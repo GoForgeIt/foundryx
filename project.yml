@@ -10,11 +10,16 @@ targets:
     sources:
       - App
       - Sources/FoundryXKit
+      - Resources
     info:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: FoundryX
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
+        ITSAppUsesNonExemptEncryption: false
+        NSLocalNetworkUsageDescription: FoundryX connects to your Foundry door running on your computer over the local network.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
     settings:
@@ -22,6 +27,15 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.goforgeit.foundryx
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
-        CODE_SIGNING_ALLOWED: NO
+        DEVELOPMENT_TEAM: ND7H73W8VZ
+        CODE_SIGN_STYLE: Automatic
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1,2"
+      configs:
+        Debug:
+          # Simulator/dev builds stay creds-free (no signing identity required).
+          CODE_SIGNING_ALLOWED: NO
+        Release:
+          # Device/archive (TestFlight) signs via the team + automatic provisioning.
+          CODE_SIGNING_ALLOWED: YES

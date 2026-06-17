@@ -4,3 +4,20 @@
 .swiftpm/
 .DS_Store
 Package.resolved
+
+# Fastlane / TestFlight build artifacts
+build/
+*.ipa
+*.xcarchive
+DerivedData/
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/test_output/
+fastlane/*.log
+vendor/bundle/
+.bundle/
+
+# Never commit Apple credentials
+*.p8
+*.mobileprovision
+*.p12
