@@ -39,6 +39,11 @@ struct ChatScreen: View {
                          onReject: { answer($0, "reject") })
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // Tap anywhere in the chat (or drag) dismisses the keyboard; tapping
+            // back into the composer field re-opens it (its own focus, default).
+            .scrollDismissesKeyboard(.interactively)
+            .contentShape(Rectangle())
+            .onTapGesture { hideKeyboard() }
             GrainComposer("Message the local brain…", text: $input, isSending: streaming, onSend: send)
         }
         .grainBackground()
@@ -50,6 +55,13 @@ struct ChatScreen: View {
         #endif
         copied = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+    }
+
+    /// Resign first responder so a tap in the chat closes the keyboard.
+    private func hideKeyboard() {
+        #if canImport(UIKit)
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        #endif
     }
 
     private func send() {
