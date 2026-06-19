@@ -22,13 +22,24 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>FoundryX connects to your Foundry door running on your computer over the local network.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>FoundryX connects to your Omi wearable over Bluetooth to capture audio.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>FoundryX connects to your Foundry door running on your computer over the local network.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>FoundryX captures audio from your Omi wearable.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+		<string>audio</string>
+	</array>
+	<key>UILaunchScreen</key>
+	<dict/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
@@ -40,7 +51,5 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-	<key>UILaunchScreen</key>
-	<dict/>
 </dict>
 </plist>

@@ -35,6 +35,11 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         ITSAppUsesNonExemptEncryption: false
         NSLocalNetworkUsageDescription: FoundryX connects to your Foundry door running on your computer over the local network.
+        NSBluetoothAlwaysUsageDescription: FoundryX connects to your Omi wearable over Bluetooth to capture audio.
+        NSMicrophoneUsageDescription: FoundryX captures audio from your Omi wearable.
+        UIBackgroundModes:
+          - bluetooth-central
+          - audio
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
     settings:
