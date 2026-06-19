@@ -15,16 +15,54 @@ import Combine
 #endif
 
 /// Lock-guarded routing of frames → the active WAL, gated by pause. Lives off the
-/// main actor so the source's frame callback never hops actors per frame.
+/// main actor so the source's frame callback never hops actors per frame. Also the
+/// single tap point for the audio-level signal: per frame it computes the cheap
+/// level (→ the meter) and feeds the silence segmenter (→ conversation boundaries),
+/// all under the same lock so order is preserved and pause freezes everything.
 final class FrameRouter: @unchecked Sendable {
     private let lock = NSLock()
     private var wal: CaptureWAL?
     private var paused = false
+    private let segmenter: SilenceSegmenter
+    private let clock: () -> TimeInterval
+
+    /// Off-main per-frame level (0…1) for the meter. Must be cheap + non-blocking.
+    var onLevel: ((Float) -> Void)?
+    /// Off-main conversation boundary; the owner hops to the main actor to act.
+    var onSegment: ((SegmentEvent) -> Void)?
+
+    init(segmenter: SilenceSegmenter,
+         clock: @escaping () -> TimeInterval = { Date().timeIntervalSinceReferenceDate }) {
+        self.segmenter = segmenter
+        self.clock = clock
+    }
+
     func setWAL(_ w: CaptureWAL?) { lock.lock(); wal = w; lock.unlock() }
-    func setPaused(_ p: Bool) { lock.lock(); paused = p; lock.unlock() }
+    func setPaused(_ p: Bool) {
+        lock.lock()
+        paused = p
+        if !p { segmenter.noteActive(at: clock()) }   // resume ≠ a silence gap
+        lock.unlock()
+    }
+    func resetSegmenter() { lock.lock(); segmenter.reset(); lock.unlock() }
+    func setSilenceGap(_ g: TimeInterval) { lock.lock(); segmenter.silenceGap = g; lock.unlock() }
+
     func route(_ frame: Data) {
-        lock.lock(); let target = paused ? nil : wal; lock.unlock()
+        lock.lock()
+        let isPaused = paused
+        let target = isPaused ? nil : wal
+        var level: Float = 0
+        var event: SegmentEvent?
+        if !isPaused {
+            level = opusFrameLevel(frame)
+            event = segmenter.observe(level: level, at: clock())
+        }
+        lock.unlock()
         target?.appendFrame(frame)
+        if !isPaused {
+            onLevel?(level)
+            if let e = event { onSegment?(e) }
+        }
     }
 }
 
@@ -35,13 +73,22 @@ public final class CaptureManager: ObservableObject {
     @Published public private(set) var sourceState: AudioSourceState = .idle
     /// Ambient capture is paused (device stays connected; frames are dropped).
     @Published public private(set) var isPaused: Bool = false
+    /// Rolling audio-level bars (0…1, oldest→newest) for the live meter (req 8).
+    @Published public private(set) var levels: [Float]
+    /// Silence gap (seconds) that auto-ends a conversation (req 9). Persisted.
+    @Published public private(set) var silenceGapSeconds: TimeInterval
+
+    /// Number of bars in the meter window (~4s at the 12 Hz sample tick).
+    public static let meterBarCount = 48
 
     private let target: DoorTarget
     private let baseDir: URL
     private let log: DoorLog?
     private let source: AudioFrameSource
-    private let router = FrameRouter()
+    private let router: FrameRouter
+    private let levelBuffer = LevelBuffer()
     private var drainTimer: Timer?
+    private var meterTimer: Timer?
 
     public init(target: DoorTarget,
                 baseDir: URL? = nil,
@@ -51,10 +98,19 @@ public final class CaptureManager: ObservableObject {
         self.baseDir = baseDir ?? CaptureWAL.documentsCaptures()
         self.log = log
         self.source = source
+        let gap = CaptureSettings.silenceGapSeconds
+        self.silenceGapSeconds = gap
+        self.levels = Array(repeating: 0, count: Self.meterBarCount)
+        self.router = FrameRouter(segmenter: SilenceSegmenter(silenceGap: gap))
         // Frame path: serial source queue → router → WAL io queue. No main hop.
         source.onFrame = { [router] frame in router.route(frame) }
         source.onState = { [weak self] state in
             Task { @MainActor in self?.onSourceState(state) }
+        }
+        // Level tap (off-main, cheap) + silence-gap boundaries (→ main to rotate).
+        router.onLevel = { [levelBuffer] lvl in levelBuffer.record(lvl) }
+        router.onSegment = { [weak self] event in
+            Task { @MainActor in self?.handleSegment(event) }
         }
         loadExisting()
         startDrainTimer()
@@ -75,12 +131,61 @@ public final class CaptureManager: ObservableObject {
         sourceState = state
         switch state {
         case .streaming:
-            if active == nil { beginSession() }   // connected + audio flowing → ambient capture
+            if active == nil { router.resetSegmenter(); beginSession() }  // ambient capture
         case .stopped, .failed:
             endSession()                          // disconnected → end the session
         case .idle, .scanning:
             break
         }
+    }
+
+    // MARK: silence-gap auto-segmentation (req 9)
+
+    /// A silence gap closes the current conversation and immediately opens the next,
+    /// so each closed conversation (which by construction contained voice) surfaces
+    /// in the timeline on its own — no pause/stop needed. Capture stays continuous.
+    private func handleSegment(_ event: SegmentEvent) {
+        switch event {
+        case .opened:
+            if active == nil { beginSession() }   // edge: open if somehow idle
+        case .closed:
+            guard active != nil else { return }
+            endSession()
+            beginSession()
+            log?.info("capture: silence gap (\(Int(silenceGapSeconds))s) → new conversation")
+        }
+    }
+
+    /// Change the silence-gap threshold (settings UI); applies live + persists.
+    public func setSilenceGap(_ seconds: TimeInterval) {
+        silenceGapSeconds = seconds
+        CaptureSettings.silenceGapSeconds = seconds
+        router.setSilenceGap(seconds)
+    }
+
+    // MARK: live audio meter (req 8)
+
+    /// Start sampling the level buffer into the bars (call from the capture screen's
+    /// onAppear). Idempotent.
+    public func startMeter() {
+        guard meterTimer == nil else { return }
+        meterTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 12.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.tickMeter() }
+        }
+    }
+
+    /// Stop sampling + flatten the bars (call from onDisappear).
+    public func stopMeter() {
+        meterTimer?.invalidate(); meterTimer = nil
+        levels = Array(repeating: 0, count: Self.meterBarCount)
+    }
+
+    private func tickMeter() {
+        let peak = isPaused ? 0 : levelBuffer.drainPeak()
+        var ring = levels
+        if !ring.isEmpty { ring.removeFirst() }
+        ring.append(peak)
+        levels = ring
     }
 
     private func beginSession() {
@@ -139,5 +244,20 @@ public final class CaptureManager: ObservableObject {
         f.timeZone = TimeZone(identifier: "UTC")
         let stamp = f.string(from: Date())
         return "omi-\(stamp)-\(String(UUID().uuidString.prefix(8)))"
+    }
+}
+
+/// Persisted capture preferences (UserDefaults). Currently the silence-gap that
+/// drives auto-segmentation (req 9); default ~2 min, à la Omi.
+public enum CaptureSettings {
+    private static let gapKey = "foundryx.capture.silence-gap-seconds"
+    public static let defaultGapSeconds: TimeInterval = 120
+
+    public static var silenceGapSeconds: TimeInterval {
+        get {
+            let v = UserDefaults.standard.double(forKey: gapKey)
+            return v > 0 ? v : defaultGapSeconds
+        }
+        set { UserDefaults.standard.set(newValue, forKey: gapKey) }
     }
 }

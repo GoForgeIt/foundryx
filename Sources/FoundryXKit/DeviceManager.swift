@@ -27,6 +27,14 @@ public struct DiscoveredDevice: Identifiable, Equatable, Sendable {
     public let rssi: Int
 }
 
+/// The remembered Omi shown on the dedicated device page (req 7): what we
+/// auto-reconnect to, plus when we last had it connected.
+public struct SavedOmi: Equatable, Sendable {
+    public let id: UUID
+    public let name: String
+    public let lastConnected: Date?
+}
+
 #if canImport(CoreBluetooth)
 import CoreBluetooth
 
@@ -38,6 +46,8 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     // UI-facing state (published on main).
     @Published public private(set) var connectionState: DeviceConnectionState = .poweredOff
     @Published public private(set) var discovered: [DiscoveredDevice] = []
+    /// The remembered Omi (device page). nil until the user first connects one.
+    @Published public private(set) var saved: SavedOmi?
 
     private let log: DoorLog?
     private let bleQueue = DispatchQueue(label: "foundryx.device-ble")
@@ -46,10 +56,13 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     private let headerBytes = 3   // Omi packet header [seq:2][index:1]
 
     private static let savedKey = "foundryx.omi.peripheral-id"
+    private static let savedNameKey = "foundryx.omi.peripheral-name"
+    private static let savedDateKey = "foundryx.omi.last-connected"
 
     public init(log: DoorLog? = nil) {
         self.log = log
         super.init()
+        saved = Self.loadSaved()
     }
 
     /// AudioFrameSource.start() = power on + begin the connect flow (auto-reconnect
@@ -77,9 +90,16 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
                   ?? discoveredPeripherals[device.id] else { return }
         c.stopScan()
         bind(p)
-        setSaved(device.id)
+        setSaved(device.id, name: p.name ?? device.name)
         setState(.connecting(p.name ?? "Omi"))
         c.connect(p, options: nil)
+    }
+
+    /// Manual reconnect (device page, req 7): re-run the saved-device connect, or
+    /// fall back to a scan when there's nothing saved / it's out of range.
+    public func reconnect() {
+        guard let c = central, c.state == .poweredOn else { start(); return }
+        autoReconnect()
     }
 
     /// Drop the current link AND forget the saved device (user-initiated).
@@ -87,6 +107,9 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
         if let p = peripheral { central?.cancelPeripheralConnection(p) }
         peripheral = nil
         UserDefaults.standard.removeObject(forKey: Self.savedKey)
+        UserDefaults.standard.removeObject(forKey: Self.savedNameKey)
+        UserDefaults.standard.removeObject(forKey: Self.savedDateKey)
+        DispatchQueue.main.async { self.saved = nil }
         setState(.idle)
         onState?(.stopped)
     }
@@ -119,7 +142,36 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     // main-thread published mutations
     private func setState(_ s: DeviceConnectionState) { DispatchQueue.main.async { self.connectionState = s } }
     private func setDiscovered(_ d: [DiscoveredDevice]) { DispatchQueue.main.async { self.discovered = d } }
-    private func setSaved(_ id: UUID) { UserDefaults.standard.set(id.uuidString, forKey: Self.savedKey) }
+
+    private func setSaved(_ id: UUID, name: String) {
+        let d = UserDefaults.standard
+        d.set(id.uuidString, forKey: Self.savedKey)
+        d.set(name, forKey: Self.savedNameKey)
+        publishSaved()
+    }
+
+    /// Record a successful connection (updates "last connected" on the device page).
+    private func markConnected(_ id: UUID, name: String) {
+        let d = UserDefaults.standard
+        d.set(id.uuidString, forKey: Self.savedKey)
+        d.set(name, forKey: Self.savedNameKey)
+        d.set(Date().timeIntervalSinceReferenceDate, forKey: Self.savedDateKey)
+        publishSaved()
+    }
+
+    private func publishSaved() {
+        let s = Self.loadSaved()
+        DispatchQueue.main.async { self.saved = s }
+    }
+
+    static func loadSaved() -> SavedOmi? {
+        let d = UserDefaults.standard
+        guard let idStr = d.string(forKey: Self.savedKey), let id = UUID(uuidString: idStr) else { return nil }
+        let name = d.string(forKey: Self.savedNameKey) ?? "Omi"
+        let ts = d.double(forKey: Self.savedDateKey)
+        let last = ts > 0 ? Date(timeIntervalSinceReferenceDate: ts) : nil
+        return SavedOmi(id: id, name: name, lastConnected: last)
+    }
 }
 
 extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
@@ -169,6 +221,7 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
             if ch.uuid == OmiUUID.codecChar { p.readValue(for: ch) }
             if ch.uuid == OmiUUID.audioDataChar {
                 p.setNotifyValue(true, for: ch)
+                markConnected(p.identifier, name: p.name ?? "Omi")
                 setState(.connected(p.name ?? "Omi"))
                 onState?(.streaming)   // triggers ambient capture
                 log?.info("Omi: subscribed to audio — ambient capture live")
@@ -198,11 +251,13 @@ public final class DeviceManager: ObservableObject, AudioFrameSource, @unchecked
     public var onState: ((AudioSourceState) -> Void)?
     @Published public private(set) var connectionState: DeviceConnectionState = .poweredOff
     @Published public private(set) var discovered: [DiscoveredDevice] = []
+    @Published public private(set) var saved: SavedOmi?
     public init(log: DoorLog? = nil) { _ = log }
     public func start() { onState?(.failed("CoreBluetooth unavailable")) }
     public func stop() { onState?(.stopped) }
     public func startScan() {}
     public func connect(_ device: DiscoveredDevice) {}
+    public func reconnect() {}
     public func forget() {}
     public func disconnect() {}
 }

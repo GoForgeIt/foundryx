@@ -8,20 +8,15 @@ import Grain
 /// Recording → Saved on phone → Saved to computer) + a global "your data is safe"
 /// sync indicator so nothing ever feels lost into the phone.
 struct CaptureScreen: View {
-    @StateObject private var device: DeviceManager
-    @StateObject private var manager: CaptureManager
-
-    init(config: DoorConfig) {
-        let log = DoorLog()
-        let dm = DeviceManager(log: log)
-        let target = DoorTarget(baseURL: config.doorURL, bearer: config.bearer)
-        _device = StateObject(wrappedValue: dm)
-        _manager = StateObject(wrappedValue: CaptureManager(target: target, log: log, source: dm))
-    }
+    // Shared with the Device tab (owned by MainTabs) so both surfaces see one BLE
+    // link + one capture pipeline.
+    @ObservedObject var device: DeviceManager
+    @ObservedObject var manager: CaptureManager
 
     var body: some View {
         VStack(spacing: 0) {
             header
+            if case .connected = device.connectionState { meterBar }
             syncBar
             if manager.captures.isEmpty {
                 emptyState
@@ -37,7 +32,21 @@ struct CaptureScreen: View {
             }
         }
         .grainBackground()
-        .onAppear { manager.startSource() }   // power on → auto-reconnect saved Omi / scan
+        .onAppear { manager.startSource(); manager.startMeter() }  // power on + drive the meter
+        .onDisappear { manager.stopMeter() }
+    }
+
+    // MARK: live audio meter (req 8) — shows the Omi is actually hearing sound
+
+    private var meterBar: some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+            LevelMeterView(levels: manager.levels, active: !manager.isPaused)
+            Text(manager.isPaused ? "Paused — not listening" : "Listening — bars rise as it hears you")
+                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+        }
+        .padding(.horizontal, GrainSpacing.x4)
+        .padding(.vertical, GrainSpacing.x2)
+        .overlay(alignment: .bottom) { Rectangle().fill(GrainColor.borderHairline).frame(height: 1) }
     }
 
     // MARK: header — ambient control when connected, else the connect/pairing flow
