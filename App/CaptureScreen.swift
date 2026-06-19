@@ -1,24 +1,27 @@
 import SwiftUI
 import Grain
 
-/// The capture surface: an Omi-style timeline of captures, each showing where it
-/// is in the pipeline (Recording → Saved on phone → Saved to computer), plus a
-/// record control and a global sync indicator so the user can SEE that nothing is
-/// lost into the phone — it's held safely and will deliver.
+/// The capture surface. When no Omi is connected it's a connect/pairing flow
+/// (scan → pick a device → connect, persisted + auto-reconnecting). Once
+/// connected, capture is AMBIENT — it runs automatically; the header shows the
+/// device + a Pause/Resume control. Below: the Omi-style timeline (each capture
+/// Recording → Saved on phone → Saved to computer) + a global "your data is safe"
+/// sync indicator so nothing ever feels lost into the phone.
 struct CaptureScreen: View {
+    @StateObject private var device: DeviceManager
     @StateObject private var manager: CaptureManager
 
     init(config: DoorConfig) {
+        let log = DoorLog()
+        let dm = DeviceManager(log: log)
         let target = DoorTarget(baseURL: config.doorURL, bearer: config.bearer)
-        _manager = StateObject(wrappedValue: CaptureManager(
-            target: target,
-            log: DoorLog(),
-            makeSource: { OmiBleSource(log: $0) }
-        ))
+        _device = StateObject(wrappedValue: dm)
+        _manager = StateObject(wrappedValue: CaptureManager(target: target, log: log, source: dm))
     }
 
     var body: some View {
         VStack(spacing: 0) {
+            header
             syncBar
             if manager.captures.isEmpty {
                 emptyState
@@ -32,12 +35,82 @@ struct CaptureScreen: View {
                     .padding(GrainSpacing.x4)
                 }
             }
-            recordBar
         }
         .grainBackground()
+        .onAppear { manager.startSource() }   // power on → auto-reconnect saved Omi / scan
     }
 
-    // Global "your data is safe" signal.
+    // MARK: header — ambient control when connected, else the connect/pairing flow
+
+    @ViewBuilder private var header: some View {
+        switch device.connectionState {
+        case .connected(let name):
+            ambientHeader(name)
+        default:
+            connectSection
+        }
+    }
+
+    private func ambientHeader(_ name: String) -> some View {
+        HStack(spacing: GrainSpacing.x3) {
+            Circle().fill(manager.isPaused ? GrainColor.amber : GrainColor.forgeBlue)
+                .frame(width: 10, height: 10)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(name).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                Text(manager.isPaused ? "Paused" : "Capturing ambiently")
+                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+            }
+            Spacer()
+            GrainButton(manager.isPaused ? "Resume" : "Pause",
+                        variant: manager.isPaused ? .filled : .tonal, size: .sm) {
+                manager.togglePause()
+            }
+            GrainButton("Disconnect", variant: .text, size: .sm) { device.forget() }
+        }
+        .padding(.horizontal, GrainSpacing.x4)
+        .padding(.vertical, GrainSpacing.x3)
+        .overlay(alignment: .bottom) { Rectangle().fill(GrainColor.borderHairline).frame(height: 1) }
+    }
+
+    private var connectSection: some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+            HStack(spacing: GrainSpacing.x2) {
+                Circle().fill(GrainColor.inkTertiary).frame(width: 9, height: 9)
+                Text(connectLabel).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                Spacer()
+                GrainButton("Scan", variant: .tonal, size: .sm) { device.startScan() }
+            }
+            ForEach(device.discovered) { dev in
+                Button { device.connect(dev) } label: {
+                    HStack {
+                        Image(systemName: "dot.radiowaves.left.and.right").foregroundStyle(GrainColor.forgeBlue)
+                        Text(dev.name).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                        Spacer()
+                        Text("\(dev.rssi) dBm").grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                    }
+                    .padding(.vertical, GrainSpacing.x2)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, GrainSpacing.x4)
+        .padding(.vertical, GrainSpacing.x3)
+        .overlay(alignment: .bottom) { Rectangle().fill(GrainColor.borderHairline).frame(height: 1) }
+    }
+
+    private var connectLabel: String {
+        switch device.connectionState {
+        case .poweredOff: return "Bluetooth off — enable it to connect your Omi"
+        case .idle: return "Connect your Omi"
+        case .scanning: return "Scanning for your Omi…"
+        case .connecting(let n): return "Connecting to \(n)…"
+        case .disconnected: return "Omi disconnected — reconnecting…"
+        case .connected: return ""
+        }
+    }
+
+    // MARK: global "your data is safe" signal
+
     private var syncBar: some View {
         HStack(spacing: GrainSpacing.x2) {
             if manager.hasPending {
@@ -66,26 +139,12 @@ struct CaptureScreen: View {
             Spacer()
             Image(systemName: "waveform").font(.system(size: 40)).foregroundStyle(GrainColor.inkTertiary)
             Text("No captures yet").grainTextStyle(.title).foregroundStyle(GrainColor.ink)
-            Text("Connect your Omi and tap Record. Audio is held on your phone and synced to your computer — nothing leaves your devices.")
+            Text("Connect your Omi above. Capture runs ambiently while it's connected — audio is held on your phone and synced to your computer; nothing leaves your devices.")
                 .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
                 .multilineTextAlignment(.center).padding(.horizontal, GrainSpacing.x6)
             Spacer()
         }
         .frame(maxWidth: .infinity)
-    }
-
-    private var recordBar: some View {
-        HStack {
-            Spacer()
-            if manager.active != nil {
-                GrainButton("Stop", variant: .destructive, size: .lg) { manager.stopCapture() }
-            } else {
-                GrainButton("Record", variant: .filled, size: .lg) { manager.startCapture() }
-            }
-            Spacer()
-        }
-        .padding(GrainSpacing.x4)
-        .overlay(alignment: .top) { Rectangle().fill(GrainColor.borderHairline).frame(height: 1) }
     }
 }
 

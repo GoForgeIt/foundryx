@@ -21,3 +21,4 @@ vendor/bundle/
 *.p8
 *.mobileprovision
 *.p12
+.hearth
