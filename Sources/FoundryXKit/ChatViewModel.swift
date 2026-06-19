@@ -12,6 +12,19 @@ public final class ChatViewModel: ObservableObject {
         public let id = UUID()
         public let role: String          // "user" | "assistant"
         public var text: String
+        /// Router target_id that handled this (assistant) message, e.g.
+        /// "local-qwen3-8b" — stamped from the door's `routed:` boundary. nil until routed.
+        public var routedVia: String?
+
+        /// True when the routing target ran on-device (target_id prefixed "local").
+        public var routeIsLocal: Bool { (routedVia ?? "").hasPrefix("local") }
+        /// Friendly model label for display — the target_id with a leading
+        /// "local-"/"cloud-" stripped (falls back to the raw id).
+        public var routeModelLabel: String? {
+            guard let r = routedVia else { return nil }
+            for p in ["local-", "cloud-"] where r.hasPrefix(p) { return String(r.dropFirst(p.count)) }
+            return r
+        }
     }
 
     public enum TurnState: Equatable {
@@ -60,6 +73,7 @@ public final class ChatViewModel: ObservableObject {
             appendAssistant(t)
         case .boundary(let label):
             lastBoundary = label
+            if let targetId = Self.parseRoutedTarget(label) { stampRoute(targetId) }
         case .toolCall, .toolResult:
             break
         case .approvalRequest(let callId, let name, let args):
@@ -84,6 +98,21 @@ public final class ChatViewModel: ObservableObject {
             messages[idx].text += t
         } else {
             messages.append(Message(role: "assistant", text: t))
+        }
+    }
+
+    /// Parse a `routed: <target_id>` boundary label → the target_id (nil if not a route).
+    static func parseRoutedTarget(_ label: String) -> String? {
+        let prefix = "routed:"
+        guard label.hasPrefix(prefix) else { return nil }
+        let tid = label.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces)
+        return tid.isEmpty ? nil : tid
+    }
+
+    /// Stamp the routing target_id onto the current (last) assistant message.
+    private func stampRoute(_ targetId: String) {
+        if let idx = messages.lastIndex(where: { $0.role == "assistant" }) {
+            messages[idx].routedVia = targetId
         }
     }
 }

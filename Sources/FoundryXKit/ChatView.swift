@@ -30,8 +30,24 @@ public struct ChatView: View {
             connectionStatusRow
 
             ForEach(model.messages) { msg in
-                GrainMessageBubble(role: msg.role == "assistant" ? .assistant : .user, text: msg.text)
-                    .accessibilityIdentifier(msg.role == "assistant" ? "assistant-message" : "user-message")
+                if msg.role == "assistant" {
+                    VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                        GrainMessageBubble(role: .assistant, text: msg.text)
+                            .accessibilityIdentifier("assistant-message")
+                        // Trust signal: which model + router answered, and whether it
+                        // ran on-device (🔒 local) or in the cloud (☁️ cloud).
+                        if let caption = Self.routeCaption(msg) {
+                            Text(caption)
+                                .grainTextStyle(.caption)
+                                .foregroundStyle(GrainColor.textMuted)
+                                .accessibilityIdentifier("message-route")
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    GrainMessageBubble(role: .user, text: msg.text)
+                        .accessibilityIdentifier("user-message")
+                }
             }
 
             switch model.turnState {
@@ -68,6 +84,13 @@ public struct ChatView: View {
         }
         .padding(GrainSpacing.x4)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// `🔒 local · <model>` / `☁️ cloud · <model>` for a routed assistant message
+    /// (nil until the turn's `routed:` boundary lands).
+    private static func routeCaption(_ msg: ChatViewModel.Message) -> String? {
+        guard let model = msg.routeModelLabel else { return nil }
+        return msg.routeIsLocal ? "🔒 local · \(model)" : "☁️ cloud · \(model)"
     }
 
     /// Connection/transport status — dot + label. Green when connected/streaming,
