@@ -8,11 +8,16 @@ let package = Package(
         .library(name: "FoundryXKit", targets: ["FoundryXKit"]),
     ],
     dependencies: [
+        // Grain — the shared SwiftUI design system (tokens + components).
+        .package(name: "Grain", path: "../grain/platforms/grain-swift"),
         // The reusable Swift Brine runner (M1) — test-only dependency.
         .package(name: "brine-swift", path: "../brine-private/runners/implementations/swift"),
     ],
     targets: [
-        .target(name: "FoundryXKit"),
+        .target(
+            name: "FoundryXKit",
+            dependencies: [.product(name: "Grain", package: "Grain")]
+        ),
         .testTarget(
             name: "FoundryXBrineTests",
             dependencies: [

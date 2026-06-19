@@ -1,4 +1,5 @@
 import SwiftUI
+import Grain
 
 struct ChatScreen: View {
     let config: DoorConfig
@@ -12,14 +13,16 @@ struct ChatScreen: View {
     }
 
     var body: some View {
-        VStack {
-            ScrollView { ChatView(model: model, onApprove: { answer($0, "always") }, onReject: { answer($0, "reject") }) }
-            HStack {
-                TextField("Message the local brain…", text: $input)
-                    .textFieldStyle(.roundedBorder)
-                Button("Send") { send() }.disabled(input.isEmpty || streaming)
-            }.padding()
+        VStack(spacing: 0) {
+            ScrollView {
+                ChatView(model: model,
+                         onApprove: { answer($0, "always") },
+                         onReject: { answer($0, "reject") })
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            GrainComposer("Message the local brain…", text: $input, isSending: streaming, onSend: send)
         }
+        .grainBackground()
     }
 
     private func send() {

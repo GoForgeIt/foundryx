@@ -1,4 +1,5 @@
 import SwiftUI
+import Grain
 
 struct ConnectionConfigView: View {
     @State private var urlText: String
@@ -11,20 +12,44 @@ struct ConnectionConfigView: View {
         self.onSave = onSave
     }
 
+    private var isValid: Bool { URL(string: urlText) != nil && !token.isEmpty }
+
     var body: some View {
-        Form {
-            Section("Local Foundry door") {
-                TextField("Door URL", text: $urlText)
-                    .textContentType(.URL).autocorrectionDisabled()
-                SecureField("Bearer token", text: $token)
+        ScrollView {
+            VStack(alignment: .leading, spacing: GrainSpacing.x6) {
+                VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                    Text("Connect").grainTextStyle(.display).foregroundStyle(GrainColor.inkEmphasis)
+                    Text("Point FoundryX at your local Foundry door.")
+                        .grainTextStyle(.body).foregroundStyle(GrainColor.inkSecondary)
+                }
+
+                GrainCard(.elevated) {
+                    VStack(alignment: .leading, spacing: GrainSpacing.x4) {
+                        Text("Local Foundry door")
+                            .grainTextStyle(.caption).textCase(.uppercase)
+                            .foregroundStyle(GrainColor.inkTertiary)
+                        GrainTextField("http://127.0.0.1:14288", text: $urlText, label: "Door URL")
+                            .textContentType(.URL)
+                            .autocorrectionDisabled()
+                            .accessibilityIdentifier("door-url-field")
+                        GrainTextField("Bearer token", text: $token, label: "Token", secure: true)
+                            .accessibilityIdentifier("door-token-field")
+                    }
+                }
+
+                GrainButton("Save & Connect", variant: .filled, size: .lg) {
+                    guard let c = DoorConfig(url: urlText, bearer: token) else { return }
+                    DoorConfigStore.save(c)
+                    onSave(c)
+                }
+                .frame(maxWidth: .infinity)
+                .disabled(!isValid)
+                .opacity(isValid ? 1 : 0.5)
+                .accessibilityIdentifier("save-connect-button")
             }
-            Button("Save & Connect") {
-                guard let c = DoorConfig(url: urlText, bearer: token) else { return }
-                DoorConfigStore.save(c)
-                onSave(c)
-            }
-            .disabled(URL(string: urlText) == nil || token.isEmpty)
+            .padding(GrainSpacing.x6)
         }
+        .grainBackground()
         .navigationTitle("Connect")
     }
 }
