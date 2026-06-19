@@ -27,6 +27,8 @@ public struct ChatView: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x3) {
+            connectionStatusRow
+
             ForEach(model.messages) { msg in
                 GrainMessageBubble(role: msg.role == "assistant" ? .assistant : .user, text: msg.text)
                     .accessibilityIdentifier(msg.role == "assistant" ? "assistant-message" : "user-message")
@@ -66,6 +68,32 @@ public struct ChatView: View {
         }
         .padding(GrainSpacing.x4)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Connection/transport status — dot + label. Green when connected/streaming,
+    /// gray when idle, red (with the failure reason) on a transport error. Gives a
+    /// visible signal when the phone can't reach the door instead of "nothing happened."
+    private var connectionDisplay: (dot: GrainStatus, label: String, isError: Bool) {
+        switch model.connection {
+        case .idle: return (.idle, "idle", false)
+        case .connecting: return (.thinking, "connecting…", false)
+        case .streaming: return (.running, "connected", false)
+        case .completed(let reason): return (.running, "connected (\(reason))", false)
+        case .error(let detail): return (.tripped, "error: \(detail)", true)
+        }
+    }
+
+    private var connectionStatusRow: some View {
+        let d = connectionDisplay
+        return HStack(spacing: GrainSpacing.x2) {
+            GrainStatusDot(d.dot, size: .sm)
+            Text(d.label)
+                .grainTextStyle(.caption)
+                .foregroundStyle(d.isError ? GrainColor.dangerRed : GrainColor.textMuted)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+        }
+        .accessibilityIdentifier("connection-status")
     }
 }
 #endif

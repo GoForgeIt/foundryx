@@ -22,11 +22,26 @@ public final class ChatViewModel: ObservableObject {
         case refused
     }
 
+    /// Door connection/transport state — distinct from `turnState` (which tracks the
+    /// in-flight turn). This is what the status indicator renders, and it surfaces
+    /// transport failures (cannot-connect / ATS / timeout) that otherwise vanish.
+    public enum ConnectionState: Equatable {
+        case idle
+        case connecting
+        case streaming
+        case completed(reason: String)
+        case error(detail: String)
+    }
+
     @Published public private(set) var messages: [Message] = []
     @Published public private(set) var turnState: TurnState = .idle
     @Published public private(set) var lastBoundary: String?
+    @Published public private(set) var connection: ConnectionState = .idle
 
     public init() {}
+
+    /// Drive the connection indicator from the app's stream loop.
+    public func setConnection(_ state: ConnectionState) { connection = state }
 
     /// Append the user's outgoing message and open an empty assistant message to stream into.
     public func beginUserTurn(_ text: String) {

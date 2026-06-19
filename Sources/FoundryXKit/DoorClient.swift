@@ -94,10 +94,28 @@ public enum DoorError: Error, Equatable, Sendable {
 public final class DoorClient: @unchecked Sendable {
     private let target: DoorTarget
     private let session: URLSession
+    private let log: DoorLog?
 
-    public init(target: DoorTarget, session: URLSession = URLSession(configuration: .ephemeral)) {
+    public init(target: DoorTarget,
+                session: URLSession = URLSession(configuration: .ephemeral),
+                log: DoorLog? = nil) {
         self.target = target
         self.session = session
+        self.log = log
+    }
+
+    /// A short one-line summary of a DoorEvent for the log.
+    static func summary(_ e: DoorEvent) -> String {
+        switch e {
+        case .session(let sid): return "session \(sid.prefix(8))"
+        case .assistantDelta(let t): return "assistant_delta (\(t.count) chars)"
+        case .toolCall(_, let name, _): return "tool_call \(name)"
+        case .toolResult(_, _, let isErr): return "tool_result\(isErr ? " (error)" : "")"
+        case .boundary(let label): return "boundary: \(label)"
+        case .approvalRequest(_, let name, _): return "approval_request \(name)"
+        case .done(let reason): return "done: \(reason)"
+        case .other(let type, _): return "other: \(type)"
+        }
     }
 
     private func chatRequest(_ req: ChatRequest) throws -> URLRequest {
@@ -115,23 +133,37 @@ public final class DoorClient: @unchecked Sendable {
     /// event), `.http`/`.transport` on other failures. Terminates after `done`.
     public func events(for req: ChatRequest) -> AsyncThrowingStream<DoorEvent, Error> {
         AsyncThrowingStream { continuation in
+            let log = self.log
             let task = Task {
                 do {
                     let request = try self.chatRequest(req)
+                    log?.info("→ POST \(request.url?.absoluteString ?? "?") chat_id=\(req.chatId) org=\(req.org) (\(req.message.count) chars)")
                     let (bytes, response) = try await self.session.bytes(for: request)
                     guard let http = response as? HTTPURLResponse else {
+                        log?.error("✗ non-HTTP response")
                         throw DoorError.transport("non-HTTP response")
                     }
-                    if http.statusCode == 401 { throw DoorError.unauthorized }
-                    guard http.statusCode == 200 else { throw DoorError.http(http.statusCode) }
+                    log?.info("← HTTP \(http.statusCode)")
+                    if http.statusCode == 401 {
+                        log?.error("✗ 401 unauthorized — bad or missing bearer token")
+                        throw DoorError.unauthorized
+                    }
+                    guard http.statusCode == 200 else {
+                        log?.error("✗ HTTP \(http.statusCode) (expected 200)")
+                        throw DoorError.http(http.statusCode)
+                    }
+                    var count = 0
                     for try await line in bytes.lines {
                         guard line.hasPrefix("data:") else { continue }   // SSE data frames only
                         let payload = String(line.dropFirst("data:".count)).trimmingCharacters(in: .whitespaces)
                         if payload.isEmpty || payload == "[DONE]" { continue }
                         let event = DoorEvent.parse(payload)
+                        count += 1
+                        log?.info("event \(DoorClient.summary(event))")
                         continuation.yield(event)
                         if case .done = event { break }
                     }
+                    log?.info("✓ stream finished (\(count) events)")
                     continuation.finish()
                 } catch {
                     // The 3a door streams SSE with `Connection: close` and drops the socket at
@@ -139,9 +171,13 @@ public final class DoorClient: @unchecked Sendable {
                     // even after all events (incl. `done`) were delivered. Treat it as a graceful
                     // end so the collected events stand — only a genuine pre/mid-stream failure
                     // (auth, HTTP error, timeout) propagates.
-                    if (error as NSError).code == NSURLErrorNetworkConnectionLost {
+                    let ns = error as NSError
+                    if ns.code == NSURLErrorNetworkConnectionLost {
+                        log?.warn("-1005 NetworkConnectionLost — treating as graceful end (door closed socket after the turn)")
                         continuation.finish()
                     } else {
+                        // This is the failure that used to vanish silently — surface it loudly.
+                        log?.error("✗ stream error: domain=\(ns.domain) code=\(ns.code) — \(ns.localizedDescription)")
                         continuation.finish(throwing: error)
                     }
                 }
