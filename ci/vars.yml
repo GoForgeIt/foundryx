@@ -1,7 +1,0 @@
-# Non-secret pipeline vars (committed). Secrets (((…))) resolve from the
-# Concourse credential manager.
-git-uri: https://github.com/GoForgeIt/foundryx.git
-grain-git-uri: https://github.com/GoForgeIt/forge-design-system.git
-brine-git-uri: https://github.com/MarkDucommun/brine-private.git
-github-owner: GoForgeIt
-github-repo: foundryx
