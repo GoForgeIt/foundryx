@@ -21,4 +21,3 @@ vendor/bundle/
 *.p8
 *.mobileprovision
 *.p12
-ci/*.params.yml
