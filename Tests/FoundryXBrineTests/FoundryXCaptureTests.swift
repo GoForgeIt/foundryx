@@ -14,6 +14,15 @@ struct CaptureTestError: Error { let message: String; init(_ m: String) { messag
 
 final class FoundryXCaptureTests: XCTestCase {
     func testCaptureScenariosAgainstRealDoor() async throws {
+        // Opt-in only. This suite spawns a real door + kiln-session fixture, which is
+        // NON-HERMETIC on a machine running the live Foundry.app: the fixture's
+        // kiln-session collides with the live one, so WAL→door sync flakes (0/N
+        // synced) intermittently. CI runs on the live-app Mac, so excluding it here
+        // keeps the release gate deterministic. Run it in a controlled lane with
+        // FOUNDRYX_REAL_DOOR_TESTS=1 (no live app on the same host).
+        guard ProcessInfo.processInfo.environment["FOUNDRYX_REAL_DOOR_TESTS"] == "1" else {
+            throw XCTSkip("real-door integration test — opt in with FOUNDRYX_REAL_DOOR_TESTS=1 (non-hermetic; excluded from the CI gate)")
+        }
         guard FileManager.default.fileExists(atPath: FoundryXDoorTests.doorExample),
               FileManager.default.fileExists(atPath: FoundryXDoorTests.kilnSessionBin) else {
             throw XCTSkip("real-door fixture binaries not built (foundryx_door / kiln-session)")

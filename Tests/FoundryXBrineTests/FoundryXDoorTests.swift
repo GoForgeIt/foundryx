@@ -30,6 +30,12 @@ final class FoundryXDoorTests: XCTestCase {
     static let kilnSessionBin = NSHomeDirectory() + "/Development/kiln/target/release/kiln-session"
 
     func testDoorScenariosAgainstRealDoor() async throws {
+        // Opt-in only — see FoundryXCaptureTests: non-hermetic on a host running the
+        // live Foundry.app (fixture kiln-session collides), so it's excluded from the
+        // CI gate. Run with FOUNDRYX_REAL_DOOR_TESTS=1 in a controlled lane.
+        guard ProcessInfo.processInfo.environment["FOUNDRYX_REAL_DOOR_TESTS"] == "1" else {
+            throw XCTSkip("real-door integration test — opt in with FOUNDRYX_REAL_DOOR_TESTS=1 (non-hermetic; excluded from the CI gate)")
+        }
         // Skip cleanly if the dev fixture binaries aren't built (keeps the suite honest
         // about what it needs rather than failing opaquely).
         guard FileManager.default.fileExists(atPath: Self.doorExample),
