@@ -54,6 +54,7 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     private var central: CBCentralManager?
     private var peripheral: CBPeripheral?
     private let headerBytes = 3   // Omi packet header [seq:2][index:1]
+    private var audioNotifs = 0   // diagnostics: raw audio-char notifications seen (bleQueue only)
 
     private static let savedKey = "foundryx.omi.peripheral-id"
     private static let savedNameKey = "foundryx.omi.peripheral-name"
@@ -230,9 +231,21 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     public func peripheral(_ p: CBPeripheral, didUpdateValueFor ch: CBCharacteristic, error: Error?) {
-        guard let data = ch.value else { return }
+        if let error { log?.warn("Omi: didUpdateValue error: \(error.localizedDescription)") }
+        guard let data = ch.value else { log?.warn("Omi: notify with nil value"); return }
         if ch.uuid == OmiUUID.codecChar { log?.info("Omi: codec=\(data.map { String($0) }.joined(separator: ","))"); return }
-        guard ch.uuid == OmiUUID.audioDataChar, data.count > headerBytes else { return }
+        guard ch.uuid == OmiUUID.audioDataChar else { return }
+        // Diagnostics: count RAW notifications (before the header filter) so a
+        // "connected but silent" device is unambiguous in the logs — log the first
+        // one, then every 200th, plus any runt packet ≤ the 3-byte header.
+        audioNotifs += 1
+        if audioNotifs == 1 || audioNotifs % 200 == 0 {
+            log?.info("Omi: audio notif #\(audioNotifs), \(data.count) bytes raw (mtu \(p.maximumWriteValueLength(for: .withoutResponse)))")
+        }
+        guard data.count > headerBytes else {
+            if audioNotifs <= 5 { log?.warn("Omi: runt audio notif \(data.count)B (≤ header) — dropped") }
+            return
+        }
         onFrame?(data.subdata(in: headerBytes..<data.count))   // strip header → Opus frame
     }
 }

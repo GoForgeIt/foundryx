@@ -26,6 +26,7 @@ private struct MainTabs: View {
 
     @StateObject private var device: DeviceManager
     @StateObject private var manager: CaptureManager
+    @StateObject private var log: DoorLog
 
     init(config: DoorConfig, showingConfig: Binding<Bool>) {
         self.config = config
@@ -33,6 +34,7 @@ private struct MainTabs: View {
         let log = DoorLog()
         let dm = DeviceManager(log: log)
         let target = DoorTarget(baseURL: config.doorURL, bearer: config.bearer)
+        _log = StateObject(wrappedValue: log)
         _device = StateObject(wrappedValue: dm)
         _manager = StateObject(wrappedValue: CaptureManager(target: target, log: log, source: dm))
     }
@@ -40,7 +42,7 @@ private struct MainTabs: View {
     var body: some View {
         TabView {
             NavigationStack {
-                ChatScreen(config: config)
+                ChatScreen(config: config, log: log)
                     .navigationTitle("FoundryX")
                     .toolbar { Button("Door") { showingConfig = true } }
             }

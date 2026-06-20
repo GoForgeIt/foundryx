@@ -7,7 +7,9 @@ import UIKit
 struct ChatScreen: View {
     let config: DoorConfig
     @StateObject private var model = ChatViewModel()
-    @StateObject private var log = DoorLog()
+    // Shared with DeviceManager + CaptureManager (injected by MainTabs) so the
+    // "Copy logs" button surfaces BLE/capture events too — not just chat.
+    @ObservedObject var log: DoorLog
     @State private var input = ""
     @State private var sessionId = ""
     @State private var streaming = false

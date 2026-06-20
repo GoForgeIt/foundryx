@@ -43,6 +43,11 @@ struct CaptureScreen: View {
             LevelMeterView(levels: manager.levels, active: !manager.isPaused)
             Text(manager.isPaused ? "Paused — not listening" : "Listening — bars rise as it hears you")
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            // Diagnostic: definitive "are frames arriving?" signal. framesReceived
+            // stuck at 0 ⇒ the Omi isn't notifying (not a meter bug).
+            Text("frames \(manager.framesReceived) · last \(manager.lastFrameBytes)B")
+                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                .monospacedDigit()
         }
         .padding(.horizontal, GrainSpacing.x4)
         .padding(.vertical, GrainSpacing.x2)

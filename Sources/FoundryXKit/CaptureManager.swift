@@ -25,6 +25,11 @@ final class FrameRouter: @unchecked Sendable {
     private var paused = false
     private let segmenter: SilenceSegmenter
     private let clock: () -> TimeInterval
+    // Diagnostics: how many frames the source has routed in (regardless of pause)
+    // and the most recent frame's byte size — surfaced to the UI/log so a flat
+    // meter can be told apart from "no frames arriving at all."
+    private var frameCount = 0
+    private var lastBytes = 0
 
     /// Off-main per-frame level (0…1) for the meter. Must be cheap + non-blocking.
     var onLevel: ((Float) -> Void)?
@@ -47,8 +52,16 @@ final class FrameRouter: @unchecked Sendable {
     func resetSegmenter() { lock.lock(); segmenter.reset(); lock.unlock() }
     func setSilenceGap(_ g: TimeInterval) { lock.lock(); segmenter.silenceGap = g; lock.unlock() }
 
+    /// Diagnostics snapshot for the UI/log: total frames routed + last frame size.
+    func stats() -> (count: Int, lastBytes: Int) {
+        lock.lock(); defer { lock.unlock() }
+        return (frameCount, lastBytes)
+    }
+
     func route(_ frame: Data) {
         lock.lock()
+        frameCount += 1
+        lastBytes = frame.count
         let isPaused = paused
         let target = isPaused ? nil : wal
         var level: Float = 0
@@ -77,6 +90,12 @@ public final class CaptureManager: ObservableObject {
     @Published public private(set) var levels: [Float]
     /// Silence gap (seconds) that auto-ends a conversation (req 9). Persisted.
     @Published public private(set) var silenceGapSeconds: TimeInterval
+    /// Diagnostics (surfaced on the capture screen): total Opus frames the BLE
+    /// source has delivered into the pipeline, and the last frame's byte size. A
+    /// flat meter with framesReceived==0 ⇒ the device isn't notifying; >0 ⇒ frames
+    /// arrive (then the meter/levels are the thing to look at).
+    @Published public private(set) var framesReceived: Int = 0
+    @Published public private(set) var lastFrameBytes: Int = 0
 
     /// Number of bars in the meter window (~4s at the 12 Hz sample tick).
     public static let meterBarCount = 48
@@ -202,6 +221,10 @@ public final class CaptureManager: ObservableObject {
         if !ring.isEmpty { ring.removeFirst() }
         ring.append(peak)
         levels = ring
+        // Surface the frame diagnostics on the same 12 Hz tick (no per-frame main hop).
+        let s = router.stats()
+        if s.count != framesReceived { framesReceived = s.count }
+        if s.lastBytes != lastFrameBytes { lastFrameBytes = s.lastBytes }
     }
 
     private func beginSession() {
