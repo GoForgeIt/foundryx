@@ -89,6 +89,50 @@ public enum DoorError: Error, Equatable, Sendable {
     case transport(String)
 }
 
+/// The OPTIONAL finalize body the phone POSTs with `/foundryx/capture/{id}/finalize`,
+/// carrying the conversation's real boundary metadata (F1, F9). Matches the door's
+/// optional body `{started_at?, ended_at?, location?:{lat,long,label}}` — the door
+/// persists it onto the manifest and threads it into the ingest envelope. Encoded
+/// only when there's something to send (a nil meta → empty body → still valid).
+public struct FinalizeBody: Encodable, Sendable {
+    public let startedAt: UInt64?
+    public let endedAt: UInt64?
+    public let location: ConversationLocation?
+
+    enum CodingKeys: String, CodingKey {
+        case startedAt = "started_at"
+        case endedAt = "ended_at"
+        case location
+    }
+
+    public init(meta: ConversationMeta) {
+        self.startedAt = meta.startedAt
+        self.endedAt = meta.endedAt
+        self.location = meta.location
+    }
+}
+
+/// The door's status endpoint reply (`GET /foundryx/capture/{phone_id}/status`).
+/// Stage-only in Phase A (title/transcript arrive in Phase B). `stage` is the
+/// user-facing chip; `loreCaptureId` is present once the capture reaches Lore.
+public struct CaptureStatusResponse: Decodable, Sendable, Equatable {
+    public let stage: String
+    public let loreCaptureId: String?
+    public let transcribed: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case stage
+        case loreCaptureId = "lore_capture_id"
+        case transcribed
+    }
+
+    public init(stage: String, loreCaptureId: String?, transcribed: Bool) {
+        self.stage = stage
+        self.loreCaptureId = loreCaptureId
+        self.transcribed = transcribed
+    }
+}
+
 /// The authenticated door client. `events(for:)` streams the turn; `collect(_:)` is a
 /// convenience that drains to completion (used by tests + simple callers).
 public final class DoorClient: @unchecked Sendable {
@@ -203,7 +247,7 @@ public final class DoorClient: @unchecked Sendable {
     /// un-finalized and retries on the next sync / app-foreground (the door-side
     /// finalize + the door's own retry-sweep are both idempotent, so a retry never
     /// double-ingests). A 200 means the door advanced the capture to Lore.
-    public func finalize(captureId: String) async throws {
+    public func finalize(captureId: String, meta: ConversationMeta? = nil) async throws {
         let s = target.baseURL.absoluteString
         let base = s.hasSuffix("/") ? String(s.dropLast()) : s
         guard let url = URL(string: "\(base)/foundryx/capture/\(captureId)/finalize") else {
@@ -213,7 +257,13 @@ public final class DoorClient: @unchecked Sendable {
         r.httpMethod = "POST"
         r.setValue("Bearer \(target.bearer)", forHTTPHeaderField: "Authorization")
         r.timeoutInterval = 60
-        log?.info("→ POST finalize capture=\(captureId)")
+        // Attach the conversation metadata body when present (F1, F9). Backward-
+        // compatible: nil meta → no body, which the door still accepts.
+        if let meta {
+            r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            r.httpBody = try JSONEncoder().encode(FinalizeBody(meta: meta))
+        }
+        log?.info("→ POST finalize capture=\(captureId)\(meta != nil ? " (+metadata)" : "")")
         let (_, response) = try await session.data(for: r)
         guard let http = response as? HTTPURLResponse else {
             throw DoorError.transport("non-HTTP response")
@@ -224,6 +274,29 @@ public final class DoorClient: @unchecked Sendable {
             throw DoorError.http(http.statusCode)
         }
         log?.info("✓ finalize capture=\(captureId) accepted by door")
+    }
+
+    /// Poll the door for a capture's pipeline stage (the phone→Lore join, F3),
+    /// keyed by the PHONE's capture id — the door owns the lore-id mapping. Returns
+    /// the stage + (once in Lore) the lore capture id. Phase A is stage-only.
+    /// Throws on 401 / non-2xx so the caller can back off + retry.
+    public func captureStatus(captureId: String) async throws -> CaptureStatusResponse {
+        let s = target.baseURL.absoluteString
+        let base = s.hasSuffix("/") ? String(s.dropLast()) : s
+        guard let url = URL(string: "\(base)/foundryx/capture/\(captureId)/status") else {
+            throw DoorError.transport("bad status url")
+        }
+        var r = URLRequest(url: url)
+        r.httpMethod = "GET"
+        r.setValue("Bearer \(target.bearer)", forHTTPHeaderField: "Authorization")
+        r.timeoutInterval = 30
+        let (data, response) = try await session.data(for: r)
+        guard let http = response as? HTTPURLResponse else {
+            throw DoorError.transport("non-HTTP response")
+        }
+        if http.statusCode == 401 { throw DoorError.unauthorized }
+        guard http.statusCode == 200 else { throw DoorError.http(http.statusCode) }
+        return try JSONDecoder().decode(CaptureStatusResponse.self, from: data)
     }
 
     /// Relay a gate decision to the door's approvals endpoint

@@ -115,9 +115,13 @@ public final class CaptureManager: ObservableObject {
     private var drainTimer: Timer?
     private var meterTimer: Timer?
     /// Finalize-the-conversation seam (injectable for door-free tests): given a
-    /// closed capture id, tell the door to assemble + ingest it to Lore. Throws on
-    /// failure so the capture stays pending-finalize and is retried.
-    private let finalizeCapture: @Sendable (String) async throws -> Void
+    /// closed capture id + its conversation metadata (start/end/location), tell the
+    /// door to assemble + ingest it to Lore. Throws on failure so the capture stays
+    /// pending-finalize and is retried.
+    private let finalizeCapture: @Sendable (String, ConversationMeta?) async throws -> Void
+    /// One-shot location at conversation boundaries (When-In-Use, opportunistic —
+    /// F5). Degrades to no-location off the main app / when denied.
+    private let locationProvider: ConversationLocationProviding
     /// In-flight finalize attempts, so a retry tick never double-fires for the same
     /// capture while one is already running.
     private var finalizing: Set<String> = []
@@ -126,18 +130,33 @@ public final class CaptureManager: ObservableObject {
                 baseDir: URL? = nil,
                 log: DoorLog? = nil,
                 source: AudioFrameSource,
-                finalize: (@Sendable (String) async throws -> Void)? = nil) {
+                finalize: (@Sendable (String, ConversationMeta?) async throws -> Void)? = nil,
+                locationProvider: ConversationLocationProviding? = nil) {
         self.target = target
         self.baseDir = baseDir ?? CaptureWAL.documentsCaptures()
         self.log = log
         self.source = source
-        // Default finalize = the real door call. Tests inject a stub to assert the
-        // conversation-close seam fires finalize once per closed capture.
+        // Default finalize = the real door call (carrying the conversation metadata
+        // body). Tests inject a stub to assert the close seam fires finalize once per
+        // closed capture and that the body shape is right.
         if let finalize {
             self.finalizeCapture = finalize
         } else {
             let client = DoorClient(target: target, log: log)
-            self.finalizeCapture = { captureId in try await client.finalize(captureId: captureId) }
+            self.finalizeCapture = { captureId, meta in
+                try await client.finalize(captureId: captureId, meta: meta)
+            }
+        }
+        // Default location = the real When-In-Use one-shot on iOS; the no-location
+        // degradation provider elsewhere (and the injected stub in door-free tests).
+        if let locationProvider {
+            self.locationProvider = locationProvider
+        } else {
+            #if canImport(CoreLocation) && os(iOS)
+            self.locationProvider = LocationProvider()
+            #else
+            self.locationProvider = NoLocationProvider()
+            #endif
         }
         let gap = CaptureSettings.silenceGapSeconds
         self.silenceGapSeconds = gap
@@ -155,6 +174,27 @@ public final class CaptureManager: ObservableObject {
         }
         loadExisting()
         startDrainTimer()
+    }
+
+    /// The durable conversation metadata (start/end/location) for a capture, for
+    /// the timeline card (F1). `nil` for captures recorded before this shipped.
+    public func conversationMeta(for captureId: String) -> ConversationMeta? {
+        ConversationMetaStore.load(captureId: captureId, baseDir: baseDir)
+    }
+
+    /// Per-capture status pollers (the door→Lore stage chip, F11). Lazily created +
+    /// memoised so a card re-render reuses the same poller (one poll loop per
+    /// capture). Driven by the card's onAppear/onDisappear.
+    private var pollers: [String: CaptureStatusPoller] = [:]
+
+    /// The status poller for a capture, creating one on first ask. The card calls
+    /// `.start()` on appear and `.stop()` on disappear.
+    public func statusPoller(for captureId: String) -> CaptureStatusPoller {
+        if let existing = pollers[captureId] { return existing }
+        let client = DoorClient(target: target, log: log)
+        let poller = CaptureStatusPoller(captureId: captureId, client: client)
+        pollers[captureId] = poller
+        return poller
     }
 
     public var pendingSegments: Int { captures.reduce(0) { $0 + $1.status.pendingSegments } }
@@ -238,6 +278,9 @@ public final class CaptureManager: ObservableObject {
         let wal = CaptureWAL(captureId: id, target: target, baseDir: baseDir, log: log)
         active = wal
         captures.insert(wal, at: 0)               // newest first (Omi-style timeline)
+        // Durably stamp the conversation START (F1) — the card's start time + the
+        // door's `capturedAt`. Idempotent (won't clobber an existing record).
+        ConversationMetaStore.recordStart(captureId: id, baseDir: baseDir, at: nowUnixSecs())
         wal.beginStreaming()
         router.resetLevelMeter()                  // fresh Opus decoder per conversation
         router.setPaused(isPaused)
@@ -256,7 +299,15 @@ public final class CaptureManager: ObservableObject {
         // any that don't complete now (door/Lore down, or segments not yet ACK'd).
         markNeedsFinalize(finished.captureId)
         let id = finished.captureId
+        let baseDir = self.baseDir
+        let provider = self.locationProvider
         Task { [weak self] in
+            // Stamp the conversation END + an opportunistic location fix (F1, F5)
+            // BEFORE finalize, so the metadata is durable and finalize sends it. The
+            // location is best-effort: nil (denied / backgrounded / no fix) → time-only.
+            let fix = await provider.currentLocation()
+            ConversationMetaStore.recordEnd(captureId: id, baseDir: baseDir,
+                                            at: nowUnixSecs(), location: fix)
             await finished.sync()                 // snappy first sync
             await self?.tryFinalize(finished)     // finalize once segments are ACK'd
         }
@@ -303,8 +354,12 @@ public final class CaptureManager: ObservableObject {
         }
         finalizing.insert(id)
         defer { finalizing.remove(id) }
+        // The durable conversation metadata (start/end/location) becomes the
+        // finalize POST body so the door persists it + threads it into the ingest
+        // envelope (F1, F9). Absent (older capture) → an empty body (still valid).
+        let meta = ConversationMetaStore.load(captureId: id, baseDir: baseDir)
         do {
-            try await finalizeCapture(id)
+            try await finalizeCapture(id, meta)
             clearNeedsFinalize(id)
             log?.info("capture \(id): finalized → advanced to Lore inbox")
         } catch {

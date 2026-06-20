@@ -24,7 +24,11 @@ struct CaptureScreen: View {
                 ScrollView {
                     VStack(spacing: GrainSpacing.x3) {
                         ForEach(manager.captures, id: \.captureId) { wal in
-                            CaptureCard(wal: wal)
+                            CaptureCard(
+                                wal: wal,
+                                meta: manager.conversationMeta(for: wal.captureId),
+                                poller: manager.statusPoller(for: wal.captureId)
+                            )
                         }
                     }
                     .padding(GrainSpacing.x4)
@@ -162,17 +166,26 @@ struct CaptureScreen: View {
     }
 }
 
-/// One capture's card — observes its WAL so the chip advances live.
+/// One capture's card — observes its WAL (segment sync) AND its door status poller
+/// (the Lore-pipeline stage chip). Shows the conversation's start–end–duration + the
+/// place label when present (Phase A: time + place + stage; title/transcript land in
+/// Phase B). Time-only when no location fix was captured.
 private struct CaptureCard: View {
     @ObservedObject var wal: CaptureWAL
+    let meta: ConversationMeta?
+    @ObservedObject var poller: CaptureStatusPoller
 
     var body: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x2) {
             HStack(spacing: GrainSpacing.x2) {
-                Circle().fill(chipColor).frame(width: 9, height: 9)
-                Text(chipLabel).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                Circle().fill(stageColor).frame(width: 9, height: 9)
+                Text(stageLabel).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
                 Spacer()
-                Text(started).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                Text(timeRange).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            }
+            // Place (when a fix was captured) — time-only otherwise (honest degradation).
+            if let place {
+                Text(place).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
             }
             Text(detail).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
         }
@@ -180,22 +193,57 @@ private struct CaptureCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).fill(GrainColor.surfaceElevated))
         .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).strokeBorder(GrainColor.border, lineWidth: 1))
+        // Drive the door→Lore stage chip while the card is on screen; stop when it
+        // scrolls off (the poller itself also stops at a terminal stage, F11).
+        .onAppear { poller.start() }
+        .onDisappear { poller.stop() }
     }
 
-    private var chipColor: Color {
+    /// The chip prefers the door→Lore stage once the audio is on the desktop; until
+    /// then it shows the local WAL sync stage (recording / saving on phone).
+    private var effectiveStage: CaptureLifecycleStage {
         switch wal.status.stage {
+        case .recording: return .recording
+        case .savedOnPhone: return wal.status.streaming ? .recording : .stored
+        case .savedToComputer:
+            // Saved to computer → the door owns the rest; show the polled stage,
+            // but never regress below "stored" (the door at least has the audio).
+            return poller.stage == .recording ? .stored : poller.stage
+        }
+    }
+
+    private var stageColor: Color {
+        switch effectiveStage {
         case .recording: return GrainColor.forgeBlue
-        case .savedOnPhone: return GrainColor.amber
-        case .savedToComputer: return GrainColor.sage
+        case .stored, .transcribing, .transcribed: return GrainColor.amber
+        case .inLore, .organized: return GrainColor.sage
+        case .failed: return GrainColor.amber
         }
     }
-    private var chipLabel: String {
-        switch wal.status.stage {
-        case .recording: return wal.status.streaming ? "🔴 Recording" : "💾 Saved on phone"
-        case .savedOnPhone: return "💾 Saved on phone"
-        case .savedToComputer: return "✅ Saved to computer"
+    private var stageLabel: String { effectiveStage.chipLabel }
+
+    /// "10:41–10:47 AM · 6 min" when closed; start time alone while open.
+    private var timeRange: String {
+        guard let meta else {
+            // No metadata sidecar (older capture) — fall back to the WAL start.
+            return Self.timeFmt.string(from: wal.status.startedAt)
         }
+        let start = Date(timeIntervalSince1970: TimeInterval(meta.startedAt))
+        guard let endSecs = meta.endedAt else {
+            return Self.timeFmt.string(from: start)
+        }
+        let end = Date(timeIntervalSince1970: TimeInterval(endSecs))
+        let startStr = Self.timeFmt.string(from: start)
+        let endStr = Self.timeFmt.string(from: end)
+        if let dur = meta.durationSeconds {
+            let mins = max(1, Int((Double(dur) / 60).rounded()))
+            return "\(startStr)–\(endStr) · \(mins) min"
+        }
+        return "\(startStr)–\(endStr)"
     }
+
+    private var place: String? { meta?.location?.label }
+
     private var detail: String {
         let s = wal.status
         let kb = String(format: "%.1f", Double(s.bytes) / 1024)
@@ -203,8 +251,8 @@ private struct CaptureCard: View {
         if let err = s.lastSyncError, s.pendingSegments > 0 { return "\(synced) · ⏳ \(err)" }
         return synced
     }
-    private var started: String {
-        let f = DateFormatter(); f.dateFormat = "MMM d, h:mm a"
-        return f.string(from: wal.status.startedAt)
-    }
+
+    private static let timeFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "h:mm a"; return f
+    }()
 }

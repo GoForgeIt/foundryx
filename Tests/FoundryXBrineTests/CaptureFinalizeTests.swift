@@ -65,7 +65,7 @@ final class CaptureFinalizeTests: XCTestCase {
         let src = TestSource()
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
         let mgr = CaptureManager(target: target, baseDir: dir, source: src,
-                                 finalize: { id in try rec.record(id) })
+                                 finalize: { id, _ in try rec.record(id) })
 
         // silenceGap 0 → a silence frame right after voice closes the conversation
         // deterministically (the gap is measured from last voice; 0 ≥ 0). No clock
@@ -108,7 +108,7 @@ final class CaptureFinalizeTests: XCTestCase {
         let src = TestSource()
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
         let mgr = CaptureManager(target: target, baseDir: dir, source: src,
-                                 finalize: { id in try rec.record(id) })
+                                 finalize: { id, _ in try rec.record(id) })
         mgr.setSilenceGap(0)
 
         src.onState?(.streaming)
@@ -141,7 +141,7 @@ final class CaptureFinalizeTests: XCTestCase {
         let src = TestSource()
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
         let mgr = CaptureManager(target: target, baseDir: dir, source: src,
-                                 finalize: { id in try rec.record(id) })
+                                 finalize: { id, _ in try rec.record(id) })
         mgr.setSilenceGap(0)
 
         src.onState?(.streaming)
