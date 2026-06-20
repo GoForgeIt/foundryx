@@ -89,15 +89,31 @@ public final class CaptureManager: ObservableObject {
     private let levelBuffer = LevelBuffer()
     private var drainTimer: Timer?
     private var meterTimer: Timer?
+    /// Finalize-the-conversation seam (injectable for door-free tests): given a
+    /// closed capture id, tell the door to assemble + ingest it to Lore. Throws on
+    /// failure so the capture stays pending-finalize and is retried.
+    private let finalizeCapture: @Sendable (String) async throws -> Void
+    /// In-flight finalize attempts, so a retry tick never double-fires for the same
+    /// capture while one is already running.
+    private var finalizing: Set<String> = []
 
     public init(target: DoorTarget,
                 baseDir: URL? = nil,
                 log: DoorLog? = nil,
-                source: AudioFrameSource) {
+                source: AudioFrameSource,
+                finalize: (@Sendable (String) async throws -> Void)? = nil) {
         self.target = target
         self.baseDir = baseDir ?? CaptureWAL.documentsCaptures()
         self.log = log
         self.source = source
+        // Default finalize = the real door call. Tests inject a stub to assert the
+        // conversation-close seam fires finalize once per closed capture.
+        if let finalize {
+            self.finalizeCapture = finalize
+        } else {
+            let client = DoorClient(target: target, log: log)
+            self.finalizeCapture = { captureId in try await client.finalize(captureId: captureId) }
+        }
         let gap = CaptureSettings.silenceGapSeconds
         self.silenceGapSeconds = gap
         self.levels = Array(repeating: 0, count: Self.meterBarCount)
@@ -204,8 +220,66 @@ public final class CaptureManager: ObservableObject {
         guard let finished = active else { return }
         finished.finish()
         active = nil
-        Task { await finished.sync() }            // snappy first sync; drain timer retries
-        log?.info("capture \(finished.captureId): session ended")
+        // A closed conversation must reach the Lore inbox: mark it pending-finalize
+        // (durably, so it survives relaunch — mirrors the WAL's waitingForInternet
+        // ethos), then drive sync→finalize. The drain timer + app-foreground retry
+        // any that don't complete now (door/Lore down, or segments not yet ACK'd).
+        markNeedsFinalize(finished.captureId)
+        let id = finished.captureId
+        Task { [weak self] in
+            await finished.sync()                 // snappy first sync
+            await self?.tryFinalize(finished)     // finalize once segments are ACK'd
+        }
+        log?.info("capture \(id): session ended (pending finalize → Lore)")
+    }
+
+    // MARK: finalize-on-conversation-close (advance the capture to the Lore inbox)
+
+    /// A capture is pending-finalize iff its dir has the marker (set on close,
+    /// removed on a successful door finalize). Durable so a relaunch retries.
+    private func needsFinalizeMarker(_ captureId: String) -> URL {
+        baseDir.appendingPathComponent(captureId, isDirectory: true)
+            .appendingPathComponent(".needs-finalize")
+    }
+
+    private func markNeedsFinalize(_ captureId: String) {
+        let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? Data().write(to: needsFinalizeMarker(captureId), options: [.atomic])
+    }
+
+    private func isPendingFinalize(_ captureId: String) -> Bool {
+        FileManager.default.fileExists(atPath: needsFinalizeMarker(captureId).path)
+    }
+
+    private func clearNeedsFinalize(_ captureId: String) {
+        try? FileManager.default.removeItem(at: needsFinalizeMarker(captureId))
+    }
+
+    /// Finalize one closed capture IF it is pending-finalize and its segments are
+    /// all durably on the desktop (ACK'd). Finalize must run AFTER the audio is on
+    /// the desktop — else the door has nothing to assemble — so we gate on a fully
+    /// synced WAL (no pending segments). On success the marker is cleared; on
+    /// failure it stays so the next retry tick tries again. Idempotent + guarded
+    /// against concurrent attempts for the same capture.
+    private func tryFinalize(_ wal: CaptureWAL) async {
+        let id = wal.captureId
+        guard isPendingFinalize(id), !finalizing.contains(id) else { return }
+        let snap = wal.snapshot()
+        // Gate: audio must be durably on the desktop before finalize.
+        guard snap.totalSegments > 0, snap.pendingSegments == 0 else {
+            log?.info("capture \(id): finalize deferred — \(snap.pendingSegments) segment(s) not yet ACK'd")
+            return
+        }
+        finalizing.insert(id)
+        defer { finalizing.remove(id) }
+        do {
+            try await finalizeCapture(id)
+            clearNeedsFinalize(id)
+            log?.info("capture \(id): finalized → advanced to Lore inbox")
+        } catch {
+            log?.warn("capture \(id): finalize failed (\((error as NSError).localizedDescription)) — staying pending, will retry")
+        }
     }
 
     // MARK: pause / resume (device stays connected)
@@ -224,6 +298,18 @@ public final class CaptureManager: ObservableObject {
 
     public func drainPending() async {
         for wal in captures where wal.status.pendingSegments > 0 { await wal.sync() }
+        // After syncing, retry any pending-finalize captures whose segments are now
+        // all ACK'd — this is the retry path for a finalize that didn't complete at
+        // conversation-close (door/Lore was down, or segments weren't ACK'd yet).
+        await retryPendingFinalizes()
+    }
+
+    /// Retry finalize for every capture still marked pending-finalize. Safe to call
+    /// from the drain timer and on app-foreground (mirrors the WAL drain ethos).
+    public func retryPendingFinalizes() async {
+        for wal in captures where wal !== active && isPendingFinalize(wal.captureId) {
+            await tryFinalize(wal)
+        }
     }
 
     // MARK: persistence (resume across launches)

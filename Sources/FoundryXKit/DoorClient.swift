@@ -193,6 +193,39 @@ public final class DoorClient: @unchecked Sendable {
         return out
     }
 
+    /// Finalize a closed conversation: tell the door to assemble the stored
+    /// capture's segments and ingest them to Lore (`POST /foundryx/capture/{id}/finalize`,
+    /// bearer-gated). Call this ONLY after the capture's segments are all ACK'd
+    /// (durably on the desktop), else there's nothing for the door to assemble.
+    ///
+    /// Resilient by contract: any non-2xx (door down → transport error; Lore down
+    /// → the door returns 502/503) throws, so the caller leaves the capture
+    /// un-finalized and retries on the next sync / app-foreground (the door-side
+    /// finalize + the door's own retry-sweep are both idempotent, so a retry never
+    /// double-ingests). A 200 means the door advanced the capture to Lore.
+    public func finalize(captureId: String) async throws {
+        let s = target.baseURL.absoluteString
+        let base = s.hasSuffix("/") ? String(s.dropLast()) : s
+        guard let url = URL(string: "\(base)/foundryx/capture/\(captureId)/finalize") else {
+            throw DoorError.transport("bad finalize url")
+        }
+        var r = URLRequest(url: url)
+        r.httpMethod = "POST"
+        r.setValue("Bearer \(target.bearer)", forHTTPHeaderField: "Authorization")
+        r.timeoutInterval = 60
+        log?.info("→ POST finalize capture=\(captureId)")
+        let (_, response) = try await session.data(for: r)
+        guard let http = response as? HTTPURLResponse else {
+            throw DoorError.transport("non-HTTP response")
+        }
+        if http.statusCode == 401 { throw DoorError.unauthorized }
+        guard http.statusCode == 200 else {
+            log?.warn("finalize capture=\(captureId) → HTTP \(http.statusCode) (will retry)")
+            throw DoorError.http(http.statusCode)
+        }
+        log?.info("✓ finalize capture=\(captureId) accepted by door")
+    }
+
     /// Relay a gate decision to the door's approvals endpoint
     /// (`POST /foundryx/chat/{session}/approvals/{call}` — answers a suspended turn).
     /// `decision` is "once" | "always" | "reject"; the suspended /chat SSE then resumes.
