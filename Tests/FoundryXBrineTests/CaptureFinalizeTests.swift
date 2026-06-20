@@ -1,5 +1,7 @@
 import XCTest
 import Foundation
+import AudioToolbox
+import CoreAudioTypes
 import FoundryXKit
 
 /// Door-free state-machine test for finalize-on-conversation-close (M4). When a
@@ -32,10 +34,15 @@ final class CaptureFinalizeTests: XCTestCase {
         }
     }
 
-    /// A loud frame (large → level ≈ 1, counts as voice) vs a silent frame (tiny →
-    /// level ≈ 0, counts as silence) — drives the segmenter's open/close boundary.
-    private func voiceFrame() -> Data { Data(repeating: 0xAB, count: 80) }
-    private func silentFrame() -> Data { Data(repeating: 0, count: 3) }
+    /// Real Opus packets (16 kHz, mono, 20 ms = 320 samples) so they exercise the
+    /// production OpusLevelMeter decode path end-to-end. A loud sine decodes to a high
+    /// RMS (→ level ≫ silenceThreshold, counts as voice); a near-silent block decodes
+    /// to RMS ≈ 0 (→ silence). This replaces the old byte-size garbage frames, which
+    /// the true RMS meter (correctly) reads as silence.
+    private lazy var loudPacket: Data = OpusTestEncoder.shared.encode(amplitude: 1.0) ?? Data()
+    private lazy var quietPacket: Data = OpusTestEncoder.shared.encode(amplitude: 0.0) ?? Data()
+    private func voiceFrame() -> Data { loudPacket }
+    private func silentFrame() -> Data { quietPacket }
 
     /// Mark every on-disk segment of a capture as ACK'd (door-free) by writing the
     /// `.ack` sibling the WAL uses to mean "durably on the desktop."
@@ -166,6 +173,70 @@ final class CaptureFinalizeTests: XCTestCase {
         while !cond() {
             if Date().timeIntervalSince(start) > timeout { XCTFail("waitUntil timed out"); return }
             try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+}
+
+/// Test-only Opus encoder (16 kHz, mono, 20 ms frames) built on AudioToolbox — the
+/// inverse of the production OpusLevelMeter decode. Lets the finalize tests inject
+/// REAL Opus packets so the true RMS level path is exercised, not a byte-size proxy.
+final class OpusTestEncoder: @unchecked Sendable {
+    static let shared = OpusTestEncoder()
+    private let converter: AudioConverterRef?
+
+    init() {
+        var src = AudioStreamBasicDescription()
+        src.mSampleRate = 16000
+        src.mFormatID = kAudioFormatLinearPCM
+        src.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked
+        src.mChannelsPerFrame = 1; src.mBitsPerChannel = 16
+        src.mBytesPerFrame = 2; src.mFramesPerPacket = 1; src.mBytesPerPacket = 2
+
+        var dst = AudioStreamBasicDescription()
+        dst.mSampleRate = 16000
+        dst.mFormatID = kAudioFormatOpus
+        dst.mChannelsPerFrame = 1
+        dst.mFramesPerPacket = 0
+
+        var conv: AudioConverterRef?
+        converter = AudioConverterNew(&src, &dst, &conv) == noErr ? conv : nil
+    }
+
+    /// One 20 ms (320-sample) Opus packet of a 440 Hz sine at the given amplitude
+    /// (0…1). amplitude 0 → near-silence (RMS ≈ 0); 1 → full-scale (loud voice).
+    func encode(amplitude: Double) -> Data? {
+        guard let conv = converter else { return nil }
+        let samples: [Int16] = (0..<320).map { i in
+            Int16(amplitude * 32000 * sin(2.0 * .pi * 440.0 * Double(i) / 16000.0))
+        }
+        final class Ctx { var samples: [Int16]; var done = false; init(_ s: [Int16]) { samples = s } }
+        let ctx = Ctx(samples)
+        let inProc: AudioConverterComplexInputDataProc = { _, ioNum, ioData, _, ud in
+            let c = Unmanaged<Ctx>.fromOpaque(ud!).takeUnretainedValue()
+            if c.done { ioNum.pointee = 0; return noErr }
+            let n = UInt32(c.samples.count)
+            c.samples.withUnsafeMutableBytes { raw in
+                ioData.pointee.mBuffers.mData = raw.baseAddress
+                ioData.pointee.mBuffers.mDataByteSize = UInt32(raw.count)
+                ioData.pointee.mBuffers.mNumberChannels = 1
+            }
+            ioNum.pointee = n
+            c.done = true
+            return noErr
+        }
+        let ud = Unmanaged.passUnretained(ctx).toOpaque()
+        var out = [UInt8](repeating: 0, count: 4000)
+        return out.withUnsafeMutableBytes { ob -> Data? in
+            var abl = AudioBufferList(mNumberBuffers: 1,
+                mBuffers: AudioBuffer(mNumberChannels: 1,
+                                      mDataByteSize: UInt32(ob.count),
+                                      mData: ob.baseAddress))
+            var pd = AudioStreamPacketDescription()
+            var ioNum: UInt32 = 1
+            let st = AudioConverterFillComplexBuffer(conv, inProc, ud, &ioNum, &abl, &pd)
+            if (st != noErr && st != 1) || ioNum == 0 { return nil }
+            return Data(bytes: ob.baseAddress!.advanced(by: Int(pd.mStartOffset)),
+                        count: Int(pd.mDataByteSize))
         }
     }
 }

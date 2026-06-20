@@ -25,6 +25,10 @@ final class FrameRouter: @unchecked Sendable {
     private var paused = false
     private let segmenter: SilenceSegmenter
     private let clock: () -> TimeInterval
+    // True decoded-amplitude RMS level meter (replaces the byte-size proxy). Stateful
+    // (one Opus decoder); recreated per capture session via `resetLevelMeter()` so a
+    // new stream starts with clean decoder state. Used under this serial lock only.
+    private let levelMeter = OpusLevelMeter()
     // Diagnostics: how many frames the source has routed in (regardless of pause)
     // and the most recent frame's byte size — surfaced to the UI/log so a flat
     // meter can be told apart from "no frames arriving at all."
@@ -50,6 +54,8 @@ final class FrameRouter: @unchecked Sendable {
         lock.unlock()
     }
     func resetSegmenter() { lock.lock(); segmenter.reset(); lock.unlock() }
+    /// Recreate the Opus decoder so a new capture stream starts clean.
+    func resetLevelMeter() { lock.lock(); levelMeter.reset(); lock.unlock() }
     func setSilenceGap(_ g: TimeInterval) { lock.lock(); segmenter.silenceGap = g; lock.unlock() }
 
     /// Diagnostics snapshot for the UI/log: total frames routed + last frame size.
@@ -67,7 +73,7 @@ final class FrameRouter: @unchecked Sendable {
         var level: Float = 0
         var event: SegmentEvent?
         if !isPaused {
-            level = opusFrameLevel(frame)
+            level = levelMeter.level(for: frame)   // true Opus→PCM RMS (perceptual 0…1)
             event = segmenter.observe(level: level, at: clock())
         }
         lock.unlock()
@@ -233,6 +239,7 @@ public final class CaptureManager: ObservableObject {
         active = wal
         captures.insert(wal, at: 0)               // newest first (Omi-style timeline)
         wal.beginStreaming()
+        router.resetLevelMeter()                  // fresh Opus decoder per conversation
         router.setPaused(isPaused)
         router.setWAL(wal)                        // frames now flow into this WAL
         log?.info("capture \(id): ambient session started")
