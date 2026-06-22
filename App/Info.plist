@@ -53,5 +53,36 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<!-- M5 R1b remote sign-in config. Fill these to enable "Continue with
+	     Google/Microsoft" + off-LAN connect (see the foundry track's
+	     oauth-client-setup.md). EMPTY client ids = remote OFF, app stays LAN-direct.
+	     You ALSO must add the OAuth redirect schemes to CFBundleURLTypes below:
+	       Google:    com.googleusercontent.apps.<reversed-ios-client-id>
+	       Microsoft: msauth.<this-app-bundle-id> -->
+	<key>FoundryXOAuth</key>
+	<dict>
+		<key>GoogleIOSClientID</key>
+		<string></string>
+		<key>MicrosoftClientID</key>
+		<string></string>
+		<key>MicrosoftTenant</key>
+		<string>organizations</string>
+		<key>GatewayHTTPURL</key>
+		<string>http://34.57.104.157:8788</string>
+		<key>RelayWSURL</key>
+		<string>ws://34.57.104.157:8787</string>
+	</dict>
+	<!-- Add the OAuth redirect URL schemes here once you have the client ids:
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.REVERSED_GOOGLE_IOS_CLIENT_ID</string>
+				<string>msauth.com.goforgeit.foundryx</string>
+			</array>
+		</dict>
+	</array>
+	-->
 </dict>
 </plist>
