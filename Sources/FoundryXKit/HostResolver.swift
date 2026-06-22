@@ -55,6 +55,21 @@ public struct HostResolver: Sendable {
         self.log = log
     }
 
+    /// Decode a hex string (e.g. the door's 64-char pubkey) to bytes; nil if not
+    /// valid even-length hex.
+    static func hexToData(_ hex: String) -> Data? {
+        guard !hex.isEmpty, hex.count % 2 == 0 else { return nil }
+        var out = Data(capacity: hex.count / 2)
+        var idx = hex.startIndex
+        while idx < hex.endIndex {
+            let next = hex.index(idx, offsetBy: 2)
+            guard let byte = UInt8(hex[idx..<next], radix: 16) else { return nil }
+            out.append(byte)
+            idx = next
+        }
+        return out
+    }
+
     /// Resolve the account's designated host and build the RelayConfig to dial it.
     /// `idToken` is the verified provider id_token (the gateway derives the account
     /// from it). Throws `noHostDesignated` when the account has no host yet.
@@ -72,11 +87,18 @@ public struct HostResolver: Sendable {
               let tunnel = obj["tunnel_id"] as? String else {
             throw HostResolveError.badResponse
         }
-        log?.info("resolved host tunnel=\(tunnel) label=\((obj["label"] as? String) ?? "?")")
+        // PIN the door's static key: the resolved `machine_id` IS the door's X25519
+        // public key (hex). Pinning it means a rogue door that registered under this
+        // tunnel fails the Noise handshake — so the relay needs no door-registration
+        // secret (open registration is safe with this pin).
+        let machineId = (obj["machine_id"] as? String) ?? ""
+        let expectedDoor = Self.hexToData(machineId)
+        log?.info("resolved host tunnel=\(tunnel) label=\((obj["label"] as? String) ?? "?") pinned=\(expectedDoor != nil)")
         return RelayConfig(
             relayURL: remote.relayWSURL,
             tunnelId: tunnel,
-            staticPrivate: PhoneStaticKey.loadOrCreate()
+            staticPrivate: PhoneStaticKey.loadOrCreate(),
+            expectedDoorStatic: expectedDoor
         )
     }
 }
