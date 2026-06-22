@@ -5,10 +5,8 @@ import UIKit
 #endif
 
 struct ChatScreen: View {
-    let config: DoorConfig
-    /// When set (signed in + a host resolved), chat is served through the blind
-    /// relay (off-LAN); nil = LAN-direct (unchanged).
-    var relay: RelayConfig? = nil
+    /// The resolved remote door target (relay tunnel + id_token bearer).
+    let target: DoorTarget
     @StateObject private var model = ChatViewModel()
     // Shared with DeviceManager + CaptureManager (injected by MainTabs) so the
     // "Copy logs" button surfaces BLE/capture events too — not just chat.
@@ -19,7 +17,7 @@ struct ChatScreen: View {
     @State private var copied = false
 
     private var client: DoorClient {
-        DoorClient(target: DoorTarget(baseURL: config.doorURL, bearer: config.bearer, relay: relay), log: log)
+        DoorClient(target: target, log: log)
     }
 
     var body: some View {
@@ -73,7 +71,7 @@ struct ChatScreen: View {
         let text = input; input = ""; streaming = true
         model.beginUserTurn(text)
         model.setConnection(.connecting)
-        log.info("send tapped → \(config.doorURL.absoluteString)")
+        log.info("send tapped → \(target.baseURL.absoluteString) (relay)")
         Task {
             var sawEvent = false
             do {

@@ -22,6 +22,9 @@ public final class RemoteSession: ObservableObject {
     @Published public private(set) var status: Status = .signedOut
     @Published public private(set) var email: String?
     @Published public private(set) var relay: RelayConfig?
+    /// The current verified id_token — sent to the door as the bearer (the door
+    /// verifies it; no manual door bearer needed in remote-only mode).
+    @Published public private(set) var idToken: String?
 
     private let auth: FoundryAuth
     private let remote: RemoteConfig?
@@ -73,13 +76,15 @@ public final class RemoteSession: ObservableObject {
     public func resolve() async {
         guard let remote else { status = .unconfigured; return }
         status = .resolving
-        guard let idToken = await auth.currentIdToken() else {
+        guard let token = await auth.currentIdToken() else {
             relay = nil
+            idToken = nil
             status = .signedOut
             return
         }
+        idToken = token
         do {
-            let cfg = try await HostResolver(remote: remote, log: log).resolveRelayConfig(idToken: idToken)
+            let cfg = try await HostResolver(remote: remote, log: log).resolveRelayConfig(idToken: token)
             relay = cfg
             status = .connected(host: cfg.tunnelId)
         } catch HostResolveError.noHostDesignated {
@@ -89,5 +94,14 @@ public final class RemoteSession: ObservableObject {
             relay = nil
             status = .error(error.localizedDescription)
         }
+    }
+
+    /// The door target for the resolved remote host: the relay tunnel + the
+    /// id_token as bearer (the door verifies it). `nil` until connected.
+    public func makeDoorTarget() -> DoorTarget? {
+        guard let relay, let token = idToken, let remote else { return nil }
+        // baseURL is nominal in relay mode (RelayTransport drives the tunnel); use
+        // the gateway URL so it's a valid URL.
+        return DoorTarget(baseURL: remote.gatewayHTTPURL, bearer: token, relay: relay)
     }
 }
