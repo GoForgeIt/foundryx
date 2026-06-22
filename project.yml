@@ -6,6 +6,9 @@ options:
 packages:
   Grain:
     path: ../grain/platforms/grain-swift
+  BlakeHash:
+    url: https://github.com/trancee/blake-hash.git
+    exactVersion: 1.1.1
 targets:
   FoundryX:
     type: application
@@ -17,6 +20,8 @@ targets:
     dependencies:
       - package: Grain
         product: Grain
+      - package: BlakeHash
+        product: BlakeHash
     info:
       path: App/Info.plist
       properties:

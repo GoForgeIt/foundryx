@@ -17,9 +17,14 @@ public struct DoorTarget: Sendable {
     /// Base URL, e.g. http://127.0.0.1:14288 — the `/foundryx/chat` path is appended.
     public let baseURL: URL
     public let bearer: String
-    public init(baseURL: URL, bearer: String) {
+    /// OPTIONAL (M5 R1b, gated, default OFF): route turns through the blind E2E relay
+    /// instead of LAN-direct HTTP. When nil, the LAN-direct path is used unchanged.
+    public let relay: RelayConfig?
+
+    public init(baseURL: URL, bearer: String, relay: RelayConfig? = nil) {
         self.baseURL = baseURL
         self.bearer = bearer
+        self.relay = relay
     }
 }
 
@@ -230,11 +235,63 @@ public final class DoorClient: @unchecked Sendable {
         }
     }
 
-    /// Drain the turn to completion, returning all events in order.
+    /// Drain the turn to completion, returning all events in order. Routes through the
+    /// blind E2E relay when `target.relay` is configured (M5 R1b, default OFF);
+    /// otherwise uses the unchanged LAN-direct HTTP/SSE path.
     public func collect(_ req: ChatRequest) async throws -> [DoorEvent] {
+        if target.relay != nil {
+            return try await collectViaRelay(req)
+        }
         var out: [DoorEvent] = []
         for try await event in events(for: req) { out.append(event) }
         return out
+    }
+
+    /// Build the raw HTTP/1.1 chat request as bytes (the relay carries opaque HTTP).
+    private func rawChatHTTP(_ req: ChatRequest) throws -> Data {
+        let body = try JSONEncoder().encode(req)
+        let path = "/foundryx/chat"
+        let host = target.baseURL.host.map { h -> String in
+            if let p = target.baseURL.port { return "\(h):\(p)" }
+            return h
+        } ?? "door"
+        var head = "POST \(path) HTTP/1.1\r\n"
+        head += "Host: \(host)\r\n"
+        head += "Authorization: Bearer \(target.bearer)\r\n"
+        head += "Content-Type: application/json\r\n"
+        head += "Accept: text/event-stream\r\n"
+        head += "Content-Length: \(body.count)\r\n"
+        head += "Connection: close\r\n\r\n"
+        var data = Data(head.utf8)
+        data.append(body)
+        return data
+    }
+
+    /// The relay path: one E2E turn → decrypted reply frames → parse SSE `data:` events.
+    private func collectViaRelay(_ req: ChatRequest) async throws -> [DoorEvent] {
+        guard let relayConfig = target.relay else { return try await collect(req) }
+        let transport = RelayTransport(config: relayConfig, session: session, log: log)
+        let httpBytes = try rawChatHTTP(req)
+        log?.info("→ relay chat turn chat_id=\(req.chatId) org=\(req.org) (\(req.message.count) chars)")
+        let frames = try await transport.roundTrip(requestBytes: httpBytes)
+
+        // Concatenate the decrypted reply frames and parse SSE `data:` lines (the door
+        // streams the same SSE body over the relay it would over LAN-direct HTTP).
+        var buffer = Data()
+        for f in frames { buffer.append(f) }
+        let text = String(decoding: buffer, as: UTF8.self)
+        var events: [DoorEvent] = []
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(rawLine)
+            guard line.hasPrefix("data:") else { continue }
+            let payload = String(line.dropFirst("data:".count)).trimmingCharacters(in: .whitespaces)
+            if payload.isEmpty || payload == "[DONE]" { continue }
+            let event = DoorEvent.parse(payload)
+            events.append(event)
+            if case .done = event { break }
+        }
+        log?.info("✓ relay chat turn parsed \(events.count) event(s)")
+        return events
     }
 
     /// Finalize a closed conversation: tell the door to assemble the stored

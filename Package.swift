@@ -12,18 +12,24 @@ let package = Package(
         .package(name: "Grain", path: "../grain/platforms/grain-swift"),
         // The reusable Swift Brine runner (M1) — test-only dependency.
         .package(name: "brine-swift", path: "../brine-private/runners/implementations/swift"),
+        // BLAKE2s-256 (pure Swift, iOS16+) — the hash for the Noise_XX relay channel.
+        .package(url: "https://github.com/trancee/blake-hash.git", exact: "1.1.1"),
     ],
     targets: [
         .target(
             name: "FoundryXKit",
-            dependencies: [.product(name: "Grain", package: "Grain")]
+            dependencies: [
+                .product(name: "Grain", package: "Grain"),
+                .product(name: "BlakeHash", package: "blake-hash"),
+            ]
         ),
         .testTarget(
             name: "FoundryXBrineTests",
             dependencies: [
                 "FoundryXKit",
                 .product(name: "BrineSwiftCore", package: "brine-swift"),
-            ]
+            ],
+            resources: [.copy("fixtures/handshake_vectors.json")]
         ),
     ]
 )
