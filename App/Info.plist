@@ -61,10 +61,15 @@
 	       Microsoft: msauth.<this-app-bundle-id> -->
 	<key>FoundryXOAuth</key>
 	<dict>
+		<!-- NOTE: this Google id is the existing FKM *Web* client (works for the
+		     relay audience check + the desktop's loopback Google sign-in). The
+		     phone's NATIVE Google flow needs a Google *iOS*-type client; until one
+		     exists, Google sign-in on the phone will fail (Microsoft works). Swap
+		     this for the iOS client id (and its reversed scheme below) to enable it. -->
 		<key>GoogleIOSClientID</key>
-		<string></string>
+		<string>449450484577-snm32nugh3ons4rjgr95tn5je6qfgrs4.apps.googleusercontent.com</string>
 		<key>MicrosoftClientID</key>
-		<string></string>
+		<string>b0b93eb1-413e-41e5-8a90-5e991e113b62</string>
 		<key>MicrosoftTenant</key>
 		<string>organizations</string>
 		<key>GatewayHTTPURL</key>
@@ -72,17 +77,20 @@
 		<key>RelayWSURL</key>
 		<string>ws://34.57.104.157:8787</string>
 	</dict>
-	<!-- Add the OAuth redirect URL schemes here once you have the client ids:
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>com.googleusercontent.apps.REVERSED_GOOGLE_IOS_CLIENT_ID</string>
+				<!-- Google reversed-client-id scheme (becomes valid once GoogleIOSClientID
+				     is an iOS-type client). -->
+				<string>com.googleusercontent.apps.449450484577-snm32nugh3ons4rjgr95tn5je6qfgrs4</string>
+				<!-- Microsoft (Entra) iOS redirect — works with app b0b93eb1 once a
+				     "Mobile and desktop" redirect msauth.com.goforgeit.foundryx://auth
+				     is added in Entra. -->
 				<string>msauth.com.goforgeit.foundryx</string>
 			</array>
 		</dict>
 	</array>
-	-->
 </dict>
 </plist>
