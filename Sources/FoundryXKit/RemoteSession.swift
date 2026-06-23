@@ -45,6 +45,33 @@ public final class RemoteSession: ObservableObject {
     public var providers: [AuthProvider] { AuthProvider.allCases.filter { auth.isConfigured($0) } }
     public var isConfigured: Bool { remote != nil && !providers.isEmpty }
 
+    // ── Server-side diagnostics (M5 R1b) ────────────────────────────────────
+    // The sign-in/resolve path runs BEFORE the app can authenticate, so its
+    // failures are invisible in-app (you can't reach the in-app log without
+    // getting past sign-in). Ship a running diagnostic to the relay's
+    // unauthenticated /diag/log so we can read it server-side on the VM.
+    private var diag: [String] = []
+
+    private func note(_ s: String) {
+        log?.info("remote: \(s)")
+        diag.append(s)
+        shipDiag()
+    }
+
+    private func shipDiag() {
+        guard let remote else { return }
+        let b = Bundle.main.infoDictionary
+        let ver = (b?["CFBundleShortVersionString"] as? String) ?? "?"
+        let build = (b?["CFBundleVersion"] as? String) ?? "?"
+        let header = "FoundryX \(ver)(\(build)) email=\(email ?? "-") status=\(status) provs=\(providers.map { $0.rawValue })"
+        let payload = ([header] + diag).joined(separator: "\n")
+        var req = URLRequest(url: remote.gatewayHTTPURL.appendingPathComponent("diag/log"))
+        req.httpMethod = "POST"
+        req.setValue("text/plain", forHTTPHeaderField: "Content-Type")
+        req.httpBody = payload.data(using: .utf8)
+        Task { _ = try? await URLSession.shared.data(for: req) }  // fire-and-forget
+    }
+
     /// On launch / appear: if already signed in, resolve the host silently.
     public func restore() async {
         guard remote != nil, auth.signedInEmail != nil else { return }
@@ -53,15 +80,17 @@ public final class RemoteSession: ObservableObject {
 
     public func signIn(_ provider: AuthProvider) async {
         guard let remote else { status = .unconfigured; return }
-        _ = remote
+        note("signIn(\(provider.rawValue)) start")
         do {
             let id = try await auth.signIn(provider)
             email = id.email
+            note("signIn(\(provider.rawValue)) OK email=\(id.email ?? "-")")
             await resolve()
         } catch AuthError.cancelled {
-            // leave status as-is
+            note("signIn cancelled")
         } catch {
             status = .error(error.localizedDescription)
+            note("signIn FAILED: \(error.localizedDescription)")
         }
     }
 
@@ -76,10 +105,12 @@ public final class RemoteSession: ObservableObject {
     public func resolve() async {
         guard let remote else { status = .unconfigured; return }
         status = .resolving
+        note("resolve start (gateway=\(remote.gatewayHTTPURL.absoluteString))")
         guard let token = await auth.currentIdToken() else {
             relay = nil
             idToken = nil
             status = .signedOut
+            note("resolve: no valid id_token (signed out / refresh failed)")
             return
         }
         idToken = token
@@ -87,12 +118,15 @@ public final class RemoteSession: ObservableObject {
             let cfg = try await HostResolver(remote: remote, log: log).resolveRelayConfig(idToken: token)
             relay = cfg
             status = .connected(host: cfg.tunnelId)
+            note("resolve OK tunnel=\(cfg.tunnelId) relay=\(cfg.relayURL.absoluteString) pinned=\(cfg.expectedDoorStatic != nil)")
         } catch HostResolveError.noHostDesignated {
             relay = nil
             status = .noHost
+            note("resolve: NO host designated for this account")
         } catch {
             relay = nil
             status = .error(error.localizedDescription)
+            note("resolve FAILED: \(error.localizedDescription)")
         }
     }
 
