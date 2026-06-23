@@ -159,11 +159,17 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
         case .microsoft:
             comps = URLComponents(string: "https://login.microsoftonline.com/\(config.microsoftTenant)/oauth2/v2.0/authorize")!
         }
+        // Scopes differ by provider: Google rejects the `offline_access` SCOPE
+        // (it uses the `access_type=offline` PARAM below for refresh tokens);
+        // Microsoft REQUIRES the `offline_access` scope to return a refresh token.
+        let scope = provider == .microsoft
+            ? "openid email profile offline_access"
+            : "openid email profile"
         comps.queryItems = [
             .init(name: "client_id", value: clientID),
             .init(name: "redirect_uri", value: redirect),
             .init(name: "response_type", value: "code"),
-            .init(name: "scope", value: "openid email profile offline_access"),
+            .init(name: "scope", value: scope),
             .init(name: "code_challenge", value: challenge),
             .init(name: "code_challenge_method", value: "S256"),
             .init(name: "state", value: state),
