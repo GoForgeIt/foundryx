@@ -49,19 +49,18 @@ targets:
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         # M5 R1b remote sign-in (Google/Microsoft) → designated desktop host.
-        # Google id = existing FKM *Web* client (works for the relay audience check;
-        # the phone's NATIVE Google flow needs a Google iOS client). Microsoft works
-        # on the phone once a mobile redirect msauth.<bundle>://auth is added to
-        # Entra app b0b93eb1.
+        # Google = the iOS-type OAuth client (PKCE, no secret); Microsoft = Entra
+        # app b0b93eb1 with the mobile redirect msauth.<bundle>://auth. Both work
+        # on the phone.
         FoundryXOAuth:
-          GoogleIOSClientID: "449450484577-snm32nugh3ons4rjgr95tn5je6qfgrs4.apps.googleusercontent.com"
+          GoogleIOSClientID: "449450484577-vvrkjs9hkbp5t5rgju6td29r1762hoei.apps.googleusercontent.com"
           MicrosoftClientID: "b0b93eb1-413e-41e5-8a90-5e991e113b62"
           MicrosoftTenant: organizations
           GatewayHTTPURL: "http://34.57.104.157:8788"
           RelayWSURL: "ws://34.57.104.157:8787"
         CFBundleURLTypes:
           - CFBundleURLSchemes:
-              - com.googleusercontent.apps.449450484577-snm32nugh3ons4rjgr95tn5je6qfgrs4
+              - com.googleusercontent.apps.449450484577-vvrkjs9hkbp5t5rgju6td29r1762hoei
               - msauth.com.goforgeit.foundryx
     settings:
       base:
