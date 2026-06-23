@@ -7,10 +7,15 @@ import SwiftUI
 struct RootView: View {
     @StateObject private var remote = RemoteSession()
     @State private var showingAccount = false
+    // On a FRESH launch, let the branded sign-in screen sit for ~2s before
+    // auto-advancing into the app (so an already-signed-in user still sees it).
+    // This .task runs once at launch; foregrounding an already-open app does NOT
+    // re-run it, so we never bounce back to the gate mid-session.
+    @State private var splashElapsed = false
 
     var body: some View {
         Group {
-            if let target = remote.makeDoorTarget() {
+            if let target = remote.makeDoorTarget(), splashElapsed {
                 MainTabs(target: target, showingAccount: $showingAccount)
                     // A resolved-host change rebuilds the tabs (+ their clients).
                     .id(target.relay?.tunnelId ?? "remote")
@@ -18,11 +23,15 @@ struct RootView: View {
                         SignInView(remote: remote) { showingAccount = false }
                     }
             } else {
-                // Sign-in gate: not signed in, or no desktop designated as host yet.
+                // Sign-in gate: not signed in, no host yet, or the launch splash.
                 SignInView(remote: remote, onDone: { }, dismissable: false)
             }
         }
         .task { await remote.restore() }
+        .task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            splashElapsed = true
+        }
     }
 }
 
@@ -41,6 +50,9 @@ private struct MainTabs: View {
         self.target = target
         _showingAccount = showingAccount
         let log = DoorLog()
+        // Ship the phone's BLE/audio/capture/chat log to the relay diag sink so
+        // it's observable server-side (no copying logs off the device).
+        log.setRemoteSink(RemoteConfig.fromBundle()?.gatewayHTTPURL.appendingPathComponent("diag/log"))
         let dm = DeviceManager(log: log)
         _log = StateObject(wrappedValue: log)
         _device = StateObject(wrappedValue: dm)

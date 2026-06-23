@@ -26,7 +26,17 @@ public final class DoorLog: ObservableObject, @unchecked Sendable {
     @Published public private(set) var entries: [Entry] = []
     private let cap: Int
 
+    // Remote diagnostics sink (M5 R1b): when set, new entries are shipped (batched,
+    // best-effort) to the relay's /diag/log so the phone's BLE/audio/capture/chat
+    // behavior is observable SERVER-SIDE — no need to copy logs off the device.
+    private var sink: URL?
+    private var shipped = 0
+    private var flushScheduled = false
+
     public init(cap: Int = 500) { self.cap = cap }
+
+    /// Point the log at the relay diag endpoint (e.g. `…:8788/diag/log`).
+    public func setRemoteSink(_ url: URL?) { sink = url }
 
     /// Append an entry. Safe from any thread — hops to main for the @Published write.
     public func log(_ level: Level, _ text: String) {
@@ -48,7 +58,41 @@ public final class DoorLog: ObservableObject, @unchecked Sendable {
 
     private func append(_ level: Level, _ text: String) {
         entries.append(Entry(ts: Date(), level: level, text: text))
-        if entries.count > cap { entries.removeFirst(entries.count - cap) }
+        if entries.count > cap {
+            let removed = entries.count - cap
+            entries.removeFirst(removed)
+            shipped = max(0, shipped - removed)
+        }
+        scheduleFlush(immediate: level == .error)
+    }
+
+    // Coalesced ship: errors flush now; otherwise debounce ~1.5s so a burst of
+    // entries goes in one POST. Main-thread only (called from append).
+    private func scheduleFlush(immediate: Bool) {
+        guard sink != nil else { return }
+        if immediate { flush(); return }
+        if flushScheduled { return }
+        flushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.flushScheduled = false
+            self?.flush()
+        }
+    }
+
+    private func flush() {
+        guard let sink, shipped < entries.count else { return }
+        let batch = entries[shipped...]
+        shipped = entries.count
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let body = (["FoundryX device log"] + batch.map {
+            "\(fmt.string(from: $0.ts)) [\($0.level.rawValue.uppercased())] \($0.text)"
+        }).joined(separator: "\n")
+        var req = URLRequest(url: sink)
+        req.httpMethod = "POST"
+        req.setValue("text/plain", forHTTPHeaderField: "Content-Type")
+        req.httpBody = body.data(using: .utf8)
+        URLSession.shared.dataTask(with: req).resume()  // fire-and-forget
     }
 
     /// All entries as copyable plain text — one line each: `ISO8601 [LEVEL] text`.
