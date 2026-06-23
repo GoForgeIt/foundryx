@@ -66,7 +66,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.goforgeit.foundryx
-        MARKETING_VERSION: "2.42.0"
+        MARKETING_VERSION: "2.42.1"
         CURRENT_PROJECT_VERSION: "1"
         DEVELOPMENT_TEAM: ND7H73W8VZ
         CODE_SIGN_STYLE: Automatic
