@@ -23,7 +23,7 @@
 		<dict>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>com.googleusercontent.apps.449450484577-snm32nugh3ons4rjgr95tn5je6qfgrs4</string>
+				<string>com.googleusercontent.apps.449450484577-vvrkjs9hkbp5t5rgju6td29r1762hoei</string>
 				<string>msauth.com.goforgeit.foundryx</string>
 			</array>
 		</dict>
@@ -35,7 +35,7 @@
 		<key>GatewayHTTPURL</key>
 		<string>http://34.57.104.157:8788</string>
 		<key>GoogleIOSClientID</key>
-		<string>449450484577-snm32nugh3ons4rjgr95tn5je6qfgrs4.apps.googleusercontent.com</string>
+		<string>449450484577-vvrkjs9hkbp5t5rgju6td29r1762hoei.apps.googleusercontent.com</string>
 		<key>MicrosoftClientID</key>
 		<string>b0b93eb1-413e-41e5-8a90-5e991e113b62</string>
 		<key>MicrosoftTenant</key>
@@ -47,6 +47,8 @@
 	<false/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
