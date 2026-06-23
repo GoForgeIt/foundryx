@@ -39,6 +39,9 @@ final class FrameRouter: @unchecked Sendable {
     var onLevel: ((Float) -> Void)?
     /// Off-main conversation boundary; the owner hops to the main actor to act.
     var onSegment: ((SegmentEvent) -> Void)?
+    /// Off-main throttled diagnostic line (decode status + level) → the capture log,
+    /// so a flat meter / 0-segment capture is debuggable server-side.
+    var onDiag: ((String) -> Void)?
 
     init(segmenter: SilenceSegmenter,
          clock: @escaping () -> TimeInterval = { Date().timeIntervalSinceReferenceDate }) {
@@ -76,11 +79,21 @@ final class FrameRouter: @unchecked Sendable {
             level = levelMeter.level(for: frame)   // true Opus→PCM RMS (perceptual 0…1)
             event = segmenter.observe(level: level, at: clock())
         }
+        // Diag locals (read under lock): first few frames + every 50th, plus the
+        // decode outcome, so a flat meter's cause is visible.
+        let fc = frameCount, lb = lastBytes, hasWAL = wal != nil
+        let dstatus = levelMeter.lastStatus, dpcm = levelMeter.lastPCMFrames
+        let drms = levelMeter.lastRMS, dconv = levelMeter.hasConverter
+        let emitDiag = !isPaused && (fc <= 3 || fc % 50 == 0)
         lock.unlock()
         target?.appendFrame(frame)
         if !isPaused {
             onLevel?(level)
             if let e = event { onSegment?(e) }
+            if emitDiag {
+                onDiag?(String(format: "cap frame#%d bytes=%d wal=%@ level=%.3f decode[conv=%@ status=%d pcm=%d rms=%.4f]",
+                               fc, lb, hasWAL ? "y" : "n", level, dconv ? "y" : "n", Int(dstatus), dpcm, drms))
+            }
         }
     }
 }
@@ -172,6 +185,11 @@ public final class CaptureManager: ObservableObject {
         router.onSegment = { [weak self] event in
             Task { @MainActor in self?.handleSegment(event) }
         }
+        // Capture-pipeline diagnostics → the (diag-shipping) log, so a flat meter /
+        // 0-segment capture is debuggable server-side.
+        router.onDiag = { [weak self] line in
+            Task { @MainActor in self?.log?.info(line) }
+        }
         loadExisting()
         startDrainTimer()
     }
@@ -228,6 +246,7 @@ public final class CaptureManager: ObservableObject {
     private func handleSegment(_ event: SegmentEvent) {
         switch event {
         case .opened:
+            log?.info("capture: segment OPENED (voice after idle)")
             if active == nil { beginSession() }   // edge: open if somehow idle
         case .closed:
             guard active != nil else { return }

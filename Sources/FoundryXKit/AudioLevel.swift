@@ -55,11 +55,21 @@ public final class OpusLevelMeter: @unchecked Sendable {
         converter = Self.makeConverter()
     }
 
+    // Diagnostics: the most recent decode outcome, surfaced to the capture log so
+    // a flat meter's cause is visible server-side (decode error vs 0 frames vs
+    // sub-floor rms vs no converter).
+    public private(set) var lastStatus: OSStatus = 0
+    public private(set) var lastPCMFrames: Int = 0
+    public private(set) var lastRMS: Float = 0
+    public private(set) var hasConverter = true
+
     /// Decode one raw Opus packet and return its perceptual 0…1 level. Returns 0 on a
     /// failed/empty decode (e.g. a DTX/comfort-noise packet decodes to ~silence → 0).
     public func level(for frame: Data) -> Float {
+        hasConverter = converter != nil
         guard !frame.isEmpty, let conv = converter else { return 0 }
         let rms = decodeRMS(frame, conv: conv)
+        lastRMS = rms
         if rms <= 0 { return 0 }
         let db = 20 * log10(rms)
         let norm = (db - floorDB) / (ceilDB - floorDB)
@@ -101,9 +111,11 @@ public final class OpusLevelMeter: @unchecked Sendable {
                                       mData: out.baseAddress))
             return AudioConverterFillComplexBuffer(conv, inputProc, ud, &ioNumFrames, &abl, nil)
         }
+        lastStatus = status
         // noErr (0) or "input ran out" (1) both yield valid decoded frames.
-        if status != noErr && status != 1 { return 0 }
+        if status != noErr && status != 1 { lastPCMFrames = 0; return 0 }
         let n = Int(ioNumFrames)
+        lastPCMFrames = n
         if n == 0 { return 0 }
 
         var acc: Double = 0
