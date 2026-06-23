@@ -19,7 +19,7 @@ struct RootView: View {
                     }
             } else {
                 // Sign-in gate: not signed in, or no desktop designated as host yet.
-                SignInView(remote: remote) { }
+                SignInView(remote: remote, onDone: { }, dismissable: false)
             }
         }
         .task { await remote.restore() }

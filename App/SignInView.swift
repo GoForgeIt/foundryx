@@ -9,6 +9,9 @@ import SwiftUI
 struct SignInView: View {
     @ObservedObject var remote: RemoteSession
     var onDone: () -> Void
+    /// When shown as the entry GATE (not a sheet) there's nothing to dismiss to,
+    /// so hide "Done". Only the post-connect sheet (sign-out/status) shows it.
+    var dismissable: Bool = true
 
     var body: some View {
         NavigationStack {
@@ -46,7 +49,11 @@ struct SignInView: View {
             }
             .padding(20)
             .navigationTitle("Remote")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done", action: onDone) } }
+            .toolbar {
+                if dismissable {
+                    ToolbarItem(placement: .confirmationAction) { Button("Done", action: onDone) }
+                }
+            }
             .task { await remote.restore() }
         }
     }
