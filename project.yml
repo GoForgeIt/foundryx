@@ -47,12 +47,12 @@ targets:
           - bluetooth-central
           - audio
         NSAppTransportSecurity:
-          NSAllowsLocalNetworking: true
-          # M5 R1b: the hosted relay/gateway is currently a raw-IP http/ws endpoint
-          # (no domain/cert yet). The actual door traffic is already E2E-encrypted by
-          # the Noise tunnel regardless of TLS; this lets the host-resolve + relay
-          # socket reach it. TODO: put a domain + TLS (wss/https) on the relay and
-          # scope this back to a per-host exception.
+          # NOTE: NSAllowsArbitraryLoads MUST be the only key here — iOS 10+ IGNORES
+          # it if NSAllowsLocalNetworking (or other granular keys) is also present.
+          # The app is remote-only (relay), so LAN-networking allowance isn't needed.
+          # The hosted relay/gateway is a raw-IP http/ws endpoint (no domain/cert
+          # yet); door traffic is already E2E-encrypted by the Noise tunnel. TODO:
+          # domain + TLS (wss/https) on the relay, then scope to a per-host exception.
           NSAllowsArbitraryLoads: true
         # M5 R1b remote sign-in (Google/Microsoft) → designated desktop host.
         # Google = the iOS-type OAuth client (PKCE, no secret); Microsoft = Entra

@@ -49,8 +49,6 @@
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
-		<key>NSAllowsLocalNetworking</key>
-		<true/>
 	</dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>FoundryX connects to your Omi wearable over Bluetooth to capture audio.</string>
