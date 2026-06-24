@@ -14,6 +14,17 @@ import Foundation
 import CoreLocation
 #endif
 
+/// Format a conversation's place label as "City, State, Country" from reverse-geocoded
+/// components, gracefully omitting any missing/empty parts (so a partial fix reads
+/// "City, Country" or "State, Country", and an empty one → nil → the card shows time
+/// only). Pure + CoreLocation-free so it's unit-testable on the macOS test host.
+public func foundryxPlaceLabel(city: String?, state: String?, country: String?) -> String? {
+    let parts = [city, state, country]
+        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+    return parts.isEmpty ? nil : parts.joined(separator: ", ")
+}
+
 /// One-shot location lookup. Injectable behind a protocol so door-free tests can
 /// drive the degradation path without CoreLocation.
 public protocol ConversationLocationProviding: Sendable {
@@ -106,8 +117,13 @@ public final class LocationProvider: NSObject, ConversationLocationProviding, CL
     private func reverseGeocode(_ location: CLLocation) async -> String? {
         let placemarks = try? await geocoder.reverseGeocodeLocation(location)
         guard let p = placemarks?.first else { return nil }
-        // Prefer a named point-of-interest / area; fall back to locality.
-        return p.name ?? p.areasOfInterest?.first ?? p.locality ?? p.subLocality
+        // "City, State, Country" — the where-it-happened label the card + Lore want.
+        // Fall back through subLocality when locality is absent (some regions).
+        return foundryxPlaceLabel(
+            city: p.locality ?? p.subLocality,
+            state: p.administrativeArea,
+            country: p.country
+        )
     }
 
     // MARK: CLLocationManagerDelegate

@@ -242,17 +242,19 @@ private struct CaptureCard: View {
     /// Shared formatter so the conversation detail view shows the SAME time range
     /// as the card. `fallback` is the WAL start used when there's no metadata sidecar.
     static func timeRangeString(meta: ConversationMeta?, fallback: Date) -> String {
-        guard let meta else { return timeFmt.string(from: fallback) }
+        // Lead with the DATE so "when the recording happened" is unambiguous (captures
+        // span days), then the time-of-day range + duration.
+        guard let meta else { return "\(dayFmt.string(from: fallback)) · \(timeFmt.string(from: fallback))" }
         let start = Date(timeIntervalSince1970: TimeInterval(meta.startedAt))
-        guard let endSecs = meta.endedAt else { return timeFmt.string(from: start) }
+        let day = dayFmt.string(from: start)
+        guard let endSecs = meta.endedAt else { return "\(day) · \(timeFmt.string(from: start))" }
         let end = Date(timeIntervalSince1970: TimeInterval(endSecs))
-        let startStr = timeFmt.string(from: start)
-        let endStr = timeFmt.string(from: end)
+        let span = "\(timeFmt.string(from: start))–\(timeFmt.string(from: end))"
         if let dur = meta.durationSeconds {
             let mins = max(1, Int((Double(dur) / 60).rounded()))
-            return "\(startStr)–\(endStr) · \(mins) min"
+            return "\(day) · \(span) · \(mins) min"
         }
-        return "\(startStr)–\(endStr)"
+        return "\(day) · \(span)"
     }
 
     private var place: String? { meta?.location?.label }
@@ -267,6 +269,9 @@ private struct CaptureCard: View {
 
     private static let timeFmt: DateFormatter = {
         let f = DateFormatter(); f.dateFormat = "h:mm a"; return f
+    }()
+    private static let dayFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "EEE, MMM d"; return f
     }()
 }
 
