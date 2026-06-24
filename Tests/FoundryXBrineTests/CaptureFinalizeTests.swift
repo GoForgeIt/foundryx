@@ -39,8 +39,8 @@ final class CaptureFinalizeTests: XCTestCase {
     /// RMS (→ level ≫ silenceThreshold, counts as voice); a near-silent block decodes
     /// to RMS ≈ 0 (→ silence). This replaces the old byte-size garbage frames, which
     /// the true RMS meter (correctly) reads as silence.
-    private lazy var loudPacket: Data = OpusTestEncoder.shared.encode(amplitude: 1.0) ?? Data()
-    private lazy var quietPacket: Data = OpusTestEncoder.shared.encode(amplitude: 0.0) ?? Data()
+    private lazy var loudPacket: Data = RealOmiFrames.voiced()
+    private lazy var quietPacket: Data = RealOmiFrames.silent()
     private func voiceFrame() -> Data { loudPacket }
     private func silentFrame() -> Data { quietPacket }
 

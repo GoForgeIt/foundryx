@@ -35,8 +35,8 @@ final class ConversationCardTests: XCTestCase {
         func currentLocation() async -> ConversationLocation? { location }
     }
 
-    private lazy var loudPacket: Data = OpusTestEncoder.shared.encode(amplitude: 1.0) ?? Data()
-    private lazy var quietPacket: Data = OpusTestEncoder.shared.encode(amplitude: 0.0) ?? Data()
+    private lazy var loudPacket: Data = RealOmiFrames.voiced()
+    private lazy var quietPacket: Data = RealOmiFrames.silent()
 
     private func ackAllSegments(_ dir: URL, _ captureId: String) {
         let cdir = dir.appendingPathComponent(captureId, isDirectory: true)

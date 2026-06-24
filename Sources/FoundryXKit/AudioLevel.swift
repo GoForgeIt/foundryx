@@ -83,6 +83,13 @@ public final class OpusLevelMeter: @unchecked Sendable {
     // MARK: decode
 
     private func decodeRMS(_ frame: Data, conv: AudioConverterRef) -> Float {
+        // Decode each packet INDEPENDENTLY: reset the converter first. The input proc
+        // below returns 0 packets after handing over our one packet, which the
+        // converter reads as END-OF-STREAM — without a reset that EOS state persists
+        // and EVERY subsequent packet decodes to 0 frames (on-device: only the very
+        // first frame ever produced PCM). Reset clears it so each BLE packet decodes
+        // cleanly for its RMS. CELT frames are self-contained enough for metering.
+        AudioConverterReset(conv)
         let pktDesc = AudioStreamPacketDescription(
             mStartOffset: 0, mVariableFramesInPacket: 0, mDataByteSize: UInt32(frame.count))
 
@@ -146,7 +153,7 @@ public final class OpusLevelMeter: @unchecked Sendable {
         src.mFramesPerPacket = 960
 
         var dst = AudioStreamBasicDescription()
-        dst.mSampleRate = 16000
+        dst.mSampleRate = 48000
         dst.mFormatID = kAudioFormatLinearPCM
         dst.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked
         dst.mChannelsPerFrame = 1
@@ -171,7 +178,10 @@ public final class OpusLevelMeter: @unchecked Sendable {
         cookie.append(contentsOf: Array("OpusHead".utf8))
         cookie.append(1)                       // version
         cookie.append(1)                       // channel count (mono)
-        let preSkip: UInt16 = 3840             // libopus default (referenced to 48 kHz)
+        let preSkip: UInt16 = 0                // 0: we decode each packet INDEPENDENTLY for
+                                               // metering (converter is reset per packet), so
+                                               // a non-zero encoder-delay trim would eat each
+                                               // short 20ms frame down to near-silence.
         cookie.append(UInt8(preSkip & 0xff)); cookie.append(UInt8(preSkip >> 8))
         let inRate: UInt32 = 16000             // Omi's original encode rate (informational)
         cookie.append(UInt8(inRate & 0xff)); cookie.append(UInt8((inRate >> 8) & 0xff))

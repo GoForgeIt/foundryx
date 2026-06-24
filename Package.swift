@@ -29,7 +29,10 @@ let package = Package(
                 "FoundryXKit",
                 .product(name: "BrineSwiftCore", package: "brine-swift"),
             ],
-            resources: [.copy("fixtures/handshake_vectors.json")]
+            resources: [
+                .copy("fixtures/handshake_vectors.json"),
+                .copy("fixtures/omi_real_frames.json"),
+            ]
         ),
     ]
 )
