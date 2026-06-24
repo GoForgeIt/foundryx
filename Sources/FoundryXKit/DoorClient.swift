@@ -145,15 +145,40 @@ public struct CaptureContent: Decodable, Sendable, Equatable {
     public let transcript: String
     public let capturedAt: Int
     public let found: Bool
+    /// Kiln-generated title/summary (Phase B). `nil` until generated; `summarizing`
+    /// is true while the door is producing them in the background (the view shows a
+    /// "Summarizing…" hint and re-fetches). `titleModel` records which LLM produced
+    /// the title (the benchmark hook).
+    public let title: String?
+    public let summary: String?
+    public let titleModel: String?
+    public let summarizing: Bool
 
     enum CodingKeys: String, CodingKey {
-        case transcript, capturedAt, found
+        case transcript, capturedAt, found, title, summary, titleModel, summarizing
     }
 
-    public init(transcript: String, capturedAt: Int, found: Bool) {
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        transcript = try c.decodeIfPresent(String.self, forKey: .transcript) ?? ""
+        capturedAt = try c.decodeIfPresent(Int.self, forKey: .capturedAt) ?? 0
+        found = try c.decodeIfPresent(Bool.self, forKey: .found) ?? false
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+        summary = try c.decodeIfPresent(String.self, forKey: .summary)
+        titleModel = try c.decodeIfPresent(String.self, forKey: .titleModel)
+        summarizing = try c.decodeIfPresent(Bool.self, forKey: .summarizing) ?? false
+    }
+
+    public init(transcript: String, capturedAt: Int, found: Bool,
+                title: String? = nil, summary: String? = nil,
+                titleModel: String? = nil, summarizing: Bool = false) {
         self.transcript = transcript
         self.capturedAt = capturedAt
         self.found = found
+        self.title = title
+        self.summary = summary
+        self.titleModel = titleModel
+        self.summarizing = summarizing
     }
 }
 

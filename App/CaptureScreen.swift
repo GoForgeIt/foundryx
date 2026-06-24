@@ -306,6 +306,19 @@ struct ConversationDetailView: View {
                     Text("Couldn't load transcript: \(loadError)")
                         .grainTextStyle(.body).foregroundStyle(GrainColor.amber)
                 } else if let content, content.found, !content.transcript.isEmpty {
+                    // Kiln-generated title + summary (Phase B) when ready; a subtle
+                    // "Summarizing…" hint while the door generates them in the
+                    // background (the .task re-fetches once so they fill in).
+                    if let summary = content.summary, !summary.isEmpty {
+                        Text("Summary").grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                        Text(summary)
+                            .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                            .textSelection(.enabled)
+                        Divider().background(GrainColor.borderHairline)
+                    } else if content.summarizing {
+                        Text("Summarizing…").grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                    }
+                    Text("Transcript").grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                     Text(content.transcript)
                         .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
                         .textSelection(.enabled)
@@ -325,9 +338,10 @@ struct ConversationDetailView: View {
         .task { await load() }
     }
 
-    /// First ~6 words of the transcript as a lightweight title; "Conversation"
-    /// until there's text. (Real subject/summary is a follow-up.)
+    /// Prefer the Kiln-generated title; fall back to the first ~6 words of the
+    /// transcript while it's still summarizing, then "Conversation".
     private var navTitle: String {
+        if let t = content?.title, !t.isEmpty { return t }
         guard let t = content?.transcript, !t.isEmpty else { return "Conversation" }
         let words = t.split(whereSeparator: { $0 == " " || $0 == "\n" }).prefix(6).joined(separator: " ")
         return words.isEmpty ? "Conversation" : words
@@ -342,5 +356,14 @@ struct ConversationDetailView: View {
             loadError = (error as NSError).localizedDescription
         }
         loading = false
+        // The door generates the title/summary in the background on first fetch; if
+        // it's still summarizing, re-fetch once after a short delay so they appear
+        // without the user having to leave + reopen the conversation.
+        if content?.summarizing == true, (content?.title ?? "").isEmpty {
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            if let refreshed = try? await DoorClient(target: target).captureContent(captureId: captureId) {
+                content = refreshed
+            }
+        }
     }
 }
