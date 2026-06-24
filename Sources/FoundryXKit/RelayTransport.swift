@@ -39,6 +39,20 @@ public struct RelayConfig: Sendable {
         self.staticPrivate = staticPrivate
         self.expectedDoorStatic = expectedDoorStatic
     }
+
+    /// The INTERACTIVE channel: same relay, key, and door-key pin, but the tunnel id
+    /// suffixed `-chat`. Chat turns + transcript fetches dial this so they splice
+    /// through the door's dedicated interactive pool and never queue behind bulk
+    /// capture sync (which keeps using the base tunnel). Mirrors the door's
+    /// `interactive_tunnel_id` (base + "-chat").
+    public func interactive() -> RelayConfig {
+        RelayConfig(
+            relayURL: relayURL,
+            tunnelId: "\(tunnelId)-chat",
+            staticPrivate: staticPrivate,
+            expectedDoorStatic: expectedDoorStatic
+        )
+    }
 }
 
 public enum RelayError: Error, Equatable {

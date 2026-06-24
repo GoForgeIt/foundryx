@@ -206,7 +206,7 @@ public final class DoorClient: @unchecked Sendable {
                 // Remote mode: the door's /foundryx/chat is behind the relay tunnel.
                 // Run one E2E turn, then yield the parsed SSE events (the door streams
                 // the same SSE body over the relay it would over LAN-direct HTTP).
-                if let relay = self.target.relay {
+                if let relay = self.target.relay?.interactive() {
                     do {
                         let httpBytes = RelayHTTP.rawRequest(
                             method: "POST", path: "/foundryx/chat", bearer: self.target.bearer,
@@ -327,7 +327,7 @@ public final class DoorClient: @unchecked Sendable {
 
     /// The relay path: one E2E turn → decrypted reply frames → parse SSE `data:` events.
     private func collectViaRelay(_ req: ChatRequest) async throws -> [DoorEvent] {
-        guard let relayConfig = target.relay else { return try await collect(req) }
+        guard let relayConfig = target.relay?.interactive() else { return try await collect(req) }
         let transport = RelayTransport(config: relayConfig, session: session, log: log)
         let httpBytes = try rawChatHTTP(req)
         log?.info("→ relay chat turn chat_id=\(req.chatId) org=\(req.org) (\(req.message.count) chars)")
@@ -445,7 +445,9 @@ public final class DoorClient: @unchecked Sendable {
     /// NOT an error). Relay-aware: routes through the tunnel when configured.
     public func captureContent(captureId: String) async throws -> CaptureContent {
         let notReady = CaptureContent(transcript: "", capturedAt: 0, found: false)
-        if let relay = target.relay {
+        // Interactive channel: transcript fetch is a user-facing read, so it rides the
+        // chat tunnel (own door pool), never queuing behind bulk capture sync.
+        if let relay = target.relay?.interactive() {
             let resp = try await RelayHTTP.roundTrip(
                 relay: relay, bearer: target.bearer, method: "GET",
                 path: "/foundryx/capture/\(captureId)/content",
