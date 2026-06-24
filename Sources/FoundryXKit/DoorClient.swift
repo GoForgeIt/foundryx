@@ -184,6 +184,45 @@ public final class DoorClient: @unchecked Sendable {
         AsyncThrowingStream { continuation in
             let log = self.log
             let task = Task {
+                // Remote mode: the door's /foundryx/chat is behind the relay tunnel.
+                // Run one E2E turn, then yield the parsed SSE events (the door streams
+                // the same SSE body over the relay it would over LAN-direct HTTP).
+                if let relay = self.target.relay {
+                    do {
+                        let httpBytes = RelayHTTP.rawRequest(
+                            method: "POST", path: "/foundryx/chat", bearer: self.target.bearer,
+                            extraHeaders: [:], contentType: "application/json",
+                            accept: "text/event-stream", body: try JSONEncoder().encode(req))
+                        log?.info("→ relay chat turn chat_id=\(req.chatId) org=\(req.org) (\(req.message.count) chars)")
+                        let transport = RelayTransport(config: relay, session: self.session, log: log)
+                        let frames = try await transport.roundTrip(requestBytes: httpBytes)
+                        var buf = Data(); for f in frames { buf.append(f) }
+                        let resp = try RelayHTTP.parseResponse(buf)
+                        log?.info("← relay HTTP \(resp.status)")
+                        if resp.status == 401 { throw DoorError.unauthorized }
+                        guard resp.status == 200 else { throw DoorError.http(resp.status) }
+                        var count = 0
+                        let text = String(decoding: resp.body, as: UTF8.self)
+                        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+                            let line = String(rawLine)
+                            guard line.hasPrefix("data:") else { continue }
+                            let payload = String(line.dropFirst("data:".count)).trimmingCharacters(in: .whitespaces)
+                            if payload.isEmpty || payload == "[DONE]" { continue }
+                            let event = DoorEvent.parse(payload)
+                            count += 1
+                            log?.info("event \(DoorClient.summary(event))")
+                            continuation.yield(event)
+                            if case .done = event { break }
+                        }
+                        log?.info("✓ relay chat turn parsed \(count) event(s)")
+                        continuation.finish()
+                    } catch {
+                        let ns = error as NSError
+                        log?.error("✗ relay chat error: domain=\(ns.domain) code=\(ns.code) — \(ns.localizedDescription)")
+                        continuation.finish(throwing: error)
+                    }
+                    return
+                }
                 do {
                     let request = try self.chatRequest(req)
                     log?.info("→ POST \(request.url?.absoluteString ?? "?") chat_id=\(req.chatId) org=\(req.org) (\(req.message.count) chars)")
@@ -305,6 +344,25 @@ public final class DoorClient: @unchecked Sendable {
     /// finalize + the door's own retry-sweep are both idempotent, so a retry never
     /// double-ingests). A 200 means the door advanced the capture to Lore.
     public func finalize(captureId: String, meta: ConversationMeta? = nil) async throws {
+        let body: Data? = try meta.map { try JSONEncoder().encode(FinalizeBody(meta: $0)) }
+        log?.info("→ POST finalize capture=\(captureId)\(meta != nil ? " (+metadata)" : "")")
+        // Remote mode: finalize the closed capture through the relay tunnel (the
+        // door's /foundryx/capture/{id}/finalize is behind the tunnel, not on the
+        // relay's nominal HTTP control port).
+        if let relay = target.relay {
+            let resp = try await RelayHTTP.roundTrip(
+                relay: relay, bearer: target.bearer, method: "POST",
+                path: "/foundryx/capture/\(captureId)/finalize",
+                contentType: meta != nil ? "application/json" : nil, body: body,
+                session: session, log: log)
+            if resp.status == 401 { throw DoorError.unauthorized }
+            guard resp.status == 200 else {
+                log?.warn("finalize capture=\(captureId) → HTTP \(resp.status) (will retry)")
+                throw DoorError.http(resp.status)
+            }
+            log?.info("✓ finalize capture=\(captureId) accepted by door (relay)")
+            return
+        }
         let s = target.baseURL.absoluteString
         let base = s.hasSuffix("/") ? String(s.dropLast()) : s
         guard let url = URL(string: "\(base)/foundryx/capture/\(captureId)/finalize") else {
@@ -314,13 +372,10 @@ public final class DoorClient: @unchecked Sendable {
         r.httpMethod = "POST"
         r.setValue("Bearer \(target.bearer)", forHTTPHeaderField: "Authorization")
         r.timeoutInterval = 60
-        // Attach the conversation metadata body when present (F1, F9). Backward-
-        // compatible: nil meta → no body, which the door still accepts.
-        if let meta {
+        if let body {
             r.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            r.httpBody = try JSONEncoder().encode(FinalizeBody(meta: meta))
+            r.httpBody = body
         }
-        log?.info("→ POST finalize capture=\(captureId)\(meta != nil ? " (+metadata)" : "")")
         let (_, response) = try await session.data(for: r)
         guard let http = response as? HTTPURLResponse else {
             throw DoorError.transport("non-HTTP response")
@@ -338,6 +393,15 @@ public final class DoorClient: @unchecked Sendable {
     /// the stage + (once in Lore) the lore capture id. Phase A is stage-only.
     /// Throws on 401 / non-2xx so the caller can back off + retry.
     public func captureStatus(captureId: String) async throws -> CaptureStatusResponse {
+        if let relay = target.relay {
+            let resp = try await RelayHTTP.roundTrip(
+                relay: relay, bearer: target.bearer, method: "GET",
+                path: "/foundryx/capture/\(captureId)/status",
+                session: session, log: log)
+            if resp.status == 401 { throw DoorError.unauthorized }
+            guard resp.status == 200 else { throw DoorError.http(resp.status) }
+            return try JSONDecoder().decode(CaptureStatusResponse.self, from: resp.body)
+        }
         let s = target.baseURL.absoluteString
         let base = s.hasSuffix("/") ? String(s.dropLast()) : s
         guard let url = URL(string: "\(base)/foundryx/capture/\(captureId)/status") else {

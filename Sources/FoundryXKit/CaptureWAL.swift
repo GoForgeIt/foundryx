@@ -163,8 +163,22 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         }
     }
 
-    /// POST one segment. Throws on any non-200 so the segment stays pending.
+    /// POST one segment. Throws on any non-200 so the segment stays pending. In
+    /// remote mode the door lives behind the relay tunnel, so the upload goes E2E
+    /// through RelayHTTP (a plain POST to the nominal baseURL — the relay's HTTP
+    /// control port — has no /foundryx/capture route and 404s).
     private func upload(seq: UInt64, body: Data) async throws {
+        let headers = ["X-Capture-Id": captureId, "X-Capture-Seq": String(seq)]
+        if let relay = target.relay {
+            let resp = try await RelayHTTP.roundTrip(
+                relay: relay, bearer: target.bearer, method: "POST",
+                path: "/foundryx/capture", extraHeaders: headers,
+                contentType: "application/octet-stream", body: body,
+                session: session, log: log)
+            if resp.status == 401 { throw DoorError.unauthorized }
+            guard resp.status == 200 else { throw DoorError.http(resp.status) }
+            return
+        }
         var r = URLRequest(url: target.baseURL.appendingPathComponent("foundryx/capture"))
         r.httpMethod = "POST"
         r.setValue("Bearer \(target.bearer)", forHTTPHeaderField: "Authorization")
