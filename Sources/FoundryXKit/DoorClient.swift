@@ -124,17 +124,26 @@ public struct CaptureStatusResponse: Decodable, Sendable, Equatable {
     public let stage: String
     public let loreCaptureId: String?
     public let transcribed: Bool
+    /// The Kiln-generated title (Phase B) once the door has cached it — surfaced on
+    /// the poll so the conversation CARD can show it without a separate /content call.
+    public let title: String?
+    public let summary: String?
 
     enum CodingKeys: String, CodingKey {
         case stage
         case loreCaptureId = "lore_capture_id"
         case transcribed
+        case title
+        case summary
     }
 
-    public init(stage: String, loreCaptureId: String?, transcribed: Bool) {
+    public init(stage: String, loreCaptureId: String?, transcribed: Bool,
+                title: String? = nil, summary: String? = nil) {
         self.stage = stage
         self.loreCaptureId = loreCaptureId
         self.transcribed = transcribed
+        self.title = title
+        self.summary = summary
     }
 }
 

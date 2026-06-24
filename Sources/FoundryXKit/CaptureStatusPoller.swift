@@ -64,11 +64,14 @@ public final class CaptureStatusPoller: ObservableObject {
     public let captureId: String
     @Published public private(set) var stage: CaptureLifecycleStage
     @Published public private(set) var loreCaptureId: String?
+    /// The Kiln-generated title once the door has it (drives the card's primary line).
+    @Published public private(set) var title: String?
 
     private let client: CaptureStatusFetching
     private let baseInterval: TimeInterval
     private let maxInterval: TimeInterval
     private var task: Task<Void, Never>?
+    private var lastTranscribed = false
 
     public init(captureId: String,
                 client: CaptureStatusFetching,
@@ -84,7 +87,10 @@ public final class CaptureStatusPoller: ObservableObject {
 
     /// Start polling. No-op if already running or already terminal.
     public func start() {
-        guard task == nil, !stage.isTerminal else { return }
+        // Poll if not terminal, OR if we're terminal but still have no title (an
+        // already-organized capture still needs its background-generated title for
+        // the card). Nothing to do once terminal AND titled.
+        guard task == nil, !(stage.isTerminal && title != nil) else { return }
         task = Task { [weak self] in await self?.loop() }
     }
 
@@ -103,6 +109,8 @@ public final class CaptureStatusPoller: ObservableObject {
             let next = CaptureLifecycleStage(wire: resp.stage)
             stage = next
             if let id = resp.loreCaptureId { loreCaptureId = id }
+            if let t = resp.title, !t.isEmpty { title = t }
+            lastTranscribed = resp.transcribed
             return next.isTerminal
         } catch {
             // Transport / non-2xx (incl. 404 before the door has the manifest) — keep
@@ -113,9 +121,18 @@ public final class CaptureStatusPoller: ObservableObject {
 
     private func loop() async {
         var interval = baseInterval
+        var titleWaits = 0
         while !Task.isCancelled {
             let terminal = await pollOnce()
-            if terminal { break }            // organized / failed → stop polling (F11)
+            // Keep polling past a terminal stage ONLY while a transcribed (non-failed)
+            // capture is still waiting on its background-generated title, so the card's
+            // title fills in. Bounded so a never-titled capture doesn't poll forever.
+            let titlePending = title == nil && lastTranscribed && stage != .failed
+            if terminal {
+                if !titlePending { break }
+                titleWaits += 1
+                if titleWaits > 8 { break }
+            }
             // Healthy poll resets the cadence; a stuck/erroring poll backs off.
             interval = min(interval * 1.5, maxInterval)
             if stage != .stored { interval = baseInterval }  // mid-pipeline → keep snappy

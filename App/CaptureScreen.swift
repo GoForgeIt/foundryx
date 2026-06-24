@@ -191,9 +191,16 @@ private struct CaptureCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+            // Kiln-generated title as the card's headline once the door has it; the
+            // stage chip drops to a secondary line. Falls back to stage-only until then.
+            if let title = poller.title, !title.isEmpty {
+                Text(title).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                    .lineLimit(2)
+            }
             HStack(spacing: GrainSpacing.x2) {
                 Circle().fill(stageColor).frame(width: 9, height: 9)
-                Text(stageLabel).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                Text(stageLabel).grainTextStyle(poller.title == nil ? .body : .caption)
+                    .foregroundStyle(poller.title == nil ? GrainColor.ink : GrainColor.textMuted)
                 Spacer()
                 Text(timeRange).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             }
