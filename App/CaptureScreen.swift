@@ -12,6 +12,8 @@ struct CaptureScreen: View {
     // link + one capture pipeline.
     @ObservedObject var device: DeviceManager
     @ObservedObject var manager: CaptureManager
+    /// The resolved door target — lets a tapped card open its transcript (Phase B).
+    let target: DoorTarget
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,11 +26,23 @@ struct CaptureScreen: View {
                 ScrollView {
                     VStack(spacing: GrainSpacing.x3) {
                         ForEach(manager.captures, id: \.captureId) { wal in
-                            CaptureCard(
-                                wal: wal,
-                                meta: manager.conversationMeta(for: wal.captureId),
-                                poller: manager.statusPoller(for: wal.captureId)
-                            )
+                            NavigationLink {
+                                ConversationDetailView(
+                                    target: target,
+                                    captureId: wal.captureId,
+                                    timeRange: manager.conversationMeta(for: wal.captureId)
+                                        .map { CaptureCard.timeRangeString(meta: $0, fallback: wal.status.startedAt) }
+                                        ?? CaptureCard.timeRangeString(meta: nil, fallback: wal.status.startedAt),
+                                    place: manager.conversationMeta(for: wal.captureId)?.location?.label
+                                )
+                            } label: {
+                                CaptureCard(
+                                    wal: wal,
+                                    meta: manager.conversationMeta(for: wal.captureId),
+                                    poller: manager.statusPoller(for: wal.captureId)
+                                )
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                     .padding(GrainSpacing.x4)
@@ -223,18 +237,17 @@ private struct CaptureCard: View {
     private var stageLabel: String { effectiveStage.chipLabel }
 
     /// "10:41–10:47 AM · 6 min" when closed; start time alone while open.
-    private var timeRange: String {
-        guard let meta else {
-            // No metadata sidecar (older capture) — fall back to the WAL start.
-            return Self.timeFmt.string(from: wal.status.startedAt)
-        }
+    private var timeRange: String { Self.timeRangeString(meta: meta, fallback: wal.status.startedAt) }
+
+    /// Shared formatter so the conversation detail view shows the SAME time range
+    /// as the card. `fallback` is the WAL start used when there's no metadata sidecar.
+    static func timeRangeString(meta: ConversationMeta?, fallback: Date) -> String {
+        guard let meta else { return timeFmt.string(from: fallback) }
         let start = Date(timeIntervalSince1970: TimeInterval(meta.startedAt))
-        guard let endSecs = meta.endedAt else {
-            return Self.timeFmt.string(from: start)
-        }
+        guard let endSecs = meta.endedAt else { return timeFmt.string(from: start) }
         let end = Date(timeIntervalSince1970: TimeInterval(endSecs))
-        let startStr = Self.timeFmt.string(from: start)
-        let endStr = Self.timeFmt.string(from: end)
+        let startStr = timeFmt.string(from: start)
+        let endStr = timeFmt.string(from: end)
         if let dur = meta.durationSeconds {
             let mins = max(1, Int((Double(dur) / 60).rounded()))
             return "\(startStr)–\(endStr) · \(mins) min"
@@ -255,4 +268,74 @@ private struct CaptureCard: View {
     private static let timeFmt: DateFormatter = {
         let f = DateFormatter(); f.dateFormat = "h:mm a"; return f
     }()
+}
+
+/// Phase B: a conversation's TRANSCRIPT. Fetched from the door (which reads it from
+/// the local Lore engine, keyed by the phone's capture id). Shows time + place +
+/// the transcript; a friendly "still processing" state until Lore has transcribed
+/// it. The nav title is derived from the first few words of the transcript (real
+/// subject/summary generation is a later slice).
+struct ConversationDetailView: View {
+    let target: DoorTarget
+    let captureId: String
+    let timeRange: String
+    let place: String?
+
+    @State private var content: CaptureContent?
+    @State private var loadError: String?
+    @State private var loading = true
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: GrainSpacing.x3) {
+                Text(timeRange).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                if let place {
+                    Text(place).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                }
+                Divider().background(GrainColor.borderHairline)
+
+                if loading {
+                    Text("Loading transcript…")
+                        .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
+                } else if let loadError {
+                    Text("Couldn't load transcript: \(loadError)")
+                        .grainTextStyle(.body).foregroundStyle(GrainColor.amber)
+                } else if let content, content.found, !content.transcript.isEmpty {
+                    Text(content.transcript)
+                        .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                        .textSelection(.enabled)
+                } else {
+                    Text("Transcript still processing…")
+                        .grainTextStyle(.title).foregroundStyle(GrainColor.ink)
+                    Text("Your conversation is saved. The transcript shows up here once it's been processed on your computer.")
+                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                }
+            }
+            .padding(GrainSpacing.x4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .grainBackground()
+        .navigationTitle(navTitle)
+        .navigationBarTitleDisplayMode(.inline)
+        .task { await load() }
+    }
+
+    /// First ~6 words of the transcript as a lightweight title; "Conversation"
+    /// until there's text. (Real subject/summary is a follow-up.)
+    private var navTitle: String {
+        guard let t = content?.transcript, !t.isEmpty else { return "Conversation" }
+        let words = t.split(whereSeparator: { $0 == " " || $0 == "\n" }).prefix(6).joined(separator: " ")
+        return words.isEmpty ? "Conversation" : words
+    }
+
+    private func load() async {
+        loading = true
+        loadError = nil
+        do {
+            content = try await DoorClient(target: target).captureContent(captureId: captureId)
+        } catch {
+            loadError = (error as NSError).localizedDescription
+        }
+        loading = false
+    }
 }

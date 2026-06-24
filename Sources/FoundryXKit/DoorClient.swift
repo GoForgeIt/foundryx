@@ -138,6 +138,25 @@ public struct CaptureStatusResponse: Decodable, Sendable, Equatable {
     }
 }
 
+/// The door's transcript reply (`GET /foundryx/capture/{phone_id}/content`, Phase
+/// B) — the conversation text Lore produced + when it was captured. `found` is
+/// false (the door 404s with `{found:false}`) until Lore has transcribed it.
+public struct CaptureContent: Decodable, Sendable, Equatable {
+    public let transcript: String
+    public let capturedAt: Int
+    public let found: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case transcript, capturedAt, found
+    }
+
+    public init(transcript: String, capturedAt: Int, found: Bool) {
+        self.transcript = transcript
+        self.capturedAt = capturedAt
+        self.found = found
+    }
+}
+
 /// The authenticated door client. `events(for:)` streams the turn; `collect(_:)` is a
 /// convenience that drains to completion (used by tests + simple callers).
 public final class DoorClient: @unchecked Sendable {
@@ -418,6 +437,41 @@ public final class DoorClient: @unchecked Sendable {
         if http.statusCode == 401 { throw DoorError.unauthorized }
         guard http.statusCode == 200 else { throw DoorError.http(http.statusCode) }
         return try JSONDecoder().decode(CaptureStatusResponse.self, from: data)
+    }
+
+    /// Fetch a capture's TRANSCRIPT (Phase B), keyed by the PHONE's capture id —
+    /// the door reads it from the local Lore engine. A 404 means Lore hasn't
+    /// transcribed it yet → returned as `found:false` (a "still processing" state,
+    /// NOT an error). Relay-aware: routes through the tunnel when configured.
+    public func captureContent(captureId: String) async throws -> CaptureContent {
+        let notReady = CaptureContent(transcript: "", capturedAt: 0, found: false)
+        if let relay = target.relay {
+            let resp = try await RelayHTTP.roundTrip(
+                relay: relay, bearer: target.bearer, method: "GET",
+                path: "/foundryx/capture/\(captureId)/content",
+                session: session, log: log)
+            if resp.status == 401 { throw DoorError.unauthorized }
+            if resp.status == 404 { return notReady }
+            guard resp.status == 200 else { throw DoorError.http(resp.status) }
+            return try JSONDecoder().decode(CaptureContent.self, from: resp.body)
+        }
+        let s = target.baseURL.absoluteString
+        let base = s.hasSuffix("/") ? String(s.dropLast()) : s
+        guard let url = URL(string: "\(base)/foundryx/capture/\(captureId)/content") else {
+            throw DoorError.transport("bad content url")
+        }
+        var r = URLRequest(url: url)
+        r.httpMethod = "GET"
+        r.setValue("Bearer \(target.bearer)", forHTTPHeaderField: "Authorization")
+        r.timeoutInterval = 30
+        let (data, response) = try await session.data(for: r)
+        guard let http = response as? HTTPURLResponse else {
+            throw DoorError.transport("non-HTTP response")
+        }
+        if http.statusCode == 401 { throw DoorError.unauthorized }
+        if http.statusCode == 404 { return notReady }
+        guard http.statusCode == 200 else { throw DoorError.http(http.statusCode) }
+        return try JSONDecoder().decode(CaptureContent.self, from: data)
     }
 
     /// Relay a gate decision to the door's approvals endpoint

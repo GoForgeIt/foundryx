@@ -69,7 +69,7 @@ private struct MainTabs: View {
             .tabItem { Label("Chat", systemImage: "message") }
 
             NavigationStack {
-                CaptureScreen(device: device, manager: manager)
+                CaptureScreen(device: device, manager: manager, target: target)
                     .navigationTitle("Capture")
                     .toolbar { Button("Account") { showingAccount = true } }
             }
