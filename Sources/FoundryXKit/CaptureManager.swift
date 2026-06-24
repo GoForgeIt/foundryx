@@ -84,6 +84,7 @@ final class FrameRouter: @unchecked Sendable {
         let fc = frameCount, lb = lastBytes, hasWAL = wal != nil
         let dstatus = levelMeter.lastStatus, dpcm = levelMeter.lastPCMFrames
         let drms = levelMeter.lastRMS, dconv = levelMeter.hasConverter
+        let dcookie = levelMeter.lastCookieStatus
         let emitDiag = !isPaused && (fc <= 3 || fc % 50 == 0)
         lock.unlock()
         target?.appendFrame(frame)
@@ -91,8 +92,8 @@ final class FrameRouter: @unchecked Sendable {
             onLevel?(level)
             if let e = event { onSegment?(e) }
             if emitDiag {
-                onDiag?(String(format: "cap frame#%d bytes=%d wal=%@ level=%.3f decode[conv=%@ status=%d pcm=%d rms=%.4f]",
-                               fc, lb, hasWAL ? "y" : "n", level, dconv ? "y" : "n", Int(dstatus), dpcm, drms))
+                onDiag?(String(format: "cap frame#%d bytes=%d wal=%@ level=%.3f decode[conv=%@ cookie=%d status=%d pcm=%d rms=%.4f]",
+                               fc, lb, hasWAL ? "y" : "n", level, dconv ? "y" : "n", Int(dcookie), Int(dstatus), dpcm, drms))
             }
         }
     }

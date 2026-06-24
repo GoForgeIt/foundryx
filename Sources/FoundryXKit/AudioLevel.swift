@@ -62,6 +62,10 @@ public final class OpusLevelMeter: @unchecked Sendable {
     public private(set) var lastPCMFrames: Int = 0
     public private(set) var lastRMS: Float = 0
     public private(set) var hasConverter = true
+    /// Status of the OpusHead magic-cookie set (0 = accepted). Surfaced to diag so a
+    /// still-flat meter shows whether the cookie was the missing piece.
+    public var lastCookieStatus: OSStatus { Self.cookieStatus }
+    nonisolated(unsafe) private static var cookieStatus: OSStatus = 0
 
     /// Decode one raw Opus packet and return its perceptual 0…1 level. Returns 0 on a
     /// failed/empty decode (e.g. a DTX/comfort-noise packet decodes to ~silence → 0).
@@ -153,7 +157,33 @@ public final class OpusLevelMeter: @unchecked Sendable {
 
         var conv: AudioConverterRef?
         let st = AudioConverterNew(&src, &dst, &conv)
-        return st == noErr ? conv : nil
+        guard st == noErr, let c = conv else { return nil }
+
+        // Opus magic cookie (RFC 7845 OpusHead). REAL libopus-encoded Omi packets
+        // need this for Apple's decoder to know the channel-mapping / pre-skip / input
+        // rate; without it the decoder initializes empty and emits 0 PCM frames
+        // (status=noErr, pcm=0) — exactly what on-device diag showed even after the
+        // 48k/960 fix. (Apple's OWN encoder is lenient with its own packets, which is
+        // why the synthetic roundtrip test decoded without a cookie.) 19 bytes:
+        //   "OpusHead"(8) ver=1(1) channels=1(1) preSkip(2,LE) inputRate(4,LE)
+        //   outputGain=0(2,LE) mappingFamily=0(1).
+        var cookie = [UInt8]()
+        cookie.append(contentsOf: Array("OpusHead".utf8))
+        cookie.append(1)                       // version
+        cookie.append(1)                       // channel count (mono)
+        let preSkip: UInt16 = 3840             // libopus default (referenced to 48 kHz)
+        cookie.append(UInt8(preSkip & 0xff)); cookie.append(UInt8(preSkip >> 8))
+        let inRate: UInt32 = 16000             // Omi's original encode rate (informational)
+        cookie.append(UInt8(inRate & 0xff)); cookie.append(UInt8((inRate >> 8) & 0xff))
+        cookie.append(UInt8((inRate >> 16) & 0xff)); cookie.append(UInt8((inRate >> 24) & 0xff))
+        cookie.append(0); cookie.append(0)     // output gain Q7.8 = 0 dB
+        cookie.append(0)                       // channel mapping family 0 (mono/stereo)
+        let setStatus = cookie.withUnsafeBytes {
+            AudioConverterSetProperty(c, kAudioConverterDecompressionMagicCookie,
+                                      UInt32($0.count), $0.baseAddress!)
+        }
+        cookieStatus = setStatus               // surfaced to diag (0 = accepted)
+        return c
     }
 }
 
