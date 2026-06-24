@@ -126,11 +126,20 @@ public final class OpusLevelMeter: @unchecked Sendable {
     }
 
     private static func makeConverter() -> AudioConverterRef? {
+        // Apple's kAudioFormatOpus decoder REQUIRES the source declared at 48 kHz /
+        // 960 frames-per-packet — Opus always decodes to 48 kHz internally and the
+        // per-packet TOC byte carries the real bandwidth, so this declaration is
+        // correct regardless of the rate Omi encodes at. Declaring 16 kHz / variable
+        // (0) made AudioConverterFillComplexBuffer return noErr but ZERO PCM frames
+        // for real packets (the synthetic roundtrip test passed only because it
+        // encoded AND decoded with the same self-consistent 16 kHz config). We let
+        // the converter resample 48 k → 16 k so the RMS window + buffer sizing are
+        // unchanged. (Apple's sanctioned example: 48000 / mFramesPerPacket = 960.)
         var src = AudioStreamBasicDescription()
-        src.mSampleRate = 16000
+        src.mSampleRate = 48000
         src.mFormatID = kAudioFormatOpus
         src.mChannelsPerFrame = 1
-        src.mFramesPerPacket = 0       // variable (Opus)
+        src.mFramesPerPacket = 960
 
         var dst = AudioStreamBasicDescription()
         dst.mSampleRate = 16000

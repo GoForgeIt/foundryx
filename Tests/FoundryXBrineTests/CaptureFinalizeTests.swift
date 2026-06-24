@@ -55,6 +55,28 @@ final class CaptureFinalizeTests: XCTestCase {
         }
     }
 
+    /// Regression: the OpusLevelMeter must actually DECODE real Opus packets to PCM.
+    /// The pre-fix converter declared the Opus source at 16 kHz / variable-frames,
+    /// which made AudioConverterFillComplexBuffer return noErr but ZERO PCM frames
+    /// for every real packet (status=0, pcm=0 → flat bars + a silence-blind
+    /// segmenter, exactly what the on-device diag showed). The canonical 48 kHz /
+    /// 960-frames declaration decodes them. Assert the decode produces PCM frames
+    /// with a noErr status and a finite, in-range level — the precise inverse of the
+    /// pcm=0 failure. (Voice-vs-silence discrimination over a real frame STREAM is
+    /// covered by testSilenceGapCloseFinalizesOncePerCapture; a single isolated
+    /// packet through the 48k→16k resampler carries a priming transient.)
+    func testOpusLevelMeterDecodesRealPacketsToPCM() throws {
+        let meter = OpusLevelMeter()
+        for amp in [1.0, 0.5, 0.0] {
+            meter.reset()
+            let packet = try XCTUnwrap(OpusTestEncoder.shared.encode(amplitude: amp), "encode \(amp)")
+            let level = meter.level(for: packet)
+            XCTAssertGreaterThan(meter.lastPCMFrames, 0, "decode must produce PCM frames (was 0 pre-fix) @\(amp)")
+            XCTAssertEqual(meter.lastStatus, 0, "decode status noErr @\(amp)")
+            XCTAssertTrue(level >= 0 && level <= 1, "level in 0…1 @\(amp)")
+        }
+    }
+
     func testSilenceGapCloseFinalizesOncePerCapture() async throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("foundryx-finalize-\(UUID().uuidString)", isDirectory: true)
