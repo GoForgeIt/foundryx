@@ -253,8 +253,10 @@ public final class DoorClient: @unchecked Sendable {
                             extraHeaders: [:], contentType: "application/json",
                             accept: "text/event-stream", body: try JSONEncoder().encode(req))
                         log?.info("→ relay chat turn chat_id=\(req.chatId) org=\(req.org) (\(req.message.count) chars)")
-                        let transport = RelayTransport(config: relay, session: self.session, log: log)
-                        let frames = try await transport.roundTrip(requestBytes: httpBytes)
+                        let frames = self.target.useMux
+                            ? try await DoorConnectionPool.shared.turn(config: relay, request: httpBytes, log: log)
+                            : try await RelayTransport(config: relay, session: self.session, log: log)
+                                .roundTrip(requestBytes: httpBytes)
                         var buf = Data(); for f in frames { buf.append(f) }
                         let resp = try RelayHTTP.parseResponse(buf)
                         log?.info("← relay HTTP \(resp.status)")
@@ -368,10 +370,12 @@ public final class DoorClient: @unchecked Sendable {
     /// The relay path: one E2E turn → decrypted reply frames → parse SSE `data:` events.
     private func collectViaRelay(_ req: ChatRequest) async throws -> [DoorEvent] {
         guard let relayConfig = target.relay?.interactive() else { return try await collect(req) }
-        let transport = RelayTransport(config: relayConfig, session: session, log: log)
         let httpBytes = try rawChatHTTP(req)
         log?.info("→ relay chat turn chat_id=\(req.chatId) org=\(req.org) (\(req.message.count) chars)")
-        let frames = try await transport.roundTrip(requestBytes: httpBytes)
+        let frames = target.useMux
+            ? try await DoorConnectionPool.shared.turn(config: relayConfig, request: httpBytes, log: log)
+            : try await RelayTransport(config: relayConfig, session: session, log: log)
+                .roundTrip(requestBytes: httpBytes)
 
         // Concatenate the decrypted reply frames and parse SSE `data:` lines (the door
         // streams the same SSE body over the relay it would over LAN-direct HTTP).
@@ -413,7 +417,7 @@ public final class DoorClient: @unchecked Sendable {
                 relay: relay, bearer: target.bearer, method: "POST",
                 path: "/foundryx/capture/\(captureId)/finalize",
                 contentType: meta != nil ? "application/json" : nil, body: body,
-                session: session, log: log)
+                session: session, log: log, useMux: target.useMux)
             if resp.status == 401 { throw DoorError.unauthorized }
             guard resp.status == 200 else {
                 log?.warn("finalize capture=\(captureId) → HTTP \(resp.status) (will retry)")
@@ -456,7 +460,7 @@ public final class DoorClient: @unchecked Sendable {
             let resp = try await RelayHTTP.roundTrip(
                 relay: relay, bearer: target.bearer, method: "GET",
                 path: "/foundryx/capture/\(captureId)/status",
-                session: session, log: log)
+                session: session, log: log, useMux: target.useMux)
             if resp.status == 401 { throw DoorError.unauthorized }
             guard resp.status == 200 else { throw DoorError.http(resp.status) }
             return try JSONDecoder().decode(CaptureStatusResponse.self, from: resp.body)
@@ -491,7 +495,7 @@ public final class DoorClient: @unchecked Sendable {
             let resp = try await RelayHTTP.roundTrip(
                 relay: relay, bearer: target.bearer, method: "GET",
                 path: "/foundryx/capture/\(captureId)/content",
-                session: session, log: log)
+                session: session, log: log, useMux: target.useMux)
             if resp.status == 401 { throw DoorError.unauthorized }
             if resp.status == 404 { return notReady }
             guard resp.status == 200 else { throw DoorError.http(resp.status) }

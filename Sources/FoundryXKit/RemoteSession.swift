@@ -136,6 +136,15 @@ public final class RemoteSession: ObservableObject {
         guard let relay, let token = idToken, let remote else { return nil }
         // baseURL is nominal in relay mode (RelayTransport drives the tunnel); use
         // the gateway URL so it's a valid URL.
-        return DoorTarget(baseURL: remote.gatewayHTTPURL, bearer: token, relay: relay)
+        return DoorTarget(baseURL: remote.gatewayHTTPURL, bearer: token, relay: relay,
+                          useMux: FoundryXFeatures.mux)
     }
+}
+
+/// Build-time feature flags. `mux` activates the multiplexed door transport (one
+/// persistent connection per channel) — flip in lockstep with a mux-capable desktop
+/// door (the door flips at runtime via the `~/.foundry/foundryx_mux` flag file). The
+/// per-turn `RelayTransport` path is the fallback when this is false.
+public enum FoundryXFeatures {
+    public static let mux = true
 }

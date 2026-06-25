@@ -140,4 +140,53 @@ final class DoorConnectionTests: XCTestCase {
             XCTAssertEqual(e, .disconnected, "in-flight turn fails retryably, not silently hangs")
         }
     }
+
+    /// The pool reuses ONE connection across turns (handshake paid once), and a dropped
+    /// connection reconnects + retries the turn exactly once.
+    func testPoolReusesConnectionAndReconnects() async throws {
+        actor Holder {
+            var count = 0
+            var channels: [LoopbackChannel] = []
+            var doors: [Task<Void, Never>] = []
+            func record(_ ch: LoopbackChannel, _ door: Task<Void, Never>) {
+                count += 1; channels.append(ch); doors.append(door)
+            }
+            func snapshot() -> (Int, LoopbackChannel?) { (count, channels.first) }
+            func cancelAll() { doors.forEach { $0.cancel() } }
+        }
+        let holder = Holder()
+        let makeChannel: @Sendable (RelayConfig) async throws -> MuxFrameChannel = { _ in
+            let ch = LoopbackChannel()
+            let door = Task {
+                while let frame = await ch.toDoor.pull() {
+                    guard let (id, k, payload) = decodeMuxFrame(frame),
+                          MuxKind(rawValue: k) == .request else { continue }
+                    Task {
+                        ch.fromDoor.push(encodeMuxFrame(turnId: id, kind: .responseFrame, payload: payload))
+                        ch.fromDoor.push(encodeMuxFrame(turnId: id, kind: .responseEnd, payload: Data()))
+                    }
+                }
+            }
+            await holder.record(ch, door)
+            return ch
+        }
+        let pool = DoorConnectionPool(makeChannel: makeChannel)
+        let cfg = RelayConfig(relayURL: URL(string: "ws://x")!, tunnelId: "t",
+                              staticPrivate: Data(repeating: 0, count: 32), expectedDoorStatic: nil)
+
+        let a = try await pool.turn(config: cfg, request: Data("a".utf8))
+        XCTAssertEqual(a.map { String(decoding: $0, as: UTF8.self) }, ["a"])
+        let b = try await pool.turn(config: cfg, request: Data("b".utf8))
+        XCTAssertEqual(b.map { String(decoding: $0, as: UTF8.self) }, ["b"])
+        let (c1, firstCh) = await holder.snapshot()
+        XCTAssertEqual(c1, 1, "second turn reused the one connection (no new channel)")
+
+        firstCh?.fromDoor.finish()                     // drop the connection
+        try await Task.sleep(nanoseconds: 60_000_000)  // let the reader fail the conn
+        let c = try await pool.turn(config: cfg, request: Data("c".utf8))
+        XCTAssertEqual(c.map { String(decoding: $0, as: UTF8.self) }, ["c"], "turn survived a reconnect")
+        let (c2, _) = await holder.snapshot()
+        XCTAssertEqual(c2, 2, "a dropped connection reconnected exactly once")
+        await holder.cancelAll()
+    }
 }

@@ -174,7 +174,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
                 relay: relay, bearer: target.bearer, method: "POST",
                 path: "/foundryx/capture", extraHeaders: headers,
                 contentType: "application/octet-stream", body: body,
-                session: session, log: log)
+                session: session, log: log, useMux: target.useMux)
             if resp.status == 401 { throw DoorError.unauthorized }
             guard resp.status == 200 else { throw DoorError.http(resp.status) }
             return

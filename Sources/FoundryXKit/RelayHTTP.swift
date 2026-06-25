@@ -29,13 +29,18 @@ public enum RelayHTTP {
         accept: String? = nil,
         body: Data? = nil,
         session: URLSession,
-        log: DoorLog? = nil
+        log: DoorLog? = nil,
+        useMux: Bool = false
     ) async throws -> Response {
-        let transport = RelayTransport(config: relay, session: session, log: log)
         let reqBytes = rawRequest(method: method, path: path, bearer: bearer,
                                   extraHeaders: extraHeaders, contentType: contentType,
                                   accept: accept, body: body)
-        let frames = try await transport.roundTrip(requestBytes: reqBytes)
+        // Mux: ride the shared persistent connection (same request bytes / reply frames as
+        // RelayTransport, just multiplexed over one socket). Per-turn path otherwise.
+        let frames = useMux
+            ? try await DoorConnectionPool.shared.turn(config: relay, request: reqBytes, log: log)
+            : try await RelayTransport(config: relay, session: session, log: log)
+                .roundTrip(requestBytes: reqBytes)
         var buf = Data()
         for f in frames { buf.append(f) }
         return try parseResponse(buf)
