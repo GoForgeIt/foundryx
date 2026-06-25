@@ -20,11 +20,17 @@ public struct DoorTarget: Sendable {
     /// OPTIONAL (M5 R1b, gated, default OFF): route turns through the blind E2E relay
     /// instead of LAN-direct HTTP. When nil, the LAN-direct path is used unchanged.
     public let relay: RelayConfig?
+    /// DORMANT (M5 R1c, default OFF): when true AND a relay is set, door turns multiplex
+    /// over ONE persistent connection (DoorConnection) instead of a fresh connection per
+    /// turn. Flip ON only in lockstep with a mux-capable desktop door; until then the
+    /// proven per-turn RelayTransport path is used. Nothing reads this yet.
+    public let useMux: Bool
 
-    public init(baseURL: URL, bearer: String, relay: RelayConfig? = nil) {
+    public init(baseURL: URL, bearer: String, relay: RelayConfig? = nil, useMux: Bool = false) {
         self.baseURL = baseURL
         self.bearer = bearer
         self.relay = relay
+        self.useMux = useMux
     }
 }
 

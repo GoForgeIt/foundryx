@@ -68,7 +68,13 @@ enum NoiseHash {
 
 // MARK: - CipherState (ChaCha20-Poly1305 with a 64-bit nonce counter)
 
-public final class NoiseCipherState {
+// `@unchecked Sendable`: a CipherState is always used strictly serially PER INSTANCE —
+// a Noise transport message's nonce must advance in order, so callers never share one
+// instance across concurrent operations (RelayTransport uses it within one round-trip;
+// the multiplexed DoorConnection path serializes the send cipher behind one writer and
+// reads the recv cipher from one reader). Marking it Sendable lets the send cipher live
+// inside the mux send-serializer actor.
+public final class NoiseCipherState: @unchecked Sendable {
     private var key: SymmetricKey?
     private var n: UInt64 = 0
 
