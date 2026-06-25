@@ -226,6 +226,37 @@ public final class DoorClient: @unchecked Sendable {
         }
     }
 
+    /// Status code from an HTTP head ("HTTP/1.1 200 OK" → 200); 0 if unparseable.
+    static func parseStatusLine(_ head: String) -> Int {
+        guard let first = head.split(whereSeparator: { $0 == "\r" || $0 == "\n" }).first else { return 0 }
+        let parts = first.split(separator: " ")
+        guard parts.count >= 2, let code = Int(parts[1]) else { return 0 }
+        return code
+    }
+
+    /// Parse the COMPLETE SSE `data:` lines out of a streaming body buffer, returning the
+    /// parsed events, the trailing partial bytes to keep (a line may be split across mux
+    /// frames), and whether a `done` event terminated the turn. Only whole lines (ending in
+    /// `\n`) are consumed; the remainder carries forward to the next frame.
+    static func drainSSELines(_ buf: Data) -> (events: [DoorEvent], remainder: Data, done: Bool) {
+        guard let lastNL = buf.lastIndex(of: 0x0A) else { return ([], buf, false) }
+        let complete = buf.subdata(in: buf.startIndex..<(lastNL + 1))
+        let remainder = buf.subdata(in: (lastNL + 1)..<buf.endIndex)
+        var events: [DoorEvent] = []
+        var done = false
+        let text = String(decoding: complete, as: UTF8.self)
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(rawLine)
+            guard line.hasPrefix("data:") else { continue }
+            let payload = String(line.dropFirst("data:".count)).trimmingCharacters(in: .whitespaces)
+            if payload.isEmpty || payload == "[DONE]" { continue }
+            let event = DoorEvent.parse(payload)
+            events.append(event)
+            if case .done = event { done = true; break }
+        }
+        return (events, remainder, done)
+    }
+
     private func chatRequest(_ req: ChatRequest) throws -> URLRequest {
         var r = URLRequest(url: target.baseURL.appendingPathComponent("foundryx/chat"))
         r.httpMethod = "POST"
@@ -247,16 +278,52 @@ public final class DoorClient: @unchecked Sendable {
                 // Run one E2E turn, then yield the parsed SSE events (the door streams
                 // the same SSE body over the relay it would over LAN-direct HTTP).
                 if let relay = self.target.relay?.interactive() {
+                    let httpBytes = RelayHTTP.rawRequest(
+                        method: "POST", path: "/foundryx/chat", bearer: self.target.bearer,
+                        extraHeaders: [:], contentType: "application/json",
+                        accept: "text/event-stream", body: (try? JSONEncoder().encode(req)) ?? Data())
+                    // Mux: STREAM the door's SSE frames as they arrive (deltas reach the UI
+                    // live). Per-turn relay: one buffered round-trip, then replay (unchanged).
+                    if self.target.useMux {
+                        do {
+                            log?.info("→ relay(mux,stream) chat chat_id=\(req.chatId) org=\(req.org) (\(req.message.count) chars)")
+                            var buf = Data()
+                            var headerParsed = false
+                            var count = 0
+                            for try await frame in DoorConnectionPool.shared.turnStream(config: relay, request: httpBytes, log: log) {
+                                buf.append(frame)
+                                if !headerParsed {
+                                    guard let end = buf.range(of: Data("\r\n\r\n".utf8)) else { continue }
+                                    let head = String(decoding: buf.subdata(in: buf.startIndex..<end.lowerBound), as: UTF8.self)
+                                    let status = DoorClient.parseStatusLine(head)
+                                    log?.info("← relay(mux) HTTP \(status)")
+                                    if status == 401 { throw DoorError.unauthorized }
+                                    guard status == 200 else { throw DoorError.http(status) }
+                                    headerParsed = true
+                                    buf = buf.subdata(in: end.upperBound..<buf.endIndex) // keep body only
+                                }
+                                let (events, remainder, done) = DoorClient.drainSSELines(buf)
+                                buf = remainder
+                                for e in events {
+                                    count += 1
+                                    log?.info("event \(DoorClient.summary(e))")
+                                    continuation.yield(e)
+                                }
+                                if done { break }
+                            }
+                            log?.info("✓ relay(mux,stream) chat parsed \(count) event(s)")
+                            continuation.finish()
+                        } catch {
+                            let ns = error as NSError
+                            log?.error("✗ relay(mux) chat error: domain=\(ns.domain) code=\(ns.code) — \(ns.localizedDescription)")
+                            continuation.finish(throwing: error)
+                        }
+                        return
+                    }
                     do {
-                        let httpBytes = RelayHTTP.rawRequest(
-                            method: "POST", path: "/foundryx/chat", bearer: self.target.bearer,
-                            extraHeaders: [:], contentType: "application/json",
-                            accept: "text/event-stream", body: try JSONEncoder().encode(req))
                         log?.info("→ relay chat turn chat_id=\(req.chatId) org=\(req.org) (\(req.message.count) chars)")
-                        let frames = self.target.useMux
-                            ? try await DoorConnectionPool.shared.turn(config: relay, request: httpBytes, log: log)
-                            : try await RelayTransport(config: relay, session: self.session, log: log)
-                                .roundTrip(requestBytes: httpBytes)
+                        let frames = try await RelayTransport(config: relay, session: self.session, log: log)
+                            .roundTrip(requestBytes: httpBytes)
                         var buf = Data(); for f in frames { buf.append(f) }
                         let resp = try RelayHTTP.parseResponse(buf)
                         log?.info("← relay HTTP \(resp.status)")

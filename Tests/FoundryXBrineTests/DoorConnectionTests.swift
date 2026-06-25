@@ -189,4 +189,55 @@ final class DoorConnectionTests: XCTestCase {
         XCTAssertEqual(c2, 2, "a dropped connection reconnected exactly once")
         await holder.cancelAll()
     }
+
+    /// `turnStream` yields each ResponseFrame AS IT ARRIVES (not collected at ResponseEnd) —
+    /// the property that makes chat deltas reach the UI live instead of all-at-once.
+    func testTurnStreamYieldsFramesIncrementally() async throws {
+        let ch = LoopbackChannel()
+        let conn = DoorConnection(channel: ch)
+        await conn.start()
+        // Door pushes 3 frames with 120ms gaps, then ResponseEnd — the shape of SSE deltas
+        // produced over time. Buffered delivery would collapse all arrivals to the end.
+        let door = Task {
+            while let frame = await ch.toDoor.pull() {
+                guard let (id, k, _) = decodeMuxFrame(frame), MuxKind(rawValue: k) == .request else { continue }
+                Task {
+                    for i in 0..<3 {
+                        try? await Task.sleep(nanoseconds: 120_000_000)
+                        ch.fromDoor.push(encodeMuxFrame(turnId: id, kind: .responseFrame, payload: Data("d\(i)".utf8)))
+                    }
+                    ch.fromDoor.push(encodeMuxFrame(turnId: id, kind: .responseEnd, payload: Data()))
+                }
+            }
+        }
+        defer { door.cancel() }
+
+        let t0 = Date()
+        var arrivals: [(String, TimeInterval)] = []
+        for try await frame in conn.turnStream(Data("go".utf8)) {
+            arrivals.append((String(decoding: frame, as: UTF8.self), Date().timeIntervalSince(t0)))
+        }
+        XCTAssertEqual(arrivals.map { $0.0 }, ["d0", "d1", "d2"], "all frames streamed, in order")
+        // The PROOF: the first delta arrives early and frames are spaced over time. If the
+        // turn buffered to ResponseEnd, all three arrivals would be ~0.36s (collapsed).
+        XCTAssertLessThan(arrivals[0].1, 0.25, "first delta streamed early, not buffered to the end")
+        XCTAssertGreaterThanOrEqual(arrivals[2].1 - arrivals[0].1, 0.15,
+                                    "frames spaced over time — incremental, not batched")
+    }
+
+    /// The incremental SSE parser tolerates `data:` lines split ACROSS mux frame boundaries:
+    /// only whole lines are emitted; a partial line carries forward in the remainder.
+    func testDrainSSELinesHandlesSplitLines() {
+        // Frame 1 ends mid-line; frame 2 completes it + adds another.
+        var buf = Data("data: {\"type\":\"assistant_delta\",\"te".utf8)
+        var (events, remainder, done) = DoorClient.drainSSELines(buf)
+        XCTAssertTrue(events.isEmpty, "no complete line yet → nothing emitted")
+        XCTAssertFalse(done)
+
+        buf = remainder + Data("xt\":\"hi\"}\ndata: {\"type\":\"done\",\"reason\":\"ok\"}\n".utf8)
+        (events, remainder, done) = DoorClient.drainSSELines(buf)
+        XCTAssertEqual(events.count, 2, "the rejoined delta + the done event")
+        XCTAssertTrue(done, "done event terminates the turn")
+        if case .assistantDelta(let t) = events[0] { XCTAssertEqual(t, "hi") } else { XCTFail("expected delta") }
+    }
 }

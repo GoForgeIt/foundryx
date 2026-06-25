@@ -37,6 +37,42 @@ public actor DoorConnectionPool {
         }
     }
 
+    /// Stream one turn's response frames over the shared persistent connection — each frame
+    /// is yielded as the door produces it (live SSE deltas), the stream finishing on the
+    /// door's ResponseEnd. If the connection is already dead when the turn starts (no frame
+    /// yielded yet), it drops + reconnects + retries ONCE; a drop AFTER frames have streamed
+    /// surfaces the error (we don't replay a partially-delivered response).
+    public nonisolated func turnStream(config: RelayConfig, request: Data, log: DoorLog? = nil)
+        -> AsyncThrowingStream<Data, Error>
+    {
+        AsyncThrowingStream { continuation in
+            let work = Task {
+                var yielded = 0
+                do {
+                    let conn = try await self.connection(for: config, log: log)
+                    for try await frame in conn.turnStream(request) { yielded += 1; continuation.yield(frame) }
+                    continuation.finish()
+                } catch {
+                    let retryable = (error as? DoorConnectionError) == .disconnected
+                    guard yielded == 0, retryable else { continuation.finish(throwing: error); return }
+                    // Dead connection before any data → reconnect + re-issue once.
+                    await self.drop(config.tunnelId)
+                    do {
+                        let conn = try await self.connection(for: config, log: log)
+                        for try await frame in conn.turnStream(request) { continuation.yield(frame) }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+            }
+            continuation.onTermination = { _ in work.cancel() }
+        }
+    }
+
+    /// Drop the (dead) connection for a tunnel so the next call reconnects.
+    private func drop(_ tunnelId: String) { conns.removeValue(forKey: tunnelId) }
+
     /// Get the live connection for this tunnel, lazily connecting. Concurrent first-callers
     /// share ONE connect (the `connecting` task), so we never open two sockets for a channel.
     private func connection(for config: RelayConfig, log: DoorLog?) async throws -> DoorConnection {

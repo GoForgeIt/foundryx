@@ -46,13 +46,16 @@ public actor DoorConnection {
     private var readerTask: Task<Void, Never>?
     private var closed = false
 
-    /// One in-flight turn. Frames accumulate as ResponseFrames arrive; the continuation is
-    /// resolved on ResponseEnd. `done` handles the (tiny) race where ResponseEnd arrives
-    /// before `turn()` has attached its continuation across the send `await`.
+    /// One in-flight turn. Either BUFFERED (frames accumulate, the continuation resolves on
+    /// ResponseEnd — for capture/finalize/status) or STREAMING (`stream` is set; each
+    /// ResponseFrame is yielded live and the stream finishes on ResponseEnd — for chat SSE).
+    /// `done` handles the (tiny) race where ResponseEnd arrives before buffered `turn()` has
+    /// attached its continuation across the send `await`.
     private struct Turn {
         var frames: [Data] = []
         var continuation: CheckedContinuation<[Data], Error>?
         var done = false
+        var stream: AsyncThrowingStream<Data, Error>.Continuation?
     }
     private var turns: [UInt64: Turn] = [:]
 
@@ -98,6 +101,37 @@ public actor DoorConnection {
         }
     }
 
+    /// Run one multiplexed turn but STREAM the door's response frames: each ResponseFrame
+    /// is yielded as it arrives (the door flushes per SSE line), and the stream finishes on
+    /// ResponseEnd — so chat deltas reach the UI live instead of all-at-once. The stream
+    /// finishes with `.disconnected` (retryable) if the connection drops mid-turn.
+    public nonisolated func turnStream(_ request: Data) -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            let work = Task { await self.startStreamTurn(request, continuation) }
+            continuation.onTermination = { _ in work.cancel() }
+        }
+    }
+
+    /// Register the streaming turn (continuation stored atomically with its id, BEFORE the
+    /// send — so a fast ResponseFrame/End is never dropped) and send the request.
+    private func startStreamTurn(
+        _ request: Data,
+        _ continuation: AsyncThrowingStream<Data, Error>.Continuation
+    ) async {
+        if closed { continuation.finish(throwing: DoorConnectionError.disconnected); return }
+        let id = nextTurnId
+        nextTurnId &+= 1
+        var t = Turn()
+        t.stream = continuation
+        turns[id] = t
+        do {
+            try await channel.sendFrame(encodeMuxFrame(turnId: id, kind: .request, payload: request))
+        } catch {
+            turns.removeValue(forKey: id)
+            continuation.finish(throwing: DoorConnectionError.disconnected)
+        }
+    }
+
     /// Best-effort cancel: tell the door to stop a turn (it navigated away). Resolves the
     /// local turn as disconnected so a waiter doesn't hang.
     public func cancel(turnId id: UInt64) async {
@@ -133,9 +167,18 @@ public actor DoorConnection {
             }
             switch kind {
             case .responseFrame:
-                turns[id]?.frames.append(payload)
+                if let stream = turns[id]?.stream {
+                    stream.yield(payload)          // streaming: deliver the delta live
+                } else {
+                    turns[id]?.frames.append(payload)  // buffered: accumulate
+                }
             case .responseEnd:
-                completeTurn(id)
+                if let t = turns[id], let stream = t.stream {
+                    turns.removeValue(forKey: id)
+                    stream.finish()
+                } else {
+                    completeTurn(id)
+                }
             case .request, .cancel:
                 continue // the client never receives these
             }
@@ -158,7 +201,10 @@ public actor DoorConnection {
         closed = true
         let pending = turns
         turns = [:]
-        for (_, t) in pending { t.continuation?.resume(throwing: err) }
+        for (_, t) in pending {
+            t.continuation?.resume(throwing: err)
+            t.stream?.finish(throwing: err)
+        }
     }
 }
 
