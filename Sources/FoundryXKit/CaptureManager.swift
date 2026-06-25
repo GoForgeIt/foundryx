@@ -102,6 +102,21 @@ final class FrameRouter: @unchecked Sendable {
 @MainActor
 public final class CaptureManager: ObservableObject {
     @Published public private(set) var captures: [CaptureWAL] = []
+
+    /// Captures worth showing: hide ones that recorded NOTHING (0 segments) and aren't
+    /// still streaming — those are useless empty cards (the Omi connected but no audio
+    /// arrived, or a capture that never produced a frame). A capture that DID record but
+    /// failed to upload ("socket is not connected") still has segments, so it stays
+    /// visible — its audio is real and pending retry, not junk. Pure filter on `captures`.
+    public var visibleCaptures: [CaptureWAL] {
+        captures.filter { CaptureManager.isWorthShowing($0.status) }
+    }
+
+    /// A capture is worth showing if it has ≥1 recorded segment, or is actively streaming
+    /// (a just-started capture that hasn't flushed its first segment yet).
+    public nonisolated static func isWorthShowing(_ status: CaptureStatus) -> Bool {
+        status.totalSegments > 0 || status.streaming
+    }
     @Published public private(set) var active: CaptureWAL?
     @Published public private(set) var sourceState: AudioSourceState = .idle
     /// Ambient capture is paused (device stays connected; frames are dropped).

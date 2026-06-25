@@ -20,12 +20,12 @@ struct CaptureScreen: View {
             header
             if case .connected = device.connectionState { meterBar }
             syncBar
-            if manager.captures.isEmpty {
+            if manager.visibleCaptures.isEmpty {
                 emptyState
             } else {
                 ScrollView {
                     VStack(spacing: GrainSpacing.x3) {
-                        ForEach(manager.captures, id: \.captureId) { wal in
+                        ForEach(manager.visibleCaptures, id: \.captureId) { wal in
                             NavigationLink {
                                 ConversationDetailView(
                                     target: target,
