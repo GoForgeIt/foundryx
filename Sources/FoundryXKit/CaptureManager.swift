@@ -69,9 +69,14 @@ final class FrameRouter: @unchecked Sendable {
 
     func route(_ frame: Data) {
         lock.lock()
-        frameCount += 1
-        lastBytes = frame.count
         let isPaused = paused
+        // Count only frames we actually CAPTURE. When paused the BLE source still
+        // delivers frames (we drop them), but the counter must FREEZE so a paused
+        // capture doesn't look like it's still recording.
+        if !isPaused {
+            frameCount += 1
+            lastBytes = frame.count
+        }
         let target = isPaused ? nil : wal
         var level: Float = 0
         var event: SegmentEvent?
@@ -101,19 +106,23 @@ final class FrameRouter: @unchecked Sendable {
 
 @MainActor
 public final class CaptureManager: ObservableObject {
-    @Published public private(set) var captures: [CaptureWAL] = []
+    @Published public private(set) var captures: [CaptureWAL] = [] {
+        didSet { rebuildVisibleCaptures() }
+    }
 
-    /// Captures worth showing: hide ones that recorded NOTHING (0 segments) and aren't
-    /// still streaming — those are useless empty cards (the Omi connected but no audio
-    /// arrived, or a capture that never produced a frame). A capture that DID record but
-    /// failed to upload ("socket is not connected") still has segments, so it stays
-    /// visible — its audio is real and pending retry, not junk. Pure filter on `captures`.
-    public var visibleCaptures: [CaptureWAL] {
-        captures
-            // Worth showing if it has real audio/is streaming, OR it's been pruned to a
-            // transcript tombstone (audio gone, transcript kept) — still a real conversation.
+    /// Captures worth showing, newest-first. STORED (not computed) — recomputed only when
+    /// the capture SET changes, never per render. The filter/sort touch disk
+    /// (`hasCachedTranscript`, `startTime` → `meta.json`); doing that inside a computed
+    /// property meant 56 disk stats on every SwiftUI invalidation → scroll jank. Now the
+    /// list view just reads this array.
+    @Published public private(set) var visibleCaptures: [CaptureWAL] = []
+
+    /// Recompute the visible list. Hide ones that recorded NOTHING (0 segments, not
+    /// streaming) — useless empty cards; keep ones with real audio, still-streaming, or a
+    /// pruned-to-transcript tombstone. Order newest-first by the durable conversation start.
+    private func rebuildVisibleCaptures() {
+        visibleCaptures = captures
             .filter { CaptureManager.isWorthShowing($0.status) || self.hasCachedTranscript($0.captureId) }
-            // Newest conversation first (Omi-style), by the durable conversation start.
             .sorted { self.startTime(of: $0) > self.startTime(of: $1) }
     }
 
@@ -443,7 +452,16 @@ public final class CaptureManager: ObservableObject {
         }
     }
 
+    /// Guards against overlapping drains: the 5s timer can fire a new drain while the
+    /// previous one is still `await`-ing a slow `wal.sync()`, which ran two `sync()`/
+    /// `computeStatus()`/prune passes on the SAME WAL concurrently (off-main) → a data
+    /// race that crashed in `objc_retain` (EXC_BAD_ACCESS). One drain at a time.
+    private var isDraining = false
+
     public func drainPending() async {
+        guard !isDraining else { return }   // a drain is already in flight — skip this tick
+        isDraining = true
+        defer { isDraining = false }
         for wal in captures where wal.status.pendingSegments > 0 { await wal.sync() }
         // After syncing, retry any pending-finalize captures whose segments are now
         // all ACK'd — this is the retry path for a finalize that didn't complete at
@@ -461,6 +479,7 @@ public final class CaptureManager: ObservableObject {
     /// capture, or one without a cached transcript. Idempotent + offline-safe (all
     /// inputs come from disk — no network).
     public func pruneOldAudio() {
+        var prunedAny = false
         for wal in captures where wal !== active {
             let id = wal.captureId
             guard let age = newestSegmentAge(id) else { continue }   // nil ⇒ no audio (already pruned)
@@ -471,8 +490,10 @@ public final class CaptureManager: ObservableObject {
                                                     hasCachedTranscript: hasTranscript) else { continue }
             deleteLocalAudio(id)
             wal.refreshStatus()
+            prunedAny = true
             log?.info("capture \(id): pruned local audio (>30d, confirmed in Lore, transcript cached) — transcript kept")
         }
+        if prunedAny { rebuildVisibleCaptures() }   // membership may shift to tombstone state
     }
 
     /// Age (seconds) of the newest `seg-*.opus` segment by file mtime, or `nil` when

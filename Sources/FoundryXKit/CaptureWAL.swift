@@ -210,6 +210,10 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
             if let attrs = try? FileManager.default.attributesOfItem(atPath: u.path),
                let n = attrs[.size] as? Int { byteCount += n }
         }
+        // NOTE: do NOT wrap this in `io.sync` — `publish()` is sometimes called from
+        // INSIDE the io queue (e.g. `beginStreaming`), so a reentrant `io.sync` traps.
+        // The real fix for the cross-drain race that crashed here is the single-drain
+        // guard in CaptureManager.drainPending (no two `computeStatus` run concurrently).
         let stage: CaptureStage = all.isEmpty ? .recording
             : (syncedCount == all.count && !streaming ? .savedToComputer : .savedOnPhone)
         var s = status
