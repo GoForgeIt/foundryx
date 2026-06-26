@@ -601,6 +601,44 @@ public final class DoorClient: @unchecked Sendable {
         return try JSONDecoder().decode(CaptureContent.self, from: data)
     }
 
+    /// Fetch a capture's assembled AUDIO for replay (`GET /foundryx/capture/{id}/audio`),
+    /// keyed by the PHONE's capture id. Returns the raw audio bytes (Ogg-Opus, as the
+    /// door assembles for Lore), or `nil` on a 404 — which means the audio isn't
+    /// available (e.g. not assembled, or pruned on the desktop). Relay-aware: rides the
+    /// interactive tunnel (a user-facing read) like the transcript fetch.
+    ///
+    /// NOTE: the desktop door's `/audio` endpoint is being added by a parallel change.
+    /// Until it ships, this 404s and the caller surfaces "Audio not available" — no crash.
+    public func captureAudio(captureId: String) async throws -> Data? {
+        if let relay = target.relay?.interactive() {
+            let resp = try await RelayHTTP.roundTrip(
+                relay: relay, bearer: target.bearer, method: "GET",
+                path: "/foundryx/capture/\(captureId)/audio",
+                session: session, log: log, useMux: target.useMux)
+            if resp.status == 401 { throw DoorError.unauthorized }
+            if resp.status == 404 { return nil }
+            guard resp.status == 200 else { throw DoorError.http(resp.status) }
+            return resp.body
+        }
+        let s = target.baseURL.absoluteString
+        let base = s.hasSuffix("/") ? String(s.dropLast()) : s
+        guard let url = URL(string: "\(base)/foundryx/capture/\(captureId)/audio") else {
+            throw DoorError.transport("bad audio url")
+        }
+        var r = URLRequest(url: url)
+        r.httpMethod = "GET"
+        r.setValue("Bearer \(target.bearer)", forHTTPHeaderField: "Authorization")
+        r.timeoutInterval = 60
+        let (data, response) = try await session.data(for: r)
+        guard let http = response as? HTTPURLResponse else {
+            throw DoorError.transport("non-HTTP response")
+        }
+        if http.statusCode == 401 { throw DoorError.unauthorized }
+        if http.statusCode == 404 { return nil }
+        guard http.statusCode == 200 else { throw DoorError.http(http.statusCode) }
+        return data
+    }
+
     /// Relay a gate decision to the door's approvals endpoint
     /// (`POST /foundryx/chat/{session}/approvals/{call}` — answers a suspended turn).
     /// `decision` is "once" | "always" | "reject"; the suspended /chat SSE then resumes.

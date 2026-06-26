@@ -198,6 +198,10 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     /// Synchronous status from disk — no `@Published` write. For tests + sync().
     public func snapshot() -> CaptureStatus { computeStatus() }
 
+    /// Recompute + republish the status from disk. Used after the retention pass
+    /// prunes a capture's segment files, so the card reflects the pruned state.
+    public func refreshStatus() { publish() }
+
     private func computeStatus() -> CaptureStatus {
         let all = allSegmentURLs()
         let syncedCount = all.filter { FileManager.default.fileExists(atPath: ackURL($0.1).path) }.count

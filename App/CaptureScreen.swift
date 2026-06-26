@@ -1,5 +1,19 @@
 import SwiftUI
+import AVFoundation
 import Grain
+
+private extension ConversationProgress {
+    /// The Grain status dot energy for this chip: live capture pulses warm, the
+    /// working states pulse (thinking), Ready breathes at rest (idle), failure smolders.
+    var statusDot: GrainStatus {
+        switch self {
+        case .recording: return .running
+        case .savedOnPhone, .savedToComputer, .transcribing: return .thinking
+        case .ready: return .idle
+        case .failed: return .tripped
+        }
+    }
+}
 
 /// The capture surface. When no Omi is connected it's a connect/pairing flow
 /// (scan → pick a device → connect, persisted + auto-reconnecting). Once
@@ -24,7 +38,10 @@ struct CaptureScreen: View {
                 emptyState
             } else {
                 ScrollView {
-                    VStack(spacing: GrainSpacing.x3) {
+                    // LazyVStack so only on-screen cards instantiate — their pollers
+                    // start in onAppear and stop in onDisappear, so we never run a
+                    // status poll loop for every conversation at once (the lag fix).
+                    LazyVStack(spacing: GrainSpacing.x3) {
                         ForEach(manager.visibleCaptures, id: \.captureId) { wal in
                             NavigationLink {
                                 ConversationDetailView(
@@ -39,7 +56,8 @@ struct CaptureScreen: View {
                                 CaptureCard(
                                     wal: wal,
                                     meta: manager.conversationMeta(for: wal.captureId),
-                                    poller: manager.statusPoller(for: wal.captureId)
+                                    poller: manager.statusPoller(for: wal.captureId),
+                                    hasCachedTranscript: manager.hasCachedTranscript(wal.captureId)
                                 )
                             }
                             .buttonStyle(.plain)
@@ -188,19 +206,24 @@ private struct CaptureCard: View {
     @ObservedObject var wal: CaptureWAL
     let meta: ConversationMeta?
     @ObservedObject var poller: CaptureStatusPoller
+    /// Whether a transcript has been cached locally (Ready / pruned tombstone).
+    let hasCachedTranscript: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x2) {
             // Kiln-generated title as the card's headline once the door has it; the
-            // stage chip drops to a secondary line. Falls back to stage-only until then.
+            // progress chip drops to a secondary line. Falls back to chip-only until then.
             if let title = poller.title, !title.isEmpty {
                 Text(title).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
                     .lineLimit(2)
             }
             HStack(spacing: GrainSpacing.x2) {
-                Circle().fill(stageColor).frame(width: 9, height: 9)
-                Text(stageLabel).grainTextStyle(poller.title == nil ? .body : .caption)
-                    .foregroundStyle(poller.title == nil ? GrainColor.ink : GrainColor.textMuted)
+                // Calm Grain status dot communicates motion: working states pulse,
+                // Ready breathes at rest, failed smolders.
+                GrainStatusDot(progress.statusDot, size: .sm)
+                Text(progress.label).grainTextStyle(poller.title == nil ? .body : .caption)
+                    .foregroundStyle(progress == .failed ? GrainColor.dangerRed
+                                     : (poller.title == nil ? GrainColor.ink : GrainColor.textMuted))
                 Spacer()
                 Text(timeRange).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             }
@@ -214,34 +237,22 @@ private struct CaptureCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).fill(GrainColor.surfaceElevated))
         .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).strokeBorder(GrainColor.border, lineWidth: 1))
-        // Drive the door→Lore stage chip while the card is on screen; stop when it
+        // Drive the door→Lore status poll while the card is on screen; stop when it
         // scrolls off (the poller itself also stops at a terminal stage, F11).
         .onAppear { poller.start() }
         .onDisappear { poller.stop() }
     }
 
-    /// The chip prefers the door→Lore stage once the audio is on the desktop; until
-    /// then it shows the local WAL sync stage (recording / saving on phone).
-    private var effectiveStage: CaptureLifecycleStage {
-        switch wal.status.stage {
-        case .recording: return .recording
-        case .savedOnPhone: return wal.status.streaming ? .recording : .stored
-        case .savedToComputer:
-            // Saved to computer → the door owns the rest; show the polled stage,
-            // but never regress below "stored" (the door at least has the audio).
-            return poller.stage == .recording ? .stored : poller.stage
-        }
+    /// The calm, folded processing chip (local WAL stage + door pipeline stage).
+    private var progress: ConversationProgress {
+        ConversationProgress.resolve(
+            wal: wal.status.stage,
+            streaming: wal.status.streaming,
+            door: poller.stage,
+            hasTitle: !(poller.title ?? "").isEmpty,
+            hasCachedTranscript: hasCachedTranscript
+        )
     }
-
-    private var stageColor: Color {
-        switch effectiveStage {
-        case .recording: return GrainColor.forgeBlue
-        case .stored, .transcribing, .transcribed: return GrainColor.amber
-        case .inLore, .organized: return GrainColor.sage
-        case .failed: return GrainColor.amber
-        }
-    }
-    private var stageLabel: String { effectiveStage.chipLabel }
 
     /// "10:41–10:47 AM · 6 min" when closed; start time alone while open.
     private var timeRange: String { Self.timeRangeString(meta: meta, fallback: wal.status.startedAt) }
@@ -294,8 +305,24 @@ struct ConversationDetailView: View {
     let place: String?
 
     @State private var content: CaptureContent?
+    @State private var cached: CachedTranscript?   // local fallback (pruned audio / offline)
     @State private var loadError: String?
     @State private var loading = true
+
+    // Listen affordance state.
+    @State private var audioState: AudioState = .idle
+    @State private var player: AVAudioPlayer?
+
+    private enum AudioState: Equatable { case idle, loading, playing, unavailable, failed(String) }
+
+    /// The transcript to render: prefer the live door content, fall back to the
+    /// locally cached transcript (so it survives audio pruning + offline).
+    private var transcriptText: String? {
+        if let c = content, c.found, !c.transcript.isEmpty { return c.transcript }
+        if let cached, !cached.transcript.isEmpty { return cached.transcript }
+        return nil
+    }
+    private var summaryText: String? { content?.summary ?? cached?.summary }
 
     var body: some View {
         ScrollView {
@@ -304,31 +331,31 @@ struct ConversationDetailView: View {
                 if let place {
                     Text(place).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                 }
+                listenRow
                 Divider().background(GrainColor.borderHairline)
 
-                if loading {
-                    Text("Loading transcript…")
-                        .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
-                } else if let loadError {
-                    Text("Couldn't load transcript: \(loadError)")
-                        .grainTextStyle(.body).foregroundStyle(GrainColor.amber)
-                } else if let content, content.found, !content.transcript.isEmpty {
-                    // Kiln-generated title + summary (Phase B) when ready; a subtle
-                    // "Summarizing…" hint while the door generates them in the
-                    // background (the .task re-fetches once so they fill in).
-                    if let summary = content.summary, !summary.isEmpty {
+                if let transcript = transcriptText {
+                    // Kiln-generated summary when ready; a subtle "Summarizing…" hint
+                    // while the door generates it (the .task re-fetches once).
+                    if let summary = summaryText, !summary.isEmpty {
                         Text("Summary").grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                         Text(summary)
                             .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
                             .textSelection(.enabled)
                         Divider().background(GrainColor.borderHairline)
-                    } else if content.summarizing {
+                    } else if content?.summarizing == true {
                         Text("Summarizing…").grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
                     }
                     Text("Transcript").grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-                    Text(content.transcript)
+                    Text(transcript)
                         .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
                         .textSelection(.enabled)
+                } else if loading {
+                    Text("Loading transcript…")
+                        .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
+                } else if let loadError {
+                    Text("Couldn't load transcript: \(loadError)")
+                        .grainTextStyle(.body).foregroundStyle(GrainColor.amber)
                 } else {
                     Text("Transcript still processing…")
                         .grainTextStyle(.title).foregroundStyle(GrainColor.ink)
@@ -343,13 +370,33 @@ struct ConversationDetailView: View {
         .navigationTitle(navTitle)
         .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
+        .onDisappear { player?.stop() }
     }
 
-    /// Prefer the Kiln-generated title; fall back to the first ~6 words of the
-    /// transcript while it's still summarizing, then "Conversation".
+    /// "Listen" affordance — replays the conversation audio via the door's `/audio`
+    /// endpoint. Gated so a 404 (endpoint not ready / audio pruned on desktop) reads
+    /// as a calm "Audio not available" rather than an error.
+    @ViewBuilder private var listenRow: some View {
+        switch audioState {
+        case .idle:
+            GrainButton("Listen", variant: .tonal, size: .sm) { Task { await playAudio() } }
+        case .loading:
+            Text("Loading audio…").grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+        case .playing:
+            GrainButton("Stop", variant: .text, size: .sm) { player?.stop(); audioState = .idle }
+        case .unavailable:
+            Text("Audio not available").grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+        case .failed(let why):
+            Text("Couldn't play audio: \(why)").grainTextStyle(.caption).foregroundStyle(GrainColor.amber)
+        }
+    }
+
+    /// Prefer the Kiln-generated title; fall back to the cached title, then the first
+    /// ~6 words of the transcript, then "Conversation".
     private var navTitle: String {
         if let t = content?.title, !t.isEmpty { return t }
-        guard let t = content?.transcript, !t.isEmpty else { return "Conversation" }
+        if let t = cached?.title, !t.isEmpty { return t }
+        guard let t = transcriptText, !t.isEmpty else { return "Conversation" }
         let words = t.split(whereSeparator: { $0 == " " || $0 == "\n" }).prefix(6).joined(separator: " ")
         return words.isEmpty ? "Conversation" : words
     }
@@ -357,10 +404,17 @@ struct ConversationDetailView: View {
     private func load() async {
         loading = true
         loadError = nil
+        // Seed from the local cache first so a pruned-audio / offline conversation
+        // shows its transcript instantly.
+        cached = TranscriptCacheStore.load(captureId: captureId,
+                                           baseDir: CaptureWAL.documentsCaptures())
         do {
             content = try await DoorClient(target: target).captureContent(captureId: captureId)
+            cacheIfReady(content)
         } catch {
-            loadError = (error as NSError).localizedDescription
+            // Door unreachable — keep the cached transcript if we have one; only show
+            // an error when there's nothing cached to fall back to.
+            if cached == nil { loadError = (error as NSError).localizedDescription }
         }
         loading = false
         // The door generates the title/summary in the background on first fetch; if
@@ -370,7 +424,39 @@ struct ConversationDetailView: View {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             if let refreshed = try? await DoorClient(target: target).captureContent(captureId: captureId) {
                 content = refreshed
+                cacheIfReady(refreshed)
             }
+        }
+    }
+
+    /// Persist the transcript locally once the door returns it, so it survives audio
+    /// pruning + offline. Also stamps the in-Lore confirmation marker (a transcript
+    /// can only exist because Lore transcribed the audio).
+    private func cacheIfReady(_ c: CaptureContent?) {
+        guard let c, c.found, !c.transcript.isEmpty else { return }
+        let entry = CachedTranscript(transcript: c.transcript, title: c.title,
+                                     summary: c.summary, fetchedAt: UInt64(max(0, Date().timeIntervalSince1970)))
+        TranscriptCacheStore.save(entry, captureId: captureId, baseDir: CaptureWAL.documentsCaptures())
+        cached = entry
+    }
+
+    private func playAudio() async {
+        audioState = .loading
+        do {
+            guard let bytes = try await DoorClient(target: target).captureAudio(captureId: captureId) else {
+                audioState = .unavailable   // 404 — endpoint not ready / audio pruned on desktop
+                return
+            }
+            // TODO: the door assembles Ogg-Opus; AVAudioPlayer can't decode Opus on all
+            // iOS versions. If playback fails here, route the bytes through an Opus
+            // decoder (or have the door transcode to AAC/m4a) — tracked with the
+            // parallel /audio endpoint work.
+            let p = try AVAudioPlayer(data: bytes)
+            player = p
+            p.play()
+            audioState = .playing
+        } catch {
+            audioState = .failed((error as NSError).localizedDescription)
         }
     }
 }

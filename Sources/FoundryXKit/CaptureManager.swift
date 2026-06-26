@@ -109,7 +109,33 @@ public final class CaptureManager: ObservableObject {
     /// failed to upload ("socket is not connected") still has segments, so it stays
     /// visible — its audio is real and pending retry, not junk. Pure filter on `captures`.
     public var visibleCaptures: [CaptureWAL] {
-        captures.filter { CaptureManager.isWorthShowing($0.status) }
+        captures
+            // Worth showing if it has real audio/is streaming, OR it's been pruned to a
+            // transcript tombstone (audio gone, transcript kept) — still a real conversation.
+            .filter { CaptureManager.isWorthShowing($0.status) || self.hasCachedTranscript($0.captureId) }
+            // Newest conversation first (Omi-style), by the durable conversation start.
+            .sorted { self.startTime(of: $0) > self.startTime(of: $1) }
+    }
+
+    /// A capture's durable conversation start (unix seconds) for ordering. Prefers the
+    /// `meta.json` start (stable across relaunch) over the WAL's in-memory `startedAt`
+    /// (which is re-stamped to launch time when an existing capture is reloaded).
+    /// Memoised once a stable meta start is found so the list sort doesn't re-read disk.
+    private var startTimeCache: [String: TimeInterval] = [:]
+    private func startTime(of wal: CaptureWAL) -> TimeInterval {
+        if let cached = startTimeCache[wal.captureId] { return cached }
+        if let meta = ConversationMetaStore.load(captureId: wal.captureId, baseDir: baseDir) {
+            let t = TimeInterval(meta.startedAt)
+            startTimeCache[wal.captureId] = t
+            return t
+        }
+        return wal.status.startedAt.timeIntervalSince1970
+    }
+
+    /// True once a transcript has been cached locally for this capture (used to keep a
+    /// pruned/tombstoned conversation visible + to drive the card's "Ready" chip).
+    public func hasCachedTranscript(_ captureId: String) -> Bool {
+        TranscriptCacheStore.hasCachedTranscript(captureId: captureId, baseDir: baseDir)
     }
 
     /// A capture is worth showing if it has ≥1 recorded segment, or is actively streaming
@@ -207,6 +233,7 @@ public final class CaptureManager: ObservableObject {
             Task { @MainActor in self?.log?.info(line) }
         }
         loadExisting()
+        pruneOldAudio()      // retention sweep on launch (keeps transcripts, prunes safe-in-Lore audio)
         startDrainTimer()
     }
 
@@ -422,6 +449,53 @@ public final class CaptureManager: ObservableObject {
         // all ACK'd — this is the retry path for a finalize that didn't complete at
         // conversation-close (door/Lore was down, or segments weren't ACK'd yet).
         await retryPendingFinalizes()
+        pruneOldAudio()   // periodic retention sweep (cheap: stats files, only acts >30d)
+    }
+
+    // MARK: retention (prune local audio after 30d once it's safe in Lore — keep the transcript)
+
+    /// Prune the local audio for every capture whose newest segment is older than the
+    /// retention window AND is confirmed durably in Lore AND has a cached transcript.
+    /// Deletes the `seg-*.opus` + `.ack` files but KEEPS the dir + `transcript.json`
+    /// (a readable tombstone). Never prunes the active capture, an unconfirmed
+    /// capture, or one without a cached transcript. Idempotent + offline-safe (all
+    /// inputs come from disk — no network).
+    public func pruneOldAudio() {
+        for wal in captures where wal !== active {
+            let id = wal.captureId
+            guard let age = newestSegmentAge(id) else { continue }   // nil ⇒ no audio (already pruned)
+            let confirmed = TranscriptCacheStore.isConfirmedInLore(captureId: id, baseDir: baseDir)
+            let hasTranscript = TranscriptCacheStore.hasCachedTranscript(captureId: id, baseDir: baseDir)
+            guard CaptureRetention.shouldPruneAudio(newestSegmentAge: age,
+                                                    confirmedInLore: confirmed,
+                                                    hasCachedTranscript: hasTranscript) else { continue }
+            deleteLocalAudio(id)
+            wal.refreshStatus()
+            log?.info("capture \(id): pruned local audio (>30d, confirmed in Lore, transcript cached) — transcript kept")
+        }
+    }
+
+    /// Age (seconds) of the newest `seg-*.opus` segment by file mtime, or `nil` when
+    /// there are no segments left on disk.
+    private func newestSegmentAge(_ captureId: String) -> TimeInterval? {
+        let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let mtimes = files
+            .filter { $0.pathExtension == "opus" }
+            .compactMap { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
+        guard let newest = mtimes.max() else { return nil }
+        return Date().timeIntervalSince(newest)
+    }
+
+    /// Delete a capture's `seg-*.opus` + `seg-*.ack` files, keeping everything else
+    /// (the dir, `transcript.json`, `meta.json`, markers) as a tombstone.
+    private func deleteLocalAudio(_ captureId: String) {
+        let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        for f in files where f.pathExtension == "opus" || f.pathExtension == "ack" {
+            try? FileManager.default.removeItem(at: f)
+        }
     }
 
     /// Retry finalize for every capture still marked pending-finalize. Safe to call

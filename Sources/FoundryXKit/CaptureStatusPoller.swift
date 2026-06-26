@@ -48,6 +48,71 @@ public enum CaptureLifecycleStage: String, Sendable, Equatable {
     public var needsRetry: Bool { self == .failed }
 }
 
+/// The calm, human "what's happening to this conversation" chip shown on each card
+/// (track 20260626). Distinct from `CaptureLifecycleStage` (the raw door wire stage):
+/// this folds the LOCAL WAL sync stage and the door pipeline stage into one ordered,
+/// user-legible progression so the user can SEE motion rather than a flat "Saved".
+///
+///   Recording → Saved on phone → Saved to computer → Transcribing… → Ready
+///
+/// `failed` is the terminal-failure chip. Pure + unit-tested via `resolve`.
+public enum ConversationProgress: String, Sendable, Equatable {
+    case recording          // mic live, frames arriving
+    case savedOnPhone       // ≥1 segment durable on the phone, not all ACK'd yet
+    case savedToComputer    // every segment ACK'd; door hasn't reported Lore progress yet
+    case transcribing       // reached the desktop/Lore; transcript still cooking
+    case ready              // transcript/title available — openable
+    case failed             // terminal transcription failure (retry affordance)
+
+    /// The calm chip label.
+    public var label: String {
+        switch self {
+        case .recording: return "Recording"
+        case .savedOnPhone: return "Saved on phone"
+        case .savedToComputer: return "Saved to computer"
+        case .transcribing: return "Transcribing…"
+        case .ready: return "Ready"
+        case .failed: return "Transcription failed — retry"
+        }
+    }
+
+    /// Whether the card should offer a retry affordance.
+    public var needsRetry: Bool { self == .failed }
+
+    /// Derive the card's progress from the local WAL stage, whether the source is
+    /// still streaming, the door's pipeline stage, whether a Kiln title is known, and
+    /// whether a transcript has been cached locally. Pure — the view maps the result
+    /// to a Grain status dot.
+    ///
+    /// A cached transcript is the strongest signal: Lore could only have produced it
+    /// by transcribing the audio, so it always reads as Ready (this also keeps a
+    /// pruned/tombstoned capture — whose audio is gone — reading correctly).
+    public static func resolve(wal: CaptureStage,
+                               streaming: Bool,
+                               door: CaptureLifecycleStage,
+                               hasTitle: Bool,
+                               hasCachedTranscript: Bool) -> ConversationProgress {
+        if hasCachedTranscript { return .ready }
+        switch wal {
+        case .recording:
+            return .recording
+        case .savedOnPhone:
+            return streaming ? .recording : .savedOnPhone
+        case .savedToComputer:
+            // Audio is safely on the computer; the door owns the rest of the journey.
+            switch door {
+            case .recording, .stored: return .savedToComputer
+            case .transcribing: return .transcribing
+            // in_lore but not yet transcribed reads as Transcribing… (something IS
+            // happening); once a title exists it's Ready.
+            case .inLore: return hasTitle ? .ready : .transcribing
+            case .transcribed, .organized: return .ready
+            case .failed: return .failed
+            }
+        }
+    }
+}
+
 /// The status-fetch dependency the poller drives. `DoorClient` is the production
 /// conformer; door-free tests inject a stub to drive the stage machine without HTTP.
 public protocol CaptureStatusFetching: Sendable {
@@ -57,10 +122,15 @@ public protocol CaptureStatusFetching: Sendable {
 extension DoorClient: CaptureStatusFetching {}
 
 /// Polls one capture's door status until it reaches a terminal stage. Observable so
-/// the card binds to `stage` directly. `@MainActor` — it mutates published state and
-/// is owned by the timeline.
-@MainActor
-public final class CaptureStatusPoller: ObservableObject {
+/// the card binds to `stage` directly.
+///
+/// LAG FIX (track 20260626): the poller is deliberately NOT fully `@MainActor`. The
+/// network fetch + JSON decode run OFF the main actor (`pollAndApply()` is
+/// nonisolated and the polling loop runs on a detached task); only the final
+/// `@Published` state assignment hops back to the main actor (`apply(_:)`). With
+/// dozens of cards on screen, doing the fetch/decode on the main actor stuttered the
+/// UI for ~1–2s; isolating just the published mutation keeps the main thread free.
+public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
     public let captureId: String
     @Published public private(set) var stage: CaptureLifecycleStage
     @Published public private(set) var loreCaptureId: String?
@@ -70,8 +140,9 @@ public final class CaptureStatusPoller: ObservableObject {
     private let client: CaptureStatusFetching
     private let baseInterval: TimeInterval
     private let maxInterval: TimeInterval
-    private var task: Task<Void, Never>?
-    private var lastTranscribed = false
+    // Touched only on the main actor (start/stop + the @MainActor apply).
+    @MainActor private var task: Task<Void, Never>?
+    @MainActor private var lastTranscribed = false
 
     public init(captureId: String,
                 client: CaptureStatusFetching,
@@ -85,59 +156,78 @@ public final class CaptureStatusPoller: ObservableObject {
         self.maxInterval = maxInterval
     }
 
-    /// Start polling. No-op if already running or already terminal.
-    public func start() {
+    /// What the loop needs back from a poll, computed on the main actor alongside the
+    /// published-state mutation so the loop itself never touches @Published state.
+    private struct PollOutcome { let terminal: Bool; let titlePending: Bool; let stored: Bool }
+
+    /// Start polling. No-op if already running or already terminal. Driven by the
+    /// card's `onAppear` (main actor).
+    @MainActor public func start() {
         // Poll if not terminal, OR if we're terminal but still have no title (an
         // already-organized capture still needs its background-generated title for
         // the card). Nothing to do once terminal AND titled.
         guard task == nil, !(stage.isTerminal && title != nil) else { return }
-        task = Task { [weak self] in await self?.loop() }
+        // Detached so the loop (fetch + decode + sleep) runs off the main actor; only
+        // the @Published mutation in `apply` hops back to main.
+        task = Task.detached(priority: .utility) { [weak self] in await self?.loop() }
     }
 
     /// Stop polling (call from the card's onDisappear).
-    public func stop() {
+    @MainActor public func stop() {
         task?.cancel()
         task = nil
     }
 
     /// One poll-and-apply, exposed for tests (drives the state machine without a
-    /// timer). Returns true once the stage is terminal (the loop should stop).
+    /// timer). Returns true once the stage is terminal (the loop should stop). The
+    /// fetch + decode happen here, off the main actor.
     @discardableResult
     public func pollOnce() async -> Bool {
+        await pollAndApply().terminal
+    }
+
+    /// The off-main poll: fetch + decode here (nonisolated), then hop to the main
+    /// actor only to publish the new state.
+    private func pollAndApply() async -> PollOutcome {
         do {
             let resp = try await client.captureStatus(captureId: captureId)
-            let next = CaptureLifecycleStage(wire: resp.stage)
-            stage = next
-            if let id = resp.loreCaptureId { loreCaptureId = id }
-            if let t = resp.title, !t.isEmpty { title = t }
-            lastTranscribed = resp.transcribed
-            return next.isTerminal
+            return await apply(resp)
         } catch {
             // Transport / non-2xx (incl. 404 before the door has the manifest) — keep
             // the current stage and let the loop back off + retry.
-            return false
+            return PollOutcome(terminal: false, titlePending: false, stored: stage == .stored)
         }
+    }
+
+    /// Publish the polled state on the main actor and return what the loop needs.
+    @MainActor private func apply(_ resp: CaptureStatusResponse) -> PollOutcome {
+        let next = CaptureLifecycleStage(wire: resp.stage)
+        stage = next
+        if let id = resp.loreCaptureId { loreCaptureId = id }
+        if let t = resp.title, !t.isEmpty { title = t }
+        lastTranscribed = resp.transcribed
+        // Keep polling past a terminal stage ONLY while a transcribed (non-failed)
+        // capture is still waiting on its background-generated title.
+        let titlePending = title == nil && lastTranscribed && next != .failed
+        return PollOutcome(terminal: next.isTerminal, titlePending: titlePending, stored: next == .stored)
     }
 
     private func loop() async {
         var interval = baseInterval
         var titleWaits = 0
         while !Task.isCancelled {
-            let terminal = await pollOnce()
-            // Keep polling past a terminal stage ONLY while a transcribed (non-failed)
-            // capture is still waiting on its background-generated title, so the card's
-            // title fills in. Bounded so a never-titled capture doesn't poll forever.
-            let titlePending = title == nil && lastTranscribed && stage != .failed
-            if terminal {
-                if !titlePending { break }
+            let r = await pollAndApply()
+            if r.terminal {
+                // Bounded wait so a never-titled terminal capture doesn't poll forever.
+                if !r.titlePending { break }
                 titleWaits += 1
                 if titleWaits > 8 { break }
             }
             // Healthy poll resets the cadence; a stuck/erroring poll backs off.
             interval = min(interval * 1.5, maxInterval)
-            if stage != .stored { interval = baseInterval }  // mid-pipeline → keep snappy
+            if !r.stored { interval = baseInterval }  // mid-pipeline → keep snappy
             try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
         }
-        task = nil
+        await MainActor.run { [weak self] in self?.task = nil }
     }
 }
