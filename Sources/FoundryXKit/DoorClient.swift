@@ -64,6 +64,13 @@ public enum DoorEvent: Equatable, Sendable {
     case toolResult(callId: String, content: String, isError: Bool)
     case boundary(label: String)
     case approvalRequest(callId: String, name: String, args: String)
+    /// Door heartbeat while the model works (notably during time-to-first-token):
+    /// `ms` = elapsed since the turn started. Lets the UI show "thinking… Ns" so the
+    /// user sees it's MOVING before the first token, and keeps the connection alive.
+    case keepalive(ms: Int)
+    /// End-of-turn timing summary (ms; -1 = phase didn't happen): how long until the
+    /// route decision, the first token (TTFT), generation, and total + token count.
+    case timing(routeMs: Int, ttftMs: Int, genMs: Int, totalMs: Int, tokens: Int)
     case done(reason: String)
     case other(type: String, raw: String)
 
@@ -75,6 +82,7 @@ public enum DoorEvent: Equatable, Sendable {
             return .other(type: "?", raw: payload)
         }
         func str(_ k: String) -> String { (obj[k] as? String) ?? "" }
+        func int(_ k: String) -> Int { (obj[k] as? Int) ?? (obj[k] as? NSNumber)?.intValue ?? 0 }
         func args(_ k: String) -> String {
             guard let v = obj[k] else { return "" }
             if let s = v as? String { return s }
@@ -88,6 +96,9 @@ public enum DoorEvent: Equatable, Sendable {
         case "tool_result": return .toolResult(callId: str("call_id"), content: str("content"), isError: (obj["is_error"] as? Bool) ?? false)
         case "boundary": return .boundary(label: str("label"))
         case "approval_request": return .approvalRequest(callId: str("call_id"), name: str("name"), args: args("args"))
+        case "keepalive": return .keepalive(ms: int("ms"))
+        case "timing": return .timing(routeMs: int("route_ms"), ttftMs: int("ttft_ms"),
+                                      genMs: int("gen_ms"), totalMs: int("total_ms"), tokens: int("tokens"))
         case "done": return .done(reason: str("reason"))
         default: return .other(type: type, raw: payload)
         }
@@ -221,6 +232,9 @@ public final class DoorClient: @unchecked Sendable {
         case .toolResult(_, _, let isErr): return "tool_result\(isErr ? " (error)" : "")"
         case .boundary(let label): return "boundary: \(label)"
         case .approvalRequest(_, let name, _): return "approval_request \(name)"
+        case .keepalive(let ms): return "keepalive (\(ms)ms)"
+        case .timing(let r, let t, let g, let total, let n):
+            return "timing route=\(r) ttft=\(t) gen=\(g) total=\(total)ms tokens=\(n)"
         case .done(let reason): return "done: \(reason)"
         case .other(let type, _): return "other: \(type)"
         }

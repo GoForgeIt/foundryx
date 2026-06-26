@@ -46,10 +46,20 @@ public final class ChatViewModel: ObservableObject {
         case error(detail: String)
     }
 
+    /// End-of-turn timing the door reports (ms; -1 = phase didn't happen).
+    public struct TurnTiming: Equatable, Sendable {
+        public let routeMs: Int, ttftMs: Int, genMs: Int, totalMs: Int, tokens: Int
+    }
+
     @Published public private(set) var messages: [Message] = []
     @Published public private(set) var turnState: TurnState = .idle
     @Published public private(set) var lastBoundary: String?
     @Published public private(set) var connection: ConnectionState = .idle
+    /// Elapsed ms (from the door's keepalive) while waiting on the FIRST token — drives a
+    /// "thinking… Ns" hint so the user sees it's moving. 0 once tokens stream / between turns.
+    @Published public private(set) var thinkingMs: Int = 0
+    /// The last completed turn's timing summary (for a subtle "took Ns · first token Ns" line).
+    @Published public private(set) var lastTiming: TurnTiming?
 
     public init() {}
 
@@ -61,6 +71,8 @@ public final class ChatViewModel: ObservableObject {
         messages.append(Message(role: "user", text: text))
         messages.append(Message(role: "assistant", text: ""))
         turnState = .streaming
+        thinkingMs = 0
+        lastTiming = nil
     }
 
     /// Fold one DoorEvent into the rendered state. Pure + synchronous so it's trivially
@@ -70,15 +82,22 @@ public final class ChatViewModel: ObservableObject {
         case .session:
             break
         case .assistantDelta(let t):
+            thinkingMs = 0   // first token arrived → drop the "thinking…" hint
             appendAssistant(t)
         case .boundary(let label):
             lastBoundary = label
             if let targetId = Self.parseRoutedTarget(label) { stampRoute(targetId) }
+        case .keepalive(let ms):
+            // Door heartbeat while the model works. Show elapsed only until tokens stream.
+            if assistantText.isEmpty { thinkingMs = ms }
+        case .timing(let r, let t, let g, let total, let n):
+            lastTiming = TurnTiming(routeMs: r, ttftMs: t, genMs: g, totalMs: total, tokens: n)
         case .toolCall, .toolResult:
             break
         case .approvalRequest(let callId, let name, let args):
             turnState = .awaitingApproval(callId: callId, name: name, args: args)
         case .done(let reason):
+            thinkingMs = 0
             turnState = (reason == "refused") ? .refused : .completed(reason: reason)
         case .other:
             break

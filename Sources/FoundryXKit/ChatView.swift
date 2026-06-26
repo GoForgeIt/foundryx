@@ -65,11 +65,19 @@ public struct ChatView: View {
                 }
                 .accessibilityIdentifier("approval-prompt")
             case .completed(let reason):
-                Text("done: \(reason)")
-                    .grainTextStyle(.caption)
-                    .textCase(.uppercase)
-                    .foregroundStyle(GrainColor.sage)
-                    .accessibilityIdentifier("turn-status")
+                VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                    Text("done: \(reason)")
+                        .grainTextStyle(.caption)
+                        .textCase(.uppercase)
+                        .foregroundStyle(GrainColor.sage)
+                    if let t = model.lastTiming, t.totalMs >= 0 {
+                        Text(Self.timingCaption(t))
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(GrainColor.textFaint)
+                            .monospacedDigit()
+                    }
+                }
+                .accessibilityIdentifier("turn-status")
             case .refused:
                 Text("refused")
                     .grainTextStyle(.caption)
@@ -77,13 +85,30 @@ public struct ChatView: View {
                     .foregroundStyle(GrainColor.dangerRed)
                     .accessibilityIdentifier("turn-status")
             case .streaming:
-                HStack { GrainTypingIndicator(); Spacer(minLength: 0) }
+                HStack(spacing: GrainSpacing.x2) {
+                    GrainTypingIndicator()
+                    // Before the first token, show the door's elapsed heartbeat so it's
+                    // visibly MOVING (qwen3-8b's time-to-first-token can be several seconds).
+                    if model.assistantText.isEmpty, model.thinkingMs > 0 {
+                        Text("thinking… \(String(format: "%.1f", Double(model.thinkingMs) / 1000))s")
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(GrainColor.textFaint)
+                            .monospacedDigit()
+                    }
+                    Spacer(minLength: 0)
+                }
             case .idle:
                 EmptyView()
             }
         }
         .padding(GrainSpacing.x4)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// "first token 12.4s · total 31.5s · 331 tok" — the per-turn timing under a done turn.
+    private static func timingCaption(_ t: ChatViewModel.TurnTiming) -> String {
+        func s(_ ms: Int) -> String { ms < 0 ? "—" : String(format: "%.1fs", Double(ms) / 1000) }
+        return "first token \(s(t.ttftMs)) · total \(s(t.totalMs)) · \(t.tokens) tok"
     }
 
     /// `🔒 local · <model>` / `☁️ cloud · <model>` for a routed assistant message
