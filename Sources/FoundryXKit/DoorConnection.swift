@@ -250,7 +250,16 @@ public final class NoiseRelayChannel: MuxFrameChannel, @unchecked Sendable {
                 try? await Task.sleep(nanoseconds: 20 * 1_000_000_000)
                 if Task.isCancelled { break }
                 let alive: Bool = await withCheckedContinuation { cont in
-                    task.sendPing { err in cont.resume(returning: err == nil) }
+                    // URLSessionWebSocketTask.sendPing's completion handler can fire TWICE
+                    // during a teardown/cancel race (notably when a ping lands mid-turn on a
+                    // long turn) — and resuming a CheckedContinuation twice is a hard crash.
+                    // Gate it so we resume exactly once.
+                    let lock = NSLock()
+                    var resumed = false
+                    task.sendPing { err in
+                        lock.lock(); let first = !resumed; resumed = true; lock.unlock()
+                        if first { cont.resume(returning: err == nil) }
+                    }
                 }
                 if !alive { task.cancel(with: .goingAway, reason: nil); break }
             }
