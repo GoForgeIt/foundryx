@@ -58,6 +58,10 @@ public final class ChatViewModel: ObservableObject {
     /// Elapsed ms (from the door's keepalive) while waiting on the FIRST token — drives a
     /// "thinking… Ns" hint so the user sees it's moving. 0 once tokens stream / between turns.
     @Published public private(set) var thinkingMs: Int = 0
+    /// When the current turn was sent — lets the UI tick a SMOOTH local "thinking… Ns"
+    /// timer (every second) instead of jumping only when a sparse door keepalive lands.
+    /// Set on send; cleared the moment the first token arrives or the turn ends.
+    @Published public private(set) var turnStartedAt: Date?
     /// The last completed turn's timing summary (for a subtle "took Ns · first token Ns" line).
     @Published public private(set) var lastTiming: TurnTiming?
 
@@ -73,7 +77,11 @@ public final class ChatViewModel: ObservableObject {
         turnState = .streaming
         thinkingMs = 0
         lastTiming = nil
+        turnStartedAt = now()
     }
+
+    /// Injectable clock so tests are deterministic (production = real Date).
+    var now: () -> Date = { Date() }
 
     /// Fold one DoorEvent into the rendered state. Pure + synchronous so it's trivially
     /// testable and the iOS app can call it from its stream loop on the main actor.
@@ -82,7 +90,7 @@ public final class ChatViewModel: ObservableObject {
         case .session:
             break
         case .assistantDelta(let t):
-            thinkingMs = 0   // first token arrived → drop the "thinking…" hint
+            thinkingMs = 0; turnStartedAt = nil   // first token arrived → drop the "thinking…" hint
             appendAssistant(t)
         case .boundary(let label):
             lastBoundary = label
@@ -97,7 +105,7 @@ public final class ChatViewModel: ObservableObject {
         case .approvalRequest(let callId, let name, let args):
             turnState = .awaitingApproval(callId: callId, name: name, args: args)
         case .done(let reason):
-            thinkingMs = 0
+            thinkingMs = 0; turnStartedAt = nil
             turnState = (reason == "refused") ? .refused : .completed(reason: reason)
         case .other:
             break
@@ -114,9 +122,14 @@ public final class ChatViewModel: ObservableObject {
     private func appendAssistant(_ t: String) {
         if case .streaming = turnState {} else { turnState = .streaming }
         if let idx = messages.lastIndex(where: { $0.role == "assistant" }) {
-            messages[idx].text += t
+            // Models (qwen3) often lead with "\n\n" — while the bubble is still empty,
+            // drop leading whitespace so the reply doesn't render with a blank gap on top.
+            let wasEmpty = messages[idx].text.isEmpty
+            var combined = messages[idx].text + t
+            if wasEmpty { combined = String(combined.drop(while: { $0.isWhitespace })) }
+            messages[idx].text = combined
         } else {
-            messages.append(Message(role: "assistant", text: t))
+            messages.append(Message(role: "assistant", text: String(t.drop(while: { $0.isWhitespace }))))
         }
     }
 

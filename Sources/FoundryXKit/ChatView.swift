@@ -87,13 +87,16 @@ public struct ChatView: View {
             case .streaming:
                 HStack(spacing: GrainSpacing.x2) {
                     GrainTypingIndicator()
-                    // Before the first token, show the door's elapsed heartbeat so it's
-                    // visibly MOVING (qwen3-8b's time-to-first-token can be several seconds).
-                    if model.assistantText.isEmpty, model.thinkingMs > 0 {
-                        Text("thinking… \(String(format: "%.1f", Double(model.thinkingMs) / 1000))s")
-                            .grainTextStyle(.caption)
-                            .foregroundStyle(GrainColor.textFaint)
-                            .monospacedDigit()
+                    // Before the first token, tick a SMOOTH local elapsed timer (every 0.5s)
+                    // so it's visibly moving — qwen3's time-to-first-token can be many seconds,
+                    // and the door's keepalive lands too sparsely to look alive on its own.
+                    if model.assistantText.isEmpty, let started = model.turnStartedAt {
+                        TimelineView(.periodic(from: started, by: 0.5)) { ctx in
+                            Text("thinking… \(String(format: "%.1f", ctx.date.timeIntervalSince(started)))s")
+                                .grainTextStyle(.caption)
+                                .foregroundStyle(GrainColor.textFaint)
+                                .monospacedDigit()
+                        }
                     }
                     Spacer(minLength: 0)
                 }

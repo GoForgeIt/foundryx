@@ -36,6 +36,23 @@ final class TurnTimingTests: XCTestCase {
         XCTAssertEqual(m.thinkingMs, 0, "no thinking hint once tokens are streaming")
     }
 
+    func testLeadingWhitespaceStrippedFromReply() {
+        let m = ChatViewModel()
+        m.beginUserTurn("hi")
+        m.apply(.assistantDelta(text: "\n\n"))   // qwen3 often leads with blank lines
+        m.apply(.assistantDelta(text: "Hello"))
+        m.apply(.assistantDelta(text: " there"))
+        XCTAssertEqual(m.assistantText, "Hello there", "no leading blank gap above the reply")
+    }
+
+    func testTurnStartedAtSetThenClearedOnFirstToken() {
+        let m = ChatViewModel()
+        m.beginUserTurn("hi")
+        XCTAssertNotNil(m.turnStartedAt, "the smooth thinking-timer anchor is set on send")
+        m.apply(.assistantDelta(text: "Hi"))
+        XCTAssertNil(m.turnStartedAt, "first token stops the thinking timer")
+    }
+
     func testTimingSummaryStored() {
         let m = ChatViewModel()
         m.beginUserTurn("hi")
