@@ -75,6 +75,37 @@ Feature: FoundryX captures Omi audio durably to the door
     Given I choose the phone microphone as my capture source
     Then my choice is remembered and the Omi is not auto-connected
 
+  Scenario: pausing capture remembers the choice durably
+    Given an ambient capture is recording a conversation
+    When I pause the capture
+    Then my capture is remembered as paused
+
+  Scenario: resuming capture remembers the choice durably
+    Given an ambient capture is paused
+    When I resume the capture
+    Then my capture is remembered as listening
+
+  Scenario: a paused capture stays paused after the app restarts and the Omi reconnects
+    Given I previously paused the capture and fully restarted the app
+    When the Omi reconnects
+    Then capture stays paused and no audio is recorded until I resume
+
+  Scenario: resuming after a paused restart begins recording into the connected session
+    Given I previously paused the capture and fully restarted the app
+    And the Omi has reconnected and stayed paused
+    When I resume the capture
+    Then audio is recorded again
+
+  Scenario: a listening capture resumes automatically after the app restarts and the Omi reconnects
+    Given I was listening when I fully restarted the app
+    When the Omi reconnects
+    Then ambient capture resumes automatically and audio is recorded
+
+  Scenario: on first-ever launch capture defaults to listening
+    Given I have never set a capture preference
+    When the Omi connects for the first time
+    Then ambient capture is listening and audio is recorded
+
   @ble-hardware
   Scenario: a real Omi wearable streams Opus frames into the WAL
     Given a real Omi wearable in range
