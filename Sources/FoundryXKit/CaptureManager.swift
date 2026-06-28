@@ -403,6 +403,12 @@ public final class CaptureManager: ObservableObject {
         }
         let gap = CaptureSettings.silenceGapSeconds
         self.silenceGapSeconds = gap
+        // Restore the durable capture intent (req 2). A user who PAUSED before a full
+        // app restart must come back paused — not silently capturing. First-ever launch
+        // (no stored value) defaults to `.listening` (today's behavior). beginSession()
+        // re-applies this via router.setPaused(isPaused) on the next (re)connect, so a
+        // paused desired-state means the Omi connects but stays paused.
+        self.isPaused = (CaptureSettings.omiCaptureDesiredState == .paused)
         self.levels = Array(repeating: 0, count: Self.meterBarCount)
         self.router = FrameRouter(segmenter: SilenceSegmenter(silenceGap: gap))
         // Frame path: serial source queue → router → WAL io queue. No main hop.
@@ -928,8 +934,21 @@ public final class CaptureManager: ObservableObject {
 
     // MARK: pause / resume (device stays connected)
 
-    public func pause() { isPaused = true; router.setPaused(true); log?.info("capture: paused") }
-    public func resume() { isPaused = false; router.setPaused(false); log?.info("capture: resumed") }
+    // pause()/resume() persist the user's capture INTENT (req 1) so it survives a full
+    // app restart: a paused Omi stays paused on the next launch + reconnect instead of
+    // silently auto-capturing.
+    public func pause() {
+        isPaused = true
+        CaptureSettings.omiCaptureDesiredState = .paused
+        router.setPaused(true)
+        log?.info("capture: paused")
+    }
+    public func resume() {
+        isPaused = false
+        CaptureSettings.omiCaptureDesiredState = .listening
+        router.setPaused(false)
+        log?.info("capture: resumed")
+    }
     public func togglePause() { isPaused ? resume() : pause() }
 
     // MARK: drain (retry until every segment is ACK'd)
@@ -1062,8 +1081,17 @@ public final class CaptureManager: ObservableObject {
     }
 }
 
-/// Persisted capture preferences (UserDefaults). Currently the silence-gap that
-/// drives auto-segmentation (req 9); default ~2 min, à la Omi.
+/// The user's durable AMBIENT-capture intent across launches: are we listening, or
+/// did the user pause? Persisted so a paused Omi stays paused after a full app
+/// restart instead of silently auto-capturing on reconnect.
+public enum OmiCaptureDesiredState: String {
+    case listening
+    case paused
+}
+
+/// Persisted capture preferences (UserDefaults). The silence-gap that drives
+/// auto-segmentation (req 9; default ~2 min, à la Omi), the chosen capture source,
+/// and the durable pause/listen intent restored on launch.
 public enum CaptureSettings {
     private static let gapKey = "foundryx.capture.silence-gap-seconds"
     public static let defaultGapSeconds: TimeInterval = 120
@@ -1082,6 +1110,16 @@ public enum CaptureSettings {
     public static var captureSource: CaptureSourceKind {
         get { CaptureSourceKind(rawValue: UserDefaults.standard.string(forKey: sourceKey) ?? "") ?? .omi }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: sourceKey) }
+    }
+
+    private static let desiredStateKey = "foundryx.capture.omi-desired-state"
+
+    /// The user's last ambient-capture intent. Default `.listening` on first-ever
+    /// launch (no stored value) — unchanged from today's behavior. Once the user
+    /// pauses/resumes, that choice is honored across restarts.
+    public static var omiCaptureDesiredState: OmiCaptureDesiredState {
+        get { OmiCaptureDesiredState(rawValue: UserDefaults.standard.string(forKey: desiredStateKey) ?? "") ?? .listening }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: desiredStateKey) }
     }
 }
 
