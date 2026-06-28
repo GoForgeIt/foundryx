@@ -44,6 +44,7 @@ private struct MainTabs: View {
 
     @StateObject private var device: DeviceManager
     @StateObject private var manager: CaptureManager
+    @StateObject private var sources: CaptureSourceRegistry
     @StateObject private var log: DoorLog
     // The durable, resumable chat conversation list — owned here so it persists across
     // tab switches and app foregrounding (its own Application Support JSON file).
@@ -62,12 +63,22 @@ private struct MainTabs: View {
         // Live on-device transcription preview (Feature 1). The factory builds the
         // SpeechAnalyzer transcriber on iOS 26+, falling back to SFSpeechRecognizer on
         // iOS 16–25; it's additive + ephemeral (Kiln stays authoritative).
-        _manager = StateObject(wrappedValue: CaptureManager(
+        let mgr = CaptureManager(
             target: target, log: log, source: dm,
             // The phone's own mic as a second capture source (Record button when the
             // Omi is disconnected) — flows through the identical Opus/WAL/finalize path.
             micSource: MicFrameSource(log: log),
-            liveTranscriber: LiveTranscription.defaultFactory()))
+            liveTranscriber: LiveTranscription.defaultFactory())
+        _manager = StateObject(wrappedValue: mgr)
+        // The extensible capture-source registry (track 20260628T1702): per-source
+        // toggles + add-source (BT mic / Apple Watch). Its single ACTIVE source is
+        // pushed onto the existing capture lifecycle via `selectCaptureSource`, so the
+        // single-stream WAL path is unchanged.
+        let reg = CaptureSourceRegistry(phoneMicAvailable: mgr.phoneMicAvailable)
+        reg.onActiveSourceChanged = { [weak mgr] kind in
+            mgr?.selectCaptureSource(kind)
+        }
+        _sources = StateObject(wrappedValue: reg)
     }
 
     var body: some View {
@@ -87,8 +98,8 @@ private struct MainTabs: View {
             .tabItem { Label("Capture", systemImage: "waveform") }
 
             NavigationStack {
-                DeviceScreen(device: device, manager: manager)
-                    .navigationTitle("Omi Device")
+                DeviceScreen(device: device, manager: manager, sources: sources)
+                    .navigationTitle("Device")
                     .toolbar { Button("Account") { showingAccount = true } }
             }
             .tabItem { Label("Device", systemImage: "antenna.radiowaves.left.and.right") }
