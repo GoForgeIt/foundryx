@@ -231,23 +231,42 @@ public enum SegmentEvent: Equatable, Sendable {
 /// after a close emits `.opened`. Pure + clock-injectable so it's deterministically
 /// testable without sleeping out a real 2-minute gap.
 public final class SilenceSegmenter: @unchecked Sendable {
-    /// Quiet span (seconds) that ends a conversation. User-configurable (default ~2m).
+    /// Omi's conversation boundary is a single silence-gap timeout of 120s (clamped
+    /// [120s, 4h]); there is NO speaker-change or max-duration boundary. We adopt it
+    /// (`foundryx-hearth/research/20260628_omi_segmentation_learnings.md`). Tunable.
+    public static let defaultSilenceGap: TimeInterval = 120
+    /// Minimum VOICED frames a conversation must accumulate before a silence gap will
+    /// CLOSE it into its own conversation. Below this the gap is ignored and the
+    /// conversation stays open to ABSORB the next utterance — so a 1–2 word noise burst
+    /// merges forward (Omi's adjacent-fragment merge) instead of spawning a tiny card.
+    /// ~100 frames ≈ 2 s of real voice at the Omi's ~50 frames/s. Tunable.
+    public static let defaultMinVoicedFramesToClose = 100
+
+    /// Quiet span (seconds) that ends a conversation. User-configurable (default 120s).
     public var silenceGap: TimeInterval
     /// Levels below this count as silence.
     public var silenceThreshold: Float
+    /// Min voiced frames before a gap may close the conversation (else: merge forward).
+    public var minVoicedFramesToClose: Int
 
     private enum State { case idle, open }
     private var state: State = .idle
     private var lastVoice: TimeInterval?
+    /// Voiced frames observed since the CURRENT conversation opened. Drives the
+    /// merge-forward gate so a too-short burst never stands alone as its own capture.
+    private var voicedFrames = 0
 
     // silenceThreshold is on the OpusLevelMeter perceptual 0…1 scale: a -55…-15 dBFS
     // window where decoded silence/DTX → 0 and conversational speech (≈ -40…-15 dBFS)
     // reads ≈ 0.37…1.0. 0.06 sits just above the silence floor so genuine voice opens
     // a conversation while the quiet background between utterances stays below it (the
     // silenceGap timer is what actually closes a conversation, not momentary dips).
-    public init(silenceGap: TimeInterval = 120, silenceThreshold: Float = 0.06) {
+    public init(silenceGap: TimeInterval = SilenceSegmenter.defaultSilenceGap,
+                silenceThreshold: Float = 0.06,
+                minVoicedFramesToClose: Int = SilenceSegmenter.defaultMinVoicedFramesToClose) {
         self.silenceGap = silenceGap
         self.silenceThreshold = silenceThreshold
+        self.minVoicedFramesToClose = minVoicedFramesToClose
     }
 
     /// Feed one frame's `level` observed at time `t` (seconds, monotonic). Returns a
@@ -255,19 +274,32 @@ public final class SilenceSegmenter: @unchecked Sendable {
     public func observe(level: Float, at t: TimeInterval) -> SegmentEvent? {
         if level >= silenceThreshold {            // voice
             lastVoice = t
-            if state == .idle { state = .open; return .opened }
+            if state == .idle { state = .open; voicedFrames = 1; return .opened }
+            voicedFrames += 1
             return nil
         }
-        // silence: close only if we were mid-conversation and the gap is exceeded
-        if state == .open, let lv = lastVoice, (t - lv) >= silenceGap {
-            state = .idle
-            return .closed
-        }
-        return nil
+        // silence: a gap may close the conversation (gated on the same wall-clock +
+        // min-content rule the watchdog timer uses).
+        return checkSilence(at: t)
+    }
+
+    /// Wall-clock silence boundary check, INDEPENDENT of frame arrival. The Omi BLE
+    /// stream stops delivering frames during silence (DTX / device idle), so `observe`
+    /// is never called during a real gap and the boundary could never be detected from
+    /// frames alone — this is the root cause of captures swallowing many conversations.
+    /// A periodic watchdog tick (and the silence branch of `observe`) call this on the
+    /// elapsed quiet since the last voice. Closes ONLY a conversation that has enough
+    /// voiced content to stand alone; a too-short burst is left open (merge forward).
+    public func checkSilence(at t: TimeInterval) -> SegmentEvent? {
+        guard state == .open, let lv = lastVoice, (t - lv) >= silenceGap else { return nil }
+        guard voicedFrames >= minVoicedFramesToClose else { return nil }  // too short → merge fwd
+        state = .idle
+        voicedFrames = 0
+        return .closed
     }
 
     /// Back to "no conversation open" (fresh stream / device reconnect).
-    public func reset() { state = .idle; lastVoice = nil }
+    public func reset() { state = .idle; lastVoice = nil; voicedFrames = 0 }
 
     /// Bump the voice baseline without changing open/closed state — used after a
     /// deliberate pause so the paused interval isn't mistaken for a silence gap.

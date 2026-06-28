@@ -78,7 +78,9 @@ final class ConversationCardTests: XCTestCase {
         src.onState?(.streaming)
         try await waitUntil { mgr.active != nil }
         let firstCapture = try XCTUnwrap(mgr.active).captureId
-        for _ in 0..<60 { src.onFrame?(loudPacket) }
+        // ≥ the min-voiced gate so the silence gap closes this into its own conversation
+        // (a too-short burst would merge forward instead — track 20260628T1654).
+        for _ in 0..<(SilenceSegmenter.defaultMinVoicedFramesToClose + 20) { src.onFrame?(loudPacket) }
         try XCTUnwrap(mgr.active).flushAndWait()
         src.onFrame?(quietPacket)                       // silence closes the conversation
         try await waitUntil { mgr.active?.captureId != firstCapture }

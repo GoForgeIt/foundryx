@@ -74,6 +74,16 @@ final class FrameRouter: @unchecked Sendable {
         lock.unlock()
     }
     func resetSegmenter() { lock.lock(); segmenter.reset(); lock.unlock() }
+    /// Wall-clock silence boundary check for the manager's segmentation watchdog,
+    /// independent of frame arrival. Returns `.closed` when the open conversation has
+    /// been quiet past the gap AND has enough voiced content to stand alone; nil when
+    /// paused or no boundary. This is what segments the Omi ambient stream when the
+    /// source stops delivering frames during silence (the frame-driven path can't).
+    func tickSilence() -> SegmentEvent? {
+        lock.lock(); defer { lock.unlock() }
+        if paused { return nil }
+        return segmenter.checkSilence(at: clock())
+    }
     /// Recreate the Opus decoder so a new capture stream starts clean.
     func resetLevelMeter() { lock.lock(); levelMeter.reset(); lock.unlock() }
     /// When true, the source feeds live-STT PCM directly (mic) → skip the decode tap.
@@ -155,9 +165,22 @@ public final class CaptureManager: ObservableObject {
     /// streaming) — useless empty cards; keep ones with real audio, still-streaming, or a
     /// pruned-to-transcript tombstone. Order newest-first by the durable conversation start.
     private func rebuildVisibleCaptures() {
-        visibleCaptures = captures
+        visibleCaptures = CaptureManager.deduplicatedByCaptureId(captures)
             .filter { self.isBrowsable($0) }
             .sorted { self.startTime(of: $0) > self.startTime(of: $1) }
+    }
+
+    /// Collapse any duplicate capture-ids, keeping the FIRST occurrence. The door keys
+    /// transcript `/content` by exact `externalId == capture_id`, so the ONLY way one
+    /// transcript can appear under two list rows is two rows sharing a capture-id — this
+    /// enforces the "one row per capture" invariant the list renders by (`id: \.captureId`),
+    /// guaranteeing no duplicate entries regardless of how a dup id entered the array.
+    public nonisolated static func deduplicatedByCaptureId(_ wals: [CaptureWAL]) -> [CaptureWAL] {
+        var seen = Set<String>()
+        var out: [CaptureWAL] = []
+        out.reserveCapacity(wals.count)
+        for w in wals where seen.insert(w.captureId).inserted { out.append(w) }
+        return out
     }
 
     /// A conversation belongs in the all-time list when it has real audio / is
@@ -167,11 +190,40 @@ public final class CaptureManager: ObservableObject {
     /// audio AND its transcript text have been pruned. Empty (0-segment) captures with
     /// no tombstone are still hidden (useless cards).
     private func isBrowsable(_ wal: CaptureWAL) -> Bool {
-        if CaptureManager.isWorthShowing(wal.status) { return true }
+        if wal.status.streaming { return true }   // the active capture always shows
         let id = wal.captureId
+        // If we hold judge-able transcript text locally, HIDE empty / near-silent /
+        // filler captures — they pollute the timeline with useless noise cards
+        // (track 20260628T1654; Omi empty-conversation gates). Data is kept, not shown.
+        if let text = bestLocalTranscript(id) {
+            return ConversationContentFilter.isMeaningful(
+                transcript: text, durationSeconds: conversationDurationSeconds(id))
+        }
+        // No transcript text yet (still processing): keep the prior visibility rule —
+        // show real-audio / tombstoned captures, hide 0-segment empties.
+        if CaptureManager.isWorthShowing(wal.status) { return true }
         return hasCachedTranscript(id)
             || ConversationCardStore.exists(captureId: id, baseDir: baseDir)
             || TranscriptCacheStore.isConfirmedInLore(captureId: id, baseDir: baseDir)
+    }
+
+    /// The best transcript text we hold locally for the empty/filler filter: the cached
+    /// Kiln transcript, else the on-device provisional body. nil when we have neither
+    /// (still processing) — the caller then falls back to audio-presence visibility.
+    private func bestLocalTranscript(_ captureId: String) -> String? {
+        if let c = TranscriptCacheStore.load(captureId: captureId, baseDir: baseDir),
+           !c.transcript.isEmpty { return c.transcript }
+        if let card = ConversationCardStore.load(captureId: captureId, baseDir: baseDir),
+           let body = card.provisionalTranscript, !body.isEmpty { return body }
+        return nil
+    }
+
+    /// The conversation's duration (seconds) from its durable meta, or nil when not yet
+    /// finalized — drives Omi's "higher bar for short clips" empty filter.
+    private func conversationDurationSeconds(_ captureId: String) -> TimeInterval? {
+        guard let dur = ConversationMetaStore.load(captureId: captureId, baseDir: baseDir)?.durationSeconds
+        else { return nil }
+        return TimeInterval(dur)
     }
 
     /// A capture's durable conversation REAL START (unix seconds) for date grouping +
@@ -387,9 +439,11 @@ public final class CaptureManager: ObservableObject {
         }
         #endif
         loadExisting()
+        reconcileOrphanedCaptures()  // give crash-orphaned captures real bounds + finalize them
         pruneOldTranscripts()  // ~14d transcript-text sweep (keeps name/description metadata)
         pruneOldAudio()        // ~30d audio sweep (keeps transcripts, prunes safe-in-Lore audio)
         startDrainTimer()
+        startSegmentTimer()    // wall-clock silence + runaway force-split watchdog
     }
 
     /// The durable conversation metadata (start/end/location) for a capture, for
@@ -549,7 +603,97 @@ public final class CaptureManager: ObservableObject {
             guard active != nil else { return }
             endSession()
             beginSession()
+            router.resetSegmenter()   // fresh boundary state for the new conversation
             log?.info("capture: silence gap (\(Int(silenceGapSeconds))s) → new conversation")
+        }
+    }
+
+    // MARK: segmentation watchdog (wall-clock silence + runaway force-split)
+
+    /// Hard backstops on a single conversation. Omi has NO max-duration boundary (the
+    /// 120s silence gap is THE rule); these only catch a runaway with truly continuous
+    /// audio so nothing accumulates for hours/days. 4h matches Omi's silence-gap clamp
+    /// ceiling. Tunable. (`foundryx-hearth/research/20260628_omi_segmentation_learnings.md`.)
+    public nonisolated static let maxConversationSeconds: TimeInterval = 4 * 60 * 60
+    /// ~4h of audio at the WAL's ~1 segment/s — a segment-count backstop in case the
+    /// clock is unreliable (backgrounded). Tunable.
+    public nonisolated static let maxConversationSegments = 15_000
+
+    private var segmentTimer: Timer?
+
+    /// Always-on watchdog: closes a conversation after a real silence gap EVEN when the
+    /// source has stopped delivering frames (the Omi BLE stream goes quiet during
+    /// silence, so the frame-driven segmenter never sees the gap — the root cause of one
+    /// capture swallowing many conversations), and force-splits a runaway that has blown
+    /// past the hard duration/segment backstop. Runs regardless of which screen is
+    /// visible (unlike the meter), so ambient capture is always bounded.
+    private func startSegmentTimer() {
+        segmentTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.tickSegmentation() }
+        }
+    }
+
+    private func tickSegmentation() {
+        guard let wal = active, !isPaused else { return }
+        // 1. Wall-clock silence boundary (fires when no frames arrive during quiet).
+        if let event = router.tickSilence() {
+            handleSegment(event)
+            return
+        }
+        // 2. Hard backstop: force-split a runaway conversation (duration/segment cap).
+        if CaptureManager.shouldForceSplit(startedAt: startTime(of: wal),
+                                           totalSegments: wal.status.totalSegments,
+                                           now: Date().timeIntervalSince1970) {
+            forceSplit()
+        }
+    }
+
+    /// Pure force-split decision: a conversation that has run past the hard duration OR
+    /// segment backstop must be split so nothing accumulates indefinitely. Tested.
+    public nonisolated static func shouldForceSplit(startedAt: TimeInterval,
+                                                    totalSegments: Int,
+                                                    now: TimeInterval) -> Bool {
+        if totalSegments >= maxConversationSegments { return true }
+        return (now - startedAt) >= maxConversationSeconds
+    }
+
+    /// Finalize the runaway conversation (clean bounds via endSession → recordEnd) and
+    /// open a fresh one. The forced boundary is NOT gated by the min-content rule — a
+    /// runaway by definition has plenty of content.
+    private func forceSplit() {
+        endSession()
+        beginSession()
+        router.resetSegmenter()
+        log?.info("capture: hard cap reached → forced new conversation (max duration/segments)")
+    }
+
+    // MARK: orphan reconcile (crash-orphaned captures get bounds + finalize on launch)
+
+    /// A capture that was active when the app was killed never ran `endSession`, so it
+    /// has no `ended_at` and was never finalized → it shows as un-bounded and never
+    /// reaches Lore. On launch, give every such orphan real bounds (end = its newest
+    /// segment time) and mark it pending-finalize so the drain ships it. Conservative:
+    /// only captures with real audio, a recorded start, NO recorded end, not already
+    /// pending-finalize, and not confirmed in Lore. (Forward-only: this bounds + ingests
+    /// an already-merged capture; it cannot un-merge one.)
+    private func reconcileOrphanedCaptures() {
+        for wal in captures where wal !== active {
+            let id = wal.captureId
+            guard wal.status.totalSegments > 0 else { continue }
+            guard let meta = ConversationMetaStore.load(captureId: id, baseDir: baseDir),
+                  meta.startedAt > 0, meta.endedAt == nil else { continue }
+            guard !isPendingFinalize(id),
+                  !TranscriptCacheStore.isConfirmedInLore(captureId: id, baseDir: baseDir) else { continue }
+            // End at the newest segment's wall-clock time (real bounds), else now.
+            let endSecs: UInt64
+            if let age = newestSegmentAge(id) {
+                endSecs = UInt64(max(TimeInterval(meta.startedAt), Date().timeIntervalSince1970 - age))
+            } else {
+                endSecs = nowUnixSecs()
+            }
+            ConversationMetaStore.recordEnd(captureId: id, baseDir: baseDir, at: endSecs, location: nil)
+            markNeedsFinalize(id)
+            log?.info("capture \(id): orphan reconciled on launch — bounded (ended_at set) + pending finalize")
         }
     }
 
@@ -691,6 +835,7 @@ public final class CaptureManager: ObservableObject {
         guard active != nil else { return }
         endSession()
         beginSession()
+        router.resetSegmenter()   // fresh boundary state for the new conversation
         log?.info("capture: manual split → new conversation")
     }
 

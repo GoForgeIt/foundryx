@@ -10,7 +10,9 @@ import FoundryXKit
 final class SilenceSegmenterTests: XCTestCase {
 
     func testLoudSilenceLoudClosesThenOpens() {
-        let seg = SilenceSegmenter(silenceGap: 2.0, silenceThreshold: 0.5)
+        // minVoicedFramesToClose:1 isolates the GAP-timing behavior from the separate
+        // merge-forward gate (which is covered in ConversationSegmentationTests).
+        let seg = SilenceSegmenter(silenceGap: 2.0, silenceThreshold: 0.5, minVoicedFramesToClose: 1)
         var events: [SegmentEvent] = []
         func feed(_ level: Float, _ t: TimeInterval) { if let e = seg.observe(level: level, at: t) { events.append(e) } }
 
@@ -36,7 +38,7 @@ final class SilenceSegmenterTests: XCTestCase {
 
     /// A gap shorter than the threshold never segments (one continuous conversation).
     func testBriefPausesDoNotSegment() {
-        let seg = SilenceSegmenter(silenceGap: 120, silenceThreshold: 0.5)
+        let seg = SilenceSegmenter(silenceGap: 120, silenceThreshold: 0.5, minVoicedFramesToClose: 1)
         var events: [SegmentEvent] = []
         func feed(_ l: Float, _ t: TimeInterval) { if let e = seg.observe(level: l, at: t) { events.append(e) } }
         feed(0.9, 0)
@@ -50,7 +52,7 @@ final class SilenceSegmenterTests: XCTestCase {
     /// `noteActive` (used on resume) rebaselines the quiet clock so a deliberate
     /// pause isn't mistaken for a silence gap.
     func testNoteActiveRebaselinesAfterPause() {
-        let seg = SilenceSegmenter(silenceGap: 2.0, silenceThreshold: 0.5)
+        let seg = SilenceSegmenter(silenceGap: 2.0, silenceThreshold: 0.5, minVoicedFramesToClose: 1)
         XCTAssertEqual(seg.observe(level: 0.9, at: 0.0), .opened)
         // Simulate a 100s pause, then resume → rebaseline at t=100.
         seg.noteActive(at: 100.0)
