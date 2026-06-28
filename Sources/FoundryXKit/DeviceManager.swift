@@ -86,6 +86,18 @@ public enum OmiScanPresentation: Equatable, Sendable {
     }
 }
 
+/// Pure auto-connect decision, testable WITHOUT CoreBluetooth (so the "stuck on
+/// scanning, won't auto-connect" regression has real coverage). During a scan we
+/// auto-connect to a discovered peripheral ONLY when it is the device we've already
+/// paired (saved). First-time pairing stays an explicit tap so we never silently grab
+/// a stranger's nearby Omi.
+public enum OmiAutoConnect {
+    public static func shouldAutoConnect(discoveredId: UUID, savedId: UUID?) -> Bool {
+        guard let savedId else { return false }
+        return discoveredId == savedId
+    }
+}
+
 /// A discovered, connectable Omi.
 public struct DiscoveredDevice: Identifiable, Equatable, Sendable {
     public let id: UUID        // CBPeripheral.identifier
@@ -121,6 +133,11 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     private var peripheral: CBPeripheral?
     private let headerBytes = 3   // Omi packet header [seq:2][index:1]
     private var audioNotifs = 0   // diagnostics: raw audio-char notifications seen (bleQueue only)
+    /// When false the link is USER-SUSPENDED (the Omi was toggled OFF on the device
+    /// page): we drop it AND stop auto-reconnecting until re-enabled, so a disabled Omi
+    /// truly leaves the capture surface instead of silently reconnecting itself. The
+    /// saved pairing is kept so re-enabling reconnects hands-free.
+    private var autoConnect = true
 
     private static let savedKey = "foundryx.omi.peripheral-id"
     private static let savedNameKey = "foundryx.omi.peripheral-name"
@@ -133,14 +150,44 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     }
 
     /// AudioFrameSource.start() = power on + begin the connect flow (auto-reconnect
-    /// the saved device, else scan).
+    /// the saved device, else scan). RE-ENTRANT: when the central is already powered on
+    /// and we're not currently linked, this RE-INITIATES the connect flow. Previously
+    /// start() only created the central and otherwise no-oped, so re-selecting /
+    /// re-enabling the Omi after a stop never reconnected (the user had to manually
+    /// scan) — a primary "zero frames / stuck" cause.
     public func start() {
-        if central == nil { central = CBCentralManager(delegate: self, queue: bleQueue) }
-        // The rest happens once the central reports .poweredOn.
+        autoConnect = true
+        guard let c = central else {
+            central = CBCentralManager(delegate: self, queue: bleQueue)
+            return   // the connect flow resumes once the central reports .poweredOn
+        }
+        guard c.state == .poweredOn else { return }
+        switch connectionState {
+        case .connected, .connecting: break          // already linked — nothing to do
+        default: autoReconnect()                      // re-initiate (reconnect saved, else scan)
+        }
     }
 
     /// AudioFrameSource.stop() = drop the link (capture ends; we keep the saved id).
     public func stop() { disconnect() }
+
+    /// Enable/disable the Omi as a capture source (device-page toggle). Disabling drops
+    /// the link AND stops auto-reconnect, so a toggled-off Omi leaves the capture
+    /// surface; enabling resumes the hands-free connect flow. The saved pairing persists.
+    public func setEnabled(_ on: Bool) { if on { start() } else { suspend() } }
+
+    /// User-suspend: drop the link, keep the saved device, and DON'T auto-reconnect
+    /// (until `start()`/`setEnabled(true)`). Distinct from `disconnect()`, which keeps
+    /// auto-reconnect armed for a transient drop.
+    public func suspend() {
+        autoConnect = false
+        central?.stopScan()
+        if let p = peripheral { central?.cancelPeripheralConnection(p) }
+        peripheral = nil
+        setDiscovered([])
+        setState(.idle)
+        onState?(.stopped)
+    }
 
     // MARK: connect UI API
 
@@ -160,6 +207,7 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     }
 
     public func connect(_ device: DiscoveredDevice) {
+        autoConnect = true
         guard let c = central,
               let p = c.retrievePeripherals(withIdentifiers: [device.id]).first
                   ?? discoveredPeripherals[device.id] else { return }
@@ -173,12 +221,15 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     /// Manual reconnect (device page, req 7): re-run the saved-device connect, or
     /// fall back to a scan when there's nothing saved / it's out of range.
     public func reconnect() {
+        autoConnect = true
         guard let c = central, c.state == .poweredOn else { start(); return }
         autoReconnect()
     }
 
     /// Drop the current link AND forget the saved device (user-initiated).
     public func forget() {
+        autoConnect = false
+        central?.stopScan()
         if let p = peripheral { central?.cancelPeripheralConnection(p) }
         peripheral = nil
         UserDefaults.standard.removeObject(forKey: Self.savedKey)
@@ -252,7 +303,7 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
 extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
     public func centralManagerDidUpdateState(_ c: CBCentralManager) {
         switch c.state {
-        case .poweredOn: autoReconnect()
+        case .poweredOn: if autoConnect { autoReconnect() }
         case .unauthorized, .poweredOff, .unsupported:
             setState(.poweredOff); onState?(.failed("bluetooth unavailable"))
         default: break
@@ -268,7 +319,24 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
             list.append(dev)
             self.discovered = list.sorted { $0.rssi > $1.rssi }
         }
+        // Hands-free reconnect: when a scan turns up the device we've already paired,
+        // connect to it AUTOMATICALLY instead of waiting for a manual tap. This is the
+        // "stuck on scanning — sees the Omi but won't auto-connect" fix: autoReconnect's
+        // retrievePeripherals() can come up empty (the OS handle isn't cached yet), so it
+        // falls back to a scan that previously just listed the device and waited. First-
+        // time pairing stays an explicit tap (no saved id ⇒ shouldAutoConnect == false).
+        let savedId = UserDefaults.standard.string(forKey: Self.savedKey).flatMap(UUID.init(uuidString:))
+        if autoConnect, OmiAutoConnect.shouldAutoConnect(discoveredId: p.identifier, savedId: savedId) {
+            log?.info("Omi: saved device in range during scan — auto-connecting \(p.name ?? "?")")
+            c.stopScan()
+            bind(p)
+            markConnectingName(p.name ?? "Omi")
+            c.connect(p, options: nil)
+        }
     }
+
+    /// Set the connecting state for a name (used by the scan auto-connect path).
+    private func markConnectingName(_ name: String) { setState(.connecting(name)) }
 
     public func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) {
         log?.info("Omi: connected \(p.name ?? "?") — discovering audio service")
@@ -280,9 +348,12 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     public func centralManager(_ c: CBCentralManager, didDisconnectPeripheral p: CBPeripheral, error: Error?) {
+        onState?(.stopped)            // ends the ambient capture session
+        // A USER-suspended link (Omi toggled off) must stay down — don't fight the
+        // toggle with an auto-reconnect. A transient drop (in/out of range) re-arms it.
+        guard autoConnect else { setState(.idle); return }
         log?.warn("Omi: disconnected (\(error?.localizedDescription ?? "clean")) — auto-reconnecting")
         setState(.disconnected)
-        onState?(.stopped)            // ends the ambient capture session
         autoReconnect()               // come back when it's in range
     }
 
@@ -342,6 +413,8 @@ public final class DeviceManager: ObservableObject, AudioFrameSource, @unchecked
     public init(log: DoorLog? = nil) { _ = log }
     public func start() { onState?(.failed("CoreBluetooth unavailable")) }
     public func stop() { onState?(.stopped) }
+    public func setEnabled(_ on: Bool) {}
+    public func suspend() { onState?(.stopped) }
     public func startScan() {}
     public func stopScan() {}
     public func connect(_ device: DiscoveredDevice) {}

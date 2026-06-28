@@ -291,6 +291,13 @@ public final class CaptureSourceRegistry: ObservableObject {
     /// `@MainActor` since the registry (and `CaptureManager`) live on the main actor.
     public var onActiveSourceChanged: (@MainActor (CaptureSourceKind) -> Void)?
 
+    /// Fired whenever a source's ENABLED flag flips (device-page toggle). Wired by the
+    /// app to the source's lifecycle owner — e.g. the Omi's `DeviceManager.setEnabled`,
+    /// so toggling the Omi off truly drops + un-arms its BLE link (and toggling it on
+    /// resumes the connect flow), independent of the active-capture-kind switch.
+    /// `@MainActor` since the registry + DeviceManager live on the main actor.
+    public var onSourceEnabledChanged: (@MainActor (CaptureSourceCategory, Bool) -> Void)?
+
     public init(store: CaptureSourceStore = UserDefaultsCaptureSourceStore(),
                 discovery: AudioInputDiscovering? = nil,
                 phoneMicAvailable: Bool = true) {
@@ -357,10 +364,28 @@ public final class CaptureSourceRegistry: ObservableObject {
         guard sources[idx].canToggle else { return }
         guard sources[idx].enabled != on else { return }
         sources[idx].enabled = on
+        let category = sources[idx].category
         var overrides = store.enabledOverrides
         overrides[id] = on
         store.enabledOverrides = overrides
+        // Drive the source's lifecycle owner FIRST (e.g. suspend/resume the Omi link)
+        // so a toggled-off source is actually torn down, THEN recompute which enabled+
+        // ready source captures.
+        onSourceEnabledChanged?(category, on)
         recomputeActive(notify: true)
+    }
+
+    /// The sources VISIBLE as usable capture options on the capture surface: the ones the
+    /// user has left ENABLED. A toggled-off source is removed from this set (the capture
+    /// page must not keep offering / showing a source the user switched off).
+    public var captureVisibleSources: [CaptureSourceDescriptor] {
+        sources.filter { $0.enabled }
+    }
+
+    /// Whether a source is currently capture-visible (enabled) — the capture page uses
+    /// this to hide a toggled-off source.
+    public func isCaptureVisible(_ id: String) -> Bool {
+        sources.first(where: { $0.id == id })?.enabled ?? false
     }
 
     // MARK: live connection updates

@@ -32,11 +32,32 @@ public final class DoorLog: ObservableObject, @unchecked Sendable {
     private var sink: URL?
     private var shipped = 0
     private var flushScheduled = false
+    private var heartbeat: Timer?
+
+    /// Periodic backstop flush cadence (seconds). The debounced per-entry flush ships a
+    /// burst quickly; this guarantees a steady, low-rate trickle reaches the relay even
+    /// during quiet stretches (so `/diag/log` is never silent while the app is live) and
+    /// re-tries entries a dropped fire-and-forget POST never delivered. Tunable.
+    public nonisolated static let flushInterval: TimeInterval = 15
 
     public init(cap: Int = 500) { self.cap = cap }
 
-    /// Point the log at the relay diag endpoint (e.g. `…:8788/diag/log`).
-    public func setRemoteSink(_ url: URL?) { sink = url }
+    /// Point the log at the relay diag endpoint (e.g. `…:8788/diag/log`) and start the
+    /// periodic backstop flush. Emits a one-line transport marker so the desktop/relay
+    /// can confirm the phone→relay diag path is live (grep `diag transport online`).
+    public func setRemoteSink(_ url: URL?) {
+        sink = url
+        heartbeat?.invalidate(); heartbeat = nil
+        guard url != nil else { return }
+        info("diag transport online — shipping phone log to \(url!.absoluteString)")
+        let t = Timer(timeInterval: Self.flushInterval, repeats: true) { [weak self] _ in
+            // Flush on the main thread (where shipped/entries are mutated).
+            if Thread.isMainThread { self?.flush() }
+            else { DispatchQueue.main.async { self?.flush() } }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        heartbeat = t
+    }
 
     /// Append an entry. Safe from any thread — hops to main for the @Published write.
     public func log(_ level: Level, _ text: String) {

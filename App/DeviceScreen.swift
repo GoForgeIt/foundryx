@@ -27,7 +27,9 @@ struct DeviceScreen: View {
             .padding(GrainSpacing.x4)
         }
         .grainBackground()
-        .onAppear { device.start() }   // ensure the central is powered + reconnecting
+        // Power the central + reconnect ONLY when the Omi is still an enabled source;
+        // a toggled-off Omi must stay off (don't silently re-arm it on appear).
+        .onAppear { if sources.isEnabled(CaptureSourceDescriptor.omiId) { device.start() } }
         .onChange(of: device.connectionState) { _ in syncOmiConnection() }
         .sheet(isPresented: $showingAddSource) {
             AddSourceSheet(sources: sources)

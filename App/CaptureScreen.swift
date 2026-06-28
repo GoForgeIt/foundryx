@@ -26,8 +26,15 @@ struct CaptureScreen: View {
     // link + one capture pipeline.
     @ObservedObject var device: DeviceManager
     @ObservedObject var manager: CaptureManager
+    /// The capture-source registry — so a source toggled OFF on the device page is
+    /// removed from this surface (and not auto-started here).
+    @ObservedObject var sources: CaptureSourceRegistry
     /// The resolved door target — lets a tapped card open its transcript (Phase B).
     let target: DoorTarget
+
+    /// Whether the Omi is still an enabled capture source (device-page toggle). When off,
+    /// the capture page neither auto-starts nor shows the Omi scan affordance.
+    private var omiEnabled: Bool { sources.isEnabled(CaptureSourceDescriptor.omiId) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -51,7 +58,8 @@ struct CaptureScreen: View {
             }
         }
         .grainBackground()
-        .onAppear { manager.startSource(); manager.startMeter() }  // power on + drive the meter
+        // Power on the Omi only when it's still an enabled source; always drive the meter.
+        .onAppear { if omiEnabled { manager.startSource() }; manager.startMeter() }
         .onDisappear { manager.stopMeter() }
     }
 
@@ -152,7 +160,7 @@ struct CaptureScreen: View {
     /// Whether the live capture surface (meter + transcript) should show: the Omi is
     /// connected, or the phone mic is actively recording.
     private var isShowingCapture: Bool {
-        if case .connected = device.connectionState { return true }
+        if omiEnabled, case .connected = device.connectionState { return true }
         return manager.isRecordingMic
     }
 
@@ -171,12 +179,15 @@ struct CaptureScreen: View {
                         .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                 }
                 Spacer()
-                // The Omi as a small circular icon that expands to a "Scanning…" pill.
-                OmiScanButton(presentation: OmiScanPresentation.from(device.connectionState)) { action in
-                    switch action {
-                    case .startScan: device.startScan()
-                    case .stopScan: device.stopScan()
-                    case .none: break
+                // The Omi as a small circular icon that expands to a "Scanning…" pill —
+                // shown only while the Omi is an enabled source (toggled off ⇒ removed).
+                if omiEnabled {
+                    OmiScanButton(presentation: OmiScanPresentation.from(device.connectionState)) { action in
+                        switch action {
+                        case .startScan: device.startScan()
+                        case .stopScan: device.stopScan()
+                        case .none: break
+                        }
                     }
                 }
                 // The phone-mic record sphere (build #65), inline beside the Omi icon.
@@ -196,6 +207,11 @@ struct CaptureScreen: View {
     /// short reflection of the Omi connection state, else the inline how-to.
     private var captureSubtitle: String {
         if manager.isRecordingMic { return "Recording — tap to stop" }
+        if !omiEnabled {
+            return manager.phoneMicAvailable
+                ? "Tap the mic to record · turn the Omi on in Device"
+                : "Turn the Omi on in Device to capture"
+        }
         switch device.connectionState {
         case .scanning: return "Scanning for your Omi…"
         case .connecting(let n): return "Connecting to \(n)…"

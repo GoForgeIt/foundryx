@@ -82,8 +82,20 @@ private struct MainTabs: View {
         // pushed onto the existing capture lifecycle via `selectCaptureSource`, so the
         // single-stream WAL path is unchanged.
         let reg = CaptureSourceRegistry(phoneMicAvailable: mgr.phoneMicAvailable)
+        // The registry drives the AMBIENT (Omi) capture kind only. The phone mic is a
+        // MANUAL record source (the Record button) — a TRANSIENT Omi disconnect must NOT
+        // auto-switch ambient capture to the phone mic NOR tear down the Omi's
+        // auto-reconnect (selectCaptureSource(.phoneMic) calls source.stop(), which would
+        // cancel the in-flight reconnect → the Omi never comes back = zero frames). So
+        // only an Omi activation flows to selectCaptureSource; the Omi's on/off lifecycle
+        // is owned by the enabled toggle below.
         reg.onActiveSourceChanged = { [weak mgr] kind in
-            mgr?.selectCaptureSource(kind)
+            if kind == .omi { mgr?.selectCaptureSource(.omi) }
+        }
+        // The per-source ENABLED toggle owns the Omi's BLE link: off ⇒ drop + un-arm
+        // auto-reconnect (truly leaves the capture surface); on ⇒ resume the connect flow.
+        reg.onSourceEnabledChanged = { [weak dm] category, on in
+            if category == .omi { dm?.setEnabled(on) }
         }
         _sources = StateObject(wrappedValue: reg)
     }
@@ -98,7 +110,7 @@ private struct MainTabs: View {
             .tabItem { Label("Chat", systemImage: "message") }
 
             NavigationStack {
-                CaptureScreen(device: device, manager: manager, target: target)
+                CaptureScreen(device: device, manager: manager, sources: sources, target: target)
                     .navigationTitle("Capture")
                     .toolbar { Button("Account") { showingAccount = true } }
             }
@@ -111,5 +123,18 @@ private struct MainTabs: View {
             }
             .tabItem { Label("Device", systemImage: "antenna.radiowaves.left.and.right") }
         }
+        // Keep the registry's Omi liveness in step with the BLE link from a SINGLE,
+        // always-mounted place (not just the Device tab's onChange, which doesn't fire
+        // unless that tab is on screen). This is what makes the active-source policy
+        // correct — so toggling the Omi off actually hands off + drops it, and a transient
+        // reconnect is reflected — regardless of which tab is visible.
+        .onChange(of: device.connectionState) { _ in syncOmiConnection() }
+        .onAppear { syncOmiConnection() }
+    }
+
+    /// Mirror the live BLE connection state onto the registry's Omi row.
+    private func syncOmiConnection() {
+        if case .connected = device.connectionState { sources.setOmiConnected(true) }
+        else { sources.setOmiConnected(false) }
     }
 }
