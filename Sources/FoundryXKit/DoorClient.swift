@@ -35,24 +35,32 @@ public struct DoorTarget: Sendable {
 }
 
 /// One outbound chat turn. `sensitivity` defaults to "public" server-side when nil.
+/// `requestedTarget` is the OPTIONAL per-turn model selection — a Kiln *target_id*
+/// (e.g. "local-qwen3-8b", "claude-max"). nil ⇒ the field is omitted ⇒ Kiln's router
+/// decides (the "Auto" default). The door forwards it to kiln-session as
+/// `requested_target` on `/sessions/:id/messages`.
 public struct ChatRequest: Encodable, Sendable {
     public let message: String
     public let platform: String
     public let chatId: String
     public let org: String
     public let sensitivity: String?
+    public let requestedTarget: String?
 
-    public init(message: String, platform: String, chatId: String, org: String, sensitivity: String? = nil) {
+    public init(message: String, platform: String, chatId: String, org: String,
+                sensitivity: String? = nil, requestedTarget: String? = nil) {
         self.message = message
         self.platform = platform
         self.chatId = chatId
         self.org = org
         self.sensitivity = sensitivity
+        self.requestedTarget = requestedTarget
     }
 
     enum CodingKeys: String, CodingKey {
         case message, platform, org, sensitivity
         case chatId = "chat_id"
+        case requestedTarget = "requested_target"
     }
 }
 
@@ -109,6 +117,34 @@ public enum DoorError: Error, Equatable, Sendable {
     case unauthorized          // 401 — rejected before any session/inference
     case http(Int)
     case transport(String)
+}
+
+/// One selectable model for the chat header picker — a Kiln *target_id* (`id`) plus a
+/// friendly `label`. The door enumerates these from the operator's `~/.kiln/config.json`
+/// targets (`GET /foundryx/models`). Picking one sets `ChatRequest.requestedTarget = id`.
+public struct ModelOption: Decodable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let label: String
+
+    public init(id: String, label: String) {
+        self.id = id
+        self.label = label
+    }
+
+    enum CodingKeys: String, CodingKey { case id, label }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        // Label is optional in the wire shape — fall back to the id.
+        label = (try c.decodeIfPresent(String.self, forKey: .label)) ?? id
+    }
+}
+
+/// The door's `GET /foundryx/models` reply: the operator's configured Kiln targets.
+public struct ModelsResponse: Decodable, Sendable, Equatable {
+    public let models: [ModelOption]
+    public init(models: [ModelOption]) { self.models = models }
 }
 
 /// The OPTIONAL finalize body the phone POSTs with `/foundryx/capture/{id}/finalize`,
@@ -658,5 +694,40 @@ public final class DoorClient: @unchecked Sendable {
         r.httpBody = try JSONSerialization.data(withJSONObject: payload)
         let (_, response) = try await session.data(for: r)
         if let http = response as? HTTPURLResponse, http.statusCode == 401 { throw DoorError.unauthorized }
+    }
+
+    /// Fetch the operator's configured Kiln targets for the model picker
+    /// (`GET /foundryx/models`). Relay-aware: rides the interactive tunnel (a
+    /// user-facing read) like the transcript fetch. Returns an empty list (never
+    /// throws) when the door doesn't yet expose the route (404) or has no targets —
+    /// the picker then just offers "Auto (router)".
+    public func models() async throws -> [ModelOption] {
+        if let relay = target.relay?.interactive() {
+            let resp = try await RelayHTTP.roundTrip(
+                relay: relay, bearer: target.bearer, method: "GET",
+                path: "/foundryx/models",
+                session: session, log: log, useMux: target.useMux)
+            if resp.status == 401 { throw DoorError.unauthorized }
+            if resp.status == 404 { return [] }
+            guard resp.status == 200 else { throw DoorError.http(resp.status) }
+            return (try? JSONDecoder().decode(ModelsResponse.self, from: resp.body))?.models ?? []
+        }
+        let s = target.baseURL.absoluteString
+        let base = s.hasSuffix("/") ? String(s.dropLast()) : s
+        guard let url = URL(string: "\(base)/foundryx/models") else {
+            throw DoorError.transport("bad models url")
+        }
+        var r = URLRequest(url: url)
+        r.httpMethod = "GET"
+        r.setValue("Bearer \(target.bearer)", forHTTPHeaderField: "Authorization")
+        r.timeoutInterval = 15
+        let (data, response) = try await session.data(for: r)
+        guard let http = response as? HTTPURLResponse else {
+            throw DoorError.transport("non-HTTP response")
+        }
+        if http.statusCode == 401 { throw DoorError.unauthorized }
+        if http.statusCode == 404 { return [] }
+        guard http.statusCode == 200 else { throw DoorError.http(http.statusCode) }
+        return (try? JSONDecoder().decode(ModelsResponse.self, from: data))?.models ?? []
     }
 }

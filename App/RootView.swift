@@ -45,6 +45,9 @@ private struct MainTabs: View {
     @StateObject private var device: DeviceManager
     @StateObject private var manager: CaptureManager
     @StateObject private var log: DoorLog
+    // The durable, resumable chat conversation list — owned here so it persists across
+    // tab switches and app foregrounding (its own Application Support JSON file).
+    @StateObject private var chats = ChatConversationStore(storageURL: ChatConversationStore.defaultStorageURL())
 
     init(target: DoorTarget, showingAccount: Binding<Bool>) {
         self.target = target
@@ -70,7 +73,7 @@ private struct MainTabs: View {
     var body: some View {
         TabView {
             NavigationStack {
-                ChatScreen(target: target, log: log)
+                ChatScreen(target: target, store: chats, log: log)
                     .navigationTitle("FoundryX")
                     .toolbar { Button("Account") { showingAccount = true } }
             }

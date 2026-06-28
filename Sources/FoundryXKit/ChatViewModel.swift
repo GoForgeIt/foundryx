@@ -114,6 +114,22 @@ public final class ChatViewModel: ObservableObject {
 
     public func applyAll(_ events: [DoorEvent]) { for e in events { apply(e) } }
 
+    /// Load a conversation's persisted history into the live view (used when switching
+    /// chats). Resets the in-flight turn state — we're rendering a settled conversation.
+    public func load(from stored: [ChatConversationStore.StoredMessage]) {
+        messages = stored.map { Message(role: $0.role, text: $0.text, routedVia: $0.routedVia) }
+        turnState = .idle
+        thinkingMs = 0
+        turnStartedAt = nil
+        lastTiming = nil
+    }
+
+    /// Snapshot the current rendered messages back into durable form (persisted into the
+    /// ChatConversationStore at end-of-turn).
+    public func snapshot() -> [ChatConversationStore.StoredMessage] {
+        messages.map { .init(role: $0.role, text: $0.text, routedVia: $0.routedVia) }
+    }
+
     /// The text of the in-flight / last assistant message — what the bubble renders.
     public var assistantText: String {
         messages.last(where: { $0.role == "assistant" })?.text ?? ""
