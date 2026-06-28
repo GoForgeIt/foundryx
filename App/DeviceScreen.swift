@@ -1,18 +1,24 @@
 import SwiftUI
 import Grain
 
-/// Dedicated Omi device page (req 7): the remembered device (name / short id /
-/// last-connected), live connection state, a Reconnect button for when
-/// auto-reconnect hasn't re-bound, scan + pick a different device, Forget, and the
-/// conversation-segmentation setting (the silence gap that auto-splits captures).
+/// Dedicated device / capture-source page. Two halves:
+///   1. CAPTURE SOURCES (track 20260628T1702) — an extensible list of sources, each with
+///      an independent on/off Toggle (no more mutually-exclusive segmented pick), plus a
+///      "+ Add source" affordance that discovers Bluetooth mics and offers an Apple Watch
+///      scaffold. The registry owns the model; this screen just renders it.
+///   2. The remembered Omi device (name / id / last-connected), live connection state,
+///      Reconnect / Scan / Forget, and the conversation-segmentation (silence-gap) setting.
 struct DeviceScreen: View {
     @ObservedObject var device: DeviceManager
     @ObservedObject var manager: CaptureManager
+    @ObservedObject var sources: CaptureSourceRegistry
+
+    @State private var showingAddSource = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GrainSpacing.x4) {
-                if manager.phoneMicAvailable { captureSourceCard }
+                captureSourcesCard
                 savedCard
                 actions
                 if !device.discovered.isEmpty { discoveredList }
@@ -22,27 +28,78 @@ struct DeviceScreen: View {
         }
         .grainBackground()
         .onAppear { device.start() }   // ensure the central is powered + reconnecting
+        .onChange(of: device.connectionState) { _ in syncOmiConnection() }
+        .sheet(isPresented: $showingAddSource) {
+            AddSourceSheet(sources: sources)
+        }
     }
 
-    // MARK: capture source (Omi vs phone microphone)
+    /// Keep the registry's Omi row liveness in step with the BLE connection state, so
+    /// the active-source policy (Omi only active when connected) is correct.
+    private func syncOmiConnection() {
+        if case .connected = device.connectionState { sources.setOmiConnected(true) }
+        else { sources.setOmiConnected(false) }
+    }
 
-    private var captureSourceCard: some View {
+    // MARK: capture sources (per-source toggles + add-source)
+
+    private var captureSourcesCard: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x2) {
-            Text("Capture source").grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-            Text("Choose what records your conversations. The phone microphone lets you capture without your Omi — audio flows through the same private pipeline.")
+            Text("Capture sources").grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+            Text("Turn each source on or off independently. Audio from the active source flows through the same private pipeline. One source records at a time — the connected one with the highest priority.")
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-            Picker("Capture source", selection: Binding(
-                get: { manager.captureSource },
-                set: { manager.selectCaptureSource($0) })) {
-                Text("Omi wearable").tag(CaptureSourceKind.omi)
-                Text("Phone microphone").tag(CaptureSourceKind.phoneMic)
+            VStack(spacing: 0) {
+                ForEach(sources.sources) { src in
+                    sourceRow(src)
+                    if src.id != sources.sources.last?.id {
+                        Divider().overlay(GrainColor.border)
+                    }
+                }
             }
-            .pickerStyle(.segmented)
+            .padding(.top, GrainSpacing.x1)
+            Button { sources.discoverBluetoothMics(); showingAddSource = true } label: {
+                HStack(spacing: GrainSpacing.x1) {
+                    Image(systemName: "plus.circle.fill").foregroundStyle(GrainColor.forgeBlue)
+                    Text("Add source").grainTextStyle(.body).foregroundStyle(GrainColor.forgeBlue)
+                }
+                .padding(.top, GrainSpacing.x2)
+            }
+            .buttonStyle(.plain)
         }
         .padding(GrainSpacing.x3)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).fill(GrainColor.surfaceElevated))
         .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).strokeBorder(GrainColor.border, lineWidth: 1))
+    }
+
+    private func sourceRow(_ src: CaptureSourceDescriptor) -> some View {
+        HStack(spacing: GrainSpacing.x2) {
+            Image(systemName: src.category.symbolName)
+                .foregroundStyle(src.id == sources.activeSourceId ? GrainColor.sage : GrainColor.inkTertiary)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: GrainSpacing.x1) {
+                    Text(src.displayName).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                    if src.id == sources.activeSourceId {
+                        Text("ACTIVE").grainTextStyle(.caption).foregroundStyle(GrainColor.sage)
+                    }
+                }
+                Text(connectionLabel(src)).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            }
+            Spacer()
+            Toggle("", isOn: Binding(
+                get: { src.enabled },
+                set: { sources.setEnabled(src.id, $0) }))
+                .labelsHidden()
+                .disabled(!src.canToggle)
+                .tint(GrainColor.forgeBlue)
+        }
+        .padding(.vertical, GrainSpacing.x2)
+    }
+
+    private func connectionLabel(_ src: CaptureSourceDescriptor) -> String {
+        if let detail = src.detail, !detail.isEmpty { return "\(src.connection.label) · \(detail)" }
+        return src.connection.label
     }
 
     // MARK: remembered device
@@ -101,7 +158,7 @@ struct DeviceScreen: View {
         }
     }
 
-    // MARK: conversation segmentation setting (req 9)
+    // MARK: conversation segmentation setting
 
     private var settingsCard: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x2) {
@@ -149,5 +206,91 @@ struct DeviceScreen: View {
         guard let date else { return "Last connected: never" }
         let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short
         return "Last connected: \(f.string(from: date))"
+    }
+}
+
+/// "+ Add source" sheet: lists discovered Bluetooth mics (real, via AVAudioSession) to
+/// add, plus an Apple Watch scaffold entry. Adding registers the source in the registry
+/// (with its own toggle, enabled by default) and dismisses.
+private struct AddSourceSheet: View {
+    @ObservedObject var sources: CaptureSourceRegistry
+    @Environment(\.dismiss) private var dismiss
+
+    private var watchAlreadyAdded: Bool {
+        sources.sources.contains { $0.category == .appleWatch }
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: GrainSpacing.x4) {
+                    bluetoothSection
+                    watchSection
+                }
+                .padding(GrainSpacing.x4)
+            }
+            .grainBackground()
+            .navigationTitle("Add source")
+            .toolbar { Button("Done") { dismiss() } }
+        }
+    }
+
+    private var bluetoothSection: some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+            HStack {
+                Text("Bluetooth microphones").grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                Spacer()
+                Button { sources.discoverBluetoothMics() } label: {
+                    Image(systemName: "arrow.clockwise").foregroundStyle(GrainColor.forgeBlue)
+                }
+                .buttonStyle(.plain)
+            }
+            if sources.discoveredBluetoothInputs.isEmpty {
+                Text("No new Bluetooth microphones found. Connect a Bluetooth headset or mic in iOS Settings, then refresh.")
+                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+            } else {
+                ForEach(sources.discoveredBluetoothInputs, id: \.uid) { input in
+                    Button { sources.addBluetoothMic(input); dismiss() } label: {
+                        HStack(spacing: GrainSpacing.x2) {
+                            Image(systemName: "headphones").foregroundStyle(GrainColor.forgeBlue)
+                            Text(input.name.isEmpty ? "Bluetooth microphone" : input.name)
+                                .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                            Spacer()
+                            Image(systemName: "plus.circle").foregroundStyle(GrainColor.forgeBlue)
+                        }
+                        .padding(.vertical, GrainSpacing.x2)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(GrainSpacing.x3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).fill(GrainColor.surfaceElevated))
+        .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).strokeBorder(GrainColor.border, lineWidth: 1))
+    }
+
+    private var watchSection: some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+            Text("Apple Watch").grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+            Text("Record with your Apple Watch's microphone. Coming soon — adds the source to your list so it's ready when the watch app ships.")
+                .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+            Button { sources.addAppleWatchScaffold(); dismiss() } label: {
+                HStack(spacing: GrainSpacing.x2) {
+                    Image(systemName: "applewatch").foregroundStyle(watchAlreadyAdded ? GrainColor.inkTertiary : GrainColor.forgeBlue)
+                    Text(watchAlreadyAdded ? "Apple Watch added" : "Add Apple Watch")
+                        .grainTextStyle(.body).foregroundStyle(watchAlreadyAdded ? GrainColor.textMuted : GrainColor.forgeBlue)
+                    Spacer()
+                    if !watchAlreadyAdded { Image(systemName: "plus.circle").foregroundStyle(GrainColor.forgeBlue) }
+                }
+                .padding(.vertical, GrainSpacing.x2)
+            }
+            .buttonStyle(.plain)
+            .disabled(watchAlreadyAdded)
+        }
+        .padding(GrainSpacing.x3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).fill(GrainColor.surfaceElevated))
+        .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).strokeBorder(GrainColor.border, lineWidth: 1))
     }
 }
