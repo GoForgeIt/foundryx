@@ -130,6 +130,33 @@ public final class RemoteSession: ObservableObject {
         }
     }
 
+    /// The phone's door bearer (its OIDC id_token) was rejected as EXPIRED by the door
+    /// (a 401 on a capture upload). Per the user's ask: attempt a silent refresh ONCE;
+    /// if that yields a genuinely fresh token, publish it (the door target rebuilds with
+    /// it and uploads resume); if not, drop to signed-out so the LOGIN screen is surfaced
+    /// — never keep firing requests with a known-expired token. Guarded so a burst of
+    /// 401s triggers a single refresh attempt.
+    private var reauthInFlight = false
+    public func handleAuthExpired() async {
+        guard remote != nil else { status = .unconfigured; return }
+        guard !reauthInFlight else { return }
+        reauthInFlight = true
+        defer { reauthInFlight = false }
+        note("door rejected id_token as expired — silent refresh once")
+        let fresh = await auth.currentIdToken()
+        if let fresh, fresh != idToken {
+            idToken = fresh
+            note("re-auth: obtained a fresh id_token (door target rebuilds, uploads resume)")
+            return
+        }
+        // No NEW token (refresh failed / not possible / door still rejects it) → surface
+        // the login screen so the user re-authenticates and mints a fresh id_token.
+        relay = nil
+        idToken = nil
+        status = .signedOut
+        note("re-auth: no fresh id_token → signed out (login required)")
+    }
+
     /// The door target for the resolved remote host: the relay tunnel + the
     /// id_token as bearer (the door verifies it). `nil` until connected.
     public func makeDoorTarget() -> DoorTarget? {

@@ -342,6 +342,66 @@ public final class CaptureManager: ObservableObject {
     /// capture while one is already running.
     private var finalizing: Set<String> = []
 
+    // MARK: bounded backlog drain + re-auth (anti-storm)
+
+    /// Exponential-backoff bounds for a capture whose uploads keep failing — so a
+    /// persistent failure (door down / offline) backs off instead of re-firing every
+    /// 5s drain tick (the retry storm that pegged the device). Tunable.
+    public nonisolated static let retryBaseDelay: TimeInterval = 2
+    public nonisolated static let retryMaxDelay: TimeInterval = 5 * 60        // 5-minute ceiling
+    /// At most this many distinct captures are ATTEMPTED per drain tick (the in-flight /
+    /// backlog concurrency valve) — so a multi-day backlog drains steadily, never a storm.
+    public nonisolated static let maxCapturesPerDrain = 3
+    /// A capture is ABANDONED (terminal) after this many consecutive failed drain
+    /// attempts, OR when it's a stuck old backlog item past `maxBacklogAge`, OR has an
+    /// absurd segment count — so one poisoned capture can't wedge the queue forever.
+    public nonisolated static let maxUploadAttempts = 40
+    public nonisolated static let maxBacklogAge: TimeInterval = 14 * 24 * 60 * 60   // 14 days
+    public nonisolated static let absurdSegmentCount = 50_000
+
+    /// Per-capture upload retry state (consecutive failures + earliest next attempt).
+    private struct RetryState { var failures = 0; var nextEligible: TimeInterval = 0 }
+    private var retryStates: [String: RetryState] = [:]
+
+    /// Fired when an upload is rejected as auth-expired (401). The app wires this to the
+    /// remote session so it refreshes the id_token ONCE and, failing that, surfaces the
+    /// login screen — instead of the phone retry-looping with a known-expired token.
+    public var onAuthExpired: (@MainActor () -> Void)?
+    /// True once a 401/expired-token rejection was seen — suppresses all further upload
+    /// attempts (the immediate storm-stop) until the pipeline is rebuilt with a fresh
+    /// token. Surfaced so the UI can show a "session expired" state.
+    @Published public private(set) var authExpired = false
+    private var authExpiredFired = false
+
+    /// Pure exponential-backoff-with-jitter delay for the Nth consecutive failure
+    /// (attempt ≥ 1): doubles from `retryBaseDelay`, capped at `retryMaxDelay`, then
+    /// scaled by `jitter` (default ±25%). Tested deterministically with jitter = 1.
+    public nonisolated static func retryDelay(forFailures n: Int,
+                                              jitter: Double = Double.random(in: 0.75...1.25)) -> TimeInterval {
+        guard n > 0 else { return 0 }
+        let exp = retryBaseDelay * pow(2, Double(min(n - 1, 20)))   // clamp the exponent
+        return min(retryMaxDelay, exp) * jitter
+    }
+
+    /// Pure terminal-abandon decision: a capture is stuck and must be given up so it
+    /// can't wedge the drain forever. Tested.
+    public nonisolated static func shouldAbandonCapture(failures: Int,
+                                                        ageSeconds: TimeInterval,
+                                                        totalSegments: Int) -> Bool {
+        if totalSegments >= absurdSegmentCount { return true }
+        if failures >= maxUploadAttempts { return true }
+        if failures > 0 && ageSeconds >= maxBacklogAge { return true }
+        return false
+    }
+
+    /// Re-arm the drain after a fresh id_token has been obtained (the rebuilt pipeline
+    /// starts clean, but this lets a same-instance recovery resume too). Idempotent.
+    public func clearAuthExpired() {
+        authExpired = false
+        authExpiredFired = false
+        retryStates.removeAll()
+    }
+
     // MARK: live on-device transcription (Feature 1) — additive, ephemeral, off-path
     /// Factory for the per-conversation live transcriber (nil ⇒ no live preview wired,
     /// e.g. door-free tests + older OSes). Injected so tests drive a fake transcriber.
@@ -356,6 +416,11 @@ public final class CaptureManager: ObservableObject {
     private let liveBox = CurrentLiveTranscriber()
     #endif
 
+    /// Test seam: override the per-segment door upload for every WAL this manager
+    /// builds (so the bounded-retry / backoff / abandon / re-auth paths are exercised
+    /// deterministically without a live door). nil ⇒ the real door POST.
+    private let uploadSegment: (@Sendable (String, UInt64, Data) async throws -> Void)?
+
     public init(target: DoorTarget,
                 baseDir: URL? = nil,
                 log: DoorLog? = nil,
@@ -364,8 +429,10 @@ public final class CaptureManager: ObservableObject {
                 finalize: (@Sendable (String, ConversationMeta?) async throws -> Void)? = nil,
                 fetchContent: (@Sendable (String) async -> CaptureContent?)? = nil,
                 locationProvider: ConversationLocationProviding? = nil,
-                liveTranscriber: LiveTranscriberFactory? = nil) {
+                liveTranscriber: LiveTranscriberFactory? = nil,
+                uploadSegment: (@Sendable (String, UInt64, Data) async throws -> Void)? = nil) {
         self.target = target
+        self.uploadSegment = uploadSegment
         self.makeLiveTranscriber = liveTranscriber
         self.baseDir = baseDir ?? CaptureWAL.documentsCaptures()
         self.log = log
@@ -640,6 +707,7 @@ public final class CaptureManager: ObservableObject {
     }
 
     private func tickSegmentation() {
+        emitCaptureHeartbeatIfDue()   // Omi-path diagnostics (runs even while paused)
         guard let wal = active, !isPaused else { return }
         // 1. Wall-clock silence boundary (fires when no frames arrive during quiet).
         if let event = router.tickSilence() {
@@ -651,6 +719,48 @@ public final class CaptureManager: ObservableObject {
                                            totalSegments: wal.status.totalSegments,
                                            now: Date().timeIntervalSince1970) {
             forceSplit()
+        }
+    }
+
+    // MARK: Omi capture-path diagnostics (debug "shows recording but nothing records")
+
+    /// Cadence of the capture heartbeat — one rate-limited diag line so the storm-prone
+    /// device never floods the diag sink. Tunable.
+    public nonisolated static let captureHeartbeatInterval: TimeInterval = 10
+    private var lastHeartbeatAt: TimeInterval = 0
+    private var lastHeartbeatFrames = 0
+
+    private var sourceStateLabel: String {
+        switch sourceState {
+        case .idle: return "idle"
+        case .scanning: return "scanning"
+        case .streaming: return "streaming"
+        case .stopped: return "stopped"
+        case .failed(let m): return "failed(\(m))"
+        }
+    }
+
+    /// While a capture session is open, emit ONE diag line every ~10s summarizing the
+    /// Omi path end-to-end — source kind + liveness, FRAMES received since the last beat,
+    /// last frame size, and segment progress — so the desktop `/diag/log` shows whether
+    /// live frames are arriving at all. A zero-frame beat while capturing is the precise
+    /// signature of "shows recording but nothing records" (BLE subscribed, no audio
+    /// notifications) — surfaced as an explicit warning. Routed through the same `log`
+    /// the door ships to `/diag/log` (grep `omi diag:`).
+    private func emitCaptureHeartbeatIfDue() {
+        guard active != nil else { return }   // only while a session is open
+        let now = Date().timeIntervalSince1970
+        guard now - lastHeartbeatAt >= Self.captureHeartbeatInterval else { return }
+        let s = router.stats()
+        let delta = s.count - lastHeartbeatFrames
+        lastHeartbeatFrames = s.count
+        lastHeartbeatAt = now
+        let st = active?.status
+        log?.info(String(format: "omi diag: src=%@ state=%@ paused=%@ frames+%d total=%d lastBytes=%d seg=%d/%d",
+                         captureSource.rawValue, sourceStateLabel, isPaused ? "y" : "n",
+                         delta, s.count, s.lastBytes, st?.syncedSegments ?? 0, st?.totalSegments ?? 0))
+        if delta == 0 && !isPaused {
+            log?.warn("omi diag: 0 frames in last \(Int(Self.captureHeartbeatInterval))s while capturing — the source is delivering NO audio (check BLE notify/subscription or the device mic)")
         }
     }
 
@@ -739,9 +849,18 @@ public final class CaptureManager: ObservableObject {
         if s.lastBytes != lastFrameBytes { lastFrameBytes = s.lastBytes }
     }
 
+    /// Build a WAL, threading the (test-only) per-segment upload override so every
+    /// capture this manager owns uploads through the same (real or injected) path.
+    private func makeWAL(captureId id: String) -> CaptureWAL {
+        let upload: (@Sendable (UInt64, Data) async throws -> Void)?
+        if let uploadSegment { upload = { seq, body in try await uploadSegment(id, seq, body) } }
+        else { upload = nil }
+        return CaptureWAL(captureId: id, target: target, baseDir: baseDir, log: log, upload: upload)
+    }
+
     private func beginSession() {
         let id = Self.newCaptureId()
-        let wal = CaptureWAL(captureId: id, target: target, baseDir: baseDir, log: log)
+        let wal = makeWAL(captureId: id)
         active = wal
         captures.insert(wal, at: 0)               // newest first (Omi-style timeline)
         // Durably stamp the conversation START (F1) — the card's start time + the
@@ -762,7 +881,8 @@ public final class CaptureManager: ObservableObject {
         router.setPaused(isPaused)
         router.setWAL(wal)                        // frames now flow into this WAL
         startLiveTranscription()                  // additive live preview (no-op if unwired)
-        log?.info("capture \(id): ambient session started")
+        lastHeartbeatAt = 0; lastHeartbeatFrames = router.stats().count   // fresh heartbeat baseline
+        log?.info("capture \(id): ambient session started (source=\(captureSource.rawValue), state=\(sourceStateLabel))")
     }
 
     // MARK: live on-device transcription lifecycle (Feature 1)
@@ -969,11 +1089,96 @@ public final class CaptureManager: ObservableObject {
         guard !isDraining else { return }   // a drain is already in flight — skip this tick
         isDraining = true
         defer { isDraining = false }
-        for wal in captures where wal.status.pendingSegments > 0 { await wal.sync() }
+
+        // Storm-stop: a known-expired bearer means EVERY upload will 401 — fire none.
+        // `onAuthExpired` drives a one-shot token refresh / login; the rebuilt pipeline
+        // (or `clearAuthExpired`) re-arms the drain.
+        guard !authExpired else { return }
+
+        let now = Date().timeIntervalSince1970
+        var attempted = 0
+        for wal in captures where wal.status.pendingSegments > 0 {
+            let id = wal.captureId
+            if isAbandoned(id) { continue }
+            // Safety valve: give up on a poisoned / ancient / absurd capture (terminal).
+            let failures = retryStates[id]?.failures ?? 0
+            if CaptureManager.shouldAbandonCapture(failures: failures,
+                                                   ageSeconds: max(0, now - startTime(of: wal)),
+                                                   totalSegments: wal.status.totalSegments) {
+                abandon(id, failures: failures); continue
+            }
+            // Backoff gate: skip a failing capture until its next-eligible instant.
+            if let st = retryStates[id], now < st.nextEligible { continue }
+            // Concurrency / backlog valve: bound how many captures one tick attempts.
+            if attempted >= Self.maxCapturesPerDrain { break }
+            attempted += 1
+            switch await wal.sync() {
+            case .idle, .progressed:
+                retryStates[id] = nil                 // healthy → reset backoff
+            case .failed:
+                recordUploadFailure(id, now: now)     // back off; retry later
+            case .authExpired:
+                recordUploadFailure(id, now: now)
+                handleUploadAuthExpired()             // stop everything + request re-auth
+                return
+            }
+        }
         // After syncing, retry any pending-finalize captures whose segments are now
         // all ACK'd — this is the retry path for a finalize that didn't complete at
         // conversation-close (door/Lore was down, or segments weren't ACK'd yet).
         await retryPendingFinalizes()
+        maybePrune()   // retention sweeps — throttled OFF the every-5s main path
+    }
+
+    /// Record an upload failure: bump the consecutive-failure count and schedule the
+    /// next eligible retry with exponential backoff + jitter (no tight loop).
+    private func recordUploadFailure(_ id: String, now: TimeInterval) {
+        var st = retryStates[id] ?? RetryState()
+        st.failures += 1
+        st.nextEligible = now + CaptureManager.retryDelay(forFailures: st.failures)
+        retryStates[id] = st
+    }
+
+    /// React to a 401/expired-token upload rejection: stop the drain immediately and
+    /// ask the app to re-authenticate (refresh once, else surface the login screen).
+    /// Idempotent — fires the hook once per expired-token epoch.
+    private func handleUploadAuthExpired() {
+        authExpired = true
+        guard !authExpiredFired else { return }
+        authExpiredFired = true
+        log?.warn("capture: upload rejected as token-expired (401) — paused uploads, requesting re-auth")
+        onAuthExpired?()
+    }
+
+    // MARK: terminal-abandon (a stuck capture can't wedge the queue forever)
+
+    private func abandonedMarker(_ captureId: String) -> URL {
+        baseDir.appendingPathComponent(captureId, isDirectory: true)
+            .appendingPathComponent(".abandoned")
+    }
+    private func isAbandoned(_ captureId: String) -> Bool {
+        FileManager.default.fileExists(atPath: abandonedMarker(captureId).path)
+    }
+    /// Record a clear terminal state for an abandoned capture (a durable marker, not a
+    /// silent drop) and clear its pending-finalize intent so it stops being retried.
+    private func abandon(_ captureId: String, failures: Int) {
+        try? Data().write(to: abandonedMarker(captureId), options: [.atomic])
+        clearNeedsFinalize(captureId)
+        retryStates[captureId] = nil
+        log?.error("capture \(captureId): ABANDONED after \(failures) failed upload attempt(s) — terminal (stuck/old/oversized), no longer retried")
+    }
+
+    // MARK: retention throttle (keep the big disk sweeps off the every-5s drain)
+
+    /// The retention sweeps iterate ALL captures touching disk; running them every 5s on
+    /// the main actor churned the main thread under a large backlog. Throttle to a calm
+    /// cadence so the UI stays responsive. Tunable.
+    public nonisolated static let pruneInterval: TimeInterval = 120
+    private var lastPruneAt: TimeInterval = 0
+    private func maybePrune() {
+        let now = Date().timeIntervalSince1970
+        guard now - lastPruneAt >= Self.pruneInterval else { return }
+        lastPruneAt = now
         pruneOldTranscripts()   // ~14d transcript-text sweep (keeps name/description metadata)
         pruneOldAudio()         // periodic retention sweep (cheap: stats files, only acts >30d)
     }
@@ -1068,7 +1273,7 @@ public final class CaptureManager: ObservableObject {
         let ids = dirs.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }
             .map { $0.lastPathComponent }
         for id in ids.sorted(by: >) {
-            captures.append(CaptureWAL(captureId: id, target: target, baseDir: baseDir, log: log))
+            captures.append(makeWAL(captureId: id))
         }
     }
 

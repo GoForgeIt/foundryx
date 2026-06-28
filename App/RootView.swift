@@ -16,9 +16,11 @@ struct RootView: View {
     var body: some View {
         Group {
             if let target = remote.makeDoorTarget(), splashElapsed {
-                MainTabs(target: target, showingAccount: $showingAccount)
-                    // A resolved-host change rebuilds the tabs (+ their clients).
-                    .id(target.relay?.tunnelId ?? "remote")
+                MainTabs(target: target, remote: remote, showingAccount: $showingAccount)
+                    // A resolved-host change OR a refreshed bearer (after a token-expiry
+                    // re-auth) rebuilds the tabs (+ their clients) so every door request
+                    // uses the fresh id_token — never a stale, expired one.
+                    .id((target.relay?.tunnelId ?? "remote") + "#" + target.bearer.suffix(12))
                     .sheet(isPresented: $showingAccount) {
                         SignInView(remote: remote) { showingAccount = false }
                     }
@@ -40,6 +42,7 @@ struct RootView: View {
 /// `target` (relay tunnel + id_token bearer). Chat is independent.
 private struct MainTabs: View {
     let target: DoorTarget
+    let remote: RemoteSession
     @Binding var showingAccount: Bool
 
     @StateObject private var device: DeviceManager
@@ -50,8 +53,9 @@ private struct MainTabs: View {
     // tab switches and app foregrounding (its own Application Support JSON file).
     @StateObject private var chats = ChatConversationStore(storageURL: ChatConversationStore.defaultStorageURL())
 
-    init(target: DoorTarget, showingAccount: Binding<Bool>) {
+    init(target: DoorTarget, remote: RemoteSession, showingAccount: Binding<Bool>) {
         self.target = target
+        self.remote = remote
         _showingAccount = showingAccount
         let log = DoorLog()
         // Ship the phone's BLE/audio/capture/chat log to the relay diag sink so
@@ -69,6 +73,9 @@ private struct MainTabs: View {
             // Omi is disconnected) — flows through the identical Opus/WAL/finalize path.
             micSource: MicFrameSource(log: log),
             liveTranscriber: LiveTranscription.defaultFactory())
+        // When a capture upload is rejected as token-expired (401), refresh the id_token
+        // once / surface login — instead of the phone retry-looping with a dead token.
+        mgr.onAuthExpired = { [weak remote] in Task { @MainActor in await remote?.handleAuthExpired() } }
         _manager = StateObject(wrappedValue: mgr)
         // The extensible capture-source registry (track 20260628T1702): per-source
         // toggles + add-source (BT mic / Apple Watch). Its single ACTIVE source is

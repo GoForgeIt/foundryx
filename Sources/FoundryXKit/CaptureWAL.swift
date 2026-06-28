@@ -33,9 +33,25 @@ public struct CaptureStatus: Sendable, Equatable, Identifiable {
     public var pendingSegments: Int { max(0, totalSegments - syncedSegments) }
 }
 
+/// The outcome of one `CaptureWAL.sync()` pass — so the owner's bounded-retry drain
+/// can tell "made progress / nothing to do" from a TRANSIENT failure (back off + retry)
+/// and from an AUTH-EXPIRED rejection (stop retrying; the bearer is a known-bad,
+/// expired id_token — re-auth is required, retrying just storms the door).
+public enum SyncOutcome: Sendable, Equatable {
+    case idle            // nothing pending
+    case progressed      // uploaded ≥1 segment with no failure
+    case failed          // transient failure (offline / door down) — retry with backoff
+    case authExpired     // a 401 — STOP; the token is expired, re-auth before retrying
+}
+
 public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     public let captureId: String
     @Published public private(set) var status: CaptureStatus
+
+    /// Cap the segments uploaded in ONE `sync()` pass so a giant backlog (e.g. a stuck
+    /// capture with thousands of segments) drains at a sane, steady rate instead of
+    /// firing thousands of POSTs back-to-back. The remainder drains on the next tick.
+    public static let maxSegmentsPerSync = 8
 
     private let dir: URL
     private let target: DoorTarget
@@ -43,6 +59,9 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     private let log: DoorLog?
     private let chunkFrames: Int
     private let startedAt = Date()
+    /// Test seam: when set, replaces the real door POST for each segment (so the
+    /// drain/backoff/auth-expired paths are exercised deterministically, no network).
+    private let uploadOverride: (@Sendable (UInt64, Data) async throws -> Void)?
 
     private let io = DispatchQueue(label: "foundryx.capture-wal")
     private var buffer: [Data] = []      // frames awaiting a chunk (io queue only)
@@ -56,12 +75,14 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
                 baseDir: URL? = nil,
                 chunkFrames: Int = 50,            // ~1s at Omi's ~50 frames/s
                 session: URLSession = URLSession(configuration: .ephemeral),
-                log: DoorLog? = nil) {
+                log: DoorLog? = nil,
+                upload: (@Sendable (UInt64, Data) async throws -> Void)? = nil) {
         self.captureId = captureId
         self.target = target
         self.session = session
         self.log = log
         self.chunkFrames = chunkFrames
+        self.uploadOverride = upload
         let root = baseDir ?? CaptureWAL.documentsCaptures()
         self.dir = root.appendingPathComponent(captureId, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -141,26 +162,38 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
 
     // MARK: sync (mark synced ONLY on the door's 200 ACK)
 
-    /// Drain every unsynced segment to the door. Re-entrant-safe; segments that
-    /// fail stay pending and are retried on the next call.
-    public func sync() async {
+    /// Drain unsynced segments to the door, AT MOST `maxSegmentsPerSync` per pass (so a
+    /// huge backlog drains steadily, not in a storm). Re-entrant-safe; segments that fail
+    /// stay pending and are retried on the next call. Returns the outcome so the owner's
+    /// bounded-retry drain can back off on `.failed` and STOP on `.authExpired` (a 401 ⇒
+    /// the bearer is an expired id_token; retrying with it just storms the door).
+    @discardableResult
+    public func sync() async -> SyncOutcome {
         let pending = pendingSegmentURLs()
-        guard !pending.isEmpty else { lastError = nil; publish(); return }
-        for (seq, segURL) in pending {
+        guard !pending.isEmpty else { lastError = nil; publish(); return .idle }
+        var uploaded = 0
+        for (seq, segURL) in pending.prefix(Self.maxSegmentsPerSync) {
             do {
                 let bytes = try Data(contentsOf: segURL)
                 try await upload(seq: seq, body: bytes)
                 try Data().write(to: ackURL(segURL), options: [.atomic])   // 200 ACK ⇒ saved to computer
                 lastError = nil
+                uploaded += 1
                 log?.info("capture \(captureId): segment \(seq) ACK'd by desktop (saved to computer)")
                 publish()
+            } catch DoorError.unauthorized {
+                lastError = "unauthorized (id_token expired)"
+                log?.warn("capture \(captureId): segment \(seq) rejected 401 (token expired) — stopping uploads, re-auth required")
+                publish()
+                return .authExpired   // do NOT keep firing with a known-expired token
             } catch {
                 lastError = (error as NSError).localizedDescription
                 log?.warn("capture \(captureId): segment \(seq) not synced (\(lastError ?? "?")) — staying pending, will retry")
                 publish()
-                return  // stop on first failure; the rest stay pending for the next tick
+                return .failed  // stop on first failure; the rest stay pending for the next tick
             }
         }
+        return uploaded > 0 ? .progressed : .idle
     }
 
     /// POST one segment. Throws on any non-200 so the segment stays pending. In
@@ -168,6 +201,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     /// through RelayHTTP (a plain POST to the nominal baseURL — the relay's HTTP
     /// control port — has no /foundryx/capture route and 404s).
     private func upload(seq: UInt64, body: Data) async throws {
+        if let uploadOverride { try await uploadOverride(seq, body); return }
         let headers = ["X-Capture-Id": captureId, "X-Capture-Seq": String(seq)]
         if let relay = target.relay {
             let resp = try await RelayHTTP.roundTrip(
@@ -255,6 +289,10 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         let segs = allSegmentURLs()
         if let maxSeq = segs.map({ $0.0 }).max() { nextSeq = maxSeq + 1 }
         publish()
-        if !pendingSegmentURLs().isEmpty { Task { await self.sync() } }
+        // NOTE: no auto-sync here on purpose. The CaptureManager's bounded, backoff-aware
+        // drain is the SOLE upload coordinator. A per-WAL `Task { sync() }` on construction
+        // meant a multi-day backlog spawned hundreds of UNBOUNDED concurrent uploads the
+        // instant the app launched (a retry storm that pegged the device) — exactly the
+        // bug this change fixes. Pending segments drain through the rate-limited drain.
     }
 }
