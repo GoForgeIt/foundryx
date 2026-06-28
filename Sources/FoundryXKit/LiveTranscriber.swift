@@ -47,6 +47,49 @@ public struct LiveTranscript: Sendable, Equatable {
     }
 
     public var isEmpty: Bool { finalizedText.isEmpty && volatileTail.isEmpty }
+
+    /// Word-level render decomposition for the faded-tail effect (Feature 2). Every
+    /// FINALIZED word renders at full opacity (locked in); the trailing VOLATILE words
+    /// are dimmed within a bounded `fadeWindow`, the NEWEST (last) word at `floorOpacity`,
+    /// ramping back up to 1.0 — so the most-recent word is faintest and each word SNAPS
+    /// to full opacity the moment the recognizer finalizes it (volatile → finalized).
+    /// Pure (no SwiftUI) so the `LiveTranscriptTicker` just renders the result and a
+    /// brine test can assert the opacities + that no words are dropped/duplicated.
+    public func renderedSegments(fadeWindow: Int = 3, floorOpacity: Double = 0.35) -> [LiveTranscriptSegment] {
+        let finalWords = finalizedText.split(separator: " ").map(String.init)
+        let volatileWords = volatileTail.split(separator: " ").map(String.init)
+        var segs = finalWords.map { LiveTranscriptSegment(text: $0, opacity: 1.0) }
+        let n = volatileWords.count
+        guard n > 0 else { return segs }
+        // Newest volatile word = faintest; ramp up to full over `fadeWindow` words.
+        let window = max(1, fadeWindow)
+        let step = (1.0 - floorOpacity) / Double(window)
+        for (i, w) in volatileWords.enumerated() {
+            let fromEnd = n - 1 - i                     // 0 = newest (last) volatile word
+            let opacity = fromEnd >= window ? 1.0 : min(1.0, floorOpacity + Double(fromEnd) * step)
+            segs.append(LiveTranscriptSegment(text: w, opacity: opacity, volatile: true))
+        }
+        return segs
+    }
+}
+
+/// One rendered run of the live transcript: a single word plus the opacity it should
+/// render at. Finalized words are opacity `1.0` (locked in); the trailing volatile
+/// word(s) are dimmed (the newest faintest) and marked `volatile` so the UI can also
+/// italicize the still-settling tail. Word-level, not line-level (Feature 2).
+public struct LiveTranscriptSegment: Sendable, Equatable {
+    /// The word, without surrounding whitespace.
+    public let text: String
+    /// 1.0 = locked in (finalized); < 1.0 = still settling.
+    public let opacity: Double
+    /// True for the still-settling volatile tail words (render dimmed + italic).
+    public let volatile: Bool
+
+    public init(text: String, opacity: Double, volatile: Bool = false) {
+        self.text = text
+        self.opacity = opacity
+        self.volatile = volatile
+    }
 }
 
 /// One live, on-device transcription session for ONE conversation. Side-effect-only:

@@ -56,6 +56,21 @@ Feature: FoundryX captures Omi audio durably to the door
     Given the Omi is not connected
     Then I can record a conversation with the phone microphone
 
+  Scenario: the Omi connect control is a compact icon in the capture header
+    Given the Omi is not connected
+    Then the capture header shows the Omi as a small icon next to the mic record control
+
+  Scenario: tapping the Omi icon starts a scan and the icon expands
+    Given the Omi is not connected
+    When I tap the Omi icon in the capture header
+    Then a scan for my Omi begins
+    And the Omi control expands to show "Scanning…" with an activity indicator
+
+  Scenario: tapping the scanning Omi control stops the scan and collapses it
+    Given the capture header is scanning for my Omi
+    When I tap the Omi control again
+    Then the scan stops and the control collapses back to its compact icon
+
   Scenario: choosing the phone microphone as the capture source does not auto-connect the Omi
     Given I choose the phone microphone as my capture source
     Then my choice is remembered and the Omi is not auto-connected

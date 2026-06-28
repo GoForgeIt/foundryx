@@ -20,6 +20,72 @@ public enum DeviceConnectionState: Equatable, Sendable {
     case disconnected        // was connected, link dropped (auto-reconnecting)
 }
 
+/// What a tap on the consolidated capture header's Omi icon should do, given its
+/// current presentation (Feature 3). Pure so the SwiftUI button and a brine test agree
+/// on the scan toggle.
+public enum OmiScanTapAction: Equatable, Sendable { case startScan, stopScan, none }
+
+/// The consolidated capture header's Omi control as a pure presentation over the
+/// connection state (Feature 3). The control is a small CIRCULAR icon when collapsed
+/// (idle / disconnected) and EXPANDS into a wider pill while scanning / connecting /
+/// connected. Keeping this a pure value (no SwiftUI) lets a brine test assert the
+/// collapsed-icon ↔ expanded-pill state machine and the scan toggle.
+public enum OmiScanPresentation: Equatable, Sendable {
+    case collapsed                 // idle / disconnected: a small icon; tap → start a scan
+    case scanning                  // expanded "Scanning…" pill + a subtle activity indicator
+    case connecting(String)        // expanded "Connecting…" pill + activity
+    case connected(String)         // distinct connected style (the header itself switches to
+                                   // the ambient layout on connect, so this rarely shows here)
+    case off                       // Bluetooth off / unavailable: a non-interactive icon
+
+    /// Map the live connection state onto the control's presentation.
+    public static func from(_ state: DeviceConnectionState) -> OmiScanPresentation {
+        switch state {
+        case .idle, .disconnected: return .collapsed
+        case .scanning: return .scanning
+        case .connecting(let n): return .connecting(n)
+        case .connected(let n): return .connected(n)
+        case .poweredOff: return .off
+        }
+    }
+
+    /// The control is a WIDE pill (vs a small circle) while scanning / connecting / connected.
+    public var isExpanded: Bool {
+        switch self {
+        case .collapsed, .off: return false
+        case .scanning, .connecting, .connected: return true
+        }
+    }
+
+    /// A subtle activity indicator spins while actively scanning / connecting.
+    public var showsActivity: Bool {
+        switch self {
+        case .scanning, .connecting: return true
+        case .collapsed, .connected, .off: return false
+        }
+    }
+
+    /// The short label inside the expanded pill (nil when collapsed / off → icon only).
+    public var label: String? {
+        switch self {
+        case .collapsed, .off: return nil
+        case .scanning: return "Scanning…"
+        case .connecting: return "Connecting…"
+        case .connected(let n): return n
+        }
+    }
+
+    /// What a tap does: start a scan from the collapsed icon, stop it while scanning,
+    /// otherwise nothing (connecting / connected are driven by the BLE lifecycle).
+    public var tapAction: OmiScanTapAction {
+        switch self {
+        case .collapsed: return .startScan
+        case .scanning: return .stopScan
+        case .connecting, .connected, .off: return .none
+        }
+    }
+}
+
 /// A discovered, connectable Omi.
 public struct DiscoveredDevice: Identifiable, Equatable, Sendable {
     public let id: UUID        // CBPeripheral.identifier
@@ -83,6 +149,14 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
         setDiscovered([])
         setState(.scanning)
         c.scanForPeripherals(withServices: [OmiUUID.audioService], options: nil)
+    }
+
+    /// Stop an in-progress scan and collapse back to idle (the consolidated header's
+    /// Omi icon returns to its small circle). Clears any discovered results.
+    public func stopScan() {
+        central?.stopScan()
+        setDiscovered([])
+        setState(.idle)
     }
 
     public func connect(_ device: DiscoveredDevice) {
@@ -269,6 +343,7 @@ public final class DeviceManager: ObservableObject, AudioFrameSource, @unchecked
     public func start() { onState?(.failed("CoreBluetooth unavailable")) }
     public func stop() { onState?(.stopped) }
     public func startScan() {}
+    public func stopScan() {}
     public func connect(_ device: DiscoveredDevice) {}
     public func reconnect() {}
     public func forget() {}

@@ -21,6 +21,13 @@ Feature: A live, on-device transcript preview while recording
     When a tentative word is later finalized into a corrected form
     Then the live preview updates the word to its corrected, finalized form
 
+  Scenario: the most-recent word is faded until it locks in
+    Given an ambient capture is recording a conversation
+    And on-device live transcription is available
+    When the recognizer reports tentative trailing words as I speak
+    Then the newest word is shown faintest and the words just before it ramp up to full
+    And each word snaps to full opacity the moment the recognizer finalizes it
+
   Scenario: the live preview is provisional and never replaces the Kiln transcript
     Given a conversation showed a live on-device preview while recording
     When the conversation ends and Kiln returns its authoritative transcript

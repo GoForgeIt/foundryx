@@ -141,12 +141,11 @@ struct CaptureScreen: View {
         case .connected(let name):
             ambientHeader(name)
         default:
-            // Omi not connected: a compact capture header with the phone-mic record
-            // sphere on the right, then (when not phone-mic-only) the Omi connect flow.
-            VStack(spacing: 0) {
-                if manager.phoneMicAvailable { micHeader }
-                if manager.captureSource == .omi { connectSection }
-            }
+            // Omi not connected: ONE compact header (Feature 3) — capture title/status on
+            // the left; the Omi scan icon + the phone-mic record sphere inline on the
+            // right; the discovered-device list folds in below only while scanning finds
+            // results. Reclaims the vertical space the old separate connect rows ate.
+            consolidatedHeader
         }
     }
 
@@ -157,25 +156,75 @@ struct CaptureScreen: View {
         return manager.isRecordingMic
     }
 
-    // MARK: phone-microphone capture header (mic sphere on the right, Feature 3)
+    // MARK: consolidated capture header (Omi scan icon + mic sphere inline, Feature 3)
 
-    /// The capture header when the Omi isn't connected: a title + status on the left and
-    /// the mic record sphere on the right. Tapping the sphere toggles record/stop; while
-    /// recording it becomes a red, pulsing record sphere.
-    private var micHeader: some View {
-        HStack(spacing: GrainSpacing.x3) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Capture").grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-                Text(manager.isRecordingMic ? "Recording — tap to stop"
-                                            : "Tap the mic to record with your phone")
-                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+    /// The single compact capture header shown when the Omi isn't connected: the capture
+    /// title + a status subtitle on the left; the Omi scan icon and the phone-mic record
+    /// sphere inline on the right. The Omi icon expands into a "Scanning…" pill on tap and
+    /// collapses on connect. Discovered devices fold in below only while there are results.
+    private var consolidatedHeader: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: GrainSpacing.x3) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Capture").grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                    Text(captureSubtitle)
+                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                }
+                Spacer()
+                // The Omi as a small circular icon that expands to a "Scanning…" pill.
+                OmiScanButton(presentation: OmiScanPresentation.from(device.connectionState)) { action in
+                    switch action {
+                    case .startScan: device.startScan()
+                    case .stopScan: device.stopScan()
+                    case .none: break
+                    }
+                }
+                // The phone-mic record sphere (build #65), inline beside the Omi icon.
+                if manager.phoneMicAvailable {
+                    MicSphereButton(recording: manager.isRecordingMic) { manager.toggleMicRecording() }
+                }
             }
-            Spacer()
-            MicSphereButton(recording: manager.isRecordingMic) { manager.toggleMicRecording() }
+            .padding(.horizontal, GrainSpacing.x4)
+            .padding(.vertical, GrainSpacing.x3)
+            // Compact discovered-device list — only while a scan has found Omis.
+            if !device.discovered.isEmpty { discoveredList }
         }
-        .padding(.horizontal, GrainSpacing.x4)
-        .padding(.vertical, GrainSpacing.x3)
         .overlay(alignment: .bottom) { Rectangle().fill(GrainColor.borderHairline).frame(height: 1) }
+    }
+
+    /// The header's status subtitle: phone-mic recording state takes priority, else a
+    /// short reflection of the Omi connection state, else the inline how-to.
+    private var captureSubtitle: String {
+        if manager.isRecordingMic { return "Recording — tap to stop" }
+        switch device.connectionState {
+        case .scanning: return "Scanning for your Omi…"
+        case .connecting(let n): return "Connecting to \(n)…"
+        case .disconnected: return "Omi disconnected — reconnecting…"
+        case .poweredOff: return "Bluetooth off — enable it to connect your Omi"
+        default:
+            return manager.phoneMicAvailable
+                ? "Tap the mic to record · tap the Omi to connect"
+                : "Tap the Omi to connect"
+        }
+    }
+
+    /// The compact, inline list of Omis a scan has discovered. Tapping one connects.
+    private var discoveredList: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(device.discovered) { dev in
+                Button { device.connect(dev) } label: {
+                    HStack(spacing: GrainSpacing.x2) {
+                        Image(systemName: "dot.radiowaves.left.and.right").foregroundStyle(GrainColor.forgeBlue)
+                        Text(dev.name).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                        Spacer()
+                        Text("\(dev.rssi) dBm").grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                    }
+                    .padding(.horizontal, GrainSpacing.x4)
+                    .padding(.vertical, GrainSpacing.x2)
+                }
+                .buttonStyle(.plain)
+            }
+        }
     }
 
     private func ambientHeader(_ name: String) -> some View {
@@ -203,43 +252,6 @@ struct CaptureScreen: View {
         .padding(.horizontal, GrainSpacing.x4)
         .padding(.vertical, GrainSpacing.x3)
         .overlay(alignment: .bottom) { Rectangle().fill(GrainColor.borderHairline).frame(height: 1) }
-    }
-
-    private var connectSection: some View {
-        VStack(alignment: .leading, spacing: GrainSpacing.x2) {
-            HStack(spacing: GrainSpacing.x2) {
-                Circle().fill(GrainColor.inkTertiary).frame(width: 9, height: 9)
-                Text(connectLabel).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-                Spacer()
-                GrainButton("Scan", variant: .tonal, size: .sm) { device.startScan() }
-            }
-            ForEach(device.discovered) { dev in
-                Button { device.connect(dev) } label: {
-                    HStack {
-                        Image(systemName: "dot.radiowaves.left.and.right").foregroundStyle(GrainColor.forgeBlue)
-                        Text(dev.name).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-                        Spacer()
-                        Text("\(dev.rssi) dBm").grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-                    }
-                    .padding(.vertical, GrainSpacing.x2)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, GrainSpacing.x4)
-        .padding(.vertical, GrainSpacing.x3)
-        .overlay(alignment: .bottom) { Rectangle().fill(GrainColor.borderHairline).frame(height: 1) }
-    }
-
-    private var connectLabel: String {
-        switch device.connectionState {
-        case .poweredOff: return "Bluetooth off — enable it to connect your Omi"
-        case .idle: return "Connect your Omi"
-        case .scanning: return "Scanning for your Omi…"
-        case .connecting(let n): return "Connecting to \(n)…"
-        case .disconnected: return "Omi disconnected — reconnecting…"
-        case .connected: return ""
-        }
     }
 
     // MARK: global "your data is safe" signal
@@ -654,6 +666,83 @@ struct ConversationDetailView: View {
     }
 }
 
+/// The Omi connect control as a compact CIRCULAR icon that EXPANDS into a "Scanning…"
+/// pill on tap (Feature 3). Collapsed (idle/disconnected): a small circle with an
+/// antenna glyph — tapping starts a scan. Scanning/Connecting: a wider capsule with a
+/// label + a subtle activity indicator — tapping while scanning stops it. Connected is
+/// styled distinctly (though the header switches to the ambient layout on connect, so it
+/// rarely renders here). Pure presentation + toggle live in `OmiScanPresentation`.
+private struct OmiScanButton: View {
+    let presentation: OmiScanPresentation
+    let onTap: (OmiScanTapAction) -> Void
+
+    var body: some View {
+        Button { onTap(presentation.tapAction) } label: {
+            HStack(spacing: GrainSpacing.x1) {
+                if presentation.showsActivity {
+                    ProgressView().controlSize(.mini).tint(tint)
+                } else {
+                    Image(systemName: glyph)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(tint)
+                }
+                if let label = presentation.label {
+                    Text(label).grainTextStyle(.caption).foregroundStyle(tint).lineLimit(1)
+                }
+            }
+            .padding(.horizontal, presentation.isExpanded ? GrainSpacing.x3 : 0)
+            .frame(minWidth: 34, minHeight: 34)
+            .frame(height: 34)
+            .background(Capsule().fill(background))
+            .overlay(Capsule().strokeBorder(borderColor, lineWidth: 1))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .animation(.easeInOut(duration: 0.18), value: presentation.isExpanded)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var glyph: String {
+        presentation == .off ? "antenna.radiowaves.left.and.right.slash"
+                             : "antenna.radiowaves.left.and.right"
+    }
+
+    /// Accent (forge blue) while scanning/connecting/connected; quiet ink when collapsed;
+    /// faint when Bluetooth is off.
+    private var tint: Color {
+        switch presentation {
+        case .scanning, .connecting, .connected: return GrainColor.forgeBlue
+        case .collapsed: return GrainColor.ink
+        case .off: return GrainColor.textFaint
+        }
+    }
+
+    private var background: Color {
+        switch presentation {
+        case .scanning, .connecting: return GrainColor.forgeBlue.opacity(0.12)
+        case .connected: return GrainColor.forgeBlue.opacity(0.18)
+        case .collapsed, .off: return GrainColor.surfaceElevated
+        }
+    }
+
+    private var borderColor: Color {
+        switch presentation {
+        case .collapsed, .off: return GrainColor.border
+        case .scanning, .connecting, .connected: return .clear
+        }
+    }
+
+    private var accessibilityLabel: String {
+        switch presentation {
+        case .collapsed: return "Scan for your Omi"
+        case .scanning: return "Scanning for your Omi, tap to stop"
+        case .connecting(let n): return "Connecting to \(n)"
+        case .connected(let n): return "Connected to \(n)"
+        case .off: return "Bluetooth off"
+        }
+    }
+}
+
 /// The phone-mic record control as a compact sphere (Feature 3). Idle: a subtle mic
 /// glyph in a quiet circle. Recording: a RED record sphere with an animated pulse ring
 /// radiating outward, so "you're recording" reads at a glance. Tapping toggles.
@@ -715,16 +804,20 @@ private struct LiveTranscriptTicker: View {
     // ~2 lines tall — one clear line + one fading above it.
     private let height: CGFloat = 40
 
+    /// Word-level styled text (Feature 2): finalized words at full opacity, the trailing
+    /// volatile word(s) dimmed with the NEWEST word the faintest + italic, each snapping
+    /// to full opacity as the recognizer finalizes it. Driven by the pure, tested
+    /// `LiveTranscript.renderedSegments()`.
     private var styledText: Text {
-        let finalized = Text(transcript.finalizedText)
-            .foregroundColor(GrainColor.ink)
-        guard !transcript.volatileTail.isEmpty else { return finalized }
-        let sep = transcript.finalizedText.isEmpty ? "" : " "
-        // Volatile tail: dimmer + italic so the user sees it's still settling.
-        let tail = Text(sep + transcript.volatileTail)
-            .foregroundColor(GrainColor.textMuted)
-            .italic()
-        return finalized + tail
+        let segments = transcript.renderedSegments()
+        var result = Text("")
+        for (i, seg) in segments.enumerated() {
+            let prefix = i == 0 ? "" : " "
+            var run = Text(prefix + seg.text).foregroundColor(GrainColor.ink.opacity(seg.opacity))
+            if seg.volatile { run = run.italic() }   // still-settling tail also italic
+            result = result + run
+        }
+        return result
     }
 
     var body: some View {
@@ -748,9 +841,10 @@ private struct LiveTranscriptTicker: View {
                 .frame(height: height)
                 .scrollDisabled(true)
                 // Slide the newest words up into view AS they stream — no debounce on the
-                // text itself (it re-renders on every snapshot); this only animates scroll.
+                // text itself (it re-renders on every snapshot). A SNAPPY (80 ms) scroll so
+                // the freshest words are SEEN the instant they arrive (Feature 1 latency).
                 .onChange(of: transcript.displayText) { _ in
-                    withAnimation(.easeOut(duration: 0.14)) { proxy.scrollTo("liveTail", anchor: .bottom) }
+                    withAnimation(.easeOut(duration: 0.08)) { proxy.scrollTo("liveTail", anchor: .bottom) }
                 }
             }
             // Top-edge fade: the older line dissolves under the header as it scrolls up.

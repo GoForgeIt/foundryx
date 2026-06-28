@@ -129,6 +129,11 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
     /// preview falls back to the FrameRouter's Opus-decode tap).
     public var onPCM: ((AVAudioPCMBuffer) -> Void)?
 
+    /// Input-tap buffer size (frames). ~20 ms at a 48 kHz hardware input — small so the
+    /// direct live-STT PCM tap fires often (lower live-transcription latency, Feature 1)
+    /// while staying above the realtime-render minimum. Reduced from 1920 (~40 ms).
+    private static let tapBufferSize: AVAudioFrameCount = 1024
+
     private let log: DoorLog?
     private let engine = AVAudioEngine()
     private let encoder = OpusEncoder48k()
@@ -187,7 +192,12 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
             pending.removeAll(keepingCapacity: true)
             frameCount = 0
             // Tap the raw hardware PCM; we normalise + encode on our serial queue.
-            input.installTap(onBus: 0, bufferSize: 1920, format: inFormat) { [weak self] buf, _ in
+            // SMALLER tap buffer = the direct live-STT PCM tap (onPCM) fires ~twice as
+            // often (~20 ms chunks at 48 kHz vs ~40 ms), so the on-device recognizer
+            // gets fed sooner and volatile partials appear closer to real time
+            // (Feature 1 latency). The durable WAL/upload path is unchanged — we still
+            // regroup into 960-sample (20 ms) Opus frames downstream.
+            input.installTap(onBus: 0, bufferSize: Self.tapBufferSize, format: inFormat) { [weak self] buf, _ in
                 self?.ingest(buf)
             }
             engine.prepare()
