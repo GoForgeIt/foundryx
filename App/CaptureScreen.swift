@@ -337,7 +337,12 @@ private struct CaptureCard: View {
             // durable card tombstone); the progress chip drops to a secondary line.
             // Falls back to chip-only until a title exists.
             if let name {
-                Text(name).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                // Generic/duplicate titles (near-silent "Thank you", "Okay"…) get the
+                // start time appended so two different short captures read distinctly
+                // (track 20260628T1609). Specific titles render unchanged.
+                Text(ConversationTitleDisplay.display(title: name, start: cardStart,
+                                                      timeString: { Self.timeFmt.string(from: $0) }))
+                    .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
                     .lineLimit(2)
             }
             HStack(spacing: GrainSpacing.x2) {
@@ -392,6 +397,18 @@ private struct CaptureCard: View {
 
     /// "10:41–10:47 AM · 6 min" when closed; start time alone while open.
     private var timeRange: String { Self.timeRangeString(meta: meta, fallback: wal.status.startedAt) }
+
+    /// The conversation's durable REAL START (for the title-time suffix). Same
+    /// processing-time-proof priority the list uses: meta → card → capture-id → (last
+    /// resort) the WAL launch time.
+    private var cardStart: Date {
+        if let s = meta?.startedAt, s > 0 { return Date(timeIntervalSince1970: TimeInterval(s)) }
+        if let s = card?.startedAt, s > 0 { return Date(timeIntervalSince1970: TimeInterval(s)) }
+        if let s = CaptureIdTime.startedAt(fromCaptureId: wal.captureId), s > 0 {
+            return Date(timeIntervalSince1970: TimeInterval(s))
+        }
+        return wal.status.startedAt
+    }
 
     /// Shared formatter so the conversation detail view shows the SAME time range
     /// as the card. `fallback` is the WAL start used when there's no metadata sidecar.

@@ -37,18 +37,26 @@ public struct ConversationCardMeta: Codable, Sendable, Equatable {
     /// the authoritative Kiln title/summary). Cleared the moment real Kiln content
     /// merges in, so the card can render a "Processing…" affordance until then.
     public var isProvisional: Bool
-    /// When this record was last updated (unix seconds).
+    /// When this record was last updated (unix seconds). A PROCESSING timestamp — it
+    /// bumps on every re-ingest/poll. NEVER use it for the conversation's date.
     public var updatedAt: UInt64
+    /// The conversation's durable REAL START (unix seconds) — the stable tombstone of
+    /// "when this conversation actually happened" (track 20260628T1609). Stamped once
+    /// from the capture's true start (meta start, else the capture-id timestamp) and
+    /// NEVER moved by a re-ingest, so a conversation keeps its date forever. This is
+    /// the date the list groups + labels by when no `meta.json` is present.
+    public var startedAt: UInt64?
 
     public init(title: String? = nil, summary: String? = nil, stage: String? = nil,
                 provisionalTranscript: String? = nil, isProvisional: Bool = false,
-                updatedAt: UInt64 = 0) {
+                updatedAt: UInt64 = 0, startedAt: UInt64? = nil) {
         self.title = title
         self.summary = summary
         self.stage = stage
         self.provisionalTranscript = provisionalTranscript
         self.isProvisional = isProvisional
         self.updatedAt = updatedAt
+        self.startedAt = startedAt
     }
 
     enum CodingKeys: String, CodingKey {
@@ -56,6 +64,7 @@ public struct ConversationCardMeta: Codable, Sendable, Equatable {
         case provisionalTranscript = "provisional_transcript"
         case isProvisional = "is_provisional"
         case updatedAt = "updated_at"
+        case startedAt = "started_at"
     }
 
     // Tolerate old card.json files written before the provisional fields existed:
@@ -68,6 +77,7 @@ public struct ConversationCardMeta: Codable, Sendable, Equatable {
         provisionalTranscript = try c.decodeIfPresent(String.self, forKey: .provisionalTranscript)
         isProvisional = try c.decodeIfPresent(Bool.self, forKey: .isProvisional) ?? false
         updatedAt = try c.decodeIfPresent(UInt64.self, forKey: .updatedAt) ?? 0
+        startedAt = try c.decodeIfPresent(UInt64.self, forKey: .startedAt)
     }
 }
 
@@ -91,12 +101,35 @@ public enum ConversationCardStore {
         FileManager.default.fileExists(atPath: cardURL(captureId: captureId, baseDir: baseDir).path)
     }
 
-    /// Durably persist (atomic write). Creates the capture dir if needed.
+    /// Durably persist (atomic write). Creates the capture dir if needed. Every write
+    /// guarantees the durable REAL START is stamped: if the card has no `startedAt`
+    /// yet, derive it from the capture-id's UTC timestamp — so even a card seeded by a
+    /// door poll (which carries only processing-time fields) gets a stable, re-ingest-
+    /// proof conversation date. An existing `startedAt` is NEVER overwritten here.
     public static func save(_ card: ConversationCardMeta, captureId: String, baseDir: URL) {
+        var card = card
+        if card.startedAt == nil, let idStart = CaptureIdTime.startedAt(fromCaptureId: captureId) {
+            card.startedAt = idStart
+        }
         let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         guard let data = try? JSONEncoder().encode(card) else { return }
         try? data.write(to: cardURL(captureId: captureId, baseDir: baseDir), options: [.atomic])
+    }
+
+    /// Durably stamp the conversation's REAL START on the card (track 20260628T1609).
+    /// Called at conversation start with the authoritative meta start (preferred over
+    /// the id-derived value). Idempotent + re-ingest-safe: it NEVER overwrites an
+    /// existing `startedAt`, so a conversation's date can never drift to a later
+    /// processing time. Returns true only if a new start was stamped.
+    @discardableResult
+    public static func recordStart(captureId: String, baseDir: URL, startedAt: UInt64) -> Bool {
+        guard startedAt > 0 else { return false }
+        var card = load(captureId: captureId, baseDir: baseDir) ?? ConversationCardMeta()
+        guard card.startedAt == nil else { return false }
+        card.startedAt = startedAt
+        save(card, captureId: captureId, baseDir: baseDir)
+        return true
     }
 
     /// Merge AUTHORITATIVE facts (the Kiln-derived title/summary, or a door stage) into

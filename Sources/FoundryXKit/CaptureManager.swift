@@ -174,19 +174,42 @@ public final class CaptureManager: ObservableObject {
             || TranscriptCacheStore.isConfirmedInLore(captureId: id, baseDir: baseDir)
     }
 
-    /// A capture's durable conversation start (unix seconds) for ordering. Prefers the
-    /// `meta.json` start (stable across relaunch) over the WAL's in-memory `startedAt`
-    /// (which is re-stamped to launch time when an existing capture is reloaded).
-    /// Memoised once a stable meta start is found so the list sort doesn't re-read disk.
+    /// A capture's durable conversation REAL START (unix seconds) for date grouping +
+    /// ordering. Resolution order, all stable across relaunch / re-ingest:
+    ///   1. `meta.json` start — the authoritative recorded conversation start.
+    ///   2. `card.json` `started_at` — the durable tombstone (set from meta, else id).
+    ///   3. the capture-id's UTC timestamp — a fixed instant baked into the id.
+    ///   4. (last resort only) the WAL's in-memory `startedAt` — which is re-stamped to
+    ///      LAUNCH time when an existing capture is reloaded, so it must never win when
+    ///      any durable source exists. This was the bug: meta-less captures dated to
+    ///      launch time and piled up under "Today".
+    /// We memoise only the durable (1–3) resolutions; the launch-time fallback is left
+    /// uncached so a late-arriving meta/card is picked up next pass.
     private var startTimeCache: [String: TimeInterval] = [:]
     private func startTime(of wal: CaptureWAL) -> TimeInterval {
         if let cached = startTimeCache[wal.captureId] { return cached }
-        if let meta = ConversationMetaStore.load(captureId: wal.captureId, baseDir: baseDir) {
-            let t = TimeInterval(meta.startedAt)
+        if let t = durableStart(captureId: wal.captureId) {
             startTimeCache[wal.captureId] = t
             return t
         }
         return wal.status.startedAt.timeIntervalSince1970
+    }
+
+    /// The durable (processing-time-proof) start for a capture, or nil if none of the
+    /// stable sources are available (only then does the caller fall back to WAL time).
+    private func durableStart(captureId: String) -> TimeInterval? {
+        if let meta = ConversationMetaStore.load(captureId: captureId, baseDir: baseDir),
+           meta.startedAt > 0 {
+            return TimeInterval(meta.startedAt)
+        }
+        if let started = ConversationCardStore.load(captureId: captureId, baseDir: baseDir)?.startedAt,
+           started > 0 {
+            return TimeInterval(started)
+        }
+        if let idStart = CaptureIdTime.startedAt(fromCaptureId: captureId), idStart > 0 {
+            return TimeInterval(idStart)
+        }
+        return nil
     }
 
     /// The durable conversation start as a `Date` (for the list's time grouping). Public
@@ -572,8 +595,12 @@ public final class CaptureManager: ObservableObject {
         active = wal
         captures.insert(wal, at: 0)               // newest first (Omi-style timeline)
         // Durably stamp the conversation START (F1) — the card's start time + the
-        // door's `capturedAt`. Idempotent (won't clobber an existing record).
-        ConversationMetaStore.recordStart(captureId: id, baseDir: baseDir, at: nowUnixSecs())
+        // door's `capturedAt`. Idempotent (won't clobber an existing record). Also
+        // stamp the durable `card.json` start so the conversation keeps this date even
+        // if its meta sidecar is ever pruned (track 20260628T1609).
+        let startSecs = nowUnixSecs()
+        ConversationMetaStore.recordStart(captureId: id, baseDir: baseDir, at: startSecs)
+        ConversationCardStore.recordStart(captureId: id, baseDir: baseDir, startedAt: startSecs)
         wal.beginStreaming()
         router.resetLevelMeter()                  // fresh Opus decoder per conversation
         #if canImport(AVFoundation)
