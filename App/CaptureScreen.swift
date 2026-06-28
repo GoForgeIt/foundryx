@@ -50,14 +50,20 @@ struct CaptureScreen: View {
                                     timeRange: manager.conversationMeta(for: wal.captureId)
                                         .map { CaptureCard.timeRangeString(meta: $0, fallback: wal.status.startedAt) }
                                         ?? CaptureCard.timeRangeString(meta: nil, fallback: wal.status.startedAt),
-                                    place: manager.conversationMeta(for: wal.captureId)?.location?.label
+                                    place: manager.conversationMeta(for: wal.captureId)?.location?.label,
+                                    conversationDate: manager.conversationMeta(for: wal.captureId)
+                                        .map { Date(timeIntervalSince1970: TimeInterval($0.startedAt)) }
+                                        ?? wal.status.startedAt
                                 )
                             } label: {
                                 CaptureCard(
                                     wal: wal,
                                     meta: manager.conversationMeta(for: wal.captureId),
+                                    card: manager.cardMeta(for: wal.captureId),
                                     poller: manager.statusPoller(for: wal.captureId),
-                                    hasCachedTranscript: manager.hasCachedTranscript(wal.captureId)
+                                    hasCachedTranscript: manager.hasCachedTranscript(wal.captureId),
+                                    // Cache RECENT (~14d) transcripts on sight (no-op for older / already-cached).
+                                    onSight: { manager.ensureRecentTranscriptCached(wal.captureId) }
                                 )
                             }
                             .buttonStyle(.plain)
@@ -205,41 +211,67 @@ struct CaptureScreen: View {
 private struct CaptureCard: View {
     @ObservedObject var wal: CaptureWAL
     let meta: ConversationMeta?
+    /// The durable, all-time name/description tombstone (seeds the card before the
+    /// live poll returns, and after the transcript text has been pruned).
+    let card: ConversationCardMeta?
     @ObservedObject var poller: CaptureStatusPoller
     /// Whether a transcript has been cached locally (Ready / pruned tombstone).
     let hasCachedTranscript: Bool
+    /// Cache this conversation's transcript on sight if it's recent (~14d) + uncached.
+    let onSight: () -> Void
+
+    /// The conversation's NAME — the live poll's title, falling back to the durable card.
+    private var name: String? {
+        if let t = poller.title, !t.isEmpty { return t }
+        if let t = card?.title, !t.isEmpty { return t }
+        return nil
+    }
+    /// The conversation's DESCRIPTION — the live poll's summary, falling back to the card.
+    private var description: String? {
+        if let s = poller.summary, !s.isEmpty { return s }
+        if let s = card?.summary, !s.isEmpty { return s }
+        return nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x2) {
-            // Kiln-generated title as the card's headline once the door has it; the
-            // progress chip drops to a secondary line. Falls back to chip-only until then.
-            if let title = poller.title, !title.isEmpty {
-                Text(title).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+            // Kiln-generated title as the card's headline once known (live poll OR the
+            // durable card tombstone); the progress chip drops to a secondary line.
+            // Falls back to chip-only until a title exists.
+            if let name {
+                Text(name).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
                     .lineLimit(2)
             }
             HStack(spacing: GrainSpacing.x2) {
                 // Calm Grain status dot communicates motion: working states pulse,
                 // Ready breathes at rest, failed smolders.
                 GrainStatusDot(progress.statusDot, size: .sm)
-                Text(progress.label).grainTextStyle(poller.title == nil ? .body : .caption)
+                Text(progress.label).grainTextStyle(name == nil ? .body : .caption)
                     .foregroundStyle(progress == .failed ? GrainColor.dangerRed
-                                     : (poller.title == nil ? GrainColor.ink : GrainColor.textMuted))
+                                     : (name == nil ? GrainColor.ink : GrainColor.textMuted))
                 Spacer()
                 Text(timeRange).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            }
+            // The conversation's DESCRIPTION (what it was about) — shown on the card,
+            // not just inside the detail view, so the whole timeline is scannable.
+            if let description {
+                Text(description).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                    .lineLimit(2)
             }
             // Place (when a fix was captured) — time-only otherwise (honest degradation).
             if let place {
                 Text(place).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
             }
-            Text(detail).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+            Text(detail).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
         }
         .padding(GrainSpacing.x3)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).fill(GrainColor.surfaceElevated))
         .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).strokeBorder(GrainColor.border, lineWidth: 1))
         // Drive the door→Lore status poll while the card is on screen; stop when it
-        // scrolls off (the poller itself also stops at a terminal stage, F11).
-        .onAppear { poller.start() }
+        // scrolls off (the poller itself also stops at a terminal stage, F11). Also
+        // cache a recent conversation's transcript on sight (offline/instant later).
+        .onAppear { poller.start(); onSight() }
         .onDisappear { poller.stop() }
     }
 
@@ -303,11 +335,23 @@ struct ConversationDetailView: View {
     let captureId: String
     let timeRange: String
     let place: String?
+    /// When the conversation happened — used to decide whether its transcript is
+    /// recent (auto-loaded/cached) or older (loaded on demand from the door).
+    let conversationDate: Date?
 
     @State private var content: CaptureContent?
     @State private var cached: CachedTranscript?   // local fallback (pruned audio / offline)
     @State private var loadError: String?
     @State private var loading = true
+    @State private var didAttemptFetch = false
+
+    /// True when the conversation is OLDER than the ~14-day transcript-cache window:
+    /// its transcript text isn't kept locally, so it loads on demand (a button /
+    /// pull-to-refresh) rather than auto-fetching on open.
+    private var isOlder: Bool {
+        guard let d = conversationDate else { return false }
+        return Date().timeIntervalSince(d) > CaptureRetention.transcriptRetention
+    }
 
     // Listen affordance state.
     @State private var audioState: AudioState = .idle
@@ -353,14 +397,27 @@ struct ConversationDetailView: View {
                 } else if loading {
                     Text("Loading transcript…")
                         .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
-                } else if let loadError {
-                    Text("Couldn't load transcript: \(loadError)")
-                        .grainTextStyle(.body).foregroundStyle(GrainColor.amber)
-                } else {
+                } else if didAttemptFetch, content?.found == false, loadError == nil {
+                    // We asked the door and it doesn't have the transcript yet.
                     Text("Transcript still processing…")
                         .grainTextStyle(.title).foregroundStyle(GrainColor.ink)
                     Text("Your conversation is saved. The transcript shows up here once it's been processed on your computer.")
                         .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                    GrainButton("Check again", variant: .tonal, size: .sm) { Task { await fetchFromDoor() } }
+                } else {
+                    // Older / not-yet-fetched conversation: load the transcript on demand
+                    // (this transcript isn't cached locally; pull-to-refresh also works).
+                    Text("Transcript not loaded")
+                        .grainTextStyle(.title).foregroundStyle(GrainColor.ink)
+                    Text(isOlder
+                         ? "This is an older conversation, so its transcript isn't stored on your phone. Load it from your computer."
+                         : "Load this conversation's transcript from your computer.")
+                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                    GrainButton("Load transcript", variant: .filled, size: .sm) { Task { await fetchFromDoor() } }
+                    if let loadError {
+                        Text("Couldn't load transcript: \(loadError)")
+                            .grainTextStyle(.caption).foregroundStyle(GrainColor.amber)
+                    }
                 }
             }
             .padding(GrainSpacing.x4)
@@ -369,7 +426,8 @@ struct ConversationDetailView: View {
         .grainBackground()
         .navigationTitle(navTitle)
         .navigationBarTitleDisplayMode(.inline)
-        .task { await load() }
+        .refreshable { await fetchFromDoor() }   // pull-to-refresh loads on demand
+        .task { await initialLoad() }
         .onDisappear { player?.stop() }
     }
 
@@ -401,13 +459,34 @@ struct ConversationDetailView: View {
         return words.isEmpty ? "Conversation" : words
     }
 
-    private func load() async {
-        loading = true
+    /// On open: show the locally cached transcript instantly if we have one. Otherwise
+    /// auto-fetch for a RECENT conversation; for an OLDER one, wait for an explicit
+    /// "Load transcript" (or pull-to-refresh) so we don't always hit the network for
+    /// the long tail of old conversations.
+    private func initialLoad() async {
         loadError = nil
-        // Seed from the local cache first so a pruned-audio / offline conversation
-        // shows its transcript instantly.
+        // Seed from the local cache first so a recent / pruned-audio / offline
+        // conversation shows its transcript instantly.
         cached = TranscriptCacheStore.load(captureId: captureId,
                                            baseDir: CaptureWAL.documentsCaptures())
+        if cached != nil {
+            loading = false
+            return            // instant from cache — no fetch needed
+        }
+        if isOlder {
+            loading = false   // older + uncached → load on demand (button / pull-to-refresh)
+            return
+        }
+        await fetchFromDoor() // recent + uncached → auto-fetch
+    }
+
+    /// Fetch the transcript from the door (`GET /content`) on demand, cache it if
+    /// ready, and surface a summarizing re-fetch. Drives the "Load transcript" button
+    /// and pull-to-refresh.
+    private func fetchFromDoor() async {
+        loading = true
+        loadError = nil
+        didAttemptFetch = true
         do {
             content = try await DoorClient(target: target).captureContent(captureId: captureId)
             cacheIfReady(content)
@@ -434,9 +513,13 @@ struct ConversationDetailView: View {
     /// can only exist because Lore transcribed the audio).
     private func cacheIfReady(_ c: CaptureContent?) {
         guard let c, c.found, !c.transcript.isEmpty else { return }
+        let baseDir = CaptureWAL.documentsCaptures()
         let entry = CachedTranscript(transcript: c.transcript, title: c.title,
                                      summary: c.summary, fetchedAt: UInt64(max(0, Date().timeIntervalSince1970)))
-        TranscriptCacheStore.save(entry, captureId: captureId, baseDir: CaptureWAL.documentsCaptures())
+        TranscriptCacheStore.save(entry, captureId: captureId, baseDir: baseDir)
+        // Seed the durable all-time name/description tombstone too.
+        ConversationCardStore.merge(captureId: captureId, baseDir: baseDir,
+                                    title: c.title, summary: c.summary, stage: nil)
         cached = entry
     }
 

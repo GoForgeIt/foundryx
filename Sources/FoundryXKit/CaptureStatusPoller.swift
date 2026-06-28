@@ -136,10 +136,17 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
     @Published public private(set) var loreCaptureId: String?
     /// The Kiln-generated title once the door has it (drives the card's primary line).
     @Published public private(set) var title: String?
+    /// The Kiln-generated summary/description once the door has it (the card's
+    /// secondary line — what the conversation was about).
+    @Published public private(set) var summary: String?
 
     private let client: CaptureStatusFetching
     private let baseInterval: TimeInterval
     private let maxInterval: TimeInterval
+    /// When set, each poll merges the title/summary/stage into the durable card
+    /// metadata tombstone (`card.json`), so the conversation shows a name + description
+    /// across launches and after its transcript text has been pruned.
+    private let baseDir: URL?
     // Touched only on the main actor (start/stop + the @MainActor apply).
     @MainActor private var task: Task<Void, Never>?
     @MainActor private var lastTranscribed = false
@@ -148,12 +155,20 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
                 client: CaptureStatusFetching,
                 initialStage: CaptureLifecycleStage = .stored,
                 baseInterval: TimeInterval = 5,
-                maxInterval: TimeInterval = 60) {
+                maxInterval: TimeInterval = 60,
+                baseDir: URL? = nil) {
         self.captureId = captureId
         self.client = client
         self.stage = initialStage
         self.baseInterval = baseInterval
         self.maxInterval = maxInterval
+        self.baseDir = baseDir
+        // Seed the live state from the durable card tombstone so the card shows its
+        // name/description immediately on launch, before the first poll returns.
+        if let baseDir, let card = ConversationCardStore.load(captureId: captureId, baseDir: baseDir) {
+            self.title = card.title
+            self.summary = card.summary
+        }
     }
 
     /// What the loop needs back from a poll, computed on the main actor alongside the
@@ -205,7 +220,14 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
         stage = next
         if let id = resp.loreCaptureId { loreCaptureId = id }
         if let t = resp.title, !t.isEmpty { title = t }
+        if let s = resp.summary, !s.isEmpty { summary = s }
         lastTranscribed = resp.transcribed
+        // Persist name/description/stage into the durable card tombstone so the whole
+        // timeline stays browsable (with a title + summary) offline + after pruning.
+        if let baseDir {
+            ConversationCardStore.merge(captureId: captureId, baseDir: baseDir,
+                                        title: resp.title, summary: resp.summary, stage: resp.stage)
+        }
         // Keep polling past a terminal stage ONLY while a transcribed (non-failed)
         // capture is still waiting on its background-generated title.
         let titlePending = title == nil && lastTranscribed && next != .failed

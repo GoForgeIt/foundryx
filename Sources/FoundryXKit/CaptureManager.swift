@@ -122,8 +122,22 @@ public final class CaptureManager: ObservableObject {
     /// pruned-to-transcript tombstone. Order newest-first by the durable conversation start.
     private func rebuildVisibleCaptures() {
         visibleCaptures = captures
-            .filter { CaptureManager.isWorthShowing($0.status) || self.hasCachedTranscript($0.captureId) }
+            .filter { self.isBrowsable($0) }
             .sorted { self.startTime(of: $0) > self.startTime(of: $1) }
+    }
+
+    /// A conversation belongs in the all-time list when it has real audio / is
+    /// streaming, OR it has any durable readable tombstone — a cached transcript, the
+    /// lightweight name/description card, or a confirmed-in-Lore marker. This keeps a
+    /// conversation browsable forever (with its name + description) even after its
+    /// audio AND its transcript text have been pruned. Empty (0-segment) captures with
+    /// no tombstone are still hidden (useless cards).
+    private func isBrowsable(_ wal: CaptureWAL) -> Bool {
+        if CaptureManager.isWorthShowing(wal.status) { return true }
+        let id = wal.captureId
+        return hasCachedTranscript(id)
+            || ConversationCardStore.exists(captureId: id, baseDir: baseDir)
+            || TranscriptCacheStore.isConfirmedInLore(captureId: id, baseDir: baseDir)
     }
 
     /// A capture's durable conversation start (unix seconds) for ordering. Prefers the
@@ -183,6 +197,10 @@ public final class CaptureManager: ObservableObject {
     /// door to assemble + ingest it to Lore. Throws on failure so the capture stays
     /// pending-finalize and is retried.
     private let finalizeCapture: @Sendable (String, ConversationMeta?) async throws -> Void
+    /// Fetch a capture's transcript content from the door (injectable for door-free
+    /// tests). Drives the proactive 14-day transcript cache ("fetch on sight"). Returns
+    /// nil on any transport error (the cache just stays empty until next sight).
+    private let fetchContent: @Sendable (String) async -> CaptureContent?
     /// One-shot location at conversation boundaries (When-In-Use, opportunistic —
     /// F5). Degrades to no-location off the main app / when denied.
     private let locationProvider: ConversationLocationProviding
@@ -195,6 +213,7 @@ public final class CaptureManager: ObservableObject {
                 log: DoorLog? = nil,
                 source: AudioFrameSource,
                 finalize: (@Sendable (String, ConversationMeta?) async throws -> Void)? = nil,
+                fetchContent: (@Sendable (String) async -> CaptureContent?)? = nil,
                 locationProvider: ConversationLocationProviding? = nil) {
         self.target = target
         self.baseDir = baseDir ?? CaptureWAL.documentsCaptures()
@@ -210,6 +229,14 @@ public final class CaptureManager: ObservableObject {
             self.finalizeCapture = { captureId, meta in
                 try await client.finalize(captureId: captureId, meta: meta)
             }
+        }
+        // Default content fetch = the real door /content call. Tests inject a stub to
+        // drive the proactive transcript cache without HTTP.
+        if let fetchContent {
+            self.fetchContent = fetchContent
+        } else {
+            let client = DoorClient(target: target, log: log)
+            self.fetchContent = { captureId in try? await client.captureContent(captureId: captureId) }
         }
         // Default location = the real When-In-Use one-shot on iOS; the no-location
         // degradation provider elsewhere (and the injected stub in door-free tests).
@@ -242,7 +269,8 @@ public final class CaptureManager: ObservableObject {
             Task { @MainActor in self?.log?.info(line) }
         }
         loadExisting()
-        pruneOldAudio()      // retention sweep on launch (keeps transcripts, prunes safe-in-Lore audio)
+        pruneOldTranscripts()  // ~14d transcript-text sweep (keeps name/description metadata)
+        pruneOldAudio()        // ~30d audio sweep (keeps transcripts, prunes safe-in-Lore audio)
         startDrainTimer()
     }
 
@@ -250,6 +278,14 @@ public final class CaptureManager: ObservableObject {
     /// the timeline card (F1). `nil` for captures recorded before this shipped.
     public func conversationMeta(for captureId: String) -> ConversationMeta? {
         ConversationMetaStore.load(captureId: captureId, baseDir: baseDir)
+    }
+
+    /// The durable, lightweight card metadata (name/description/stage) for a capture —
+    /// the all-time tombstone that lets EVERY conversation show a title + summary in
+    /// the list, even after its transcript text has been pruned. `nil` for a capture
+    /// the door hasn't reported a title/summary for yet.
+    public func cardMeta(for captureId: String) -> ConversationCardMeta? {
+        ConversationCardStore.load(captureId: captureId, baseDir: baseDir)
     }
 
     /// Per-capture status pollers (the door→Lore stage chip, F11). Lazily created +
@@ -262,9 +298,52 @@ public final class CaptureManager: ObservableObject {
     public func statusPoller(for captureId: String) -> CaptureStatusPoller {
         if let existing = pollers[captureId] { return existing }
         let client = DoorClient(target: target, log: log)
-        let poller = CaptureStatusPoller(captureId: captureId, client: client)
+        // Pass baseDir so the poller persists title/summary/stage into the durable card
+        // tombstone (card.json) — the all-time browsable name + description.
+        let poller = CaptureStatusPoller(captureId: captureId, client: client, baseDir: baseDir)
         pollers[captureId] = poller
         return poller
+    }
+
+    // MARK: proactive transcript cache (recent ~14d conversations cached on sight)
+
+    /// In-flight proactive caches, so an on-sight fetch never double-fires for the
+    /// same capture while one is already running.
+    private var cachingTranscripts: Set<String> = []
+
+    /// Ensure a RECENT conversation's transcript is cached locally — fetch it from the
+    /// door "on sight" (when its card appears / reaches a ready stage) and persist it,
+    /// so recent conversations are available offline + instantly. No-op when the
+    /// transcript is already cached, when the conversation is OLDER than the ~14-day
+    /// window (those load on demand from the detail view), or when a fetch is already
+    /// in flight. Offline-safe: a failed/empty fetch simply caches nothing.
+    public func ensureRecentTranscriptCached(_ captureId: String) {
+        guard !TranscriptCacheStore.hasCachedTranscript(captureId: captureId, baseDir: baseDir) else { return }
+        guard CaptureRetention.isRecentForTranscriptCache(conversationAge: conversationAgeSeconds(captureId)) else { return }
+        guard !cachingTranscripts.contains(captureId) else { return }
+        cachingTranscripts.insert(captureId)
+        let baseDir = self.baseDir
+        let fetch = self.fetchContent
+        Task { [weak self] in
+            defer { self?.cachingTranscripts.remove(captureId) }
+            guard let c = await fetch(captureId), c.found, !c.transcript.isEmpty else { return }
+            let entry = CachedTranscript(transcript: c.transcript, title: c.title,
+                                         summary: c.summary,
+                                         fetchedAt: UInt64(max(0, Date().timeIntervalSince1970)))
+            TranscriptCacheStore.save(entry, captureId: captureId, baseDir: baseDir)
+            // Also seed the durable card tombstone with the name/description.
+            ConversationCardStore.merge(captureId: captureId, baseDir: baseDir,
+                                        title: c.title, summary: c.summary, stage: nil)
+            self?.rebuildVisibleCaptures()   // a freshly-cached tombstone can change membership
+        }
+    }
+
+    /// Age (seconds) of a conversation since it started, from the durable `meta.json`
+    /// start. 0 (treated as "recent") when there's no metadata yet.
+    private func conversationAgeSeconds(_ captureId: String) -> TimeInterval {
+        guard let started = ConversationMetaStore.load(captureId: captureId, baseDir: baseDir)?.startedAt,
+              started > 0 else { return 0 }
+        return max(0, Date().timeIntervalSince1970 - TimeInterval(started))
     }
 
     public var pendingSegments: Int { captures.reduce(0) { $0 + $1.status.pendingSegments } }
@@ -467,10 +546,33 @@ public final class CaptureManager: ObservableObject {
         // all ACK'd — this is the retry path for a finalize that didn't complete at
         // conversation-close (door/Lore was down, or segments weren't ACK'd yet).
         await retryPendingFinalizes()
-        pruneOldAudio()   // periodic retention sweep (cheap: stats files, only acts >30d)
+        pruneOldTranscripts()   // ~14d transcript-text sweep (keeps name/description metadata)
+        pruneOldAudio()         // periodic retention sweep (cheap: stats files, only acts >30d)
     }
 
-    // MARK: retention (prune local audio after 30d once it's safe in Lore — keep the transcript)
+    // MARK: retention (prune transcript text after ~14d; prune local audio after ~30d)
+
+    /// Prune the cached transcript TEXT for every conversation older than the ~14-day
+    /// window, FIRST copying its name/description into the durable card tombstone so the
+    /// conversation stays browsable (and the transcript stays loadable on demand from
+    /// the door). Keeps `meta.json`, `card.json`, `.lore-confirmed`. Never touches the
+    /// active capture or a recent one. Offline-safe (disk only).
+    public func pruneOldTranscripts() {
+        for wal in captures where wal !== active {
+            let id = wal.captureId
+            guard TranscriptCacheStore.hasCachedTranscript(captureId: id, baseDir: baseDir) else { continue }
+            guard CaptureRetention.shouldPruneTranscript(conversationAge: conversationAgeSeconds(id)) else { continue }
+            // Preserve the readable name/description before dropping the transcript text.
+            if let t = TranscriptCacheStore.load(captureId: id, baseDir: baseDir) {
+                ConversationCardStore.merge(captureId: id, baseDir: baseDir,
+                                            title: t.title, summary: t.summary, stage: nil)
+            }
+            TranscriptCacheStore.pruneTranscriptText(captureId: id, baseDir: baseDir)
+            log?.info("capture \(id): pruned transcript text (>14d) — name/description kept, loadable on demand")
+        }
+    }
+
+    // MARK: retention (prune local audio after 30d once it's safe in Lore — keep a readable tombstone)
 
     /// Prune the local audio for every capture whose newest segment is older than the
     /// retention window AND is confirmed durably in Lore AND has a cached transcript.
@@ -484,10 +586,13 @@ public final class CaptureManager: ObservableObject {
             let id = wal.captureId
             guard let age = newestSegmentAge(id) else { continue }   // nil ⇒ no audio (already pruned)
             let confirmed = TranscriptCacheStore.isConfirmedInLore(captureId: id, baseDir: baseDir)
-            let hasTranscript = TranscriptCacheStore.hasCachedTranscript(captureId: id, baseDir: baseDir)
+            // A readable tombstone survives locally as either the cached transcript or —
+            // once that's been pruned at ~14d — the lightweight name/description card.
+            let tombstone = TranscriptCacheStore.hasCachedTranscript(captureId: id, baseDir: baseDir)
+                || ConversationCardStore.exists(captureId: id, baseDir: baseDir)
             guard CaptureRetention.shouldPruneAudio(newestSegmentAge: age,
                                                     confirmedInLore: confirmed,
-                                                    hasCachedTranscript: hasTranscript) else { continue }
+                                                    hasReadableTombstone: tombstone) else { continue }
             deleteLocalAudio(id)
             wal.refreshStatus()
             prunedAny = true

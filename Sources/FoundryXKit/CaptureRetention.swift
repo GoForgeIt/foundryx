@@ -75,22 +75,59 @@ public enum TranscriptCacheStore {
     public static func isConfirmedInLore(captureId: String, baseDir: URL) -> Bool {
         FileManager.default.fileExists(atPath: confirmedMarkerURL(captureId: captureId, baseDir: baseDir).path)
     }
+
+    /// Prune ONLY the cached transcript TEXT (`transcript.json`), keeping the
+    /// `.lore-confirmed` marker and every other sidecar (meta.json, card.json) so the
+    /// conversation stays browsable (name + description) and the transcript is still
+    /// loadable on demand from the door. Used by the ~14-day transcript retention pass.
+    public static func pruneTranscriptText(captureId: String, baseDir: URL) {
+        try? FileManager.default.removeItem(at: transcriptURL(captureId: captureId, baseDir: baseDir))
+    }
 }
 
-/// The audio retention policy. The prune decision is a pure function so the policy is
+/// The retention policy. The prune decisions are pure functions so the policy is
 /// unit-tested independently of the file system.
+///
+/// Three durable tiers per conversation:
+///   • metadata (meta.json + card.json: when/where + name/description) — kept FOREVER,
+///     so EVERY conversation from all time is browsable.
+///   • transcript text (transcript.json) — cached for ~14 days, then pruned. Older
+///     conversations load their transcript ON DEMAND from the door.
+///   • local audio (seg-*.opus) — kept ~30 days once safely in Lore, then pruned.
 public enum CaptureRetention {
     /// Keep local audio for ~30 days before it's eligible for pruning.
     public static let audioRetention: TimeInterval = 30 * 24 * 60 * 60
 
+    /// Keep the full transcript TEXT cached locally for ~14 days. Past this, the text
+    /// is pruned (the lightweight name/description metadata is kept) and the transcript
+    /// is fetched on demand when the conversation is opened.
+    public static let transcriptRetention: TimeInterval = 14 * 24 * 60 * 60
+
+    /// A conversation is "recent" (within the transcript-cache window) when it's no
+    /// older than `transcriptRetention`. Recent conversations have their transcript
+    /// fetched + cached proactively (offline/instant); older ones load on demand.
+    public static func isRecentForTranscriptCache(conversationAge: TimeInterval) -> Bool {
+        conversationAge <= transcriptRetention
+    }
+
+    /// Whether a conversation's cached transcript TEXT may be pruned: only once it is
+    /// older than the transcript-cache window. The durable metadata (name/description)
+    /// is always kept, and the transcript stays loadable on demand from the door.
+    public static func shouldPruneTranscript(conversationAge: TimeInterval) -> Bool {
+        conversationAge > transcriptRetention
+    }
+
     /// Whether a capture's local audio may be pruned. Audio is pruned ONLY when it's
-    /// both confirmed durably in Lore AND has a locally cached transcript (so nothing
-    /// readable is ever lost), AND its newest segment is older than the retention
-    /// window. Audio that isn't safely stored is NEVER deleted.
+    /// confirmed durably in Lore AND a durable readable tombstone survives locally
+    /// (the cached transcript OR — once that's been pruned at 14d — the lightweight
+    /// name/description card metadata), AND its newest segment is older than the audio
+    /// window. Audio that isn't safely in Lore is NEVER deleted; nothing browsable is
+    /// ever lost (the conversation remains in the list, and Lore can re-serve its
+    /// transcript + audio on demand).
     public static func shouldPruneAudio(newestSegmentAge: TimeInterval,
                                         confirmedInLore: Bool,
-                                        hasCachedTranscript: Bool) -> Bool {
-        guard confirmedInLore, hasCachedTranscript else { return false }
+                                        hasReadableTombstone: Bool) -> Bool {
+        guard confirmedInLore, hasReadableTombstone else { return false }
         return newestSegmentAge > audioRetention
     }
 }

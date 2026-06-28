@@ -22,26 +22,45 @@ final class CaptureRetentionTests: XCTestCase {
 
     func testPrunesWhenOldConfirmedAndCached() {
         XCTAssertTrue(CaptureRetention.shouldPruneAudio(
-            newestSegmentAge: thirtyOneDays, confirmedInLore: true, hasCachedTranscript: true),
-            ">30d + in_lore + transcript ⇒ prune")
+            newestSegmentAge: thirtyOneDays, confirmedInLore: true, hasReadableTombstone: true),
+            ">30d + in_lore + readable tombstone ⇒ prune")
     }
 
     func testNeverPrunesWhenNotConfirmedInLore() {
         XCTAssertFalse(CaptureRetention.shouldPruneAudio(
-            newestSegmentAge: thirtyOneDays, confirmedInLore: false, hasCachedTranscript: true),
-            "audio not confirmed in Lore ⇒ never prune (even if old + transcript)")
+            newestSegmentAge: thirtyOneDays, confirmedInLore: false, hasReadableTombstone: true),
+            "audio not confirmed in Lore ⇒ never prune (even if old + tombstone)")
     }
 
-    func testNeverPrunesWithoutCachedTranscript() {
+    func testNeverPrunesWithoutReadableTombstone() {
         XCTAssertFalse(CaptureRetention.shouldPruneAudio(
-            newestSegmentAge: thirtyOneDays, confirmedInLore: true, hasCachedTranscript: false),
-            "no cached transcript ⇒ never prune (nothing readable would survive)")
+            newestSegmentAge: thirtyOneDays, confirmedInLore: true, hasReadableTombstone: false),
+            "no readable tombstone ⇒ never prune (nothing browsable would survive)")
     }
 
     func testNeverPrunesWithinWindow() {
         XCTAssertFalse(CaptureRetention.shouldPruneAudio(
-            newestSegmentAge: tenDays, confirmedInLore: true, hasCachedTranscript: true),
+            newestSegmentAge: tenDays, confirmedInLore: true, hasReadableTombstone: true),
             "<30d ⇒ keep the audio")
+    }
+
+    // MARK: transcript-text retention (~14 days, pure decision)
+
+    private let fifteenDays: TimeInterval = 15 * 24 * 60 * 60
+    private let thirteenDays: TimeInterval = 13 * 24 * 60 * 60
+
+    func testTranscriptIsRecentWithin14Days() {
+        XCTAssertTrue(CaptureRetention.isRecentForTranscriptCache(conversationAge: thirteenDays),
+                      "<14d ⇒ recent (cache the transcript on sight)")
+        XCTAssertFalse(CaptureRetention.isRecentForTranscriptCache(conversationAge: fifteenDays),
+                       ">14d ⇒ not recent (load on demand)")
+    }
+
+    func testTranscriptPrunesOnlyAfter14Days() {
+        XCTAssertFalse(CaptureRetention.shouldPruneTranscript(conversationAge: thirteenDays),
+                       "<14d ⇒ keep the transcript text")
+        XCTAssertTrue(CaptureRetention.shouldPruneTranscript(conversationAge: fifteenDays),
+                      ">14d ⇒ prune the transcript text (metadata kept)")
     }
 
     // MARK: transcript cache roundtrip
