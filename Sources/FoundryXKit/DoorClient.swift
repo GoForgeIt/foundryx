@@ -80,6 +80,10 @@ public enum DoorEvent: Equatable, Sendable {
     /// route decision, the first token (TTFT), generation, and total + token count.
     case timing(routeMs: Int, ttftMs: Int, genMs: Int, totalMs: Int, tokens: Int)
     case done(reason: String)
+    /// A clear, human-readable failure the door surfaced for a refused/blocked turn
+    /// (e.g. confidential content kept local, auth expired). `code` is the raw router
+    /// reason for branching; `reason` is the user-facing message.
+    case error(code: String, reason: String)
     case other(type: String, raw: String)
 
     /// Parse one SSE `data:` payload (a runtime event JSON) into a typed event.
@@ -108,6 +112,7 @@ public enum DoorEvent: Equatable, Sendable {
         case "timing": return .timing(routeMs: int("route_ms"), ttftMs: int("ttft_ms"),
                                       genMs: int("gen_ms"), totalMs: int("total_ms"), tokens: int("tokens"))
         case "done": return .done(reason: str("reason"))
+        case "error": return .error(code: str("code"), reason: str("reason"))
         default: return .other(type: type, raw: payload)
         }
     }
@@ -272,6 +277,7 @@ public final class DoorClient: @unchecked Sendable {
         case .timing(let r, let t, let g, let total, let n):
             return "timing route=\(r) ttft=\(t) gen=\(g) total=\(total)ms tokens=\(n)"
         case .done(let reason): return "done: \(reason)"
+        case .error(let code, _): return "error: \(code)"
         case .other(let type, _): return "other: \(type)"
         }
     }

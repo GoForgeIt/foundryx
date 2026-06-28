@@ -75,6 +75,42 @@ Feature: FoundryX captures Omi audio durably to the door
     Given I choose the phone microphone as my capture source
     Then my choice is remembered and the Omi is not auto-connected
 
+  Scenario: a real silence gap splits the ambient stream into two conversations
+    Given an ambient capture is recording a conversation
+    And the conversation has accumulated real spoken content
+    When the audio goes quiet for longer than the silence gap even though no frames are arriving
+    Then the current conversation is finalized and sent for transcription
+    And a new conversation begins for the next audio
+
+  Scenario: a runaway conversation is force-split by the hard duration cap
+    Given an ambient capture has been recording one conversation past the maximum duration
+    When the segmentation watchdog next checks the conversation
+    Then the conversation is finalized and a fresh one begins so nothing accumulates for hours
+
+  Scenario: a very short noise burst does not become its own conversation
+    Given an ambient capture records only a one or two word burst
+    When the audio goes quiet for longer than the silence gap
+    Then no new tiny conversation is created
+    And the burst merges into the next conversation instead
+
+  Scenario: every finalized conversation has real start and end bounds
+    Given a conversation is finalized by a silence gap or a forced split
+    Then the conversation records an ended-at time so it has real bounds
+
+  Scenario: a conversation orphaned by a crash is bounded and finalized on next launch
+    Given a capture has recorded audio but was never finalized before the app closed
+    When the app launches again
+    Then the orphaned capture is given an ended-at time and queued for finalize
+
+  Scenario: empty and filler conversations are hidden from the list
+    Given a conversation whose transcript is empty or only silence filler like "Thank you"
+    Then it is not shown in the conversation list
+    But its data is kept on the phone
+
+  Scenario: one capture appears as exactly one row in the list
+    Given the conversation list holds a capture
+    Then that capture is shown as exactly one entry, never duplicated
+
   @ble-hardware
   Scenario: a real Omi wearable streams Opus frames into the WAL
     Given a real Omi wearable in range

@@ -78,11 +78,13 @@ public struct ChatView: View {
                     }
                 }
                 .accessibilityIdentifier("turn-status")
-            case .refused:
-                Text("refused")
+            case .refused(let reason):
+                // Show the door's clear explanation (confidential kept local, auth
+                // expired, …) when present; fall back to a bare label otherwise.
+                Text(reason ?? "Message couldn't be sent")
                     .grainTextStyle(.caption)
-                    .textCase(.uppercase)
                     .foregroundStyle(GrainColor.dangerRed)
+                    .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("turn-status")
             case .streaming:
                 HStack(spacing: GrainSpacing.x2) {

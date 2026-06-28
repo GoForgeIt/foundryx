@@ -32,7 +32,9 @@ public final class ChatViewModel: ObservableObject {
         case streaming
         case awaitingApproval(callId: String, name: String, args: String)
         case completed(reason: String)
-        case refused
+        /// The turn was refused/blocked. `reason` is the door's clear, human-readable
+        /// explanation (confidential kept local, auth expired, …) when one was surfaced.
+        case refused(reason: String?)
     }
 
     /// Door connection/transport state — distinct from `turnState` (which tracks the
@@ -64,6 +66,10 @@ public final class ChatViewModel: ObservableObject {
     @Published public private(set) var turnStartedAt: Date?
     /// The last completed turn's timing summary (for a subtle "took Ns · first token Ns" line).
     @Published public private(set) var lastTiming: TurnTiming?
+    /// The clear failure reason the door surfaced for the current/last turn (set by an
+    /// `error` event, which the door emits just before a refused `done`). Drives the
+    /// refusal message instead of a bare "refused". Cleared at the start of each turn.
+    @Published public private(set) var lastErrorReason: String?
 
     public init() {}
 
@@ -77,6 +83,7 @@ public final class ChatViewModel: ObservableObject {
         turnState = .streaming
         thinkingMs = 0
         lastTiming = nil
+        lastErrorReason = nil
         turnStartedAt = now()
     }
 
@@ -104,9 +111,15 @@ public final class ChatViewModel: ObservableObject {
             break
         case .approvalRequest(let callId, let name, let args):
             turnState = .awaitingApproval(callId: callId, name: name, args: args)
+        case .error(_, let reason):
+            // The door surfaced a clear failure (emitted just before a refused `done`).
+            // Hold the reason so the `done` can render it instead of a bare "refused".
+            lastErrorReason = reason.isEmpty ? nil : reason
+            turnState = .refused(reason: lastErrorReason)
         case .done(let reason):
             thinkingMs = 0; turnStartedAt = nil
-            turnState = (reason == "refused") ? .refused : .completed(reason: reason)
+            turnState = (reason == "refused") ? .refused(reason: lastErrorReason)
+                                              : .completed(reason: reason)
         case .other:
             break
         }
