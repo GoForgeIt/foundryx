@@ -32,62 +32,86 @@ struct CaptureScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            // Meter + live transcript while EITHER the Omi is connected OR the phone
-            // mic is recording — both drive the same capture pipeline.
+            // Live transcript ABOVE the voice-recording animation (Feature 4): a tight
+            // 1-clear + 1-fading window that slides up and dissolves under the header.
+            // Ephemeral, on-device preview; Kiln's transcript remains authoritative.
             if isShowingCapture {
-                meterBar
-                // Live, on-device PROVISIONAL transcript (Feature 1) — a faded
-                // teleprompter stream of what's being heard, right under the meter.
-                // Ephemeral preview; Kiln's transcript remains authoritative.
                 if !manager.liveTranscript.isEmpty {
                     LiveTranscriptTicker(transcript: manager.liveTranscript)
                         .padding(.horizontal, GrainSpacing.x4)
-                        .padding(.bottom, GrainSpacing.x2)
+                        .padding(.top, GrainSpacing.x2)
                 }
+                meterBar
             }
             syncBar
             if manager.visibleCaptures.isEmpty {
                 emptyState
             } else {
-                ScrollView {
-                    // LazyVStack so only on-screen cards instantiate — their pollers
-                    // start in onAppear and stop in onDisappear, so we never run a
-                    // status poll loop for every conversation at once (the lag fix).
-                    LazyVStack(spacing: GrainSpacing.x3) {
-                        ForEach(manager.visibleCaptures, id: \.captureId) { wal in
-                            NavigationLink {
-                                ConversationDetailView(
-                                    target: target,
-                                    captureId: wal.captureId,
-                                    timeRange: manager.conversationMeta(for: wal.captureId)
-                                        .map { CaptureCard.timeRangeString(meta: $0, fallback: wal.status.startedAt) }
-                                        ?? CaptureCard.timeRangeString(meta: nil, fallback: wal.status.startedAt),
-                                    place: manager.conversationMeta(for: wal.captureId)?.location?.label,
-                                    conversationDate: manager.conversationMeta(for: wal.captureId)
-                                        .map { Date(timeIntervalSince1970: TimeInterval($0.startedAt)) }
-                                        ?? wal.status.startedAt
-                                )
-                            } label: {
-                                CaptureCard(
-                                    wal: wal,
-                                    meta: manager.conversationMeta(for: wal.captureId),
-                                    card: manager.cardMeta(for: wal.captureId),
-                                    poller: manager.statusPoller(for: wal.captureId),
-                                    hasCachedTranscript: manager.hasCachedTranscript(wal.captureId),
-                                    // Cache RECENT (~14d) transcripts on sight (no-op for older / already-cached).
-                                    onSight: { manager.ensureRecentTranscriptCached(wal.captureId) }
-                                )
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(GrainSpacing.x4)
-                }
+                conversationList
             }
         }
         .grainBackground()
         .onAppear { manager.startSource(); manager.startMeter() }  // power on + drive the meter
         .onDisappear { manager.stopMeter() }
+    }
+
+    // MARK: conversation list — grouped into dated sections (Feature 5)
+
+    /// The timeline, grouped newest-first into Today / Yesterday / weekday / "Last week"
+    /// / "N weeks ago" / month sections. The grouping is the pure, tested
+    /// `ConversationGrouping`; `visibleCaptures` is already date-desc, so sections stay
+    /// in order. LazyVStack keeps off-screen cards (and their pollers) inert.
+    private var conversationList: some View {
+        let sections = ConversationGrouping.group(manager.visibleCaptures, now: Date()) {
+            manager.conversationStartDate($0)
+        }
+        return ScrollView {
+            LazyVStack(alignment: .leading, spacing: GrainSpacing.x3, pinnedViews: [.sectionHeaders]) {
+                ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
+                    Section {
+                        ForEach(section.items, id: \.captureId) { wal in
+                            conversationRow(wal)
+                        }
+                    } header: {
+                        Text(section.title)
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(GrainColor.textMuted)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, GrainSpacing.x1)
+                            .background(GrainColor.background)
+                    }
+                }
+            }
+            .padding(GrainSpacing.x4)
+        }
+    }
+
+    /// One tappable conversation card → its transcript detail.
+    private func conversationRow(_ wal: CaptureWAL) -> some View {
+        NavigationLink {
+            ConversationDetailView(
+                target: target,
+                captureId: wal.captureId,
+                timeRange: manager.conversationMeta(for: wal.captureId)
+                    .map { CaptureCard.timeRangeString(meta: $0, fallback: wal.status.startedAt) }
+                    ?? CaptureCard.timeRangeString(meta: nil, fallback: wal.status.startedAt),
+                place: manager.conversationMeta(for: wal.captureId)?.location?.label,
+                conversationDate: manager.conversationMeta(for: wal.captureId)
+                    .map { Date(timeIntervalSince1970: TimeInterval($0.startedAt)) }
+                    ?? wal.status.startedAt
+            )
+        } label: {
+            CaptureCard(
+                wal: wal,
+                meta: manager.conversationMeta(for: wal.captureId),
+                card: manager.cardMeta(for: wal.captureId),
+                poller: manager.statusPoller(for: wal.captureId),
+                hasCachedTranscript: manager.hasCachedTranscript(wal.captureId),
+                // Cache RECENT (~14d) transcripts on sight (no-op for older / already-cached).
+                onSight: { manager.ensureRecentTranscriptCached(wal.captureId) }
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: live audio meter (req 8) — shows the Omi is actually hearing sound
@@ -117,10 +141,10 @@ struct CaptureScreen: View {
         case .connected(let name):
             ambientHeader(name)
         default:
-            // Omi not connected: offer the phone microphone as a Record source, then
-            // (when not phone-mic-only) the Omi connect/pairing flow below it.
+            // Omi not connected: a compact capture header with the phone-mic record
+            // sphere on the right, then (when not phone-mic-only) the Omi connect flow.
             VStack(spacing: 0) {
-                if manager.phoneMicAvailable { micRecordSection }
+                if manager.phoneMicAvailable { micHeader }
                 if manager.captureSource == .omi { connectSection }
             }
         }
@@ -133,23 +157,21 @@ struct CaptureScreen: View {
         return manager.isRecordingMic
     }
 
-    // MARK: phone-microphone Record control (shown when the Omi isn't connected)
+    // MARK: phone-microphone capture header (mic sphere on the right, Feature 3)
 
-    private var micRecordSection: some View {
+    /// The capture header when the Omi isn't connected: a title + status on the left and
+    /// the mic record sphere on the right. Tapping the sphere toggles record/stop; while
+    /// recording it becomes a red, pulsing record sphere.
+    private var micHeader: some View {
         HStack(spacing: GrainSpacing.x3) {
-            Circle().fill(manager.isRecordingMic ? GrainColor.forgeBlue : GrainColor.inkTertiary)
-                .frame(width: 10, height: 10)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Phone microphone").grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-                Text(manager.isRecordingMic ? "Recording — tap Stop to finish & transcribe"
-                                            : "Record a conversation with your phone")
+                Text("Capture").grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                Text(manager.isRecordingMic ? "Recording — tap to stop"
+                                            : "Tap the mic to record with your phone")
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
             }
             Spacer()
-            GrainButton(manager.isRecordingMic ? "Stop" : "Record",
-                        variant: manager.isRecordingMic ? .tonal : .filled, size: .sm) {
-                manager.toggleMicRecording()
-            }
+            MicSphereButton(recording: manager.isRecordingMic) { manager.toggleMicRecording() }
         }
         .padding(.horizontal, GrainSpacing.x4)
         .padding(.vertical, GrainSpacing.x3)
@@ -288,6 +310,15 @@ private struct CaptureCard: View {
         return nil
     }
 
+    /// The on-device PROVISIONAL transcript body shown the instant a capture is stopped,
+    /// until the authoritative Kiln summary lands (Feature 1). Only when the card is still
+    /// provisional and the poller hasn't returned a real title yet.
+    private var provisionalPreview: String? {
+        guard card?.isProvisional == true, (poller.title ?? "").isEmpty else { return nil }
+        guard let body = card?.provisionalTranscript, !body.isEmpty else { return nil }
+        return body
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x2) {
             // Kiln-generated title as the card's headline once known (live poll OR the
@@ -312,6 +343,12 @@ private struct CaptureCard: View {
             if let description {
                 Text(description).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                     .lineLimit(2)
+            } else if let preview = provisionalPreview {
+                // Instant on-device body until Kiln's summary overrides it in place.
+                Text(preview).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                    .lineLimit(2)
+                Text("On-device transcript · finishing on your computer…")
+                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             }
             // Place (when a fix was captured) — time-only otherwise (honest degradation).
             if let place {
@@ -396,6 +433,7 @@ struct ConversationDetailView: View {
 
     @State private var content: CaptureContent?
     @State private var cached: CachedTranscript?   // local fallback (pruned audio / offline)
+    @State private var provisional: ConversationCardMeta?  // on-device provisional (instant, pre-Kiln)
     @State private var loadError: String?
     @State private var loading = true
     @State private var didAttemptFetch = false
@@ -419,7 +457,17 @@ struct ConversationDetailView: View {
     private var transcriptText: String? {
         if let c = content, c.found, !c.transcript.isEmpty { return c.transcript }
         if let cached, !cached.transcript.isEmpty { return cached.transcript }
+        // On-device provisional body — shown instantly until Kiln's lands.
+        if let p = provisional, p.isProvisional, let body = p.provisionalTranscript, !body.isEmpty { return body }
         return nil
+    }
+    /// True when the transcript currently shown is the on-device provisional (no door /
+    /// cached Kiln transcript yet) — drives a "still finishing" note.
+    private var showingProvisional: Bool {
+        let hasAuthoritative = (content?.found == true && !(content?.transcript.isEmpty ?? true))
+            || (cached.map { !$0.transcript.isEmpty } ?? false)
+        return !hasAuthoritative && (provisional?.isProvisional == true)
+            && !((provisional?.provisionalTranscript ?? "").isEmpty)
     }
     private var summaryText: String? { content?.summary ?? cached?.summary }
 
@@ -444,6 +492,10 @@ struct ConversationDetailView: View {
                         Divider().background(GrainColor.borderHairline)
                     } else if content?.summarizing == true {
                         Text("Summarizing…").grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                    }
+                    if showingProvisional {
+                        Text("On-device transcript · finishing on your computer…")
+                            .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
                     }
                     Text("Transcript").grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                     Text(transcript)
@@ -509,6 +561,7 @@ struct ConversationDetailView: View {
     private var navTitle: String {
         if let t = content?.title, !t.isEmpty { return t }
         if let t = cached?.title, !t.isEmpty { return t }
+        if let t = provisional?.title, !t.isEmpty { return t }
         guard let t = transcriptText, !t.isEmpty else { return "Conversation" }
         let words = t.split(whereSeparator: { $0 == " " || $0 == "\n" }).prefix(6).joined(separator: " ")
         return words.isEmpty ? "Conversation" : words
@@ -521,9 +574,11 @@ struct ConversationDetailView: View {
     private func initialLoad() async {
         loadError = nil
         // Seed from the local cache first so a recent / pruned-audio / offline
-        // conversation shows its transcript instantly.
-        cached = TranscriptCacheStore.load(captureId: captureId,
-                                           baseDir: CaptureWAL.documentsCaptures())
+        // conversation shows its transcript instantly. Also load the on-device
+        // provisional card so a just-stopped conversation shows its text before Kiln.
+        let base = CaptureWAL.documentsCaptures()
+        cached = TranscriptCacheStore.load(captureId: captureId, baseDir: base)
+        provisional = ConversationCardStore.load(captureId: captureId, baseDir: base)
         if cached != nil {
             loading = false
             return            // instant from cache — no fetch needed
@@ -599,36 +654,84 @@ struct ConversationDetailView: View {
     }
 }
 
-/// The live, on-device transcription "teleprompter" (Feature 1). A short, fixed-height
-/// window of what's being heard RIGHT NOW: the newest words sit sharp at the bottom and
-/// scroll upward, fading to grey and dissolving at the top edge (a linear fade mask), so
-/// it reads as an ambient, ephemeral glimpse rather than a growing wall of text. The
-/// still-settling VOLATILE tail is rendered dimmer/italic and visibly snaps when the
-/// recognizer finalizes (the "guess then fix" refinement). Visually subordinate to the
-/// capture meter; the authoritative transcript is still Kiln's.
+/// The phone-mic record control as a compact sphere (Feature 3). Idle: a subtle mic
+/// glyph in a quiet circle. Recording: a RED record sphere with an animated pulse ring
+/// radiating outward, so "you're recording" reads at a glance. Tapping toggles.
+private struct MicSphereButton: View {
+    let recording: Bool
+    let action: () -> Void
+    @State private var pulse = false
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                // Pulsing ring (recording only): expands + fades, forever.
+                if recording {
+                    Circle()
+                        .fill(GrainColor.dangerRed.opacity(0.35))
+                        .frame(width: 44, height: 44)
+                        .scaleEffect(pulse ? 1.3 : 0.8)
+                        .opacity(pulse ? 0.0 : 0.7)
+                }
+                Circle()
+                    .fill(recording ? GrainColor.dangerRed : GrainColor.surfaceElevated)
+                    .frame(width: 34, height: 34)
+                    .overlay(
+                        Circle().strokeBorder(recording ? Color.clear : GrainColor.border, lineWidth: 1)
+                    )
+                Image(systemName: recording ? "stop.fill" : "mic.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(recording ? Color.white : GrainColor.ink)
+            }
+            .frame(width: 46, height: 46)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(recording ? "Stop recording" : "Record")
+        .onAppear { syncPulse(recording) }
+        .onChange(of: recording) { now in syncPulse(now) }
+    }
+
+    private func syncPulse(_ on: Bool) {
+        if on {
+            pulse = false
+            withAnimation(.easeOut(duration: 1.1).repeatForever(autoreverses: false)) { pulse = true }
+        } else {
+            withAnimation(.easeOut(duration: 0.2)) { pulse = false }
+        }
+    }
+}
+
+/// The live, on-device transcription window (Feature 4). A TIGHT 1-clear + 1-fading
+/// glimpse positioned ABOVE the recording meter: the newest words sit sharp at the
+/// bottom, the line above starts to fade, and as new text streams in it animates up and
+/// out — dissolving under the capture header (a top-edge fade mask). Only ~1–2 lines
+/// inline; the full transcript lives in the conversation's detail view. The still-
+/// settling VOLATILE tail is dimmer/italic and snaps when the recognizer finalizes (the
+/// "guess then fix" feel). Ephemeral preview; Kiln's transcript remains authoritative.
 private struct LiveTranscriptTicker: View {
     let transcript: LiveTranscript
 
-    // ~3 lines tall — a glimpse, not a transcript.
-    private let height: CGFloat = 58
+    // ~2 lines tall — one clear line + one fading above it.
+    private let height: CGFloat = 40
 
     private var styledText: Text {
         let finalized = Text(transcript.finalizedText)
-            .foregroundColor(GrainColor.textMuted)
+            .foregroundColor(GrainColor.ink)
         guard !transcript.volatileTail.isEmpty else { return finalized }
         let sep = transcript.finalizedText.isEmpty ? "" : " "
         // Volatile tail: dimmer + italic so the user sees it's still settling.
         let tail = Text(sep + transcript.volatileTail)
-            .foregroundColor(GrainColor.textFaint)
+            .foregroundColor(GrainColor.textMuted)
             .italic()
         return finalized + tail
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+        VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: GrainSpacing.x1) {
                 // A soft pulsing dot marks this as the LIVE / provisional layer.
-                Circle().fill(GrainColor.forgeBlue.opacity(0.7)).frame(width: 6, height: 6)
+                Circle().fill(GrainColor.forgeBlue.opacity(0.7)).frame(width: 5, height: 5)
                 Text("Live · on-device")
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             }
@@ -643,16 +746,18 @@ private struct LiveTranscriptTicker: View {
                         .frame(minHeight: height, alignment: .bottom)
                 }
                 .frame(height: height)
-                // Auto-scroll to keep the newest words in view as they stream in.
+                .scrollDisabled(true)
+                // Slide the newest words up into view AS they stream — no debounce on the
+                // text itself (it re-renders on every snapshot); this only animates scroll.
                 .onChange(of: transcript.displayText) { _ in
-                    withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo("liveTail", anchor: .bottom) }
+                    withAnimation(.easeOut(duration: 0.14)) { proxy.scrollTo("liveTail", anchor: .bottom) }
                 }
             }
-            // Top fade-out: older lines dissolve at the top edge as they scroll up.
+            // Top-edge fade: the older line dissolves under the header as it scrolls up.
             .mask(
                 LinearGradient(
-                    gradient: Gradient(colors: [.clear, .black, .black]),
-                    startPoint: .top, endPoint: .bottom)
+                    gradient: Gradient(colors: [.clear, .black]),
+                    startPoint: .top, endPoint: .center)
             )
         }
         .frame(maxWidth: .infinity, alignment: .leading)

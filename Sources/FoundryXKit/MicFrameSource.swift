@@ -122,6 +122,12 @@ public final class OpusEncoder48k: @unchecked Sendable {
 public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendable {
     public var onFrame: ((Data) -> Void)?
     public var onState: ((AudioSourceState) -> Void)?
+    /// Optional DIRECT decoded-PCM tap for live transcription (Feature 2): the already-
+    /// normalised 48 kHz mono PCM, handed off BEFORE Opus encoding so the on-device
+    /// recognizer never waits on an encode→decode round-trip. Fired on the serial encode
+    /// queue (same ordering guarantee as `onFrame`). nil ⇒ no direct tap (the live
+    /// preview falls back to the FrameRouter's Opus-decode tap).
+    public var onPCM: ((AVAudioPCMBuffer) -> Void)?
 
     private let log: DoorLog?
     private let engine = AVAudioEngine()
@@ -228,6 +234,9 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
                 return input
             }
             guard status != .error, out.frameLength > 0, let ch = out.int16ChannelData else { return }
+            // Direct live-STT tap: hand the freshly-normalised PCM straight to the
+            // recognizer (no Opus round-trip), BEFORE we encode it for the durable WAL.
+            self.onPCM?(out)
             let n = Int(out.frameLength)
             self.pending.append(contentsOf: UnsafeBufferPointer(start: ch[0], count: n))
             let fs = OpusEncoder48k.frameSamples
@@ -260,6 +269,10 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
 public final class MicFrameSource: AudioFrameSource, @unchecked Sendable {
     public var onFrame: ((Data) -> Void)?
     public var onState: ((AudioSourceState) -> Void)?
+    #if canImport(AVFoundation)
+    /// Parity with the iOS source's direct-PCM tap (unused on this host platform).
+    public var onPCM: ((AVAudioPCMBuffer) -> Void)?
+    #endif
     public init(log: DoorLog? = nil) { _ = log }
     public func start() { onState?(.failed("phone microphone unavailable on this platform")) }
     public func stop() { onState?(.stopped) }

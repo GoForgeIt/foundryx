@@ -46,6 +46,11 @@ final class FrameRouter: @unchecked Sendable {
     // meter can be told apart from "no frames arriving at all."
     private var frameCount = 0
     private var lastBytes = 0
+    // When true, the live-STT PCM is supplied DIRECTLY by the source (the phone mic
+    // hands us its already-decoded 48 kHz PCM), so we SKIP the internal Opus→PCM decode
+    // tap — avoiding an avoidable encode→decode round-trip of latency for live preview
+    // (Feature 2). The durable WAL/upload Opus path is unchanged either way.
+    private var externalPCM = false
 
     /// Off-main per-frame level (0…1) for the meter. Must be cheap + non-blocking.
     var onLevel: ((Float) -> Void)?
@@ -71,6 +76,8 @@ final class FrameRouter: @unchecked Sendable {
     func resetSegmenter() { lock.lock(); segmenter.reset(); lock.unlock() }
     /// Recreate the Opus decoder so a new capture stream starts clean.
     func resetLevelMeter() { lock.lock(); levelMeter.reset(); lock.unlock() }
+    /// When true, the source feeds live-STT PCM directly (mic) → skip the decode tap.
+    func setExternalPCM(_ b: Bool) { lock.lock(); externalPCM = b; lock.unlock() }
     #if canImport(AVFoundation)
     /// Recreate the live-STT Opus decoder so a new conversation starts clean.
     func resetPCMDecoder() { lock.lock(); pcmDecoder.reset(); lock.unlock() }
@@ -107,6 +114,7 @@ final class FrameRouter: @unchecked Sendable {
         let drms = levelMeter.lastRMS, dconv = levelMeter.hasConverter
         let dcookie = levelMeter.lastCookieStatus
         let emitDiag = !isPaused && (fc <= 3 || fc % 50 == 0)
+        let useExternalPCM = externalPCM
         lock.unlock()
         target?.appendFrame(frame)
         if !isPaused {
@@ -115,9 +123,11 @@ final class FrameRouter: @unchecked Sendable {
             // Live-transcription tap: decode the SAME packet to PCM and hand it off.
             // Strictly additive + downstream of appendFrame — a decoder/transcriber
             // failure can never affect the durable capture. Only runs when live preview
-            // is wired (onPCM set). `route` is serial (serial source queue), so the
-            // stateful decoder is fed serially.
-            if let onPCM, let buf = pcmDecoder.decode(frame) { onPCM(buf) }
+            // is wired (onPCM set) AND the source isn't already feeding PCM directly (the
+            // phone mic supplies its decoded PCM straight to the transcriber, Feature 2).
+            // `route` is serial (serial source queue), so the stateful decoder is fed
+            // serially.
+            if !useExternalPCM, let onPCM, let buf = pcmDecoder.decode(frame) { onPCM(buf) }
             #endif
             if let e = event { onSegment?(e) }
             if emitDiag {
@@ -177,6 +187,12 @@ public final class CaptureManager: ObservableObject {
             return t
         }
         return wal.status.startedAt.timeIntervalSince1970
+    }
+
+    /// The durable conversation start as a `Date` (for the list's time grouping). Public
+    /// wrapper over the same memoised `meta.json`-preferring start used to order the list.
+    public func conversationStartDate(_ wal: CaptureWAL) -> Date {
+        Date(timeIntervalSince1970: startTime(of: wal))
     }
 
     /// True once a transcript has been cached locally for this capture (used to keep a
@@ -341,6 +357,10 @@ public final class CaptureManager: ObservableObject {
         // transcriber via the thread-safe box — no main-actor hop on the frame path.
         if makeLiveTranscriber != nil {
             router.onPCM = { [liveBox] buf in liveBox.append(buf) }
+            // Phone mic: feed its DECODED PCM straight to the transcriber (no Opus
+            // encode→decode round-trip, Feature 2). When the mic is the active source the
+            // router skips its own decode tap (see beginSession) so we never double-feed.
+            (micSource as? MicFrameSource)?.onPCM = { [liveBox] buf in liveBox.append(buf) }
         }
         #endif
         loadExisting()
@@ -559,6 +579,9 @@ public final class CaptureManager: ObservableObject {
         #if canImport(AVFoundation)
         router.resetPCMDecoder()                  // fresh live-STT decoder per conversation
         #endif
+        // Phone-mic sessions feed PCM directly to the transcriber → skip the router's
+        // Opus-decode tap (Feature 2). Omi ambient sessions keep the decode tap.
+        router.setExternalPCM(isRecordingMic)
         router.setPaused(isPaused)
         router.setWAL(wal)                        // frames now flow into this WAL
         startLiveTranscription()                  // additive live preview (no-op if unwired)
@@ -598,8 +621,11 @@ public final class CaptureManager: ObservableObject {
         }
     }
 
-    /// Finish the active conversation's live transcriber + clear the preview.
-    private func endLiveTranscription() {
+    /// Finish the active conversation's live transcriber + clear the preview. When a
+    /// `seedInto` capture id is given, the transcriber's SETTLED text (more complete than
+    /// the last volatile snapshot) refines that capture's persisted provisional card
+    /// once `finish()` returns (Feature 1).
+    private func endLiveTranscription(seedInto captureId: String? = nil) {
         #if canImport(AVFoundation)
         liveBox.set(nil)
         #endif
@@ -608,7 +634,24 @@ public final class CaptureManager: ObservableObject {
         liveTranscriptTask?.cancel()
         liveTranscriptTask = nil
         liveTranscript = .empty
-        if let t { Task { _ = await t.finish() } }
+        if let t {
+            Task { @MainActor [weak self] in
+                let settled = await t.finish()
+                if let captureId, !settled.isEmpty { self?.seedProvisionalCard(captureId, transcript: settled) }
+            }
+        }
+    }
+
+    /// Persist the on-device transcript as the capture's PROVISIONAL card content + a
+    /// provisional title (first words / "Processing…"), then refresh the list so the
+    /// card shows it immediately. Never downgrades a card that already has authoritative
+    /// Kiln content. Does NOT stamp the in-Lore/cached-transcript tombstone — provisional
+    /// content must not read as "Ready".
+    private func seedProvisionalCard(_ captureId: String, transcript: String) {
+        let title = ProvisionalTitle.from(transcript: transcript)
+        let changed = ConversationCardStore.seedProvisional(
+            captureId: captureId, baseDir: baseDir, transcript: transcript, title: title)
+        if changed { rebuildVisibleCaptures() }
     }
 
     /// Manually split the conversation (Feature 2): finalize the CURRENT capture (it's
@@ -626,7 +669,14 @@ public final class CaptureManager: ObservableObject {
 
     private func endSession() {
         router.setWAL(nil)
-        endLiveTranscription()                    // stop + clear the live preview
+        // Capture the on-device transcript BEFORE teardown clears it, and persist it as
+        // the conversation's PROVISIONAL content so the card shows readable text the
+        // INSTANT it's stopped — resilient to slow/failed Kiln transcription (Feature 1).
+        let onDeviceNow = liveTranscript.displayText
+        let finishedId = active?.captureId
+        if let finishedId { seedProvisionalCard(finishedId, transcript: onDeviceNow) }
+        endLiveTranscription(seedInto: finishedId)   // stop + (async) refine the seed
+        router.setExternalPCM(false)                 // clear the mic's direct-PCM tap mode
         guard let finished = active else { return }
         finished.finish()
         active = nil

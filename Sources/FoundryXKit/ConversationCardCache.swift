@@ -21,26 +21,53 @@ import Foundation
 /// Every field is optional so a card can be seeded incrementally (stage first, then
 /// title, then summary) as the door reports more.
 public struct ConversationCardMeta: Codable, Sendable, Equatable {
-    /// The conversation's NAME (the Kiln-generated title).
+    /// The conversation's NAME (the Kiln-generated title, OR a provisional on-device one).
     public var title: String?
     /// The conversation's DESCRIPTION (the Kiln-generated summary).
     public var summary: String?
     /// Last known door pipeline stage string (advisory — the live poller is canonical
     /// while a card is on screen; this just gives a sensible value before the poll).
     public var stage: String?
+    /// The on-device PROVISIONAL transcript body, persisted at finalize so the
+    /// conversation shows readable content INSTANTLY (track 20260628) — before, and
+    /// resilient to a slow/failed, Kiln transcription. Overridden by the Kiln transcript
+    /// once it lands (the detail view prefers door/cached content over this).
+    public var provisionalTranscript: String?
+    /// True while the card's title/body are the on-device PROVISIONAL content (not yet
+    /// the authoritative Kiln title/summary). Cleared the moment real Kiln content
+    /// merges in, so the card can render a "Processing…" affordance until then.
+    public var isProvisional: Bool
     /// When this record was last updated (unix seconds).
     public var updatedAt: UInt64
 
-    public init(title: String? = nil, summary: String? = nil, stage: String? = nil, updatedAt: UInt64 = 0) {
+    public init(title: String? = nil, summary: String? = nil, stage: String? = nil,
+                provisionalTranscript: String? = nil, isProvisional: Bool = false,
+                updatedAt: UInt64 = 0) {
         self.title = title
         self.summary = summary
         self.stage = stage
+        self.provisionalTranscript = provisionalTranscript
+        self.isProvisional = isProvisional
         self.updatedAt = updatedAt
     }
 
     enum CodingKeys: String, CodingKey {
         case title, summary, stage
+        case provisionalTranscript = "provisional_transcript"
+        case isProvisional = "is_provisional"
         case updatedAt = "updated_at"
+    }
+
+    // Tolerate old card.json files written before the provisional fields existed:
+    // the new fields default to nil/false so pre-existing cards decode unchanged.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+        summary = try c.decodeIfPresent(String.self, forKey: .summary)
+        stage = try c.decodeIfPresent(String.self, forKey: .stage)
+        provisionalTranscript = try c.decodeIfPresent(String.self, forKey: .provisionalTranscript)
+        isProvisional = try c.decodeIfPresent(Bool.self, forKey: .isProvisional) ?? false
+        updatedAt = try c.decodeIfPresent(UInt64.self, forKey: .updatedAt) ?? 0
     }
 }
 
@@ -72,10 +99,13 @@ public enum ConversationCardStore {
         try? data.write(to: cardURL(captureId: captureId, baseDir: baseDir), options: [.atomic])
     }
 
-    /// Merge incoming facts into the durable card record: each non-empty incoming
-    /// field overwrites (never clobbers an existing value with nil/empty). Writes only
-    /// when something actually changed. Returns true if the record was updated — so a
-    /// caller can refresh the UI/list only on a real change.
+    /// Merge AUTHORITATIVE facts (the Kiln-derived title/summary, or a door stage) into
+    /// the durable card record: each non-empty incoming field overwrites (never clobbers
+    /// an existing value with nil/empty). A real title or summary landing here clears the
+    /// `isProvisional` flag — Kiln content has OVERRIDDEN the on-device provisional
+    /// content in place (track 20260628). Writes only when something actually changed.
+    /// Returns true if the record was updated — so a caller can refresh the UI/list only
+    /// on a real change.
     @discardableResult
     public static func merge(captureId: String,
                              baseDir: URL,
@@ -84,12 +114,58 @@ public enum ConversationCardStore {
                              stage: String? = nil) -> Bool {
         var card = load(captureId: captureId, baseDir: baseDir) ?? ConversationCardMeta()
         var changed = false
+        // A real (Kiln) title/summary takes over a provisional card: overwrite even a
+        // provisional title, and drop the provisional flag.
         if let t = title, !t.isEmpty, t != card.title { card.title = t; changed = true }
         if let s = summary, !s.isEmpty, s != card.summary { card.summary = s; changed = true }
         if let st = stage, !st.isEmpty, st != card.stage { card.stage = st; changed = true }
+        let hasAuthoritative = (title.map { !$0.isEmpty } ?? false) || (summary.map { !$0.isEmpty } ?? false)
+        if hasAuthoritative && card.isProvisional { card.isProvisional = false; changed = true }
         guard changed else { return false }
         card.updatedAt = UInt64(max(0, Date().timeIntervalSince1970))
         save(card, captureId: captureId, baseDir: baseDir)
         return true
+    }
+
+    /// Seed the durable card with the on-device PROVISIONAL content at finalize (track
+    /// 20260628), so the conversation shows readable content INSTANTLY in the list —
+    /// before, and resilient to a slow/failed, Kiln transcription. Sets a provisional
+    /// title (caller passes the first words / "Processing…") plus the on-device
+    /// transcript body, and marks the card provisional. It will NOT downgrade a card that
+    /// already carries an AUTHORITATIVE (non-provisional) title — a real Kiln title that
+    /// somehow already landed always wins. Returns true if the record was written.
+    @discardableResult
+    public static func seedProvisional(captureId: String,
+                                       baseDir: URL,
+                                       transcript: String?,
+                                       title: String?) -> Bool {
+        var card = load(captureId: captureId, baseDir: baseDir) ?? ConversationCardMeta()
+        // Don't clobber an already-authoritative title (Kiln content already won).
+        if let existing = card.title, !existing.isEmpty, !card.isProvisional { return false }
+        var changed = false
+        if let t = title, !t.isEmpty, t != card.title { card.title = t; changed = true }
+        if let body = transcript, !body.isEmpty, body != card.provisionalTranscript {
+            card.provisionalTranscript = body; changed = true
+        }
+        if !card.isProvisional { card.isProvisional = true; changed = true }
+        guard changed else { return false }
+        card.updatedAt = UInt64(max(0, Date().timeIntervalSince1970))
+        save(card, captureId: captureId, baseDir: baseDir)
+        return true
+    }
+}
+
+/// Builds a short provisional TITLE from the on-device transcript body: the first few
+/// words, else a calm "Processing…" placeholder when nothing was heard. Pure + tested.
+public enum ProvisionalTitle {
+    public static let placeholder = "Processing…"
+
+    public static func from(transcript: String?, wordLimit: Int = 6) -> String {
+        guard let t = transcript?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else {
+            return placeholder
+        }
+        let words = t.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" })
+        let head = words.prefix(wordLimit).joined(separator: " ")
+        return head.isEmpty ? placeholder : (words.count > wordLimit ? head + "…" : head)
     }
 }
