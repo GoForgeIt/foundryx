@@ -42,6 +42,24 @@ Feature: FoundryX captures Omi audio durably to the door
     When I tap to start a new conversation
     Then no conversation is finalized and nothing is recording
 
+  Scenario: recording from the phone microphone finalizes through the normal path
+    Given the Omi is not connected
+    And I am recording a conversation with the phone microphone
+    When I stop the phone-microphone recording
+    Then the conversation is finalized and sent for transcription like an Omi capture
+
+  Scenario: the phone-microphone Opus matches the pipeline's segment format
+    Given a conversation recorded with the phone microphone
+    Then its audio is 48 kHz mono Opus in 20 ms frames the door and decoder already accept
+
+  Scenario: a Record control is offered when the Omi is not connected
+    Given the Omi is not connected
+    Then I can record a conversation with the phone microphone
+
+  Scenario: choosing the phone microphone as the capture source does not auto-connect the Omi
+    Given I choose the phone microphone as my capture source
+    Then my choice is remembered and the Omi is not auto-connected
+
   @ble-hardware
   Scenario: a real Omi wearable streams Opus frames into the WAL
     Given a real Omi wearable in range

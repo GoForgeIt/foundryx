@@ -41,7 +41,7 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         NSLocalNetworkUsageDescription: FoundryX connects to your Foundry door running on your computer over the local network.
         NSBluetoothAlwaysUsageDescription: FoundryX connects to your Omi wearable over Bluetooth to capture audio.
-        NSMicrophoneUsageDescription: FoundryX captures audio from your Omi wearable.
+        NSMicrophoneUsageDescription: FoundryX records conversations using your phone's microphone (when your Omi isn't connected) and captures audio from your Omi wearable. Audio stays on your devices.
         NSSpeechRecognitionUsageDescription: FoundryX shows a live, on-device transcript preview as you speak. Speech recognition runs entirely on your phone and the text stays on your devices.
         NSLocationWhenInUseUsageDescription: FoundryX notes where a conversation took place so each capture shows its location. Location is sampled only while you're using the app and stays on your devices.
         UIBackgroundModes:

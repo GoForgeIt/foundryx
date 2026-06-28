@@ -61,6 +61,9 @@ private struct MainTabs: View {
         // iOS 16–25; it's additive + ephemeral (Kiln stays authoritative).
         _manager = StateObject(wrappedValue: CaptureManager(
             target: target, log: log, source: dm,
+            // The phone's own mic as a second capture source (Record button when the
+            // Omi is disconnected) — flows through the identical Opus/WAL/finalize path.
+            micSource: MicFrameSource(log: log),
             liveTranscriber: LiveTranscription.defaultFactory()))
     }
 

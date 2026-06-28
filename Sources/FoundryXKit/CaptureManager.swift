@@ -219,7 +219,19 @@ public final class CaptureManager: ObservableObject {
     private let baseDir: URL
     private let log: DoorLog?
     private let source: AudioFrameSource
+    /// Optional SECOND frame source: the phone's own microphone (a `MicFrameSource`).
+    /// Wired into the SAME router/WAL/lifecycle as the Omi — the mic is just another
+    /// frame source. Started/stopped explicitly via the Record control (not ambiently).
+    private let micSource: AudioFrameSource?
     private let router: FrameRouter
+
+    /// Whether a phone-mic source is wired (drives the Record control's availability).
+    public var phoneMicAvailable: Bool { micSource != nil }
+    /// True while the phone mic is actively recording (drives the Record/Stop button).
+    @Published public private(set) var isRecordingMic: Bool = false
+    /// The user's chosen capture device (Omi vs phone mic). Persisted. Selecting the
+    /// phone mic stops the Omi from auto-grabbing an ambient session.
+    @Published public private(set) var captureSource: CaptureSourceKind = CaptureSettings.captureSource
     private let levelBuffer = LevelBuffer()
     private var drainTimer: Timer?
     private var meterTimer: Timer?
@@ -257,6 +269,7 @@ public final class CaptureManager: ObservableObject {
                 baseDir: URL? = nil,
                 log: DoorLog? = nil,
                 source: AudioFrameSource,
+                micSource: AudioFrameSource? = nil,
                 finalize: (@Sendable (String, ConversationMeta?) async throws -> Void)? = nil,
                 fetchContent: (@Sendable (String) async -> CaptureContent?)? = nil,
                 locationProvider: ConversationLocationProviding? = nil,
@@ -266,6 +279,7 @@ public final class CaptureManager: ObservableObject {
         self.baseDir = baseDir ?? CaptureWAL.documentsCaptures()
         self.log = log
         self.source = source
+        self.micSource = micSource
         // Default finalize = the real door call (carrying the conversation metadata
         // body). Tests inject a stub to assert the close seam fires finalize once per
         // closed capture and that the body shape is right.
@@ -303,6 +317,13 @@ public final class CaptureManager: ObservableObject {
         // Frame path: serial source queue → router → WAL io queue. No main hop.
         source.onFrame = { [router] frame in router.route(frame) }
         source.onState = { [weak self] state in
+            Task { @MainActor in self?.onSourceState(state) }
+        }
+        // The phone mic feeds the SAME router + the SAME lifecycle handler — it's just
+        // another frame source. Its `.streaming`/`.stopped` begin/end a session exactly
+        // like the Omi's, so capture id / finalize / live transcription are identical.
+        micSource?.onFrame = { [router] frame in router.route(frame) }
+        micSource?.onState = { [weak self] state in
             Task { @MainActor in self?.onSourceState(state) }
         }
         // Level tap (off-main, cheap) + silence-gap boundaries (→ main to rotate).
@@ -405,9 +426,53 @@ public final class CaptureManager: ObservableObject {
     public var isCapturing: Bool { active != nil && !isPaused }
 
     /// Begin the source's connect flow (app: start scanning / auto-reconnect the
-    /// saved Omi). Call from the screen's onAppear.
-    public func startSource() { source.start() }
+    /// saved Omi). Call from the screen's onAppear. When the user has chosen the phone
+    /// mic as the capture device, we do NOT auto-start the Omi BLE — so it can't grab
+    /// an ambient session out from under a phone-mic recording.
+    public func startSource() {
+        if captureSource == .omi { source.start() }
+    }
     public func stopSource() { source.stop() }
+
+    // MARK: capture-source selection (Omi vs phone mic) + phone-mic recording
+
+    /// Choose the active capture device. Persisted. Picking the phone mic stops the
+    /// Omi link so it won't auto-capture; picking the Omi (re)starts its connect flow.
+    public func selectCaptureSource(_ kind: CaptureSourceKind) {
+        guard kind != captureSource else { return }
+        captureSource = kind
+        CaptureSettings.captureSource = kind
+        switch kind {
+        case .phoneMic:
+            source.stop()                 // release the Omi so it can't grab a session
+        case .omi:
+            if isRecordingMic { stopMicRecording() }
+            source.start()
+        }
+        log?.info("capture source → \(kind.rawValue)")
+    }
+
+    /// Start recording from the phone microphone. No-op if there's no mic source, it's
+    /// already recording, or an Omi session is already active (the UX only offers this
+    /// when the Omi is disconnected). Drives the normal lifecycle via the mic's
+    /// `.streaming` state → beginSession.
+    public func startMicRecording() {
+        guard let micSource, !isRecordingMic, active == nil else { return }
+        isRecordingMic = true
+        router.resetSegmenter()
+        micSource.start()
+        log?.info("phone mic: recording requested")
+    }
+
+    /// Stop the phone-mic recording. The mic's `.stopped` state ends the session and
+    /// finalizes the capture through the normal path.
+    public func stopMicRecording() {
+        guard let micSource, isRecordingMic else { return }
+        micSource.stop()
+        log?.info("phone mic: stop requested")
+    }
+
+    public func toggleMicRecording() { isRecordingMic ? stopMicRecording() : startMicRecording() }
 
     // MARK: ambient session lifecycle (driven by the source, not a button)
 
@@ -417,7 +482,11 @@ public final class CaptureManager: ObservableObject {
         case .streaming:
             if active == nil { router.resetSegmenter(); beginSession() }  // ambient capture
         case .stopped, .failed:
-            endSession()                          // disconnected → end the session
+            // A source stopping (Omi disconnect OR a phone-mic Stop/permission-deny)
+            // ends the session and resets the mic-recording flag so the Record button
+            // returns to its idle state.
+            isRecordingMic = false
+            endSession()
         case .idle, .scanning:
             break
         }
@@ -783,6 +852,14 @@ public enum CaptureSettings {
             return v > 0 ? v : defaultGapSeconds
         }
         set { UserDefaults.standard.set(newValue, forKey: gapKey) }
+    }
+
+    private static let sourceKey = "foundryx.capture.source"
+
+    /// The chosen capture device (Omi by default — today's behavior). Persisted.
+    public static var captureSource: CaptureSourceKind {
+        get { CaptureSourceKind(rawValue: UserDefaults.standard.string(forKey: sourceKey) ?? "") ?? .omi }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: sourceKey) }
     }
 }
 

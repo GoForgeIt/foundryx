@@ -32,7 +32,9 @@ struct CaptureScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            if case .connected = device.connectionState {
+            // Meter + live transcript while EITHER the Omi is connected OR the phone
+            // mic is recording — both drive the same capture pipeline.
+            if isShowingCapture {
                 meterBar
                 // Live, on-device PROVISIONAL transcript (Feature 1) — a faded
                 // teleprompter stream of what's being heard, right under the meter.
@@ -93,7 +95,9 @@ struct CaptureScreen: View {
     private var meterBar: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x1) {
             LevelMeterView(levels: manager.levels, active: !manager.isPaused)
-            Text(manager.isPaused ? "Paused — not listening" : "Listening — bars rise as it hears you")
+            Text(manager.isPaused ? "Paused — not listening"
+                 : (manager.isRecordingMic ? "Recording from phone mic — bars rise as it hears you"
+                                           : "Listening — bars rise as it hears you"))
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             // Diagnostic: definitive "are frames arriving?" signal. framesReceived
             // stuck at 0 ⇒ the Omi isn't notifying (not a meter bug).
@@ -113,8 +117,43 @@ struct CaptureScreen: View {
         case .connected(let name):
             ambientHeader(name)
         default:
-            connectSection
+            // Omi not connected: offer the phone microphone as a Record source, then
+            // (when not phone-mic-only) the Omi connect/pairing flow below it.
+            VStack(spacing: 0) {
+                if manager.phoneMicAvailable { micRecordSection }
+                if manager.captureSource == .omi { connectSection }
+            }
         }
+    }
+
+    /// Whether the live capture surface (meter + transcript) should show: the Omi is
+    /// connected, or the phone mic is actively recording.
+    private var isShowingCapture: Bool {
+        if case .connected = device.connectionState { return true }
+        return manager.isRecordingMic
+    }
+
+    // MARK: phone-microphone Record control (shown when the Omi isn't connected)
+
+    private var micRecordSection: some View {
+        HStack(spacing: GrainSpacing.x3) {
+            Circle().fill(manager.isRecordingMic ? GrainColor.forgeBlue : GrainColor.inkTertiary)
+                .frame(width: 10, height: 10)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Phone microphone").grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                Text(manager.isRecordingMic ? "Recording — tap Stop to finish & transcribe"
+                                            : "Record a conversation with your phone")
+                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+            }
+            Spacer()
+            GrainButton(manager.isRecordingMic ? "Stop" : "Record",
+                        variant: manager.isRecordingMic ? .tonal : .filled, size: .sm) {
+                manager.toggleMicRecording()
+            }
+        }
+        .padding(.horizontal, GrainSpacing.x4)
+        .padding(.vertical, GrainSpacing.x3)
+        .overlay(alignment: .bottom) { Rectangle().fill(GrainColor.borderHairline).frame(height: 1) }
     }
 
     private func ambientHeader(_ name: String) -> some View {

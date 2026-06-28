@@ -12,6 +12,7 @@ struct DeviceScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GrainSpacing.x4) {
+                if manager.phoneMicAvailable { captureSourceCard }
                 savedCard
                 actions
                 if !device.discovered.isEmpty { discoveredList }
@@ -21,6 +22,27 @@ struct DeviceScreen: View {
         }
         .grainBackground()
         .onAppear { device.start() }   // ensure the central is powered + reconnecting
+    }
+
+    // MARK: capture source (Omi vs phone microphone)
+
+    private var captureSourceCard: some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+            Text("Capture source").grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+            Text("Choose what records your conversations. The phone microphone lets you capture without your Omi — audio flows through the same private pipeline.")
+                .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+            Picker("Capture source", selection: Binding(
+                get: { manager.captureSource },
+                set: { manager.selectCaptureSource($0) })) {
+                Text("Omi wearable").tag(CaptureSourceKind.omi)
+                Text("Phone microphone").tag(CaptureSourceKind.phoneMic)
+            }
+            .pickerStyle(.segmented)
+        }
+        .padding(GrainSpacing.x3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).fill(GrainColor.surfaceElevated))
+        .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).strokeBorder(GrainColor.border, lineWidth: 1))
     }
 
     // MARK: remembered device
