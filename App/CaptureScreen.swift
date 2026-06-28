@@ -32,7 +32,17 @@ struct CaptureScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            if case .connected = device.connectionState { meterBar }
+            if case .connected = device.connectionState {
+                meterBar
+                // Live, on-device PROVISIONAL transcript (Feature 1) — a faded
+                // teleprompter stream of what's being heard, right under the meter.
+                // Ephemeral preview; Kiln's transcript remains authoritative.
+                if !manager.liveTranscript.isEmpty {
+                    LiveTranscriptTicker(transcript: manager.liveTranscript)
+                        .padding(.horizontal, GrainSpacing.x4)
+                        .padding(.bottom, GrainSpacing.x2)
+                }
+            }
             syncBar
             if manager.visibleCaptures.isEmpty {
                 emptyState
@@ -117,6 +127,12 @@ struct CaptureScreen: View {
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
             }
             Spacer()
+            // Manual conversation split (Feature 2): finalize the current section +
+            // start a fresh conversation now, without waiting for the silence gap.
+            // Only meaningful while actively capturing (not paused).
+            if manager.isCapturing {
+                GrainButton("New", variant: .tonal, size: .sm) { manager.splitConversation() }
+            }
             GrainButton(manager.isPaused ? "Resume" : "Pause",
                         variant: manager.isPaused ? .filled : .tonal, size: .sm) {
                 manager.togglePause()
@@ -541,5 +557,65 @@ struct ConversationDetailView: View {
         } catch {
             audioState = .failed((error as NSError).localizedDescription)
         }
+    }
+}
+
+/// The live, on-device transcription "teleprompter" (Feature 1). A short, fixed-height
+/// window of what's being heard RIGHT NOW: the newest words sit sharp at the bottom and
+/// scroll upward, fading to grey and dissolving at the top edge (a linear fade mask), so
+/// it reads as an ambient, ephemeral glimpse rather than a growing wall of text. The
+/// still-settling VOLATILE tail is rendered dimmer/italic and visibly snaps when the
+/// recognizer finalizes (the "guess then fix" refinement). Visually subordinate to the
+/// capture meter; the authoritative transcript is still Kiln's.
+private struct LiveTranscriptTicker: View {
+    let transcript: LiveTranscript
+
+    // ~3 lines tall — a glimpse, not a transcript.
+    private let height: CGFloat = 58
+
+    private var styledText: Text {
+        let finalized = Text(transcript.finalizedText)
+            .foregroundColor(GrainColor.textMuted)
+        guard !transcript.volatileTail.isEmpty else { return finalized }
+        let sep = transcript.finalizedText.isEmpty ? "" : " "
+        // Volatile tail: dimmer + italic so the user sees it's still settling.
+        let tail = Text(sep + transcript.volatileTail)
+            .foregroundColor(GrainColor.textFaint)
+            .italic()
+        return finalized + tail
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+            HStack(spacing: GrainSpacing.x1) {
+                // A soft pulsing dot marks this as the LIVE / provisional layer.
+                Circle().fill(GrainColor.forgeBlue.opacity(0.7)).frame(width: 6, height: 6)
+                Text("Live · on-device")
+                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            }
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: false) {
+                    styledText
+                        .grainTextStyle(.caption)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .multilineTextAlignment(.leading)
+                        .id("liveTail")
+                        // Anchor newest text to the bottom of the window.
+                        .frame(minHeight: height, alignment: .bottom)
+                }
+                .frame(height: height)
+                // Auto-scroll to keep the newest words in view as they stream in.
+                .onChange(of: transcript.displayText) { _ in
+                    withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo("liveTail", anchor: .bottom) }
+                }
+            }
+            // Top fade-out: older lines dissolve at the top edge as they scroll up.
+            .mask(
+                LinearGradient(
+                    gradient: Gradient(colors: [.clear, .black, .black]),
+                    startPoint: .top, endPoint: .bottom)
+            )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

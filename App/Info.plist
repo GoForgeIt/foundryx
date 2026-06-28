@@ -58,6 +58,8 @@
 	<string>FoundryX notes where a conversation took place so each capture shows its location. Location is sampled only while you're using the app and stays on your devices.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>FoundryX captures audio from your Omi wearable.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>FoundryX shows a live, on-device transcript preview as you speak. Speech recognition runs entirely on your phone and the text stays on your devices.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>

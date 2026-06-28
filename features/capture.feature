@@ -31,6 +31,17 @@ Feature: FoundryX captures Omi audio durably to the door
     And the WAL syncs to the door
     Then every segment is acknowledged and marked synced
 
+  Scenario: manually splitting a conversation finalizes the current one and starts a new one
+    Given an ambient capture is recording a conversation
+    When I tap to start a new conversation
+    Then the current conversation is finalized and sent for transcription
+    And a new conversation begins recording immediately without dropping audio
+
+  Scenario: tapping new conversation when nothing is recording does nothing
+    Given no ambient capture is recording
+    When I tap to start a new conversation
+    Then no conversation is finalized and nothing is recording
+
   @ble-hardware
   Scenario: a real Omi wearable streams Opus frames into the WAL
     Given a real Omi wearable in range

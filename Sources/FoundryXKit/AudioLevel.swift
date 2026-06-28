@@ -23,6 +23,9 @@
 import Foundation
 import AudioToolbox
 import CoreAudioTypes
+#if canImport(AVFoundation)
+import AVFoundation
+#endif
 
 /// Stateful Opus→PCM RMS level meter for one capture stream. Hold one instance per
 /// session (recreate on session start so a new stream begins clean). NOT thread-safe
@@ -137,6 +140,16 @@ public final class OpusLevelMeter: @unchecked Sendable {
     }
 
     private static func makeConverter() -> AudioConverterRef? {
+        let (conv, status) = buildOpusToPCMConverter()
+        cookieStatus = status
+        return conv
+    }
+}
+
+/// Shared Opus(48k/960)→Int16-PCM(48k mono) AudioConverter builder, with the RFC 7845
+/// OpusHead magic cookie. Used by BOTH the level meter (per-packet RMS) and the live
+/// on-device STT decoder. Returns the converter + the cookie-set status (0 = accepted).
+func buildOpusToPCMConverter() -> (AudioConverterRef?, OSStatus) {
         // Apple's kAudioFormatOpus decoder REQUIRES the source declared at 48 kHz /
         // 960 frames-per-packet — Opus always decodes to 48 kHz internally and the
         // per-packet TOC byte carries the real bandwidth, so this declaration is
@@ -164,7 +177,7 @@ public final class OpusLevelMeter: @unchecked Sendable {
 
         var conv: AudioConverterRef?
         let st = AudioConverterNew(&src, &dst, &conv)
-        guard st == noErr, let c = conv else { return nil }
+        guard st == noErr, let c = conv else { return (nil, 0) }
 
         // Opus magic cookie (RFC 7845 OpusHead). REAL libopus-encoded Omi packets
         // need this for Apple's decoder to know the channel-mapping / pre-skip / input
@@ -192,9 +205,7 @@ public final class OpusLevelMeter: @unchecked Sendable {
             AudioConverterSetProperty(c, kAudioConverterDecompressionMagicCookie,
                                       UInt32($0.count), $0.baseAddress!)
         }
-        cookieStatus = setStatus               // surfaced to diag (0 = accepted)
-        return c
-    }
+        return (c, setStatus)               // setStatus surfaced to diag (0 = accepted)
 }
 
 /// Legacy byte-size PROXY (VBR/DTX): tiny DTX/silence frames → ~0; full speech
@@ -272,3 +283,79 @@ final class LevelBuffer: @unchecked Sendable {
     func record(_ v: Float) { lock.lock(); if v > peak { peak = v }; lock.unlock() }
     func drainPeak() -> Float { lock.lock(); let p = peak; peak = 0; lock.unlock(); return p }
 }
+
+#if canImport(AVFoundation)
+/// Continuous Opus→PCM decoder for the live on-device STT tap (Feature 1). Mirrors the
+/// proven per-packet decode in `OpusLevelMeter` (same 48 kHz/960 converter + RFC 7845
+/// OpusHead cookie) but returns the decoded samples as an `AVAudioPCMBuffer` (48 kHz,
+/// mono, Int16) for SpeechTranscriber instead of an RMS scalar. Side-effect-only;
+/// created per capture session, called serially from FrameRouter's serial source queue.
+///
+/// Caveat (the "decode-config fork", design §7.2): like the level meter, this resets the
+/// AudioConverter per packet — the input proc signals end-of-stream after handing over
+/// one packet, which otherwise wedges the converter to 0 PCM frames on every subsequent
+/// packet. That yields valid PER-PACKET PCM (proven by the level-meter decode) at the
+/// cost of cross-packet PLC continuity, which is acceptable for a PROVISIONAL preview.
+/// NOT yet verified against real Omi hardware end-to-end.
+public final class OpusPCMDecoder: @unchecked Sendable {
+    private var converter: AudioConverterRef?
+    private var pcm = [Int16](repeating: 0, count: 5760)   // max 120 ms @ 48 k upper bound
+    /// The decoded buffer format (48 kHz, mono, Int16 interleaved). SpeechTranscriber's
+    /// own converter resamples this to the analyzer's required format.
+    public let format = AVAudioFormat(commonFormat: .pcmFormatInt16,
+                                      sampleRate: 48000, channels: 1, interleaved: true)!
+
+    public init() { let (c, _) = buildOpusToPCMConverter(); converter = c }
+    deinit { if let c = converter { AudioConverterDispose(c) } }
+
+    /// Recreate the decoder so a new capture stream starts clean.
+    public func reset() {
+        if let c = converter { AudioConverterDispose(c) }
+        let (c, _) = buildOpusToPCMConverter(); converter = c
+    }
+
+    /// Decode one raw Opus packet → PCM buffer. nil on a failed/empty decode.
+    public func decode(_ frame: Data) -> AVAudioPCMBuffer? {
+        guard !frame.isEmpty, let conv = converter else { return nil }
+        AudioConverterReset(conv)
+        let pktDesc = AudioStreamPacketDescription(
+            mStartOffset: 0, mVariableFramesInPacket: 0, mDataByteSize: UInt32(frame.count))
+
+        final class FeedCtx { var bytes: [UInt8]; var desc: AudioStreamPacketDescription; var done = false
+            init(_ b: [UInt8], _ d: AudioStreamPacketDescription) { bytes = b; desc = d } }
+        let ctx = FeedCtx([UInt8](frame), pktDesc)
+
+        let inputProc: AudioConverterComplexInputDataProc = { _, ioNumPackets, ioData, outDesc, ud in
+            let c = Unmanaged<FeedCtx>.fromOpaque(ud!).takeUnretainedValue()
+            if c.done { ioNumPackets.pointee = 0; return noErr }
+            c.bytes.withUnsafeMutableBytes { raw in
+                ioData.pointee.mBuffers.mData = raw.baseAddress
+                ioData.pointee.mBuffers.mDataByteSize = UInt32(raw.count)
+                ioData.pointee.mBuffers.mNumberChannels = 1
+            }
+            ioNumPackets.pointee = 1
+            if let outDesc { outDesc.pointee = withUnsafeMutablePointer(to: &c.desc) { $0 } }
+            c.done = true
+            return noErr
+        }
+
+        let ud = Unmanaged.passUnretained(ctx).toOpaque()
+        var ioNumFrames: UInt32 = UInt32(pcm.count)
+        let status: OSStatus = pcm.withUnsafeMutableBytes { out in
+            var abl = AudioBufferList(
+                mNumberBuffers: 1,
+                mBuffers: AudioBuffer(mNumberChannels: 1,
+                                      mDataByteSize: UInt32(out.count),
+                                      mData: out.baseAddress))
+            return AudioConverterFillComplexBuffer(conv, inputProc, ud, &ioNumFrames, &abl, nil)
+        }
+        if status != noErr && status != 1 { return nil }
+        let n = Int(ioNumFrames)
+        guard n > 0, let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(n)),
+              let dst = buf.int16ChannelData else { return nil }
+        buf.frameLength = AVAudioFrameCount(n)
+        pcm.withUnsafeBufferPointer { p in dst[0].update(from: p.baseAddress!, count: n) }
+        return buf
+    }
+}
+#endif

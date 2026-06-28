@@ -13,6 +13,9 @@ import Foundation
 #if canImport(Combine)
 import Combine
 #endif
+#if canImport(AVFoundation)
+import AVFoundation
+#endif
 
 /// Lock-guarded routing of frames → the active WAL, gated by pause. Lives off the
 /// main actor so the source's frame callback never hops actors per frame. Also the
@@ -29,6 +32,15 @@ final class FrameRouter: @unchecked Sendable {
     // (one Opus decoder); recreated per capture session via `resetLevelMeter()` so a
     // new stream starts with clean decoder state. Used under this serial lock only.
     private let levelMeter = OpusLevelMeter()
+    // Live on-device transcription tap (Feature 1): a SIDE-EFFECT-ONLY consumer of the
+    // decoded PCM. Only decodes when `onPCM` is wired (i.e. live preview is enabled +
+    // supported), so non-live builds pay nothing. Off the lock, after appendFrame — it
+    // never blocks, throws into, or reorders the sacred WAL/upload frame path.
+    #if canImport(AVFoundation)
+    private let pcmDecoder = OpusPCMDecoder()
+    /// Off-main decoded-PCM tap for live transcription (nil ⇒ no live preview).
+    var onPCM: ((AVAudioPCMBuffer) -> Void)?
+    #endif
     // Diagnostics: how many frames the source has routed in (regardless of pause)
     // and the most recent frame's byte size — surfaced to the UI/log so a flat
     // meter can be told apart from "no frames arriving at all."
@@ -59,6 +71,10 @@ final class FrameRouter: @unchecked Sendable {
     func resetSegmenter() { lock.lock(); segmenter.reset(); lock.unlock() }
     /// Recreate the Opus decoder so a new capture stream starts clean.
     func resetLevelMeter() { lock.lock(); levelMeter.reset(); lock.unlock() }
+    #if canImport(AVFoundation)
+    /// Recreate the live-STT Opus decoder so a new conversation starts clean.
+    func resetPCMDecoder() { lock.lock(); pcmDecoder.reset(); lock.unlock() }
+    #endif
     func setSilenceGap(_ g: TimeInterval) { lock.lock(); segmenter.silenceGap = g; lock.unlock() }
 
     /// Diagnostics snapshot for the UI/log: total frames routed + last frame size.
@@ -95,6 +111,14 @@ final class FrameRouter: @unchecked Sendable {
         target?.appendFrame(frame)
         if !isPaused {
             onLevel?(level)
+            #if canImport(AVFoundation)
+            // Live-transcription tap: decode the SAME packet to PCM and hand it off.
+            // Strictly additive + downstream of appendFrame — a decoder/transcriber
+            // failure can never affect the durable capture. Only runs when live preview
+            // is wired (onPCM set). `route` is serial (serial source queue), so the
+            // stateful decoder is fed serially.
+            if let onPCM, let buf = pcmDecoder.decode(frame) { onPCM(buf) }
+            #endif
             if let e = event { onSegment?(e) }
             if emitDiag {
                 onDiag?(String(format: "cap frame#%d bytes=%d wal=%@ level=%.3f decode[conv=%@ cookie=%d status=%d pcm=%d rms=%.4f]",
@@ -181,6 +205,13 @@ public final class CaptureManager: ObservableObject {
     @Published public private(set) var framesReceived: Int = 0
     @Published public private(set) var lastFrameBytes: Int = 0
 
+    /// The live, on-device PROVISIONAL transcript for the ACTIVE conversation
+    /// (Feature 1). An ephemeral PREVIEW only — it empties when no conversation is
+    /// open, and the AUTHORITATIVE transcript still comes from Kiln (door → Lore →
+    /// Kiln). Stays `.empty` when live transcription is unavailable (older OS / no
+    /// model / no factory wired), so the UI simply shows nothing extra.
+    @Published public private(set) var liveTranscript: LiveTranscript = .empty
+
     /// Number of bars in the meter window (~4s at the 12 Hz sample tick).
     public static let meterBarCount = 48
 
@@ -208,14 +239,30 @@ public final class CaptureManager: ObservableObject {
     /// capture while one is already running.
     private var finalizing: Set<String> = []
 
+    // MARK: live on-device transcription (Feature 1) — additive, ephemeral, off-path
+    /// Factory for the per-conversation live transcriber (nil ⇒ no live preview wired,
+    /// e.g. door-free tests + older OSes). Injected so tests drive a fake transcriber.
+    private let makeLiveTranscriber: LiveTranscriberFactory?
+    /// The active conversation's live transcriber (nil when none / unavailable).
+    private var liveTranscriber: LiveTranscribing?
+    /// Pump republishing the transcriber's stream into `liveTranscript` on the main actor.
+    private var liveTranscriptTask: Task<Void, Never>?
+    #if canImport(AVFoundation)
+    /// Thread-safe holder so the off-main frame path can feed the CURRENT transcriber
+    /// without touching main-actor state (the frame tap runs on the serial source queue).
+    private let liveBox = CurrentLiveTranscriber()
+    #endif
+
     public init(target: DoorTarget,
                 baseDir: URL? = nil,
                 log: DoorLog? = nil,
                 source: AudioFrameSource,
                 finalize: (@Sendable (String, ConversationMeta?) async throws -> Void)? = nil,
                 fetchContent: (@Sendable (String) async -> CaptureContent?)? = nil,
-                locationProvider: ConversationLocationProviding? = nil) {
+                locationProvider: ConversationLocationProviding? = nil,
+                liveTranscriber: LiveTranscriberFactory? = nil) {
         self.target = target
+        self.makeLiveTranscriber = liveTranscriber
         self.baseDir = baseDir ?? CaptureWAL.documentsCaptures()
         self.log = log
         self.source = source
@@ -268,6 +315,13 @@ public final class CaptureManager: ObservableObject {
         router.onDiag = { [weak self] line in
             Task { @MainActor in self?.log?.info(line) }
         }
+        #if canImport(AVFoundation)
+        // Live-transcription PCM tap (only when a factory is wired). Feeds the CURRENT
+        // transcriber via the thread-safe box — no main-actor hop on the frame path.
+        if makeLiveTranscriber != nil {
+            router.onPCM = { [liveBox] buf in liveBox.append(buf) }
+        }
+        #endif
         loadExisting()
         pruneOldTranscripts()  // ~14d transcript-text sweep (keeps name/description metadata)
         pruneOldAudio()        // ~30d audio sweep (keeps transcripts, prunes safe-in-Lore audio)
@@ -433,13 +487,77 @@ public final class CaptureManager: ObservableObject {
         ConversationMetaStore.recordStart(captureId: id, baseDir: baseDir, at: nowUnixSecs())
         wal.beginStreaming()
         router.resetLevelMeter()                  // fresh Opus decoder per conversation
+        #if canImport(AVFoundation)
+        router.resetPCMDecoder()                  // fresh live-STT decoder per conversation
+        #endif
         router.setPaused(isPaused)
         router.setWAL(wal)                        // frames now flow into this WAL
+        startLiveTranscription()                  // additive live preview (no-op if unwired)
         log?.info("capture \(id): ambient session started")
+    }
+
+    // MARK: live on-device transcription lifecycle (Feature 1)
+
+    /// Spin up a fresh per-conversation live transcriber (if a factory is wired) and
+    /// pump its provisional transcript into `liveTranscript`. All failures are
+    /// non-fatal: capture continues with no live preview.
+    private func startLiveTranscription() {
+        guard let make = makeLiveTranscriber, let t = make() else { return }
+        liveTranscript = .empty
+        liveTranscriber = t
+        #if canImport(AVFoundation)
+        liveBox.set(t)
+        #endif
+        let pump = Task { @MainActor [weak self] in
+            for await snap in t.transcript {
+                guard !Task.isCancelled else { break }
+                self?.liveTranscript = snap
+            }
+        }
+        liveTranscriptTask = pump
+        Task { @MainActor [weak self] in
+            do { try await t.start() }
+            catch {
+                self?.log?.warn("live transcription off: \((error as NSError).localizedDescription)")
+                #if canImport(AVFoundation)
+                self?.liveBox.set(nil)
+                #endif
+                self?.liveTranscriber = nil
+                pump.cancel()
+                self?.liveTranscript = .empty
+            }
+        }
+    }
+
+    /// Finish the active conversation's live transcriber + clear the preview.
+    private func endLiveTranscription() {
+        #if canImport(AVFoundation)
+        liveBox.set(nil)
+        #endif
+        let t = liveTranscriber
+        liveTranscriber = nil
+        liveTranscriptTask?.cancel()
+        liveTranscriptTask = nil
+        liveTranscript = .empty
+        if let t { Task { _ = await t.finish() } }
+    }
+
+    /// Manually split the conversation (Feature 2): finalize the CURRENT capture (it's
+    /// sent for transcription via the existing finalize path) and immediately begin a
+    /// NEW conversation — the SAME boundary the silence-gap segmenter draws, triggered
+    /// by hand. No-op when nothing is being captured. Audio is never dropped: endSession
+    /// flushes/finalizes the closed WAL and beginSession opens the next before the next
+    /// frame is routed (both run synchronously on the main actor).
+    public func splitConversation() {
+        guard active != nil else { return }
+        endSession()
+        beginSession()
+        log?.info("capture: manual split → new conversation")
     }
 
     private func endSession() {
         router.setWAL(nil)
+        endLiveTranscription()                    // stop + clear the live preview
         guard let finished = active else { return }
         finished.finish()
         active = nil
@@ -667,3 +785,19 @@ public enum CaptureSettings {
         set { UserDefaults.standard.set(newValue, forKey: gapKey) }
     }
 }
+
+#if canImport(AVFoundation)
+/// Thread-safe holder for the CURRENT live transcriber, so the off-main frame tap
+/// (serial source queue) can feed decoded PCM without touching main-actor state. The
+/// CaptureManager swaps the held transcriber on the main actor at conversation
+/// boundaries; the frame path only ever calls `append`.
+final class CurrentLiveTranscriber: @unchecked Sendable {
+    private let lock = NSLock()
+    private var transcriber: LiveTranscribing?
+    func set(_ t: LiveTranscribing?) { lock.lock(); transcriber = t; lock.unlock() }
+    func append(_ pcm: AVAudioPCMBuffer) {
+        lock.lock(); let t = transcriber; lock.unlock()
+        t?.append(pcm)
+    }
+}
+#endif

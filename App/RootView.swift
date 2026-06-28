@@ -56,7 +56,12 @@ private struct MainTabs: View {
         let dm = DeviceManager(log: log)
         _log = StateObject(wrappedValue: log)
         _device = StateObject(wrappedValue: dm)
-        _manager = StateObject(wrappedValue: CaptureManager(target: target, log: log, source: dm))
+        // Live on-device transcription preview (Feature 1). The factory builds the
+        // SpeechAnalyzer transcriber on iOS 26+, falling back to SFSpeechRecognizer on
+        // iOS 16–25; it's additive + ephemeral (Kiln stays authoritative).
+        _manager = StateObject(wrappedValue: CaptureManager(
+            target: target, log: log, source: dm,
+            liveTranscriber: LiveTranscription.defaultFactory()))
     }
 
     var body: some View {
