@@ -27,10 +27,18 @@ struct ChatScreen: View {
 
     private var client: DoorClient { DoorClient(target: target, log: log) }
 
-    /// The label for the active conversation's selected model (nil ⇒ "Auto").
+    /// Whether the active conversation uses the Auto router (the secure default) rather than a
+    /// pinned model.
+    private var isAuto: Bool { store.active?.modelTargetId == nil }
+
+    /// The door's models, grouped by provider with friendly labels + the secure Auto default.
+    /// Pure + data-driven (the door owns the list); see `ModelCatalog`.
+    private var menuData: ModelMenu { ModelCatalog.menu(from: models) }
+
+    /// The friendly label for the active conversation's pinned model (only used when not Auto).
     private var selectedModelLabel: String {
         guard let id = store.active?.modelTargetId else { return "Auto" }
-        return models.first(where: { $0.id == id })?.label ?? id
+        return models.first(where: { $0.id == id }).map(ModelCatalog.displayName(for:)) ?? id
     }
 
     var body: some View {
@@ -64,24 +72,40 @@ struct ChatScreen: View {
 
             Spacer(minLength: 0)
 
-            // Model picker — default "Auto (router)", or a specific Kiln target.
+            // Model picker — Auto (router) is the secure, recommended default; below it the
+            // door's models grouped by provider (Anthropic / OpenAI / Local) with friendly names.
             Menu {
-                Button { setModel(nil) } label: {
-                    Label("Auto (router)", systemImage: store.active?.modelTargetId == nil ? "checkmark" : "")
+                Section {
+                    Button { setModel(nil) } label: {
+                        // Shield badge marks Auto as the secure pick; keeps the badge even when
+                        // selected (checkmark.shield) so it always reads as the recommended choice.
+                        Label(menuData.auto.title,
+                              systemImage: isAuto ? "checkmark.shield.fill" : "lock.shield")
+                    }
+                } header: {
+                    Text(menuData.auto.recommended
+                         ? "Recommended — \(menuData.auto.caption)"
+                         : menuData.auto.caption)
                 }
-                if !models.isEmpty { Divider() }
-                ForEach(models) { m in
-                    Button { setModel(m.id) } label: {
-                        Label(m.label, systemImage: store.active?.modelTargetId == m.id ? "checkmark" : "")
+                ForEach(menuData.groups) { group in
+                    Section(group.title) {
+                        ForEach(group.options) { m in
+                            Button { setModel(m.id) } label: {
+                                Label(ModelCatalog.displayName(for: m),
+                                      systemImage: store.active?.modelTargetId == m.id ? "checkmark" : "")
+                            }
+                        }
                     }
                 }
             } label: {
                 HStack(spacing: GrainSpacing.x1) {
-                    Image(systemName: "cpu")
-                    Text(selectedModelLabel).grainTextStyle(.caption)
+                    // Secure default reads as a shield + "· Secure"; a pinned model reads as a cpu
+                    // + its friendly name.
+                    Image(systemName: isAuto ? "lock.shield.fill" : "cpu")
+                    Text(isAuto ? "Auto · Secure" : selectedModelLabel).grainTextStyle(.caption)
                     Image(systemName: "chevron.down").font(.system(size: 9))
                 }
-                .foregroundStyle(GrainColor.textMuted)
+                .foregroundStyle(isAuto ? GrainColor.sage : GrainColor.textMuted)
             }
             .accessibilityIdentifier("model-picker")
 
