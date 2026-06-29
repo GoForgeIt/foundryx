@@ -56,20 +56,17 @@ Feature: FoundryX captures Omi audio durably to the door
     Given the Omi is not connected
     Then I can record a conversation with the phone microphone
 
-  Scenario: the Omi connect control is a compact icon in the capture header
-    Given the Omi is not connected
-    Then the capture header shows the Omi as a small icon next to the mic record control
+  # Source connection is automatic + self-healing: the capture page auto-connects to the
+  # saved Omi and auto-reconnects on a drop. The user never hand-drives a BLE scan from
+  # here — only first-time pairing (no saved device) surfaces a tap-to-connect.
 
-  Scenario: tapping the Omi icon starts a scan and the icon expands
-    Given the Omi is not connected
-    When I tap the Omi icon in the capture header
-    Then a scan for my Omi begins
-    And the Omi control expands to show "Scanning…" with an activity indicator
+  Scenario: the capture page surfaces an inline connect affordance when nothing is connected
+    Given the Omi is not connected and nothing is being captured
+    Then the capture page shows an inline "Connect your Omi" affordance
 
-  Scenario: tapping the scanning Omi control stops the scan and collapses it
-    Given the capture header is scanning for my Omi
-    When I tap the Omi control again
-    Then the scan stops and the control collapses back to its compact icon
+  Scenario: a dropped Omi link reconnects automatically without the user driving a scan
+    Given the Omi link has dropped
+    Then the capture page shows an auto-reconnecting status and no scan control
 
   Scenario: choosing the phone microphone as the capture source does not auto-connect the Omi
     Given I choose the phone microphone as my capture source

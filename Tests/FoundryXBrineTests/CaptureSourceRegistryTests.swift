@@ -47,6 +47,42 @@ final class CaptureSourceRegistryTests: XCTestCase {
         XCTAssertTrue(reg2.isEnabled(CaptureSourceDescriptor.phoneMicId))
     }
 
+    // MARK: unit — capture-page visibility reflects the enabled toggles
+
+    /// The capture page shows only ENABLED sources; toggling a source off removes it from
+    /// the capture-visible set (the page must stop offering / showing a source the user
+    /// switched off on the device page).
+    @MainActor
+    func testCaptureVisibleSourcesReflectEnabledToggles() {
+        let reg = CaptureSourceRegistry(store: InMemoryCaptureSourceStore(),
+                                        discovery: FakeAudioInputDiscovery())
+        // Both built-ins enabled by default → both capture-visible.
+        XCTAssertEqual(Set(reg.captureVisibleSources.map(\.category)), [.omi, .phoneMic])
+        XCTAssertTrue(reg.isCaptureVisible(CaptureSourceDescriptor.omiId))
+        // Toggle the Omi OFF → it disappears from the capture-visible set.
+        reg.setEnabled(CaptureSourceDescriptor.omiId, false)
+        XCTAssertFalse(reg.isCaptureVisible(CaptureSourceDescriptor.omiId))
+        XCTAssertEqual(reg.captureVisibleSources.map(\.category), [.phoneMic])
+        // Toggle it back ON → it's offered again.
+        reg.setEnabled(CaptureSourceDescriptor.omiId, true)
+        XCTAssertTrue(reg.isCaptureVisible(CaptureSourceDescriptor.omiId))
+    }
+
+    /// A source toggled OFF is never chosen as the active capture source — even when it's
+    /// connected and would otherwise win on priority.
+    @MainActor
+    func testDisabledSourceIsNotOfferedAsActive() {
+        let reg = CaptureSourceRegistry(store: InMemoryCaptureSourceStore(),
+                                        discovery: FakeAudioInputDiscovery())
+        reg.setOmiConnected(true)
+        XCTAssertEqual(reg.activeSource?.category, .omi)   // connected Omi wins on priority
+        // Disable the Omi while it's still "connected" → it must hand off, never stay active.
+        reg.setEnabled(CaptureSourceDescriptor.omiId, false)
+        XCTAssertNotEqual(reg.activeSource?.category, .omi)
+        XCTAssertEqual(reg.activeSource?.category, .phoneMic)
+        XCTAssertNil(reg.captureVisibleSources.first { $0.category == .omi })
+    }
+
     // MARK: unit — active-source policy (one active, by priority)
 
     @MainActor

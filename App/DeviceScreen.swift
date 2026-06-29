@@ -21,7 +21,6 @@ struct DeviceScreen: View {
                 captureSourcesCard
                 savedCard
                 actions
-                if !device.discovered.isEmpty { discoveredList }
                 settingsCard
             }
             .padding(GrainSpacing.x4)
@@ -121,7 +120,7 @@ struct DeviceScreen: View {
                 Text(lastConnected(s.lastConnected))
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             } else {
-                Text("Scan below to find and connect your Omi. Once paired, it reconnects automatically.")
+                Text("Tap “Connect your Omi” on the Capture page to pair. Once paired, it reconnects automatically.")
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             }
         }
@@ -131,31 +130,18 @@ struct DeviceScreen: View {
         .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).strokeBorder(GrainColor.border, lineWidth: 1))
     }
 
+    /// Connection-health actions for the remembered Omi. Reconnect is a manual SELF-HEAL
+    /// nudge (the link already auto-reconnects); Forget re-pairs. There is no raw "Scan"
+    /// here — first-time pairing + routine reconnect happen automatically from the Capture
+    /// page, so the Device page manages WHICH sources exist, not hand-driven scanning.
     private var actions: some View {
         HStack(spacing: GrainSpacing.x2) {
-            GrainButton("Reconnect", variant: .filled, size: .sm) { device.reconnect() }
-            GrainButton("Scan", variant: .tonal, size: .sm) { device.startScan() }
+            if device.saved != nil {
+                GrainButton("Reconnect", variant: .tonal, size: .sm) { device.reconnect() }
+            }
             Spacer()
             if device.saved != nil {
                 GrainButton("Forget", variant: .text, size: .sm) { device.forget() }
-            }
-        }
-    }
-
-    private var discoveredList: some View {
-        VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-            Text("Nearby").grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-            ForEach(device.discovered) { dev in
-                Button { device.connect(dev) } label: {
-                    HStack {
-                        Image(systemName: "dot.radiowaves.left.and.right").foregroundStyle(GrainColor.forgeBlue)
-                        Text(dev.name).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-                        Spacer()
-                        Text("\(dev.rssi) dBm").grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-                    }
-                    .padding(.vertical, GrainSpacing.x2)
-                }
-                .buttonStyle(.plain)
             }
         }
     }
