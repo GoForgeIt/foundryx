@@ -18,8 +18,17 @@ struct RootView: View {
         // UI preview: launch with FOUNDRYX_UI_PREVIEW=1 (Open) or =private to skip sign-in and
         // render the chat surface against an in-memory store + stub door — for local screenshots
         // of UI work without a live host. DEBUG-only.
-        if ProcessInfo.processInfo.environment["FOUNDRYX_UI_PREVIEW"] != nil {
-            return AnyView(UIPreviewRoot())
+        if let preview = ProcessInfo.processInfo.environment["FOUNDRYX_UI_PREVIEW"] {
+            switch preview {
+            case "nohost":
+                return AnyView(SignInView(remote: .preview(status: .noHost, email: "you@goforgeit.com"),
+                                          onDone: {}, dismissable: false))
+            case "error":
+                return AnyView(SignInView(remote: .preview(status: .error("HTTP 502 from relay"), email: "you@goforgeit.com"),
+                                          onDone: {}, dismissable: false))
+            default:
+                return AnyView(UIPreviewRoot())
+            }
         }
         #endif
         return AnyView(gatedBody)

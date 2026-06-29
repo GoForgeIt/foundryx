@@ -43,7 +43,12 @@ public final class RemoteSession: ObservableObject {
     }
 
     public var providers: [AuthProvider] { AuthProvider.allCases.filter { auth.isConfigured($0) } }
-    public var isConfigured: Bool { remote != nil && !providers.isEmpty }
+    public var isConfigured: Bool {
+        #if DEBUG
+        if previewForced { return true }
+        #endif
+        return remote != nil && !providers.isEmpty
+    }
 
     // ── Server-side diagnostics (M5 R1b) ────────────────────────────────────
     // The sign-in/resolve path runs BEFORE the app can authenticate, so its
@@ -166,6 +171,20 @@ public final class RemoteSession: ObservableObject {
         return DoorTarget(baseURL: remote.gatewayHTTPURL, bearer: token, relay: relay,
                           useMux: FoundryXFeatures.mux)
     }
+
+    #if DEBUG
+    /// DEBUG-only: a session forced into a given state for headless UI screenshots
+    /// (see RootView's FOUNDRYX_UI_PREVIEW path). Bypasses real auth/config so the
+    /// no-host / error gate states can be captured without a live backend.
+    private var previewForced = false
+    public static func preview(status: Status, email: String?) -> RemoteSession {
+        let s = RemoteSession()
+        s.previewForced = true
+        s.email = email
+        s.status = status
+        return s
+    }
+    #endif
 }
 
 /// Build-time feature flags. `mux` activates the multiplexed door transport (one

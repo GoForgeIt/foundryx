@@ -108,6 +108,27 @@ struct SignInView: View {
                 }
                 .buttonStyle(.plain)
             }
+        } else if remote.status == .noHost {
+            // Signed in, but no Mac is claimed as host yet — the first-run wall. Promote
+            // the "claim this Mac" steps from the status pill into a clear, actionable card.
+            VStack(spacing: GrainSpacing.x3) {
+                GrainEmptyState(
+                    systemImage: "desktopcomputer",
+                    title: "Claim your Mac as host",
+                    message: "Your Foundry runs on your Mac. On it, open Foundry → Remote host → “Make this machine the host,” then tap Retry.",
+                    action: ("Retry connection", { Task { await remote.resolve() } })
+                )
+                GrainButton("Sign out", variant: .text, size: .sm) { remote.signOut() }
+            }
+        } else if case .error(let detail) = remote.status {
+            VStack(spacing: GrainSpacing.x3) {
+                GrainErrorState(
+                    title: "Can't reach your Mac",
+                    message: detail,
+                    retry: { Task { await remote.resolve() } }
+                )
+                GrainButton("Sign out", variant: .text, size: .sm) { remote.signOut() }
+            }
         } else {
             GrainButton("Retry connection", variant: .filled, size: .sm) {
                 Task { await remote.resolve() }
@@ -146,7 +167,7 @@ struct SignInView: View {
         case .signedOut: return "Sign in to reach your Mac"
         case .resolving: return "Connecting…"
         case .connected: return "Connected\(remote.email.map { " · \($0)" } ?? "")"
-        case .noHost: return "No Mac is your host yet — on your Mac: Foundry → Remote host → “Make this machine the host”"
+        case .noHost: return "No Mac is your host yet"
         case .error(let e): return e
         }
     }
