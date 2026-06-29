@@ -120,6 +120,38 @@ final class CaptureFinalizeTests: XCTestCase {
         XCTAssertEqual(rec.calls, [firstCapture], "a finalized capture is not finalized again")
     }
 
+    // A LARGE, fully-uploaded capture (thousands of ACK'd segments) still finalizes —
+    // the finalize path is NOT size-gated. Uses the real stuck giant capture's id so
+    // this is the exact recovery shape: once it has drained, it advances to Lore.
+    func testLargeCaptureFinalizesNotSizeGated() async throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("foundryx-finalize-large-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Pre-seed a large capture, every segment durably ACK'd + pending-finalize.
+        let bigId = "omi-20260623-202901-66651093"
+        let cdir = dir.appendingPathComponent(bigId, isDirectory: true)
+        try FileManager.default.createDirectory(at: cdir, withIntermediateDirectories: true)
+        let n = 1500
+        for seq in 0..<n {
+            let name = String(format: "seg-%012llu", UInt64(seq))
+            try Data([1, 2, 3, 4]).write(to: cdir.appendingPathComponent("\(name).opus"))
+            try Data().write(to: cdir.appendingPathComponent("\(name).ack"))   // durably on desktop
+        }
+        try Data().write(to: cdir.appendingPathComponent(".needs-finalize"))   // closed, awaiting finalize
+
+        let rec = FinalizeRecorder()
+        let src = TestSource()
+        let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
+        let mgr = CaptureManager(target: target, baseDir: dir, source: src,
+                                 finalize: { id, _ in try rec.record(id) })
+
+        await mgr.retryPendingFinalizes()
+        XCTAssertEqual(rec.calls, [bigId],
+                       "a large, fully-uploaded capture finalizes once — finalize is NOT size-gated")
+    }
+
     func testFinalizeDeferredUntilSegmentsAreAckd() async throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("foundryx-finalize-defer-\(UUID().uuidString)", isDirectory: true)

@@ -81,20 +81,26 @@ final class CaptureStormTests: XCTestCase {
         XCTAssertLessThanOrEqual(j, nominal * 1.25)
     }
 
-    func testShouldAbandonDecision() {
-        // Healthy capture: never abandoned.
-        XCTAssertFalse(CaptureManager.shouldAbandonCapture(failures: 0, ageSeconds: 0, totalSegments: 1))
-        // Too many consecutive failures → abandon.
-        XCTAssertTrue(CaptureManager.shouldAbandonCapture(
-            failures: CaptureManager.maxUploadAttempts, ageSeconds: 0, totalSegments: 1))
-        // An old, repeatedly-failing backlog item → abandon (but a fresh one isn't).
-        XCTAssertTrue(CaptureManager.shouldAbandonCapture(
-            failures: 1, ageSeconds: CaptureManager.maxBacklogAge, totalSegments: 1))
-        XCTAssertFalse(CaptureManager.shouldAbandonCapture(
-            failures: 0, ageSeconds: CaptureManager.maxBacklogAge, totalSegments: 1))
-        // Absurd segment count → abandon regardless.
-        XCTAssertTrue(CaptureManager.shouldAbandonCapture(
-            failures: 0, ageSeconds: 0, totalSegments: CaptureManager.absurdSegmentCount))
+    func testNeverAbandonForSizeAgeOrTransientFailures() {
+        // NEVER LOSE AUDIO: with no permanent poison, a capture is NEVER retired —
+        // however large, old, or long-failing it is. It just keeps draining.
+        XCTAssertFalse(CaptureManager.shouldAbandonCapture(permanentPoison: false))
+        // Only genuine, segment-level PERMANENT poison retires a capture.
+        XCTAssertTrue(CaptureManager.shouldAbandonCapture(permanentPoison: true))
+    }
+
+    func testPermanentVsTransientRejectionClassifier() {
+        // Permanent, non-auth 4xx ⇒ poison (retrying can never succeed).
+        for s in [400, 403, 404, 409, 413, 422] {
+            XCTAssertTrue(CaptureWAL.isPermanentRejection(s), "HTTP \(s) is permanent")
+        }
+        // Transient (or handled-elsewhere) ⇒ keep retrying — never discard audio.
+        XCTAssertFalse(CaptureWAL.isPermanentRejection(401), "401 is re-auth, handled separately")
+        XCTAssertFalse(CaptureWAL.isPermanentRejection(408), "408 request-timeout is transient")
+        XCTAssertFalse(CaptureWAL.isPermanentRejection(429), "429 rate-limit is transient")
+        for s in [500, 502, 503, 504] {
+            XCTAssertFalse(CaptureWAL.isPermanentRejection(s), "HTTP \(s) is transient")
+        }
     }
 
     // MARK: expired token → stop + re-auth (the user-requested behavior)
@@ -155,38 +161,71 @@ final class CaptureStormTests: XCTestCase {
         XCTAssertEqual(rec.attempts, afterFirst, "a backing-off capture is skipped, not hammered")
     }
 
-    // MARK: stuck/old capture → abandoned (terminal), can't wedge the queue
+    // MARK: large/old/failing capture → KEEPS DRAINING (never abandoned)
 
-    func testStuckOldCaptureIsAbandoned() async throws {
+    func testStuckOldLargeCaptureIsNeverAbandoned() async throws {
         let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
-        // Pre-seed a 6-months-old backlog capture with one pending (un-ACK'd) segment.
+        // Pre-seed a 6-months-old backlog capture with several pending (un-ACK'd) segments.
         let oldId = "omi-20260101-120000-deadbeef"
         let cdir = dir.appendingPathComponent(oldId, isDirectory: true)
         try FileManager.default.createDirectory(at: cdir, withIntermediateDirectories: true)
-        try Data([1, 2, 3, 4]).write(to: cdir.appendingPathComponent("seg-000000000000.opus"))
+        for seq in 0..<5 {
+            try Data([1, 2, 3, 4]).write(
+                to: cdir.appendingPathComponent(String(format: "seg-%012llu.opus", seq)))
+        }
 
         let rec = UploadRecorder()
-        rec.error = DoorError.http(503)                  // keeps failing
+        rec.error = DoorError.http(503)                  // door transiently down — keeps failing
         let src = TestSource()
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
         let mgr = CaptureManager(target: target, baseDir: dir, source: src,
                                  uploadSegment: { _, _, _ in try rec.record() })
 
-        // Drain #1: one failed attempt records a failure (now failures > 0 + ancient).
-        await mgr.drainPending()
-        let attemptsAfterFirst = rec.attempts
-        XCTAssertGreaterThanOrEqual(attemptsAfterFirst, 1, "the old capture was attempted once")
+        // Many drains while the door is down: the ancient, repeatedly-failing capture is
+        // NEVER abandoned — its audio must not be lost; it simply backs off and waits.
+        for _ in 0..<50 { await mgr.drainPending() }
+        let marker = cdir.appendingPathComponent(".abandoned")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path),
+                       "a large/old/long-failing capture is NEVER abandoned (never lose audio)")
+        XCTAssertFalse(mgr.authExpired, "a transient outage does not trip the expired-token state")
+        // The audio is all still on disk (nothing discarded).
+        let opus = (try FileManager.default.contentsOfDirectory(at: cdir, includingPropertiesForKeys: nil))
+            .filter { $0.pathExtension == "opus" }.count
+        XCTAssertEqual(opus, 5, "every segment is retained on disk while the capture waits to drain")
+    }
 
-        // Drain #2: the ancient, now-failed capture is abandoned (terminal) — a durable
-        // marker is written and it is no longer attempted.
+    // MARK: permanent poison → retired (terminal), but audio is KEPT
+
+    func testPermanentRejectionRetiresCaptureButKeepsAudio() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let rec = UploadRecorder()
+        rec.error = DoorError.http(422)                  // permanent, non-auth 4xx ⇒ poison
+        let src = TestSource()
+        let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
+        let mgr = CaptureManager(target: target, baseDir: dir, source: src,
+                                 uploadSegment: { _, _, _ in try rec.record() })
+
+        try await startCaptureWithPendingSegment(mgr, src)
+        let id = try XCTUnwrap(mgr.active).captureId
+        let cdir = dir.appendingPathComponent(id, isDirectory: true)
+
         await mgr.drainPending()
+        let attemptsAfter = rec.attempts
+        XCTAssertGreaterThanOrEqual(attemptsAfter, 1, "the segment was attempted")
+
+        // Retired with a durable marker carrying the reason — NOT a silent drop.
         let marker = cdir.appendingPathComponent(".abandoned")
         XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path),
-                      "a stuck/old capture is abandoned with a durable terminal marker")
+                      "a permanently-rejected capture is retired with a durable marker")
+        // The audio is KEPT — poison retires the retry intent, never deletes the bytes.
+        let opus = (try FileManager.default.contentsOfDirectory(at: cdir, includingPropertiesForKeys: nil))
+            .filter { $0.pathExtension == "opus" }.count
+        XCTAssertGreaterThan(opus, 0, "audio segments are KEPT on poison — never deleted")
 
-        // Drain #3: an abandoned capture is never retried again.
+        // Never retried again.
         await mgr.drainPending()
-        XCTAssertEqual(rec.attempts, attemptsAfterFirst, "an abandoned capture is no longer uploaded")
+        await mgr.drainPending()
+        XCTAssertEqual(rec.attempts, attemptsAfter, "a retired capture is no longer uploaded")
     }
 
     private func waitUntil(timeout: TimeInterval = 3, _ cond: @MainActor () -> Bool) async throws {

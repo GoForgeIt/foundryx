@@ -348,16 +348,17 @@ public final class CaptureManager: ObservableObject {
     /// persistent failure (door down / offline) backs off instead of re-firing every
     /// 5s drain tick (the retry storm that pegged the device). Tunable.
     public nonisolated static let retryBaseDelay: TimeInterval = 2
-    public nonisolated static let retryMaxDelay: TimeInterval = 5 * 60        // 5-minute ceiling
+    /// Transient upload failures retry FOREVER at a bounded cadence (≤ this ceiling), so
+    /// a multi-hour recording on a flaky / briefly-offline link keeps making forward
+    /// progress instead of being given up on. NEVER LOSE AUDIO: there is deliberately
+    /// NO size cap, NO age cap, and NO failure-count cap — a large, old, or slow capture
+    /// is never auto-discarded; it just keeps draining (resuming from its watermark)
+    /// until every segment is uploaded and it can finalize. The ONLY auto-retire is
+    /// genuine permanent poison (see `shouldAbandonCapture`), and even then audio is kept.
+    public nonisolated static let retryMaxDelay: TimeInterval = 5 * 60        // 5-minute ceiling — retry forever
     /// At most this many distinct captures are ATTEMPTED per drain tick (the in-flight /
     /// backlog concurrency valve) — so a multi-day backlog drains steadily, never a storm.
     public nonisolated static let maxCapturesPerDrain = 3
-    /// A capture is ABANDONED (terminal) after this many consecutive failed drain
-    /// attempts, OR when it's a stuck old backlog item past `maxBacklogAge`, OR has an
-    /// absurd segment count — so one poisoned capture can't wedge the queue forever.
-    public nonisolated static let maxUploadAttempts = 40
-    public nonisolated static let maxBacklogAge: TimeInterval = 14 * 24 * 60 * 60   // 14 days
-    public nonisolated static let absurdSegmentCount = 50_000
 
     /// Per-capture upload retry state (consecutive failures + earliest next attempt).
     private struct RetryState { var failures = 0; var nextEligible: TimeInterval = 0 }
@@ -383,15 +384,15 @@ public final class CaptureManager: ObservableObject {
         return min(retryMaxDelay, exp) * jitter
     }
 
-    /// Pure terminal-abandon decision: a capture is stuck and must be given up so it
-    /// can't wedge the drain forever. Tested.
-    public nonisolated static func shouldAbandonCapture(failures: Int,
-                                                        ageSeconds: TimeInterval,
-                                                        totalSegments: Int) -> Bool {
-        if totalSegments >= absurdSegmentCount { return true }
-        if failures >= maxUploadAttempts { return true }
-        if failures > 0 && ageSeconds >= maxBacklogAge { return true }
-        return false
+    /// Pure terminal-retire decision. NEVER LOSE AUDIO: a capture is retired ONLY on
+    /// genuine, segment-level PERMANENT poison (the WAL's `.poisoned` outcome — a
+    /// missing/corrupt segment file, or a permanent non-auth 4xx from the door). It is
+    /// NEVER retired for being large, old, or for a run of transient upload failures —
+    /// those keep draining. Even on poison the audio bytes are KEPT (a durable marker,
+    /// never a delete). Tested to prove a huge / ancient / long-failing capture is not
+    /// retired (`permanentPoison: false` ⇒ false).
+    public nonisolated static func shouldAbandonCapture(permanentPoison: Bool) -> Bool {
+        permanentPoison
     }
 
     /// Re-arm the drain after a fresh id_token has been obtained (the rebuilt pipeline
@@ -1100,13 +1101,10 @@ public final class CaptureManager: ObservableObject {
         for wal in captures where wal.status.pendingSegments > 0 {
             let id = wal.captureId
             if isAbandoned(id) { continue }
-            // Safety valve: give up on a poisoned / ancient / absurd capture (terminal).
-            let failures = retryStates[id]?.failures ?? 0
-            if CaptureManager.shouldAbandonCapture(failures: failures,
-                                                   ageSeconds: max(0, now - startTime(of: wal)),
-                                                   totalSegments: wal.status.totalSegments) {
-                abandon(id, failures: failures); continue
-            }
+            // NEVER LOSE AUDIO: there is NO size / age / failure-count abandon here. A
+            // large, old, or briefly-offline capture keeps draining (resuming from its
+            // watermark) until fully uploaded. The only retire is permanent poison,
+            // surfaced by `wal.sync()` returning `.poisoned` below.
             // Backoff gate: skip a failing capture until its next-eligible instant.
             if let st = retryStates[id], now < st.nextEligible { continue }
             // Concurrency / backlog valve: bound how many captures one tick attempts.
@@ -1116,7 +1114,11 @@ public final class CaptureManager: ObservableObject {
             case .idle, .progressed:
                 retryStates[id] = nil                 // healthy → reset backoff
             case .failed:
-                recordUploadFailure(id, now: now)     // back off; retry later
+                recordUploadFailure(id, now: now)     // transient — back off; retry FOREVER
+            case .poisoned(let seq, let reason):
+                // Permanent poison on a specific segment — retire so it can't wedge the
+                // drain. The audio is KEPT (durable marker, no delete).
+                abandon(id, reason: "segment \(seq): \(reason)")
             case .authExpired:
                 recordUploadFailure(id, now: now)
                 handleUploadAuthExpired()             // stop everything + request re-auth
@@ -1150,7 +1152,7 @@ public final class CaptureManager: ObservableObject {
         onAuthExpired?()
     }
 
-    // MARK: terminal-abandon (a stuck capture can't wedge the queue forever)
+    // MARK: terminal-retire (ONLY permanent poison — audio is never deleted)
 
     private func abandonedMarker(_ captureId: String) -> URL {
         baseDir.appendingPathComponent(captureId, isDirectory: true)
@@ -1159,13 +1161,15 @@ public final class CaptureManager: ObservableObject {
     private func isAbandoned(_ captureId: String) -> Bool {
         FileManager.default.fileExists(atPath: abandonedMarker(captureId).path)
     }
-    /// Record a clear terminal state for an abandoned capture (a durable marker, not a
-    /// silent drop) and clear its pending-finalize intent so it stops being retried.
-    private func abandon(_ captureId: String, failures: Int) {
-        try? Data().write(to: abandonedMarker(captureId), options: [.atomic])
+    /// Record a clear terminal state for a permanently-poisoned capture (a durable
+    /// marker carrying the reason, NOT a silent drop) and clear its pending-finalize
+    /// intent so it stops being retried. The audio segments on disk are KEPT — only the
+    /// retry intent is dropped; nothing is deleted here.
+    private func abandon(_ captureId: String, reason: String) {
+        try? Data(reason.utf8).write(to: abandonedMarker(captureId), options: [.atomic])
         clearNeedsFinalize(captureId)
         retryStates[captureId] = nil
-        log?.error("capture \(captureId): ABANDONED after \(failures) failed upload attempt(s) — terminal (stuck/old/oversized), no longer retried")
+        log?.error("capture \(captureId): RETIRED (permanent poison: \(reason)) — audio KEPT on device, no longer retried")
     }
 
     // MARK: retention throttle (keep the big disk sweeps off the every-5s drain)

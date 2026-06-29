@@ -42,6 +42,14 @@ public enum SyncOutcome: Sendable, Equatable {
     case progressed      // uploaded ≥1 segment with no failure
     case failed          // transient failure (offline / door down) — retry with backoff
     case authExpired     // a 401 — STOP; the token is expired, re-auth before retrying
+    /// A specific segment is PERMANENTLY un-uploadable: its on-disk file is
+    /// missing/corrupt (unrecoverable), OR the door rejected it with a permanent,
+    /// non-auth 4xx (e.g. 400/403/413/422). Retrying can NEVER succeed, so the owner
+    /// retires the capture — but the audio bytes are KEPT (a durable marker, never a
+    /// delete). Carries the offending seq + a human reason for the log. This is the
+    /// ONLY auto-retire trigger: a large / old / briefly-offline capture is never
+    /// poisoned, so it keeps draining until fully uploaded.
+    case poisoned(seq: UInt64, reason: String)
 }
 
 public final class CaptureWAL: ObservableObject, @unchecked Sendable {
@@ -68,6 +76,16 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     private var nextSeq: UInt64 = 0      // next segment seq (io queue only)
     private var streaming = false        // mutated on io; read in computeStatus (@unchecked)
     private var lastError: String?       // last sync failure detail (@unchecked)
+
+    /// The durable UPLOAD WATERMARK: the highest CONTIGUOUSLY-ACK'd segment seq
+    /// (−1 ⇒ none yet). Resume always starts at `watermark + 1`, so a giant capture
+    /// makes MONOTONIC forward progress across retries / app-restarts and NEVER
+    /// re-sends an already-ACK'd segment (the restart-from-0 churn this fixes).
+    /// Persisted in `.upload-watermark`; for a pre-existing / already-in-progress
+    /// stuck capture with no watermark file it is DERIVED from the on-disk `.ack`
+    /// markers (the source of truth), so an old stuck capture resumes from where it is.
+    private let wmLock = NSLock()
+    private var watermark: Int64 = -1
 
     /// `baseDir` defaults to the app's Documents dir (persists across launches).
     public init(captureId: String,
@@ -173,10 +191,23 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         guard !pending.isEmpty else { lastError = nil; publish(); return .idle }
         var uploaded = 0
         for (seq, segURL) in pending.prefix(Self.maxSegmentsPerSync) {
+            // The segment's OWN file must be readable. A missing/corrupt file is
+            // unrecoverable — retrying can never succeed — so it's permanent poison.
+            // The audio that remains is KEPT (the owner writes a durable marker, it
+            // never deletes), but this poisoned capture stops wedging the drain.
+            let bytes: Data
             do {
-                let bytes = try Data(contentsOf: segURL)
+                bytes = try Data(contentsOf: segURL)
+            } catch {
+                lastError = "segment \(seq) unreadable: \((error as NSError).localizedDescription)"
+                log?.error("capture \(captureId): segment \(seq) file missing/corrupt — permanent poison, retiring (audio kept)")
+                publish()
+                return .poisoned(seq: seq, reason: "segment file missing/corrupt")
+            }
+            do {
                 try await upload(seq: seq, body: bytes)
                 try Data().write(to: ackURL(segURL), options: [.atomic])   // 200 ACK ⇒ saved to computer
+                advanceWatermark(throughAcked: seq)                        // durable resume point moves forward
                 lastError = nil
                 uploaded += 1
                 log?.info("capture \(captureId): segment \(seq) ACK'd by desktop (saved to computer)")
@@ -186,11 +217,16 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
                 log?.warn("capture \(captureId): segment \(seq) rejected 401 (token expired) — stopping uploads, re-auth required")
                 publish()
                 return .authExpired   // do NOT keep firing with a known-expired token
+            } catch DoorError.http(let status) where CaptureWAL.isPermanentRejection(status) {
+                lastError = "door permanently rejected segment \(seq): HTTP \(status)"
+                log?.error("capture \(captureId): segment \(seq) permanently rejected (HTTP \(status)) — retiring (audio kept)")
+                publish()
+                return .poisoned(seq: seq, reason: "door rejected HTTP \(status)")
             } catch {
                 lastError = (error as NSError).localizedDescription
                 log?.warn("capture \(captureId): segment \(seq) not synced (\(lastError ?? "?")) — staying pending, will retry")
                 publish()
-                return .failed  // stop on first failure; the rest stay pending for the next tick
+                return .failed  // transient — stop on first failure; the rest stay pending for the next tick
             }
         }
         return uploaded > 0 ? .progressed : .idle
@@ -225,6 +261,62 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         guard let http = resp as? HTTPURLResponse else { throw DoorError.transport("non-HTTP response") }
         if http.statusCode == 401 { throw DoorError.unauthorized }
         guard http.statusCode == 200 else { throw DoorError.http(http.statusCode) }
+    }
+
+    // MARK: upload watermark (durable resume point — never re-send an ACK'd segment)
+
+    private func watermarkURL() -> URL { dir.appendingPathComponent(".upload-watermark") }
+
+    /// The current upload watermark (highest contiguously-ACK'd seq; −1 ⇒ none yet).
+    public func uploadWatermark() -> Int64 { wmLock.lock(); defer { wmLock.unlock() }; return watermark }
+
+    /// Load the persisted watermark, else DERIVE it from the on-disk `.ack` markers
+    /// (the highest contiguous run of ACK'd seqs from 0) so a pre-existing / stuck
+    /// capture resumes correctly. Persists the derived value. Called once at load.
+    private func loadOrDeriveWatermark() {
+        if let data = try? Data(contentsOf: watermarkURL()),
+           let s = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let v = Int64(s) {
+            wmLock.lock(); watermark = v; wmLock.unlock()
+            return
+        }
+        let acked = Set(allSegmentURLs()
+            .filter { FileManager.default.fileExists(atPath: ackURL($0.1).path) }
+            .map { $0.0 })
+        var w: Int64 = -1
+        var next: UInt64 = 0
+        while acked.contains(next) { w = Int64(next); next += 1 }   // contiguous run from 0
+        wmLock.lock(); watermark = w; wmLock.unlock()
+        persistWatermark(w)
+    }
+
+    private func persistWatermark(_ v: Int64) {
+        try? Data(String(v).utf8).write(to: watermarkURL(), options: [.atomic])
+    }
+
+    /// Advance the watermark over a freshly-ACK'd seq (and any contiguous already-ACK'd
+    /// successors), persisting it. Called after each 200 ACK; uploads are in-order so
+    /// `seq == watermark + 1` normally. Monotonic — never moves backward.
+    private func advanceWatermark(throughAcked seq: UInt64) {
+        wmLock.lock()
+        guard Int64(seq) == watermark + 1 else { wmLock.unlock(); return }
+        watermark = Int64(seq)
+        var next = seq + 1
+        while FileManager.default.fileExists(
+            atPath: ackURL(dir.appendingPathComponent(CaptureWAL.segName(next))).path) {
+            watermark = Int64(next); next += 1
+        }
+        let w = watermark
+        wmLock.unlock()
+        persistWatermark(w)
+    }
+
+    /// A door HTTP status that will NEVER succeed on retry ⇒ permanent poison. 401 is
+    /// handled separately (re-auth). 408 (request timeout), 429 (rate-limit) and ALL
+    /// 5xx are TRANSIENT (server busy / down / throttling) — those keep retrying, so a
+    /// briefly-unreachable or throttled large capture is never discarded.
+    public static func isPermanentRejection(_ status: Int) -> Bool {
+        (400..<500).contains(status) && status != 401 && status != 408 && status != 429
     }
 
     // MARK: status
@@ -269,8 +361,15 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
     }
 
+    /// Segments still to upload: everything ABOVE the durable watermark that lacks an
+    /// `.ack`. Anchoring on the watermark means a giant capture skips re-stat'ing
+    /// thousands of already-ACK'd segments every pass (and never re-sends them) — the
+    /// resume is O(remaining), not O(total).
     private func pendingSegmentURLs() -> [(UInt64, URL)] {
-        allSegmentURLs().filter { !FileManager.default.fileExists(atPath: ackURL($0.1).path) }
+        let wm = uploadWatermark()
+        return allSegmentURLs().filter {
+            Int64($0.0) > wm && !FileManager.default.fileExists(atPath: ackURL($0.1).path)
+        }
     }
 
     private func allSegmentURLs() -> [(UInt64, URL)] {
@@ -288,6 +387,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     private func scanExisting() {
         let segs = allSegmentURLs()
         if let maxSeq = segs.map({ $0.0 }).max() { nextSeq = maxSeq + 1 }
+        loadOrDeriveWatermark()   // resume point: load, else derive from on-disk `.ack` markers
         publish()
         // NOTE: no auto-sync here on purpose. The CaptureManager's bounded, backoff-aware
         // drain is the SOLE upload coordinator. A per-WAL `Task { sync() }` on construction
