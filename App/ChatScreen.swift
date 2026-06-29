@@ -49,10 +49,24 @@ struct ChatScreen: View {
         VStack(spacing: 0) {
             header
             ScrollView {
-                ChatView(model: model,
-                         onApprove: { answer($0, "always") },
-                         onReject: { answer($0, "reject") })
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                if model.messages.isEmpty {
+                    // First-run / empty chat: a warm, branded prompt instead of a blank
+                    // screen — and it reflects the current privacy posture.
+                    GrainEmptyState(
+                        systemImage: isPrivate ? "lock.fill" : "sparkles",
+                        title: "Your Foundry is ready",
+                        message: isPrivate
+                            ? "Ask anything — this chat stays on your Mac."
+                            : "Ask anything. Switch to Private anytime to keep a chat on your Mac."
+                    )
+                    .padding(GrainSpacing.x4)
+                    .padding(.top, GrainSpacing.x12)
+                } else {
+                    ChatView(model: model,
+                             onApprove: { answer($0, "always") },
+                             onReject: { answer($0, "reject") })
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
             .scrollDismissesKeyboard(.interactively)
             .contentShape(Rectangle())
