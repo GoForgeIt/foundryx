@@ -220,9 +220,25 @@ public struct CaptureContent: Decodable, Sendable, Equatable {
     public let summary: String?
     public let titleModel: String?
     public let summarizing: Bool
+    /// Speaker-diarized ORDERED segments (Lore 0.5.53). Empty when the capture was
+    /// never diarized (a flat-transcript capture) OR until the door forwards them on
+    /// `/content` (the companion foundry-repo door change). The view renders speaker
+    /// turns when this is non-empty, else falls back to the flat `transcript`.
+    public let segments: [TranscriptSegment]
+    /// Per-capture speaker slots + their inferred/confirmed/anonymous state. Pairs with
+    /// `segments`; empty for a non-diarized capture / pre-door-change reply.
+    public let speakers: [CaptureSpeaker]
+
+    /// The grouped, slot-aware view of the diarized transcript (segments → speaker
+    /// turns + stable numbering/colour). Empty `segments` → `hasSegments` is false and
+    /// the view uses the flat transcript.
+    public var diarized: SpeakerTranscript {
+        SpeakerTranscript(speakers: speakers, segments: segments)
+    }
 
     enum CodingKeys: String, CodingKey {
         case transcript, capturedAt, found, title, summary, titleModel, summarizing
+        case segments, speakers
     }
 
     public init(from decoder: Decoder) throws {
@@ -234,11 +250,14 @@ public struct CaptureContent: Decodable, Sendable, Equatable {
         summary = try c.decodeIfPresent(String.self, forKey: .summary)
         titleModel = try c.decodeIfPresent(String.self, forKey: .titleModel)
         summarizing = try c.decodeIfPresent(Bool.self, forKey: .summarizing) ?? false
+        segments = try c.decodeIfPresent([TranscriptSegment].self, forKey: .segments) ?? []
+        speakers = try c.decodeIfPresent([CaptureSpeaker].self, forKey: .speakers) ?? []
     }
 
     public init(transcript: String, capturedAt: Int, found: Bool,
                 title: String? = nil, summary: String? = nil,
-                titleModel: String? = nil, summarizing: Bool = false) {
+                titleModel: String? = nil, summarizing: Bool = false,
+                segments: [TranscriptSegment] = [], speakers: [CaptureSpeaker] = []) {
         self.transcript = transcript
         self.capturedAt = capturedAt
         self.found = found
@@ -246,6 +265,62 @@ public struct CaptureContent: Decodable, Sendable, Equatable {
         self.summary = summary
         self.titleModel = titleModel
         self.summarizing = summarizing
+        self.segments = segments
+        self.speakers = speakers
+    }
+}
+
+/// A past capture OFFERED for relabelling after a confirm — its voiceprint now matches
+/// the just-confirmed speaker. Offered to the user, NEVER auto-applied (Lore's
+/// propagation-on-confirm rule). Mirrors Lore's `OfferedCapture`.
+public struct OfferedCapture: Decodable, Sendable, Equatable, Identifiable {
+    public let captureId: String
+    public let slotLabel: String
+    public let score: Double
+
+    public var id: String { "\(captureId)#\(slotLabel)" }
+
+    public init(captureId: String, slotLabel: String, score: Double) {
+        self.captureId = captureId
+        self.slotLabel = slotLabel
+        self.score = score
+    }
+}
+
+/// The result of confirming/correcting a slot (door forwards Lore's `ConfirmOutcome`).
+/// `offeredCaptures` is the "apply to N past conversations?" offer — surfaced, not
+/// auto-applied.
+public struct ConfirmOutcome: Decodable, Sendable, Equatable {
+    public let captureId: String
+    public let slotLabel: String
+    public let status: String
+    public let speakerId: String
+    public let speakerName: String
+    public let offeredCaptures: [OfferedCapture]
+
+    enum CodingKeys: String, CodingKey {
+        case captureId, slotLabel, status, speakerId, speakerName, offeredCaptures
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        captureId = try c.decodeIfPresent(String.self, forKey: .captureId) ?? ""
+        slotLabel = try c.decodeIfPresent(String.self, forKey: .slotLabel) ?? ""
+        status = try c.decodeIfPresent(String.self, forKey: .status) ?? "confirmed"
+        speakerId = try c.decodeIfPresent(String.self, forKey: .speakerId) ?? ""
+        speakerName = try c.decodeIfPresent(String.self, forKey: .speakerName) ?? ""
+        offeredCaptures = try c.decodeIfPresent([OfferedCapture].self, forKey: .offeredCaptures) ?? []
+    }
+
+    public init(captureId: String, slotLabel: String, status: String,
+                speakerId: String, speakerName: String,
+                offeredCaptures: [OfferedCapture] = []) {
+        self.captureId = captureId
+        self.slotLabel = slotLabel
+        self.status = status
+        self.speakerId = speakerId
+        self.speakerName = speakerName
+        self.offeredCaptures = offeredCaptures
     }
 }
 
@@ -679,6 +754,54 @@ public final class DoorClient: @unchecked Sendable {
         if http.statusCode == 404 { return nil }
         guard http.statusCode == 200 else { throw DoorError.http(http.statusCode) }
         return data
+    }
+
+    /// Confirm or correct a capture's speaker SLOT (door forwards Lore's
+    /// `POST /api/admin/captures/:id/speakers/:slot/confirm`). The state machine:
+    ///   * `speakerId`  → confirm the slot for that EXISTING speaker (assign).
+    ///   * `name`       → confirm/correct for a speaker by name, CREATING if new
+    ///                    (rename + brand-new-speaker paths).
+    ///   * neither      → confirm the slot's existing INFERRED match (bare confirm).
+    /// On confirm the match flips to `confirmed` (enabling future recognition) and the
+    /// reply's `offeredCaptures` is the "apply to N past conversations?" offer.
+    /// Relay-aware: rides the interactive tunnel (a user-facing write), like the
+    /// transcript fetch.
+    public func confirmSpeaker(captureId: String, slot: String,
+                               speakerId: String? = nil,
+                               name: String? = nil) async throws -> ConfirmOutcome {
+        var bodyObj: [String: String] = [:]
+        if let speakerId, !speakerId.isEmpty { bodyObj["speakerId"] = speakerId }
+        if let name, !name.isEmpty { bodyObj["name"] = name }
+        let body = try JSONSerialization.data(withJSONObject: bodyObj)
+        let path = "/foundryx/capture/\(captureId)/speakers/\(slot)/confirm"
+
+        if let relay = target.relay?.interactive() {
+            let resp = try await RelayHTTP.roundTrip(
+                relay: relay, bearer: target.bearer, method: "POST",
+                path: path, contentType: "application/json", body: body,
+                session: session, log: log, useMux: target.useMux)
+            if resp.status == 401 { throw DoorError.unauthorized }
+            guard resp.status == 200 else { throw DoorError.http(resp.status) }
+            return try JSONDecoder().decode(ConfirmOutcome.self, from: resp.body)
+        }
+        let s = target.baseURL.absoluteString
+        let base = s.hasSuffix("/") ? String(s.dropLast()) : s
+        guard let url = URL(string: "\(base)\(path)") else {
+            throw DoorError.transport("bad confirm url")
+        }
+        var r = URLRequest(url: url)
+        r.httpMethod = "POST"
+        r.setValue("Bearer \(target.bearer)", forHTTPHeaderField: "Authorization")
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.httpBody = body
+        r.timeoutInterval = 30
+        let (data, response) = try await session.data(for: r)
+        guard let http = response as? HTTPURLResponse else {
+            throw DoorError.transport("non-HTTP response")
+        }
+        if http.statusCode == 401 { throw DoorError.unauthorized }
+        guard http.statusCode == 200 else { throw DoorError.http(http.statusCode) }
+        return try JSONDecoder().decode(ConfirmOutcome.self, from: data)
     }
 
     /// Relay a gate decision to the door's approvals endpoint

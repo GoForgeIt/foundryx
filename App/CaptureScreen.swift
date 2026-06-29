@@ -529,9 +529,21 @@ struct ConversationDetailView: View {
                             .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
                     }
                     Text("Transcript").grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-                    Text(transcript)
-                        .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-                        .textSelection(.enabled)
+                    // Speaker-diarized transcript (Lore 0.5.53): when the door forwards
+                    // segments, render colour-coded speaker turns with tag/confirm/correct.
+                    // Falls back to the flat transcript for non-diarized / legacy captures.
+                    if let diarized = content?.diarized, diarized.hasSegments {
+                        SpeakerTranscriptSection(
+                            target: target,
+                            captureId: captureId,
+                            transcript: diarized,
+                            onChanged: { await fetchFromDoor() }
+                        )
+                    } else {
+                        Text(transcript)
+                            .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                            .textSelection(.enabled)
+                    }
                 } else if loading {
                     Text("Loading transcript…")
                         .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
