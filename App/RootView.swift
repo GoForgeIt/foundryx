@@ -14,6 +14,18 @@ struct RootView: View {
     @State private var splashElapsed = false
 
     var body: some View {
+        #if DEBUG
+        // UI preview: launch with FOUNDRYX_UI_PREVIEW=1 (Open) or =private to skip sign-in and
+        // render the chat surface against an in-memory store + stub door — for local screenshots
+        // of UI work without a live host. DEBUG-only.
+        if ProcessInfo.processInfo.environment["FOUNDRYX_UI_PREVIEW"] != nil {
+            return AnyView(UIPreviewRoot())
+        }
+        #endif
+        return AnyView(gatedBody)
+    }
+
+    private var gatedBody: some View {
         Group {
             if let target = remote.makeDoorTarget(), splashElapsed {
                 MainTabs(target: target, remote: remote, showingAccount: $showingAccount)
@@ -138,3 +150,27 @@ private struct MainTabs: View {
         else { sources.setOmiConnected(false) }
     }
 }
+
+#if DEBUG
+/// DEBUG-only host for screenshotting the chat UI without sign-in (see RootView). Owns its
+/// objects via @StateObject so `body` re-evaluation can't reset them. Seeds the Private posture
+/// when launched with FOUNDRYX_UI_PREVIEW=private.
+private struct UIPreviewRoot: View {
+    @StateObject private var store = ChatConversationStore()
+    @StateObject private var log = DoorLog()
+    private let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:14288")!, bearer: "preview")
+
+    var body: some View {
+        NavigationStack {
+            ChatScreen(target: target, store: store, log: log)
+                .navigationTitle("FoundryX")
+        }
+        .onAppear {
+            if ProcessInfo.processInfo.environment["FOUNDRYX_UI_PREVIEW"] == "private",
+               !store.activeId.isEmpty {
+                store.setSensitivity(ChatConversationStore.Sensitivity.private, for: store.activeId)
+            }
+        }
+    }
+}
+#endif

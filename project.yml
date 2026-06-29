@@ -79,6 +79,10 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1,2"
+        # Xcode 26.x + XcodeGen leaves SUPPORTED_PLATFORMS unset, which makes the
+        # scheme resolve zero destinations ("Supported platforms … is empty"). Declare
+        # it explicitly so simulator + device destinations are eligible.
+        SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
       configs:
         Debug:
           # Simulator/dev builds stay creds-free (no signing identity required).

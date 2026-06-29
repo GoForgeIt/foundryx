@@ -35,6 +35,11 @@ public final class ChatConversationStore: ObservableObject {
         public var title: String
         public var messages: [StoredMessage]
         public var modelTargetId: String?
+        /// Per-conversation privacy level sent as `sensitivity` on each turn. nil ⇒ the
+        /// field is omitted ⇒ the door's default. `Sensitivity.private` (= "confidential")
+        /// tells Kiln's router to keep the turn on compliant/on-device targets; nil/"public"
+        /// lets it pick the fastest model. (Decode-old-data safe: a missing key ⇒ nil.)
+        public var sensitivity: String?
         public var createdAt: Date
         public var updatedAt: Date
 
@@ -42,12 +47,14 @@ public final class ChatConversationStore: ObservableObject {
                     title: String = "New chat",
                     messages: [StoredMessage] = [],
                     modelTargetId: String? = nil,
+                    sensitivity: String? = nil,
                     createdAt: Date = Date(),
                     updatedAt: Date = Date()) {
             self.id = id
             self.title = title
             self.messages = messages
             self.modelTargetId = modelTargetId
+            self.sensitivity = sensitivity
             self.createdAt = createdAt
             self.updatedAt = updatedAt
         }
@@ -104,7 +111,7 @@ public final class ChatConversationStore: ObservableObject {
     public func newConversation(modelTargetId: String? = nil) -> Conversation {
         // Inherit the previous active chat's model so a "new chat" keeps the user's pick.
         let inherited = modelTargetId ?? active?.modelTargetId
-        let convo = Conversation(modelTargetId: inherited)
+        let convo = Conversation(modelTargetId: inherited, sensitivity: active?.sensitivity)
         conversations.insert(convo, at: 0)
         activeId = convo.id
         persist()
@@ -134,9 +141,22 @@ public final class ChatConversationStore: ObservableObject {
 
     // MARK: - Mutations
 
+    /// Privacy levels surfaced in the UI, mapped to the door's `sensitivity` wire value.
+    /// "Standard" is nil (the door's default). NOTE: confirm against Kiln's sensitivity
+    /// taxonomy (public | confidential | phi) — "confidential" is the non-PHI private tier.
+    public enum Sensitivity {
+        public static let `private` = "confidential"
+    }
+
     /// Set the chosen model (target_id) for a conversation. nil ⇒ "Auto (router)".
     public func setModel(_ targetId: String?, for id: String) {
         mutate(id) { $0.modelTargetId = targetId }
+    }
+
+    /// Set the conversation's privacy level. nil ⇒ Standard (door default). Pass
+    /// `Sensitivity.private` to keep the turn on compliant / on-device targets.
+    public func setSensitivity(_ value: String?, for id: String) {
+        mutate(id) { $0.sensitivity = value }
     }
 
     /// Replace a conversation's whole message history (used to snapshot the live
@@ -162,6 +182,7 @@ public final class ChatConversationStore: ObservableObject {
                            platform: platform,
                            chatId: id,
                            org: org,
+                           sensitivity: convo?.sensitivity,
                            requestedTarget: convo?.modelTargetId)
     }
 

@@ -31,6 +31,10 @@ struct ChatScreen: View {
     /// pinned model.
     private var isAuto: Bool { store.active?.modelTargetId == nil }
 
+    /// Whether the active conversation is set to Private (Kiln keeps the turn on
+    /// compliant / on-device targets). The core brand promise, surfaced per-chat.
+    private var isPrivate: Bool { store.active?.sensitivity == ChatConversationStore.Sensitivity.private }
+
     /// The door's models, grouped by provider with friendly labels + the secure Auto default.
     /// Pure + data-driven (the door owns the list); see `ModelCatalog`.
     private var menuData: ModelMenu { ModelCatalog.menu(from: models) }
@@ -53,7 +57,7 @@ struct ChatScreen: View {
             .scrollDismissesKeyboard(.interactively)
             .contentShape(Rectangle())
             .onTapGesture { hideKeyboard() }
-            GrainComposer("Message the local brain…", text: $input, isSending: streaming, onSend: send)
+            GrainComposer("Message your Foundry…", text: $input, isSending: streaming, onSend: send)
         }
         .grainBackground()
         .onAppear { hydrateActive(); Task { await loadModels() } }
@@ -72,40 +76,73 @@ struct ChatScreen: View {
 
             Spacer(minLength: 0)
 
+            // Privacy control — the single source of truth for where this chat's data goes.
+            // "Private" ⇒ sensitivity=confidential ⇒ Kiln keeps the turn on-device, AND we
+            // restrict the model picker to on-device routing (below) + clear any cloud pin, so
+            // the badge can never contradict the actual route. "Open" ⇒ sensitivity omitted ⇒
+            // the router may use a faster cloud model.
+            Menu {
+                Button { setPrivacy(true) } label: {
+                    Label("Private · stays on your Mac",
+                          systemImage: isPrivate ? "checkmark" : "lock.fill")
+                }
+                Button { setPrivacy(false) } label: {
+                    Label("Open · may use cloud for speed",
+                          systemImage: isPrivate ? "cloud" : "checkmark")
+                }
+            } label: {
+                HStack(spacing: GrainSpacing.x1) {
+                    Image(systemName: isPrivate ? "lock.fill" : "cloud")
+                    Text(isPrivate ? "Private" : "Open").grainTextStyle(.caption)
+                    Image(systemName: "chevron.down").font(.system(size: 9))
+                }
+                .foregroundStyle(isPrivate ? GrainColor.sage : GrainColor.textMuted)
+                .padding(.vertical, GrainSpacing.x1)
+                .contentShape(Rectangle())
+            }
+            .accessibilityIdentifier("privacy-picker")
+            .accessibilityLabel("Privacy")
+            .accessibilityValue(isPrivate ? "Private, stays on your Mac" : "Open, may use cloud")
+            .accessibilityHint("Changes whether this chat stays on your Mac")
+
             // Model picker — Auto (router) is the secure, recommended default; below it the
             // door's models grouped by provider (Anthropic / OpenAI / Local) with friendly names.
             Menu {
                 Section {
                     Button { setModel(nil) } label: {
-                        // Shield badge marks Auto as the secure pick; keeps the badge even when
-                        // selected (checkmark.shield) so it always reads as the recommended choice.
                         Label(menuData.auto.title,
-                              systemImage: isAuto ? "checkmark.shield.fill" : "lock.shield")
+                              systemImage: isAuto ? "checkmark" : "wand.and.stars")
                     }
                 } header: {
                     Text(menuData.auto.recommended
                          ? "Recommended — \(menuData.auto.caption)"
                          : menuData.auto.caption)
                 }
-                ForEach(menuData.groups) { group in
-                    Section(group.title) {
-                        ForEach(group.options) { m in
-                            Button { setModel(m.id) } label: {
-                                Label(ModelCatalog.displayName(for: m),
-                                      systemImage: store.active?.modelTargetId == m.id ? "checkmark" : "")
+                // In Private, only on-device routing (Auto) is offered — cloud models are
+                // hidden so the "Private" badge can never contradict the actual route.
+                if isPrivate {
+                    Text("Private uses on-device routing")
+                } else {
+                    ForEach(menuData.groups) { group in
+                        Section(group.title) {
+                            ForEach(group.options) { m in
+                                Button { setModel(m.id) } label: {
+                                    Label(ModelCatalog.displayName(for: m),
+                                          systemImage: store.active?.modelTargetId == m.id ? "checkmark" : "")
+                                }
                             }
                         }
                     }
                 }
             } label: {
                 HStack(spacing: GrainSpacing.x1) {
-                    // Secure default reads as a shield + "· Secure"; a pinned model reads as a cpu
-                    // + its friendly name.
-                    Image(systemName: isAuto ? "lock.shield.fill" : "cpu")
-                    Text(isAuto ? "Auto · Secure" : selectedModelLabel).grainTextStyle(.caption)
+                    // Auto = router (wand); a pinned model = a chip (cpu). No lock/shield here —
+                    // the lock belongs solely to the Privacy control.
+                    Image(systemName: isAuto ? "wand.and.stars" : "cpu")
+                    Text(isAuto ? "Auto" : selectedModelLabel).grainTextStyle(.caption)
                     Image(systemName: "chevron.down").font(.system(size: 9))
                 }
-                .foregroundStyle(isAuto ? GrainColor.sage : GrainColor.textMuted)
+                .foregroundStyle(GrainColor.textMuted)
             }
             .accessibilityIdentifier("model-picker")
 
@@ -121,6 +158,14 @@ struct ChatScreen: View {
     private func setModel(_ id: String?) {
         guard let active = store.active else { return }
         store.setModel(id, for: active.id)
+    }
+
+    private func setPrivacy(_ on: Bool) {
+        guard let active = store.active else { return }
+        store.setSensitivity(on ? ChatConversationStore.Sensitivity.private : nil, for: active.id)
+        // Private restricts routing to on-device — clear any pinned cloud model so the badge
+        // can never contradict the actual route (the model menu also hides cloud while Private).
+        if on { store.setModel(nil, for: active.id) }
     }
 
     /// Load the active conversation's persisted history into the live view (on first

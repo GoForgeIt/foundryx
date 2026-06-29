@@ -63,6 +63,36 @@ final class ChatSessionTests: XCTestCase {
                      "Auto (router) must OMIT requested_target so Kiln's router decides")
     }
 
+    func testChatRequestCarriesSensitivityWhenPrivate() throws {
+        let store = ChatConversationStore()
+        let id = store.active!.id
+        store.setSensitivity(ChatConversationStore.Sensitivity.private, for: id)
+        let req = store.chatRequest(text: "hi", for: id)
+        XCTAssertEqual(req.sensitivity, "confidential")
+
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(req)) as! [String: Any]
+        XCTAssertEqual(json["sensitivity"] as? String, "confidential")
+    }
+
+    func testDefaultOmitsSensitivity() throws {
+        let store = ChatConversationStore()
+        let id = store.active!.id            // Open (default) ⇒ no sensitivity on the wire
+        let req = store.chatRequest(text: "hi", for: id)
+        XCTAssertNil(req.sensitivity)
+
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(req)) as! [String: Any]
+        XCTAssertNil(json["sensitivity"],
+                     "Open must OMIT sensitivity so the door uses its default")
+    }
+
+    func testNewConversationInheritsSensitivity() {
+        let store = ChatConversationStore()
+        store.setSensitivity(ChatConversationStore.Sensitivity.private, for: store.active!.id)
+        let convo = store.newConversation()
+        XCTAssertEqual(convo.sensitivity, "confidential",
+                       "a new chat keeps the prior chat's privacy posture")
+    }
+
     func testPersistenceRoundTrips() {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("foundryx-chat-test-\(UUID().uuidString).json")
@@ -71,10 +101,13 @@ final class ChatSessionTests: XCTestCase {
         let id = first.active!.id
         first.setMessages([.init(role: "user", text: "remember me")], for: id)
         first.setModel("claude-max", for: id)
+        first.setSensitivity(ChatConversationStore.Sensitivity.private, for: id)
 
         let reloaded = ChatConversationStore(storageURL: url)
         XCTAssertEqual(reloaded.conversation(id)?.messages.first?.text, "remember me")
         XCTAssertEqual(reloaded.conversation(id)?.modelTargetId, "claude-max")
+        XCTAssertEqual(reloaded.conversation(id)?.sensitivity, "confidential",
+                       "privacy posture must survive reload")
     }
 
     func testModelOptionDecodesLabelFallback() throws {

@@ -48,7 +48,7 @@ struct SignInView: View {
                     .padding(.top, GrainSpacing.x2)
 
                     Spacer()
-                    Text("End-to-end encrypted · your data stays on your devices")
+                    Text("End-to-end encrypted to your Mac · you choose what stays private")
                         .grainTextStyle(.caption)
                         .foregroundStyle(GrainColor.textFaint)
                         .padding(.bottom, GrainSpacing.x3)
