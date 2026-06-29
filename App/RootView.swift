@@ -73,6 +73,8 @@ private struct MainTabs: View {
     // The durable, resumable chat conversation list — owned here so it persists across
     // tab switches and app foregrounding (its own Application Support JSON file).
     @StateObject private var chats = ChatConversationStore(storageURL: ChatConversationStore.defaultStorageURL())
+    // The capture→chat bridge: "Ask in chat" from a transcript seeds a chat + switches tabs.
+    @StateObject private var bridge = ChatBridge()
 
     init(target: DoorTarget, remote: RemoteSession, showingAccount: Binding<Bool>) {
         self.target = target
@@ -122,20 +124,23 @@ private struct MainTabs: View {
     }
 
     var body: some View {
-        TabView {
+        // selection bound to the bridge so "Ask in chat" can jump to the Chat tab (.tag 0).
+        TabView(selection: $bridge.selectedTab) {
             NavigationStack {
-                ChatScreen(target: target, store: chats, log: log)
+                ChatScreen(target: target, store: chats, log: log, bridge: bridge)
                     .navigationTitle("FoundryX")
                     .toolbar { Button("Account") { showingAccount = true } }
             }
             .tabItem { Label("Chat", systemImage: "message") }
+            .tag(0)
 
             NavigationStack {
-                CaptureScreen(device: device, manager: manager, sources: sources, target: target)
+                CaptureScreen(device: device, manager: manager, sources: sources, target: target, bridge: bridge)
                     .navigationTitle("Capture")
                     .toolbar { Button("Account") { showingAccount = true } }
             }
             .tabItem { Label("Capture", systemImage: "waveform") }
+            .tag(1)
 
             NavigationStack {
                 DeviceScreen(device: device, manager: manager, sources: sources)
@@ -143,6 +148,7 @@ private struct MainTabs: View {
                     .toolbar { Button("Account") { showingAccount = true } }
             }
             .tabItem { Label("Device", systemImage: "antenna.radiowaves.left.and.right") }
+            .tag(2)
         }
         // Keep the registry's Omi liveness in step with the BLE link from a SINGLE,
         // always-mounted place (not just the Device tab's onChange, which doesn't fire
@@ -167,17 +173,25 @@ private struct MainTabs: View {
 private struct UIPreviewRoot: View {
     @StateObject private var store = ChatConversationStore()
     @StateObject private var log = DoorLog()
+    @StateObject private var bridge = ChatBridge()
     private let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:14288")!, bearer: "preview")
 
     var body: some View {
         NavigationStack {
-            ChatScreen(target: target, store: store, log: log)
+            ChatScreen(target: target, store: store, log: log, bridge: bridge)
                 .navigationTitle("FoundryX")
         }
         .onAppear {
-            if ProcessInfo.processInfo.environment["FOUNDRYX_UI_PREVIEW"] == "private",
-               !store.activeId.isEmpty {
-                store.setSensitivity(ChatConversationStore.Sensitivity.private, for: store.activeId)
+            switch ProcessInfo.processInfo.environment["FOUNDRYX_UI_PREVIEW"] {
+            case "private":
+                if !store.activeId.isEmpty {
+                    store.setSensitivity(ChatConversationStore.Sensitivity.private, for: store.activeId)
+                }
+            case "seed":
+                // Exercise the capture→chat bridge: a seeded "Ask in chat" prompt.
+                bridge.askAbout("About my conversation “Lantis kickoff call” (Mon, Jun 29 · 10:41–11:13 AM · 32 min):\n\nWe agreed to a 90-day pilot on the intake workflow; Justin to send the SOW by Friday; Nick to scope PHI routing.\n\nWhat are the key takeaways and any action items?")
+            default:
+                break
             }
         }
     }

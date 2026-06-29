@@ -15,6 +15,8 @@ struct ChatScreen: View {
     @ObservedObject var store: ChatConversationStore
     @StateObject private var model = ChatViewModel()
     @ObservedObject var log: DoorLog
+    /// The capture→chat bridge — delivers an "Ask in chat" seed from a transcript.
+    @ObservedObject var bridge: ChatBridge
 
     @State private var input = ""
     @State private var sessionId = ""
@@ -74,8 +76,9 @@ struct ChatScreen: View {
             GrainComposer("Message your Foundry…", text: $input, isSending: streaming, onSend: send)
         }
         .grainBackground()
-        .onAppear { hydrateActive(); Task { await loadModels() } }
+        .onAppear { hydrateActive(); consumePendingSeed(); Task { await loadModels() } }
         .onChange(of: store.activeId) { _ in hydrateActive() }
+        .onChange(of: bridge.pendingPrompt) { _ in consumePendingSeed() }
         .sheet(isPresented: $showingChats) {
             ChatListSheet(store: store) { showingChats = false }
         }
@@ -172,6 +175,15 @@ struct ChatScreen: View {
     private func setModel(_ id: String?) {
         guard let active = store.active else { return }
         store.setModel(id, for: active.id)
+    }
+
+    /// Capture→chat bridge: when "Ask in chat" sets a pending prompt, open a fresh chat
+    /// and drop the seed into the composer (ready to send / edit). Cleared once consumed.
+    private func consumePendingSeed() {
+        guard let prompt = bridge.pendingPrompt else { return }
+        bridge.pendingPrompt = nil
+        _ = store.newConversation()
+        input = prompt
     }
 
     private func setPrivacy(_ on: Bool) {

@@ -31,6 +31,8 @@ struct CaptureScreen: View {
     @ObservedObject var sources: CaptureSourceRegistry
     /// The resolved door target — lets a tapped card open its transcript (Phase B).
     let target: DoorTarget
+    /// The capture→chat bridge — a transcript's "Ask in chat" seeds a chat with it.
+    @ObservedObject var bridge: ChatBridge
 
     /// Whether the Omi is still an enabled capture source (device-page toggle). When off,
     /// the capture page neither auto-starts nor shows the Omi scan affordance.
@@ -99,6 +101,7 @@ struct CaptureScreen: View {
         NavigationLink {
             ConversationDetailView(
                 target: target,
+                bridge: bridge,
                 captureId: wal.captureId,
                 timeRange: manager.conversationMeta(for: wal.captureId)
                     .map { CaptureCard.timeRangeString(meta: $0, fallback: wal.status.startedAt) }
@@ -469,6 +472,8 @@ private struct CaptureCard: View {
 /// subject/summary generation is a later slice).
 struct ConversationDetailView: View {
     let target: DoorTarget
+    /// The capture→chat bridge — "Ask in chat" seeds a chat with this conversation.
+    @ObservedObject var bridge: ChatBridge
     let captureId: String
     let timeRange: String
     let place: String?
@@ -523,7 +528,7 @@ struct ConversationDetailView: View {
                 if let place {
                     Text(place).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                 }
-                listenRow
+                actionsRow
                 Divider().background(GrainColor.borderHairline)
 
                 if let transcript = transcriptText {
@@ -581,6 +586,35 @@ struct ConversationDetailView: View {
         .refreshable { await fetchFromDoor() }   // pull-to-refresh loads on demand
         .task { await initialLoad() }
         .onDisappear { player?.stop() }
+    }
+
+    /// Listen + "Ask in chat" — the capture→chat bridge. The ask button appears once
+    /// there's a transcript or summary to seed the chat with (thin client: it only
+    /// passes text to the Door's chat; no on-device analysis).
+    private var actionsRow: some View {
+        HStack(spacing: GrainSpacing.x2) {
+            listenRow
+            if transcriptText != nil || summaryText != nil {
+                GrainButton("Ask in chat", variant: .filled, size: .sm) {
+                    bridge.askAbout(askAboutPrompt())
+                }
+            }
+            Spacer()
+        }
+    }
+
+    /// Build the chat seed: the conversation's title/time + its summary (or a transcript
+    /// excerpt) as context, ending with a ready-to-send ask. The user can send or edit it.
+    private func askAboutPrompt() -> String {
+        let header = "About my conversation “\(navTitle)” (\(timeRange)):"
+        let tail = "What are the key takeaways and any action items?"
+        if let s = summaryText, !s.isEmpty {
+            return "\(header)\n\n\(s)\n\n\(tail)"
+        }
+        if let t = transcriptText, !t.isEmpty {
+            return "\(header)\n\n\(String(t.prefix(2000)))\n\n\(tail)"
+        }
+        return "\(header)\n\n"
     }
 
     /// "Listen" affordance — replays the conversation audio via the door's `/audio`
