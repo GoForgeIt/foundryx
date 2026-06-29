@@ -44,6 +44,12 @@ struct ChatScreen: View {
 
     // Auto/model-label/menu derivation lives in `ModelPickerMenu` (below) so the picker is an
     // isolated Equatable subview — this screen's frequent re-renders don't reset its scroll.
+    // Only the privacy posture is derived here, because the privacy CONTROL lives on this
+    // screen and the picker is told about it rather than deriving it twice.
+
+    /// Whether the active conversation is set to Private (Kiln keeps the turn on
+    /// compliant / on-device targets). The core brand promise, surfaced per-chat.
+    private var isPrivate: Bool { store.active?.sensitivity == ChatConversationStore.Sensitivity.private }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -188,12 +194,46 @@ struct ChatScreen: View {
 
             Spacer(minLength: 0)
 
+            // Privacy control — the single source of truth for where this chat's data goes.
+            // "Private" ⇒ sensitivity=confidential ⇒ Kiln keeps the turn on-device, AND we
+            // restrict the model picker to on-device routing (below) + clear any cloud pin, so
+            // the badge can never contradict the actual route. "Open" ⇒ sensitivity omitted ⇒
+            // the router may use a faster cloud model.
+            Menu {
+                Button { setPrivacy(true) } label: {
+                    Label("Private · stays on your Mac",
+                          systemImage: isPrivate ? "checkmark" : "lock.fill")
+                }
+                Button { setPrivacy(false) } label: {
+                    Label("Open · may use cloud for speed",
+                          systemImage: isPrivate ? "cloud" : "checkmark")
+                }
+            } label: {
+                HStack(spacing: GrainSpacing.x1) {
+                    Image(systemName: isPrivate ? "lock.fill" : "cloud")
+                    Text(isPrivate ? "Private" : "Open").grainTextStyle(.caption)
+                    Image(systemName: "chevron.down").font(.system(size: 9))
+                }
+                .foregroundStyle(isPrivate ? GrainColor.sage : GrainColor.textMuted)
+                .padding(.vertical, GrainSpacing.x1)
+                .contentShape(Rectangle())
+            }
+            .accessibilityIdentifier("privacy-picker")
+            .accessibilityLabel("Privacy")
+            .accessibilityValue(isPrivate ? "Private, stays on your Mac" : "Open, may use cloud")
+            .accessibilityHint("Changes whether this chat stays on your Mac")
+
             // Model picker — extracted into an Equatable subview so the per-token / elapsed-timer
             // re-renders of this screen do NOT re-evaluate the open menu (which resets its scroll
             // to the top — you couldn't stay scrolled down to pick a model). It re-renders ONLY when
             // the model list or the pinned selection actually changes.
+            // `isPrivate` is passed IN rather than re-derived: the restriction has to hold
+            // inside the picker itself (cloud models hidden), or the Private badge would be
+            // a label over a picker that still offers cloud — the exact contradiction the
+            // privacy control exists to prevent.
             ModelPickerMenu(models: models,
                             selectedId: store.active?.modelTargetId,
+                            isPrivate: isPrivate,
                             onSelect: setModel)
                 .equatable()
 
@@ -209,6 +249,14 @@ struct ChatScreen: View {
     private func setModel(_ id: String?) {
         guard let active = store.active else { return }
         store.setModel(id, for: active.id)
+    }
+
+    private func setPrivacy(_ on: Bool) {
+        guard let active = store.active else { return }
+        // The store clears any pinned model when going Private (a pin is a route, and a
+        // cloud pin under a "Private" badge would be a lie). The menu also hides cloud
+        // models while Private, so the two agree.
+        store.setSensitivity(on ? ChatConversationStore.Sensitivity.private : nil, for: active.id)
     }
 
     /// Load the active conversation's persisted history into the live view (on first
@@ -499,6 +547,9 @@ private struct ChatListSheet: View {
 private struct ModelPickerMenu: View, Equatable {
     let models: [ModelOption]
     let selectedId: String?
+    /// Private ⇒ on-device routing only. Cloud groups are hidden entirely rather than
+    /// shown-and-disabled, so nothing in the menu can contradict the Private badge.
+    let isPrivate: Bool
     let onSelect: (String?) -> Void
 
     nonisolated static func == (lhs: ModelPickerMenu, rhs: ModelPickerMenu) -> Bool {
@@ -524,12 +575,16 @@ private struct ModelPickerMenu: View, Equatable {
                      ? "Recommended — \(menuData.auto.caption)"
                      : menuData.auto.caption)
             }
-            ForEach(menuData.groups) { group in
-                Section(group.title) {
-                    ForEach(group.options) { m in
-                        Button { onSelect(m.id) } label: {
-                            Label(ModelCatalog.displayName(for: m),
-                                  systemImage: selectedId == m.id ? "checkmark" : "")
+            if isPrivate {
+                Text("Private uses on-device routing")
+            } else {
+                ForEach(menuData.groups) { group in
+                    Section(group.title) {
+                        ForEach(group.options) { m in
+                            Button { onSelect(m.id) } label: {
+                                Label(ModelCatalog.displayName(for: m),
+                                      systemImage: selectedId == m.id ? "checkmark" : "")
+                            }
                         }
                     }
                 }
