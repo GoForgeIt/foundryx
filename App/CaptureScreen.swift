@@ -142,86 +142,69 @@ struct CaptureScreen: View {
         .overlay(alignment: .bottom) { Rectangle().fill(GrainColor.borderHairline).frame(height: 1) }
     }
 
-    // MARK: header — ambient control when connected, else the connect/pairing flow
+    // MARK: header — ambient control when connected, else the auto-connect status + the
+    // inline "Connect your Omi" affordance (source connection is automatic + self-healing;
+    // the user never hand-drives a BLE scan — that lives in the Device page's source mgmt).
+
+    /// The pure capture-page banner state: the live Omi link projected through the
+    /// device-page enabled toggle (a disabled Omi short-circuits to `.omiDisabled`).
+    private var sourcePresentation: CaptureSourcePresentation {
+        .resolve(connection: device.connectionState, omiEnabled: omiEnabled, isPaused: manager.isPaused)
+    }
 
     @ViewBuilder private var header: some View {
-        switch device.connectionState {
-        case .connected(let name):
-            ambientHeader(name)
-        default:
-            // Omi not connected: ONE compact header (Feature 3) — capture title/status on
-            // the left; the Omi scan icon + the phone-mic record sphere inline on the
-            // right; the discovered-device list folds in below only while scanning finds
-            // results. Reclaims the vertical space the old separate connect rows ate.
-            consolidatedHeader
+        let p = sourcePresentation
+        if p.isConnected {
+            ambientHeader(name: p.connectedName ?? "Omi", presentation: p)
+        } else {
+            connectHeader(p)
         }
     }
 
     /// Whether the live capture surface (meter + transcript) should show: the Omi is
-    /// connected, or the phone mic is actively recording.
+    /// connected (listening or paused), or the phone mic is actively recording.
     private var isShowingCapture: Bool {
-        if omiEnabled, case .connected = device.connectionState { return true }
+        if sourcePresentation.isConnected { return true }
         return manager.isRecordingMic
     }
 
-    // MARK: consolidated capture header (Omi scan icon + mic sphere inline, Feature 3)
+    // MARK: connect header — auto-connect STATUS + the inline "Connect your Omi" affordance
 
-    /// The single compact capture header shown when the Omi isn't connected: the capture
-    /// title + a status subtitle on the left; the Omi scan icon and the phone-mic record
-    /// sphere inline on the right. The Omi icon expands into a "Scanning…" pill on tap and
-    /// collapses on connect. Discovered devices fold in below only while there are results.
-    private var consolidatedHeader: some View {
+    /// The capture header shown when the Omi isn't connected. Source connection is
+    /// automatic + self-healing, so the connecting / reconnecting / searching states read
+    /// as ambient STATUS (a spinner + a line) — the user does NOT drive a scan. A clean
+    /// nothing-connected idle (or Bluetooth-off) surfaces the inline "Connect your Omi"
+    /// affordance, whose tap kicks off the automatic connect flow. The phone-mic record
+    /// sphere is always offered as a manual source. Discovered Omis fold in below only for
+    /// first-time pairing (no saved device yet), so the user can tap theirs.
+    private func connectHeader(_ p: CaptureSourcePresentation) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: GrainSpacing.x3) {
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text("Capture").grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-                    Text(captureSubtitle)
-                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-                }
-                Spacer()
-                // The Omi as a small circular icon that expands to a "Scanning…" pill —
-                // shown only while the Omi is an enabled source (toggled off ⇒ removed).
-                if omiEnabled {
-                    OmiScanButton(presentation: OmiScanPresentation.from(device.connectionState)) { action in
-                        switch action {
-                        case .startScan: device.startScan()
-                        case .stopScan: device.stopScan()
-                        case .none: break
-                        }
+                    HStack(spacing: GrainSpacing.x1) {
+                        if p.isAutoConnecting { ProgressView().controlSize(.mini).tint(GrainColor.forgeBlue) }
+                        Text(p.statusLine).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                     }
                 }
-                // The phone-mic record sphere (build #65), inline beside the Omi icon.
+                Spacer()
+                // Inline "Connect your Omi" — a tap kicks off the AUTOMATIC connect flow
+                // (auto-reconnect the saved Omi; first-time pairing scans + lists below).
+                if p.showsConnectAffordance {
+                    GrainButton("Connect your Omi", variant: .filled, size: .sm) { device.start() }
+                }
+                // The phone-mic record sphere — a manual capture source, always available.
                 if manager.phoneMicAvailable {
                     MicSphereButton(recording: manager.isRecordingMic) { manager.toggleMicRecording() }
                 }
             }
             .padding(.horizontal, GrainSpacing.x4)
             .padding(.vertical, GrainSpacing.x3)
-            // Compact discovered-device list — only while a scan has found Omis.
+            // First-time pairing only: a scan turned up Omis — tap yours to connect.
+            // (Routine reconnect is automatic; this never asks the user to drive a scan.)
             if !device.discovered.isEmpty { discoveredList }
         }
         .overlay(alignment: .bottom) { Rectangle().fill(GrainColor.borderHairline).frame(height: 1) }
-    }
-
-    /// The header's status subtitle: phone-mic recording state takes priority, else a
-    /// short reflection of the Omi connection state, else the inline how-to.
-    private var captureSubtitle: String {
-        if manager.isRecordingMic { return "Recording — tap to stop" }
-        if !omiEnabled {
-            return manager.phoneMicAvailable
-                ? "Tap the mic to record · turn the Omi on in Device"
-                : "Turn the Omi on in Device to capture"
-        }
-        switch device.connectionState {
-        case .scanning: return "Scanning for your Omi…"
-        case .connecting(let n): return "Connecting to \(n)…"
-        case .disconnected: return "Omi disconnected — reconnecting…"
-        case .poweredOff: return "Bluetooth off — enable it to connect your Omi"
-        default:
-            return manager.phoneMicAvailable
-                ? "Tap the mic to record · tap the Omi to connect"
-                : "Tap the Omi to connect"
-        }
     }
 
     /// The compact, inline list of Omis a scan has discovered. Tapping one connects.
@@ -243,13 +226,16 @@ struct CaptureScreen: View {
         }
     }
 
-    private func ambientHeader(_ name: String) -> some View {
+    /// The connected/ambient header: the active source + live state and the single
+    /// record/pause control. Connection management (Disconnect / Forget / re-pair) lives
+    /// on the Device page now — this surface is purely "start/stop recording".
+    private func ambientHeader(name: String, presentation p: CaptureSourcePresentation) -> some View {
         HStack(spacing: GrainSpacing.x3) {
-            Circle().fill(manager.isPaused ? GrainColor.amber : GrainColor.forgeBlue)
+            Circle().fill(p.isCapturing ? GrainColor.forgeBlue : GrainColor.amber)
                 .frame(width: 10, height: 10)
             VStack(alignment: .leading, spacing: 1) {
                 Text(name).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-                Text(manager.isPaused ? "Paused" : "Capturing ambiently")
+                Text(p.statusLine)
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
             }
             Spacer()
@@ -259,11 +245,11 @@ struct CaptureScreen: View {
             if manager.isCapturing {
                 GrainButton("New", variant: .tonal, size: .sm) { manager.splitConversation() }
             }
+            // The single record/pause control.
             GrainButton(manager.isPaused ? "Resume" : "Pause",
                         variant: manager.isPaused ? .filled : .tonal, size: .sm) {
                 manager.togglePause()
             }
-            GrainButton("Disconnect", variant: .text, size: .sm) { device.forget() }
         }
         .padding(.horizontal, GrainSpacing.x4)
         .padding(.vertical, GrainSpacing.x3)
@@ -695,83 +681,6 @@ struct ConversationDetailView: View {
             audioState = .playing
         } catch {
             audioState = .failed((error as NSError).localizedDescription)
-        }
-    }
-}
-
-/// The Omi connect control as a compact CIRCULAR icon that EXPANDS into a "Scanning…"
-/// pill on tap (Feature 3). Collapsed (idle/disconnected): a small circle with an
-/// antenna glyph — tapping starts a scan. Scanning/Connecting: a wider capsule with a
-/// label + a subtle activity indicator — tapping while scanning stops it. Connected is
-/// styled distinctly (though the header switches to the ambient layout on connect, so it
-/// rarely renders here). Pure presentation + toggle live in `OmiScanPresentation`.
-private struct OmiScanButton: View {
-    let presentation: OmiScanPresentation
-    let onTap: (OmiScanTapAction) -> Void
-
-    var body: some View {
-        Button { onTap(presentation.tapAction) } label: {
-            HStack(spacing: GrainSpacing.x1) {
-                if presentation.showsActivity {
-                    ProgressView().controlSize(.mini).tint(tint)
-                } else {
-                    Image(systemName: glyph)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(tint)
-                }
-                if let label = presentation.label {
-                    Text(label).grainTextStyle(.caption).foregroundStyle(tint).lineLimit(1)
-                }
-            }
-            .padding(.horizontal, presentation.isExpanded ? GrainSpacing.x3 : 0)
-            .frame(minWidth: 34, minHeight: 34)
-            .frame(height: 34)
-            .background(Capsule().fill(background))
-            .overlay(Capsule().strokeBorder(borderColor, lineWidth: 1))
-            .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .animation(.easeInOut(duration: 0.18), value: presentation.isExpanded)
-        .accessibilityLabel(accessibilityLabel)
-    }
-
-    private var glyph: String {
-        presentation == .off ? "antenna.radiowaves.left.and.right.slash"
-                             : "antenna.radiowaves.left.and.right"
-    }
-
-    /// Accent (forge blue) while scanning/connecting/connected; quiet ink when collapsed;
-    /// faint when Bluetooth is off.
-    private var tint: Color {
-        switch presentation {
-        case .scanning, .connecting, .connected: return GrainColor.forgeBlue
-        case .collapsed: return GrainColor.ink
-        case .off: return GrainColor.textFaint
-        }
-    }
-
-    private var background: Color {
-        switch presentation {
-        case .scanning, .connecting: return GrainColor.forgeBlue.opacity(0.12)
-        case .connected: return GrainColor.forgeBlue.opacity(0.18)
-        case .collapsed, .off: return GrainColor.surfaceElevated
-        }
-    }
-
-    private var borderColor: Color {
-        switch presentation {
-        case .collapsed, .off: return GrainColor.border
-        case .scanning, .connecting, .connected: return .clear
-        }
-    }
-
-    private var accessibilityLabel: String {
-        switch presentation {
-        case .collapsed: return "Scan for your Omi"
-        case .scanning: return "Scanning for your Omi, tap to stop"
-        case .connecting(let n): return "Connecting to \(n)"
-        case .connected(let n): return "Connected to \(n)"
-        case .off: return "Bluetooth off"
         }
     }
 }
