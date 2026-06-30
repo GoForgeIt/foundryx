@@ -192,6 +192,8 @@ private struct UIPreviewRoot: View {
                 if ProcessInfo.processInfo.environment["FOUNDRYX_UI_PREVIEW"] == "insights" {
                     InsightsView(target: target, bridge: bridge, injected: .sample)
                         .navigationTitle("Insights")
+                } else if ProcessInfo.processInfo.environment["FOUNDRYX_UI_PREVIEW"] == "graph" {
+                    KnowledgeGraphView(target: target, bridge: bridge, injected: .sample)
                 } else {
                     ChatScreen(target: target, store: store, log: log, bridge: bridge)
                         .navigationTitle("FoundryX")

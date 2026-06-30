@@ -55,6 +55,22 @@ struct InsightsView: View {
                 topicChips(d.topics)
             }
         }
+        // Entry point into the full knowledge graph (connections + per-entity conversations).
+        NavigationLink {
+            KnowledgeGraphView(target: target, bridge: bridge)
+        } label: {
+            HStack(spacing: GrainSpacing.x2) {
+                Image(systemName: "point.3.connected.trianglepath.dotted").foregroundStyle(GrainColor.forgeBlue)
+                Text("Explore your knowledge graph").grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                Spacer()
+                Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(GrainColor.textFaint)
+            }
+            .padding(GrainSpacing.x3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).fill(GrainColor.surfaceElevated))
+            .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).strokeBorder(GrainColor.border, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
     }
 
     private func section(_ title: String, items: [InsightItem]) -> some View {
