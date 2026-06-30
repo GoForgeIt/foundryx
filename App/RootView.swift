@@ -134,6 +134,16 @@ private struct MainTabs: View {
             .tabItem { Label("Chat", systemImage: "message") }
             .tag(0)
 
+            // Insights — the consumer payoff (listen → surfaced insights → knowledge graph).
+            // Placed second so it's prominent; tag(3) keeps the bridge's 0/1/2 mapping intact.
+            NavigationStack {
+                InsightsView(target: target, bridge: bridge)
+                    .navigationTitle("Insights")
+                    .toolbar { Button("Account") { showingAccount = true } }
+            }
+            .tabItem { Label("Insights", systemImage: "lightbulb") }
+            .tag(3)
+
             NavigationStack {
                 CaptureScreen(device: device, manager: manager, sources: sources, target: target, bridge: bridge)
                     .navigationTitle("Capture")
@@ -178,8 +188,15 @@ private struct UIPreviewRoot: View {
 
     var body: some View {
         NavigationStack {
-            ChatScreen(target: target, store: store, log: log, bridge: bridge)
-                .navigationTitle("FoundryX")
+            Group {
+                if ProcessInfo.processInfo.environment["FOUNDRYX_UI_PREVIEW"] == "insights" {
+                    InsightsView(target: target, bridge: bridge, injected: .sample)
+                        .navigationTitle("Insights")
+                } else {
+                    ChatScreen(target: target, store: store, log: log, bridge: bridge)
+                        .navigationTitle("FoundryX")
+                }
+            }
         }
         .onAppear {
             switch ProcessInfo.processInfo.environment["FOUNDRYX_UI_PREVIEW"] {
