@@ -16,6 +16,9 @@ import Combine
 #if canImport(AVFoundation)
 import AVFoundation
 #endif
+#if canImport(WidgetKit)
+import WidgetKit
+#endif
 
 /// Lock-guarded routing of frames → the active WAL, gated by pause. Lives off the
 /// main actor so the source's frame callback never hops actors per frame. Also the
@@ -326,6 +329,29 @@ public final class CaptureManager: ObservableObject {
     private let levelBuffer = LevelBuffer()
     private var drainTimer: Timer?
     private var meterTimer: Timer?
+
+    // MARK: Live Activity + home-screen widget (Dynamic Island / WidgetKit)
+
+    /// The capture Live Activity (lock-screen banner + Dynamic Island). Driven IN-APP
+    /// (no push server in v1) on the same lifecycle transitions as capture. nil on
+    /// pre-16.1 OSes / when ActivityKit is unavailable — every use is guarded.
+    #if canImport(ActivityKit) && os(iOS)
+    private let liveActivity: Any? = {
+        if #available(iOS 16.2, *) { return CaptureLiveActivityController() }
+        return nil
+    }()
+    @available(iOS 16.2, *)
+    private var liveActivityController: CaptureLiveActivityController? {
+        liveActivity as? CaptureLiveActivityController
+    }
+    #endif
+
+    /// Throttle for live level/elapsed pushes — the Live Activity must NEVER update at
+    /// audio frame rate (it would burn the system's update budget and get throttled).
+    /// One refresh every few seconds is plenty; the elapsed timer ticks on-device via
+    /// `Text(timerInterval:)`, so we only push to move the level indicator.
+    public nonisolated static let liveActivityThrottle: TimeInterval = 3
+    private var lastLiveActivityPushAt: TimeInterval = 0
     /// Finalize-the-conversation seam (injectable for door-free tests): given a
     /// closed capture id + its conversation metadata (start/end/location), tell the
     /// door to assemble + ingest it to Lore. Throws on failure so the capture stays
@@ -518,6 +544,10 @@ public final class CaptureManager: ObservableObject {
         pruneOldAudio()        // ~30d audio sweep (keeps transcripts, prunes safe-in-Lore audio)
         startDrainTimer()
         startSegmentTimer()    // wall-clock silence + runaway force-split watchdog
+        // Seed the home-screen widget with current (idle / last-conversation) state so it
+        // renders correctly before the first capture transition fires.
+        CaptureWidgetSnapshotStore.write(makeWidgetSnapshot())
+        reloadWidgetTimelines()
     }
 
     /// The durable conversation metadata (start/end/location) for a capture, for
@@ -620,6 +650,7 @@ public final class CaptureManager: ObservableObject {
             if isRecordingMic { stopMicRecording() }
             source.start()
         }
+        pushLiveState(.update)   // source switch → refresh the source label on both surfaces
         log?.info("capture source → \(kind.rawValue)")
     }
 
@@ -848,6 +879,113 @@ public final class CaptureManager: ObservableObject {
         let s = router.stats()
         if s.count != framesReceived { framesReceived = s.count }
         if s.lastBytes != lastFrameBytes { lastFrameBytes = s.lastBytes }
+        // Move the Live Activity's live level indicator — THROTTLED to a few seconds, NOT
+        // the 12 Hz meter rate (the elapsed timer ticks on-device, so this only carries
+        // the level). No-op when not recording / the throttle window hasn't elapsed.
+        if isCapturing { pushLiveState(.throttledUpdate) }
+    }
+
+    // MARK: Live Activity / widget snapshot projection + push
+
+    /// The display title + finish time of the most recent FINISHED conversation (the
+    /// active one excluded) — shown by the Live Activity / widget when idle. Reuses the
+    /// same card tombstone + generic-title disambiguation the timeline list renders, so
+    /// the surfaces agree. nil when there is no finished conversation with a title yet.
+    private func lastFinishedConversation() -> (title: String, at: Date)? {
+        for wal in visibleCaptures where wal !== active {
+            guard let title = cardMeta(for: wal.captureId)?.title,
+                  !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            let start = conversationStartDate(wal)
+            let display = ConversationTitleDisplay.display(
+                title: title, start: start,
+                timeString: { Self.liveActivityTimeFmt.string(from: $0) })
+            // Prefer the conversation END for "finished at" when known, else its start.
+            let endedAt = conversationMeta(for: wal.captureId)?.endedAt
+            let at = endedAt.map { Date(timeIntervalSince1970: TimeInterval($0)) } ?? start
+            return (display, at)
+        }
+        return nil
+    }
+
+    private static let liveActivityTimeFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "h:mm a"
+        return f
+    }()
+
+    /// The current 0…1 level for the live indicator (the newest meter bar), or nil when
+    /// not actively recording.
+    private var currentLiveLevel: Double? {
+        guard isCapturing else { return nil }
+        return Double(levels.last ?? 0)
+    }
+
+    /// Build the App-Group snapshot the home-screen widget reads from current state.
+    private func makeWidgetSnapshot() -> CaptureWidgetSnapshot {
+        let last = lastFinishedConversation()
+        return CaptureWidgetSnapshot(
+            isRecording: isCapturing,
+            isPaused: isPaused && active != nil,
+            sourceLabel: CaptureLiveStatus.sourceLabel(source: captureSource, isRecordingMic: isRecordingMic),
+            sourceSymbol: CaptureLiveStatus.sourceSymbol(source: captureSource, isRecordingMic: isRecordingMic),
+            startedAt: active != nil ? conversationStartDate(active!) : nil,
+            lastFinishedTitle: last?.title,
+            lastFinishedAt: last?.at,
+            updatedAt: Date())
+    }
+
+    #if canImport(ActivityKit) && os(iOS)
+    /// Build the Live Activity content state from current capture state.
+    @available(iOS 16.2, *)
+    private func makeActivityState() -> CaptureActivityAttributes.ContentState {
+        let last = lastFinishedConversation()
+        return CaptureActivityAttributes.ContentState(
+            isRecording: isCapturing,
+            isPaused: isPaused && active != nil,
+            sourceLabel: CaptureLiveStatus.sourceLabel(source: captureSource, isRecordingMic: isRecordingMic),
+            sourceSymbol: CaptureLiveStatus.sourceSymbol(source: captureSource, isRecordingMic: isRecordingMic),
+            startedAt: active != nil ? conversationStartDate(active!) : nil,
+            level: currentLiveLevel,
+            lastFinishedTitle: last?.title,
+            lastFinishedAt: last?.at)
+    }
+    #endif
+
+    /// Push the current state to the home-screen widget (always) and the Live Activity
+    /// (when one should be live). `kind` distinguishes the lifecycle transition so we
+    /// start/update/end the Live Activity correctly; level/elapsed pushes are throttled.
+    private enum LivePush { case start, update, throttledUpdate, end }
+    private func pushLiveState(_ kind: LivePush) {
+        // Always refresh the home-screen widget snapshot + ask WidgetKit to reload — it's
+        // cheap and the widget has no other way to learn capture changed.
+        CaptureWidgetSnapshotStore.write(makeWidgetSnapshot())
+        reloadWidgetTimelines()
+
+        #if canImport(ActivityKit) && os(iOS)
+        guard #available(iOS 16.2, *), let controller = liveActivityController else { return }
+        switch kind {
+        case .start:
+            lastLiveActivityPushAt = Date().timeIntervalSince1970
+            controller.start(makeActivityState())
+        case .update:
+            lastLiveActivityPushAt = Date().timeIntervalSince1970
+            controller.update(makeActivityState())
+        case .throttledUpdate:
+            let now = Date().timeIntervalSince1970
+            guard now - lastLiveActivityPushAt >= Self.liveActivityThrottle else { return }
+            lastLiveActivityPushAt = now
+            controller.update(makeActivityState())
+        case .end:
+            controller.end(final: makeActivityState())
+        }
+        #endif
+    }
+
+    /// Ask WidgetKit to reload the home-screen widget timelines (no-op off iOS).
+    private func reloadWidgetTimelines() {
+        #if canImport(WidgetKit) && os(iOS)
+        WidgetCenter.shared.reloadAllTimelines()
+        #endif
     }
 
     /// Build a WAL, threading the (test-only) per-segment upload override so every
@@ -883,6 +1021,7 @@ public final class CaptureManager: ObservableObject {
         router.setWAL(wal)                        // frames now flow into this WAL
         startLiveTranscription()                  // additive live preview (no-op if unwired)
         lastHeartbeatAt = 0; lastHeartbeatFrames = router.stats().count   // fresh heartbeat baseline
+        pushLiveState(.start)   // start the Live Activity + refresh the home-screen widget
         log?.info("capture \(id): ambient session started (source=\(captureSource.rawValue), state=\(sourceStateLabel))")
     }
 
@@ -997,6 +1136,10 @@ public final class CaptureManager: ObservableObject {
             await finished.sync()                 // snappy first sync
             await self?.tryFinalize(finished)     // finalize once segments are ACK'd
         }
+        // End the Live Activity into a brief idle "last conversation" state + refresh the
+        // widget. The provisional card seeded above gives `lastFinishedConversation()` a
+        // title immediately; a later Kiln title refresh re-pushes via the next transition.
+        pushLiveState(.end)
         log?.info("capture \(id): session ended (pending finalize → Lore)")
     }
 
@@ -1062,12 +1205,14 @@ public final class CaptureManager: ObservableObject {
         isPaused = true
         CaptureSettings.omiCaptureDesiredState = .paused
         router.setPaused(true)
+        pushLiveState(.update)   // reflect paused state on the Live Activity + widget
         log?.info("capture: paused")
     }
     public func resume() {
         isPaused = false
         CaptureSettings.omiCaptureDesiredState = .listening
         router.setPaused(false)
+        pushLiveState(.update)
         log?.info("capture: resumed")
     }
     public func togglePause() { isPaused ? resume() : pause() }

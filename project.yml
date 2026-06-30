@@ -22,12 +22,17 @@ targets:
         product: Grain
       - package: BlakeHash
         product: BlakeHash
+      # Embed the widget extension into the app bundle (Live Activity + WidgetKit).
+      - target: FoundryXWidget
     info:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: FoundryX
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # Opt the app into Live Activities (ActivityKit). Required for
+        # Activity.request to succeed.
+        NSSupportsLiveActivities: true
         UILaunchScreen: {}
         # iPhone = portrait; iPad = all four (App Store requires every
         # orientation for iPad multitasking unless the app is full-screen-only).
@@ -79,10 +84,51 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1,2"
+        # App Group: the shared container the app writes + the widget reads (capture
+        # status snapshot). The widget target carries the matching entitlement.
+        CODE_SIGN_ENTITLEMENTS: App/FoundryX.entitlements
       configs:
         Debug:
           # Simulator/dev builds stay creds-free (no signing identity required).
           CODE_SIGNING_ALLOWED: NO
         Release:
           # Device/archive (TestFlight) signs via the team + automatic provisioning.
+          CODE_SIGNING_ALLOWED: YES
+
+  # Widget extension: the home/lock-screen "Capture Status" widget + the capture Live
+  # Activity (Dynamic Island). Shares CaptureActivityAttributes + CaptureWidgetSnapshot
+  # with the app by compiling those two source files into BOTH targets (the Xcode build
+  # has no FoundryXKit module — the app compiles Sources/FoundryXKit directly), and reads
+  # live state over the App Group.
+  FoundryXWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Widget
+      - path: Sources/FoundryXKit/CaptureActivityAttributes.swift
+      - path: Sources/FoundryXKit/CaptureWidgetSnapshot.swift
+    info:
+      path: Widget/Info.plist
+      properties:
+        CFBundleDisplayName: FoundryX
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.goforgeit.foundryx.widget
+        PRODUCT_NAME: FoundryXWidget
+        MARKETING_VERSION: "2.42.1"
+        CURRENT_PROJECT_VERSION: "1"
+        DEVELOPMENT_TEAM: ND7H73W8VZ
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_ENTITLEMENTS: Widget/FoundryXWidget.entitlements
+        # SwiftUI widgets need a deployment floor where WidgetKit exists; 16.0 matches
+        # the app. The Live Activity widget inside is @available(iOS 16.1)-gated.
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+      configs:
+        Debug:
+          CODE_SIGNING_ALLOWED: NO
+        Release:
           CODE_SIGNING_ALLOWED: YES
