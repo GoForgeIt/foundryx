@@ -50,13 +50,40 @@ public struct ChatView: View {
                 }
             }
 
+            // What the agent DID this turn — so a tool-running turn isn't a silent gap.
+            if !model.toolRuns.isEmpty {
+                VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                    ForEach(model.toolRuns) { run in
+                        HStack(spacing: GrainSpacing.x2) {
+                            Image(systemName: run.isError ? "xmark.circle" : (run.done ? "checkmark.circle" : "gearshape.2"))
+                                .font(.system(size: 12))
+                                .foregroundStyle(run.isError ? GrainColor.dangerRed : (run.done ? GrainColor.sage : GrainColor.textMuted))
+                            Text(run.done ? "Ran \(run.name)" : "Running \(run.name)…")
+                                .grainTextStyle(.caption)
+                                .foregroundStyle(GrainColor.textMuted)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("tool-activity")
+            }
+
             switch model.turnState {
-            case .awaitingApproval(let callId, let name, _):
+            case .awaitingApproval(let callId, let name, let args):
                 GrainCard(.filled) {
                     VStack(alignment: .leading, spacing: GrainSpacing.x3) {
-                        Text("Approve \(name)?")
+                        // Show WHAT will run + its arguments — never ask for a blind approval.
+                        Text("Run \(name)?")
                             .grainTextStyle(.body)
                             .foregroundStyle(GrainColor.ink)
+                        if let preview = Self.argsPreview(args) {
+                            Text(preview)
+                                .grainTextStyle(.caption)
+                                .foregroundStyle(GrainColor.textMuted)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
                         HStack(spacing: GrainSpacing.x2) {
                             GrainButton("Approve", variant: .filled, size: .sm) { onApprove(callId) }
                             GrainButton("Reject", variant: .outlined, size: .sm) { onReject(callId) }
@@ -108,6 +135,14 @@ public struct ChatView: View {
         }
         .padding(GrainSpacing.x4)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// A compact, human-scannable preview of a tool's args for the approval prompt
+    /// (nil when there's nothing meaningful to show).
+    private static func argsPreview(_ args: String) -> String? {
+        let t = args.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, t != "{}", t != "null" else { return nil }
+        return t.count > 240 ? String(t.prefix(240)) + "…" : t
     }
 
     /// "first token 12.4s · total 31.5s · 331 tok" — the per-turn timing under a done turn.

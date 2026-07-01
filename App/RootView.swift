@@ -186,6 +186,18 @@ private struct UIPreviewRoot: View {
     @StateObject private var bridge = ChatBridge()
     private let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:14288")!, bearer: "preview")
 
+    /// A ChatViewModel driven through synthetic Door events so the agentic rendering (tool
+    /// activity + an args-aware approval) can be screenshotted without a live Door.
+    @MainActor private static func agentDemoModel() -> ChatViewModel {
+        let m = ChatViewModel()
+        m.beginUserTurn("Summarize my Lantis call and add the SOW to my todos.")
+        m.apply(.toolCall(callId: "c1", name: "search_conversations", args: "{\"query\":\"Lantis\"}"))
+        m.apply(.toolResult(callId: "c1", content: "3 matches", isError: false))
+        m.apply(.assistantDelta(text: "From your Lantis kickoff: you agreed to a 90-day pilot on the intake workflow, and you owe the SOW by Friday. Want me to add that to your todos?"))
+        m.apply(.approvalRequest(callId: "c2", name: "add_todo", args: "{\"text\": \"Send the Lantis SOW\", \"due\": \"Friday\"}"))
+        return m
+    }
+
     var body: some View {
         NavigationStack {
             Group {
@@ -194,6 +206,10 @@ private struct UIPreviewRoot: View {
                         .navigationTitle("Insights")
                 } else if ProcessInfo.processInfo.environment["FOUNDRYX_UI_PREVIEW"] == "graph" {
                     KnowledgeGraphView(target: target, bridge: bridge, injected: .sample)
+                } else if ProcessInfo.processInfo.environment["FOUNDRYX_UI_PREVIEW"] == "chatagent" {
+                    ScrollView { ChatView(model: Self.agentDemoModel()) }
+                        .grainBackground()
+                        .navigationTitle("FoundryX")
                 } else {
                     ChatScreen(target: target, store: store, log: log, bridge: bridge)
                         .navigationTitle("FoundryX")

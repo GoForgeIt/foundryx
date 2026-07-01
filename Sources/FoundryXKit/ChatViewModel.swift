@@ -70,6 +70,19 @@ public final class ChatViewModel: ObservableObject {
     /// `error` event, which the door emits just before a refused `done`). Drives the
     /// refusal message instead of a bare "refused". Cleared at the start of each turn.
     @Published public private(set) var lastErrorReason: String?
+    /// Tools the agent ran (or is running) this turn — surfaced so the user SEES what the
+    /// agent did, not just its text. Cleared at the start of each user turn.
+    @Published public private(set) var toolRuns: [ToolRun] = []
+
+    /// One agent tool invocation, for display: a name + args, marked done/failed when the
+    /// matching result lands.
+    public struct ToolRun: Identifiable, Equatable, Sendable {
+        public var id: String        // callId
+        public var name: String
+        public var args: String
+        public var done: Bool
+        public var isError: Bool
+    }
 
     public init() {}
 
@@ -84,6 +97,7 @@ public final class ChatViewModel: ObservableObject {
         thinkingMs = 0
         lastTiming = nil
         lastErrorReason = nil
+        toolRuns = []
         turnStartedAt = now()
     }
 
@@ -107,8 +121,16 @@ public final class ChatViewModel: ObservableObject {
             if assistantText.isEmpty { thinkingMs = ms }
         case .timing(let r, let t, let g, let total, let n):
             lastTiming = TurnTiming(routeMs: r, ttftMs: t, genMs: g, totalMs: total, tokens: n)
-        case .toolCall, .toolResult:
-            break
+        case .toolCall(let callId, let name, let args):
+            // Surface the action the agent is taking (was invisible). Dedup by callId.
+            if !toolRuns.contains(where: { $0.id == callId }) {
+                toolRuns.append(ToolRun(id: callId, name: name, args: args, done: false, isError: false))
+            }
+        case .toolResult(let callId, _, let isError):
+            if let i = toolRuns.firstIndex(where: { $0.id == callId }) {
+                toolRuns[i].done = true
+                toolRuns[i].isError = isError
+            }
         case .approvalRequest(let callId, let name, let args):
             turnState = .awaitingApproval(callId: callId, name: name, args: args)
         case .error(_, let reason):
