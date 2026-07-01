@@ -55,19 +55,35 @@ public struct LiveTranscript: Sendable, Equatable {
     /// to full opacity the moment the recognizer finalizes it (volatile → finalized).
     /// Pure (no SwiftUI) so the `LiveTranscriptTicker` just renders the result and a
     /// brine test can assert the opacities + that no words are dropped/duplicated.
-    public func renderedSegments(fadeWindow: Int = 3, floorOpacity: Double = 0.35) -> [LiveTranscriptSegment] {
+    ///
+    /// `maxWords` bounds the result to the most-recent N words (the tail). The live
+    /// ticker only shows ~2 lines, but the full session's `finalizedText` grows without
+    /// bound during continuous capture — and the UI folds one `Text` per segment into a
+    /// nested `ConcatenatedTextStorage`, whose resolve recurses once per word. Past a few
+    /// hundred words that overflows the 1 MB main-thread stack (the build-89/90 SIGSEGV)
+    /// and pegs the widget's CPU budget. Capping the render to a tail keeps it O(1) in
+    /// session length; the authoritative full transcript still lives in Lore/Kiln. `nil`
+    /// = uncapped (unchanged behavior for existing callers/tests).
+    public func renderedSegments(fadeWindow: Int = 3,
+                                 floorOpacity: Double = 0.35,
+                                 maxWords: Int? = nil) -> [LiveTranscriptSegment] {
         let finalWords = finalizedText.split(separator: " ").map(String.init)
         let volatileWords = volatileTail.split(separator: " ").map(String.init)
         var segs = finalWords.map { LiveTranscriptSegment(text: $0, opacity: 1.0) }
         let n = volatileWords.count
-        guard n > 0 else { return segs }
-        // Newest volatile word = faintest; ramp up to full over `fadeWindow` words.
-        let window = max(1, fadeWindow)
-        let step = (1.0 - floorOpacity) / Double(window)
-        for (i, w) in volatileWords.enumerated() {
-            let fromEnd = n - 1 - i                     // 0 = newest (last) volatile word
-            let opacity = fromEnd >= window ? 1.0 : min(1.0, floorOpacity + Double(fromEnd) * step)
-            segs.append(LiveTranscriptSegment(text: w, opacity: opacity, volatile: true))
+        if n > 0 {
+            // Newest volatile word = faintest; ramp up to full over `fadeWindow` words.
+            let window = max(1, fadeWindow)
+            let step = (1.0 - floorOpacity) / Double(window)
+            for (i, w) in volatileWords.enumerated() {
+                let fromEnd = n - 1 - i                 // 0 = newest (last) volatile word
+                let opacity = fromEnd >= window ? 1.0 : min(1.0, floorOpacity + Double(fromEnd) * step)
+                segs.append(LiveTranscriptSegment(text: w, opacity: opacity, volatile: true))
+            }
+        }
+        // Bound to the most-recent `maxWords` (keep the tail — newest words + volatile).
+        if let maxWords, maxWords >= 0, segs.count > maxWords {
+            segs = Array(segs.suffix(maxWords))
         }
         return segs
     }

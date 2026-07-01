@@ -758,20 +758,30 @@ private struct LiveTranscriptTicker: View {
     // ~2 lines tall — one clear line + one fading above it.
     private let height: CGFloat = 40
 
+    /// The ticker only shows ~2 lines, so it renders just the most-recent words. This cap
+    /// is also a HARD SAFETY BOUND: the full session transcript grows without limit during
+    /// continuous capture, and rendering one styled run per word past a few hundred words
+    /// overflowed the main-thread stack (build-89/90 SIGSEGV). The authoritative full
+    /// transcript lives in Lore/Kiln, not here.
+    private static let maxLiveWords = 48
+
     /// Word-level styled text (Feature 2): finalized words at full opacity, the trailing
     /// volatile word(s) dimmed with the NEWEST word the faintest + italic, each snapping
     /// to full opacity as the recognizer finalizes it. Driven by the pure, tested
-    /// `LiveTranscript.renderedSegments()`.
+    /// `LiveTranscript.renderedSegments()`. Built as a SINGLE `AttributedString` (one run
+    /// per word) rather than folding `Text + Text` — the latter nests a
+    /// `ConcatenatedTextStorage` per word whose resolve recurses once per level and blows
+    /// the stack on long transcripts; a single attributed string resolves flat.
     private var styledText: Text {
-        let segments = transcript.renderedSegments()
-        var result = Text("")
+        let segments = transcript.renderedSegments(maxWords: Self.maxLiveWords)
+        var attributed = AttributedString()
         for (i, seg) in segments.enumerated() {
-            let prefix = i == 0 ? "" : " "
-            var run = Text(prefix + seg.text).foregroundColor(GrainColor.ink.opacity(seg.opacity))
-            if seg.volatile { run = run.italic() }   // still-settling tail also italic
-            result = result + run
+            var run = AttributedString((i == 0 ? "" : " ") + seg.text)
+            run.foregroundColor = GrainColor.ink.opacity(seg.opacity)
+            if seg.volatile { run.inlinePresentationIntent = .emphasized }   // italic tail
+            attributed.append(run)
         }
-        return result
+        return Text(attributed)
     }
 
     var body: some View {
