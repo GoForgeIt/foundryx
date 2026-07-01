@@ -108,6 +108,27 @@ public struct LiveTranscriptSegment: Sendable, Equatable {
     }
 }
 
+/// The single shared bound for the EPHEMERAL live-transcript buffer. FoundryX captures
+/// continuously, and the on-device transcribers accumulate finalized text for the life of
+/// a conversation — unbounded, that growth fed the build-89/90 main-thread stack overflow
+/// (rendering one styled run per word) and grows memory during a long session. The live
+/// preview is display-only; Kiln's `provisionalTranscript` is the authoritative full
+/// transcript. So both backends store only a rolling tail of the most-recent words.
+public enum LiveTranscriptBuffer {
+    /// Words retained in the live buffer. ≥ the ticker's render cap (48) so the visible
+    /// preview is never starved by the bound; the rest is Kiln's job, not the phone's.
+    public static let maxRetainedWords = 80
+
+    /// Keep only the most-recent `maxWords` words of an (ever-growing) live transcript.
+    /// Both transcriber backends route their `finalizedText` through this, so the
+    /// ephemeral buffer — and everything derived from it — stays O(1) in session length.
+    public static func boundedTail(_ text: String, maxWords: Int = maxRetainedWords) -> String {
+        let words = text.split(separator: " ")
+        guard words.count > maxWords else { return text }
+        return words.suffix(maxWords).joined(separator: " ")
+    }
+}
+
 /// One live, on-device transcription session for ONE conversation. Side-effect-only:
 /// consumes already-decoded PCM, never touches the WAL/upload path. Created per
 /// `beginSession()`, finished per `endSession()`. All failures are non-fatal to
@@ -291,7 +312,11 @@ public final class SpeechAnalyzerLiveTranscriber: LiveTranscribing, @unchecked S
                 for try await result in transcriber.results {
                     let piece = String(result.text.characters)
                     if result.isFinal {
-                        self.finalizedText = self.appendSentence(self.finalizedText, piece)
+                        // Bound the retained buffer to a rolling tail — the live preview is
+                        // ephemeral (Kiln is authoritative); unbounded growth is what fed
+                        // the build-89/90 stack overflow.
+                        self.finalizedText = LiveTranscriptBuffer.boundedTail(
+                            self.appendSentence(self.finalizedText, piece))
                         self.publish.yield(LiveTranscript(finalizedText: self.finalizedText,
                                                           volatileTail: ""))
                     } else {
@@ -406,7 +431,10 @@ public final class SFSpeechLiveTranscriber: LiveTranscribing, @unchecked Sendabl
 
         task = recognizer.recognitionTask(with: request) { [weak self] result, _ in
             guard let self, let result else { return }
-            let text = result.bestTranscription.formattedString
+            // SFSpeech revises the WHOLE utterance each callback, so it also grows
+            // unbounded over a long session — bound the retained tail (see
+            // LiveTranscriptBuffer; the live preview is ephemeral, Kiln is authoritative).
+            let text = LiveTranscriptBuffer.boundedTail(result.bestTranscription.formattedString)
             if result.isFinal {
                 self.finalizedText = text
                 self.publish.yield(LiveTranscript(finalizedText: text, volatileTail: ""))
