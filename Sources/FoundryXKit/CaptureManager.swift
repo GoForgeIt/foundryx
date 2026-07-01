@@ -49,6 +49,11 @@ final class FrameRouter: @unchecked Sendable {
     // meter can be told apart from "no frames arriving at all."
     private var frameCount = 0
     private var lastBytes = 0
+    // VOICED frames captured for the CURRENT session (level ≥ the segmenter's silence
+    // threshold). Reset when a new capture's WAL is set (a fresh session begins); survives
+    // silence-gap segment events. The owner reads this at endSession to decide whether the
+    // capture has enough substance to upload (see CaptureManager.minVoicedFramesToUpload).
+    private var sessionVoicedFrames = 0
     // When true, the live-STT PCM is supplied DIRECTLY by the source (the phone mic
     // hands us its already-decoded 48 kHz PCM), so we SKIP the internal Opus→PCM decode
     // tap — avoiding an avoidable encode→decode round-trip of latency for live preview
@@ -69,7 +74,17 @@ final class FrameRouter: @unchecked Sendable {
         self.clock = clock
     }
 
-    func setWAL(_ w: CaptureWAL?) { lock.lock(); wal = w; lock.unlock() }
+    func setWAL(_ w: CaptureWAL?) {
+        lock.lock()
+        wal = w
+        if w != nil { sessionVoicedFrames = 0 }   // fresh session → reset the voiced-frame tally
+        lock.unlock()
+    }
+    /// Voiced frames captured for the current session (drives the min-substance upload gate).
+    func sessionVoicedFrameCount() -> Int { lock.lock(); defer { lock.unlock() }; return sessionVoicedFrames }
+    /// Rebaseline the segmenter's voice clock without changing open/closed state — used on
+    /// an Omi reconnect so the brief disconnect gap isn't read as a silence boundary.
+    func noteActiveNow() { lock.lock(); segmenter.noteActive(at: clock()); lock.unlock() }
     func setPaused(_ p: Bool) {
         lock.lock()
         paused = p
@@ -119,6 +134,9 @@ final class FrameRouter: @unchecked Sendable {
         if !isPaused {
             level = levelMeter.level(for: frame)   // true Opus→PCM RMS (perceptual 0…1)
             event = segmenter.observe(level: level, at: clock())
+            // Voiced-frame accounting for the substance gate — the SAME voice/silence
+            // definition the segmenter uses (level ≥ its silence threshold).
+            if level >= segmenter.silenceThreshold { sessionVoicedFrames += 1 }
         }
         // Diag locals (read under lock): first few frames + every 50th, plus the
         // decode outcome, so a flat meter's cause is visible.
@@ -193,6 +211,7 @@ public final class CaptureManager: ObservableObject {
     /// audio AND its transcript text have been pruned. Empty (0-segment) captures with
     /// no tombstone are still hidden (useless cards).
     private func isBrowsable(_ wal: CaptureWAL) -> Bool {
+        if isDiscarded(wal.captureId) { return false }   // sub-substance junk fragment — never show
         if wal.status.streaming { return true }   // the active capture always shows
         let id = wal.captureId
         // If we hold judge-able transcript text locally, HIDE empty / near-silent /
@@ -419,6 +438,74 @@ public final class CaptureManager: ObservableObject {
     /// retired (`permanentPoison: false` ⇒ false).
     public nonisolated static func shouldAbandonCapture(permanentPoison: Bool) -> Bool {
         permanentPoison
+    }
+
+    // MARK: capture-substance gate + Omi reconnect coalescing (junk-fragment control)
+
+    /// Minimum VOICED frames a capture must accumulate before it is finalized + uploaded
+    /// to Lore. Below this bar the capture is treated as a JUNK FRAGMENT — a silent /
+    /// one-word blip, or a transient Omi BLE reconnect stub — and is dropped LOCALLY (kept
+    /// on disk under a `.discarded` marker, never POSTed to the door). At the Omi's ~50
+    /// voiced-frames/s this is ~8 s of real voice: high enough to reject sub-second
+    /// reconnect stubs + filler blips, low enough to keep a normal conversation. (Contrast
+    /// `SilenceSegmenter.minVoicedFramesToClose` ≈ 2 s, which only decides silence-gap
+    /// SEGMENT boundaries, not upload-worthiness.) A genuine brief exchange that
+    /// under-voiced is still kept when its on-device transcript is already meaningful (see
+    /// `hasUploadSubstance`). Tunable.
+    public nonisolated static let minVoicedFramesToUpload = 400
+
+    /// A transient Omi BLE disconnect within this window RESUMES the open conversation
+    /// (same captureId) instead of ending it — so a flaky link doesn't shatter one
+    /// conversation into a pile of tiny reconnect-stub fragments. A disconnect that stays
+    /// down past the window ends the conversation normally (its real boundary is preserved,
+    /// then the substance gate decides upload-vs-discard). An EXPLICIT stop (phone-mic Stop
+    /// / permission-deny) ends immediately, bypassing the grace. Tunable.
+    public nonisolated static let reconnectGraceWindow: TimeInterval = 20
+
+    /// Whether a just-closed capture has enough SUBSTANCE to finalize + upload to Lore, or
+    /// is a JUNK FRAGMENT to drop locally. Cleared when it holds ≥ `minVoicedFramesToUpload`
+    /// voiced frames (~8 s of real voice — the decisive test that rejects sub-second Omi
+    /// reconnect stubs + silent blips), OR — as a safety valve for a genuine BRIEF exchange
+    /// that under-voiced — when its on-device transcript already passes the same
+    /// empty/filler filter the timeline uses. Everything else is a fragment.
+    public nonisolated static func hasUploadSubstance(voicedFrames: Int,
+                                                      onDeviceTranscript: String?,
+                                                      durationSeconds: TimeInterval?) -> Bool {
+        if voicedFrames >= minVoicedFramesToUpload { return true }
+        return ConversationContentFilter.isMeaningful(transcript: onDeviceTranscript,
+                                                      durationSeconds: durationSeconds)
+    }
+
+    /// Whether an Omi reconnect-grace hold that began at `suspendedAt` has elapsed by `now`
+    /// (the device did not reconnect in time) and must therefore end the conversation.
+    public nonisolated static func shouldEndSuspendedSession(suspendedAt: TimeInterval,
+                                                             now: TimeInterval,
+                                                             window: TimeInterval) -> Bool {
+        now - suspendedAt >= window
+    }
+
+    /// A held-open Omi conversation awaiting a possible reconnect (its WAL + when the
+    /// disconnect happened). Non-nil ⇒ `active` is SUSPENDED, not ended: a reconnect within
+    /// `reconnectGraceWindow` resumes it (same captureId), else the watchdog ends it.
+    private var suspendedSession: (wal: CaptureWAL, at: TimeInterval)?
+
+    /// True while an Omi conversation is being HELD open awaiting a possible reconnect (a
+    /// transient BLE drop inside the grace window). The capture surface can surface a
+    /// "reconnecting…" state; a reconnect within the window resumes the same conversation.
+    public var isAwaitingReconnect: Bool { suspendedSession != nil }
+
+    /// Resolve a pending Omi reconnect-grace hold: if the device did NOT reconnect within
+    /// `reconnectGraceWindow` of the disconnect, end the held conversation now (the
+    /// substance gate then decides upload-vs-discard). No-op when nothing is held or the
+    /// window hasn't elapsed. The capture watchdog calls this each tick; tests pass an
+    /// explicit `now` to advance it deterministically.
+    public func resolveReconnectGrace(now: TimeInterval = Date().timeIntervalSince1970) {
+        guard let held = suspendedSession else { return }
+        guard CaptureManager.shouldEndSuspendedSession(suspendedAt: held.at, now: now,
+                                                       window: Self.reconnectGraceWindow) else { return }
+        suspendedSession = nil
+        log?.info("capture \(held.wal.captureId): Omi reconnect grace elapsed — ending held conversation")
+        endSession()
     }
 
     /// Re-arm the drain after a fresh id_token has been obtained (the rebuilt pipeline
@@ -682,13 +769,29 @@ public final class CaptureManager: ObservableObject {
         sourceState = state
         switch state {
         case .streaming:
-            if active == nil { router.resetSegmenter(); beginSession() }  // ambient capture
+            if suspendedSession != nil {
+                // Transient Omi reconnect WITHIN the grace window → RESUME the SAME
+                // conversation (same captureId). Do NOT mint a new session or finalize a
+                // stub — this is what coalesces reconnect churn into one conversation.
+                suspendedSession = nil
+                if !isPaused { router.noteActiveNow() }   // the disconnect gap is not a silence gap
+                log?.info("capture \(active?.captureId ?? "?"): Omi reconnected within grace → resumed (no new session)")
+            } else if active == nil {
+                router.resetSegmenter(); beginSession()   // fresh ambient capture
+            }
         case .stopped, .failed:
-            // A source stopping (Omi disconnect OR a phone-mic Stop/permission-deny)
-            // ends the session and resets the mic-recording flag so the Record button
-            // returns to its idle state.
-            isRecordingMic = false
-            endSession()
+            if isRecordingMic {
+                // Phone-mic Stop / permission-deny is an EXPLICIT boundary → end now and
+                // reset the mic flag so the Record button returns to idle (no grace).
+                isRecordingMic = false
+                endSession()
+            } else if let wal = active, suspendedSession == nil {
+                // Omi BLE dropped mid-conversation → HOLD it open for a brief reconnect
+                // grace so a flaky link doesn't split the conversation into fragments. The
+                // capture watchdog ends it if the device doesn't return within the window.
+                suspendedSession = (wal, Date().timeIntervalSince1970)
+                log?.info("capture \(wal.captureId): Omi disconnected — holding \(Int(Self.reconnectGraceWindow))s for reconnect")
+            }
         case .idle, .scanning:
             break
         }
@@ -740,6 +843,8 @@ public final class CaptureManager: ObservableObject {
 
     private func tickSegmentation() {
         emitCaptureHeartbeatIfDue()   // Omi-path diagnostics (runs even while paused)
+        resolveReconnectGrace()       // end a held session the device never reconnected to
+        guard suspendedSession == nil else { return }   // don't segment/split a suspended session
         guard let wal = active, !isPaused else { return }
         // 1. Wall-clock silence boundary (fires when no frames arrive during quiet).
         if let event = router.tickSilence() {
@@ -827,6 +932,7 @@ public final class CaptureManager: ObservableObject {
     private func reconcileOrphanedCaptures() {
         for wal in captures where wal !== active {
             let id = wal.captureId
+            guard !isDiscarded(id) else { continue }   // discarded fragments are never re-queued
             guard wal.status.totalSegments > 0 else { continue }
             guard let meta = ConversationMetaStore.load(captureId: id, baseDir: baseDir),
                   meta.startedAt > 0, meta.endedAt == nil else { continue }
@@ -1107,15 +1213,40 @@ public final class CaptureManager: ObservableObject {
 
     private func endSession() {
         router.setWAL(nil)
-        // Capture the on-device transcript BEFORE teardown clears it, and persist it as
-        // the conversation's PROVISIONAL content so the card shows readable text the
-        // INSTANT it's stopped — resilient to slow/failed Kiln transcription (Feature 1).
+        guard let finished = active else {
+            // No active session — still ensure any live preview is torn down.
+            endLiveTranscription()
+            router.setExternalPCM(false)
+            return
+        }
+        // Substance gate: read how much VOICED audio this capture accumulated and the
+        // on-device transcript we hold RIGHT NOW (before teardown clears it).
+        let voiced = router.sessionVoicedFrameCount()
         let onDeviceNow = liveTranscript.displayText
-        let finishedId = active?.captureId
-        if let finishedId { seedProvisionalCard(finishedId, transcript: onDeviceNow) }
+        let duration = max(0, Date().timeIntervalSince1970 - startTime(of: finished))
+        if !CaptureManager.hasUploadSubstance(voicedFrames: voiced,
+                                              onDeviceTranscript: onDeviceNow,
+                                              durationSeconds: duration) {
+            // JUNK FRAGMENT — drop it LOCALLY. Never seed a card, never mark it
+            // pending-finalize, never POST it to the door. The bytes stay on disk under a
+            // durable `.discarded` marker (nothing deleted); drain + visibility both skip it.
+            endLiveTranscription()                       // tear down the transcriber (no seed)
+            router.setExternalPCM(false)
+            finished.finish()
+            active = nil
+            discardLowSubstance(finished.captureId, voicedFrames: voiced)
+            rebuildVisibleCaptures()                     // ensure the fragment never shows
+            pushLiveState(.end)
+            log?.info("capture \(finished.captureId): DISCARDED — \(voiced) voiced frame(s) < \(Self.minVoicedFramesToUpload), no meaningful transcript; not uploaded")
+            return
+        }
+        // Above the bar — the existing real-conversation finalize path. Persist the
+        // on-device transcript as PROVISIONAL content so the card shows readable text the
+        // INSTANT it's stopped — resilient to slow/failed Kiln transcription (Feature 1).
+        let finishedId = finished.captureId
+        seedProvisionalCard(finishedId, transcript: onDeviceNow)
         endLiveTranscription(seedInto: finishedId)   // stop + (async) refine the seed
         router.setExternalPCM(false)                 // clear the mic's direct-PCM tap mode
-        guard let finished = active else { return }
         finished.finish()
         active = nil
         // A closed conversation must reach the Lore inbox: mark it pending-finalize
@@ -1246,6 +1377,8 @@ public final class CaptureManager: ObservableObject {
         for wal in captures where wal.status.pendingSegments > 0 {
             let id = wal.captureId
             if isAbandoned(id) { continue }
+            if isDiscarded(id) { continue }   // a sub-substance junk fragment never uploads
+            if let held = suspendedSession, held.wal === wal { continue }   // hold uploads until the grace resolves
             // NEVER LOSE AUDIO: there is NO size / age / failure-count abandon here. A
             // large, old, or briefly-offline capture keeps draining (resuming from its
             // watermark) until fully uploaded. The only retire is permanent poison,
@@ -1315,6 +1448,31 @@ public final class CaptureManager: ObservableObject {
         clearNeedsFinalize(captureId)
         retryStates[captureId] = nil
         log?.error("capture \(captureId): RETIRED (permanent poison: \(reason)) — audio KEPT on device, no longer retried")
+    }
+
+    // MARK: local discard (sub-substance junk fragments — audio kept, never uploaded)
+
+    private func discardMarker(_ captureId: String) -> URL {
+        baseDir.appendingPathComponent(captureId, isDirectory: true)
+            .appendingPathComponent(".discarded")
+    }
+    /// True once a capture was locally discarded as a sub-substance junk fragment — so it
+    /// stays discarded across relaunch and is never re-queued for upload nor shown.
+    private func isDiscarded(_ captureId: String) -> Bool {
+        FileManager.default.fileExists(atPath: discardMarker(captureId).path)
+    }
+    /// Locally DISCARD a sub-substance capture: write a durable `.discarded` marker (so a
+    /// relaunch keeps it discarded + never re-queues it) and clear any finalize/retry
+    /// intent. The audio bytes on disk are KEPT (nothing is deleted) but are never uploaded
+    /// to the door, and the capture is hidden from the timeline. This is the phone's
+    /// junk-fragment gate for silent blips + transient Omi BLE reconnect stubs.
+    private func discardLowSubstance(_ captureId: String, voicedFrames: Int) {
+        let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let reason = "below min-substance bar: \(voicedFrames) voiced frame(s) < \(Self.minVoicedFramesToUpload)"
+        try? Data(reason.utf8).write(to: discardMarker(captureId), options: [.atomic])
+        clearNeedsFinalize(captureId)
+        retryStates[captureId] = nil
     }
 
     // MARK: retention throttle (keep the big disk sweeps off the every-5s drain)

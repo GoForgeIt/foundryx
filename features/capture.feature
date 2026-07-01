@@ -84,6 +84,28 @@ Feature: FoundryX captures Omi audio durably to the door
     When the segmentation watchdog next checks the conversation
     Then the conversation is finalized and a fresh one begins so nothing accumulates for hours
 
+  Scenario: a sub-substance fragment is never uploaded to the door
+    Given an ambient capture records only a brief silent or one-word fragment
+    When the conversation ends
+    Then the fragment is kept on the phone but never uploaded to the door
+    And it is not shown in the conversation list
+
+  Scenario: a real conversation clears the substance bar and is uploaded
+    Given an ambient capture records a conversation with real spoken content
+    When the conversation ends
+    Then the conversation is finalized and sent for transcription
+
+  Scenario: a transient Omi disconnect resumes the same conversation instead of fragmenting it
+    Given an ambient capture is recording a conversation
+    When the Omi link briefly drops and reconnects within the grace window
+    Then recording resumes into the same conversation
+    And no new conversation or upload stub is created
+
+  Scenario: an Omi disconnect that stays down ends the conversation after the grace window
+    Given an ambient capture is recording a conversation
+    When the Omi link drops and does not reconnect within the grace window
+    Then the conversation ends and is finalized like a normal boundary
+
   Scenario: a very short noise burst does not become its own conversation
     Given an ambient capture records only a one or two word burst
     When the audio goes quiet for longer than the silence gap

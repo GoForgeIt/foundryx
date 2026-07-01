@@ -122,9 +122,10 @@ final class PhoneMicCaptureTests: XCTestCase {
         try await waitUntil { mgr.active != nil }
         let capture = try XCTUnwrap(mgr.active).captureId
 
-        // Encode real 48 kHz mic frames into the SAME router/WAL as Omi.
+        // Encode enough real 48 kHz mic frames to clear the min-substance upload bar (a
+        // shorter recording would be dropped as a junk fragment) into the SAME router/WAL.
         let encoder = OpusEncoder48k()
-        for _ in 0..<60 {
+        for _ in 0..<(CaptureManager.minVoicedFramesToUpload + 20) {
             if let pkt = encoder.encode(pcm960(amplitude: 0.8)) { mic.onFrame?(pkt) }
         }
         try XCTUnwrap(mgr.active).flushAndWait()

@@ -54,11 +54,16 @@ final class CaptureAmbientTests: XCTestCase {
         frames(60, 3); wal.flushAndWait()
         XCTAssertGreaterThan(wal.snapshot().totalSegments, afterStart, "resumed frames must be WAL'd")
 
-        // 4. DISCONNECT ends the session
+        // 4. DISCONNECT holds the session open for the reconnect grace (a transient BLE
+        //    drop must NOT immediately end the conversation). Only once the grace elapses
+        //    with no reconnect does the session end.
         src.onState?(.stopped)
+        try await waitUntil { mgr.isAwaitingReconnect }
+        XCTAssertNotNil(mgr.active, "a bare disconnect holds the conversation open for reconnect grace")
+        mgr.resolveReconnectGrace(now: Date().timeIntervalSince1970 + CaptureManager.reconnectGraceWindow + 1)
         try await waitUntil { mgr.active == nil }
         XCTAssertNil(mgr.active)
-        XCTAssertEqual(mgr.captures.count, 1, "the ended session stays in the timeline")
+        XCTAssertEqual(mgr.captures.count, 1, "the ended session stays on the device")
     }
 
     private func waitUntil(timeout: TimeInterval = 3, _ cond: @MainActor () -> Bool) async throws {

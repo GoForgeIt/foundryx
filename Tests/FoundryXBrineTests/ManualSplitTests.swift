@@ -52,8 +52,9 @@ final class ManualSplitTests: XCTestCase {
         try await waitUntil { mgr.active != nil }
         let firstCapture = try XCTUnwrap(mgr.active).captureId
 
-        // Record some voice into the first conversation.
-        for _ in 0..<60 { src.onFrame?(RealOmiFrames.voiced()) }
+        // Record enough voice to clear the min-substance upload bar (else the split
+        // section is dropped as a junk fragment instead of finalized).
+        for _ in 0..<(CaptureManager.minVoicedFramesToUpload + 20) { src.onFrame?(RealOmiFrames.voiced()) }
         try XCTUnwrap(mgr.active).flushAndWait()
 
         // MANUAL split: finalize the current section + begin a new one immediately.

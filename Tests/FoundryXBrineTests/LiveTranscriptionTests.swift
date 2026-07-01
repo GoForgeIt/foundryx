@@ -117,8 +117,11 @@ final class LiveTranscriptionTests: XCTestCase {
         fake.emit(LiveTranscript(finalizedText: "hello", volatileTail: "wor"))
         try await waitUntil { !mgr.liveTranscript.isEmpty }
 
-        // Disconnect ends the session → preview cleared + transcriber finished.
+        // Disconnect holds the session for the reconnect grace; once it elapses the
+        // session ends → preview cleared + transcriber finished.
         src.onState?(.stopped)
+        try await waitUntil { mgr.isAwaitingReconnect }
+        mgr.resolveReconnectGrace(now: Date().timeIntervalSince1970 + CaptureManager.reconnectGraceWindow + 1)
         try await waitUntil { mgr.active == nil }
         try await waitUntil { fake.finished }
         XCTAssertTrue(mgr.liveTranscript.isEmpty, "live preview must clear when the conversation closes")
