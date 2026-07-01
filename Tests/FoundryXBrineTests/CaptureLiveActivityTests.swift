@@ -122,6 +122,29 @@ final class CaptureLiveActivityTests: XCTestCase {
                                     CaptureLiveStatus.levelStep(fromLevel: 0.2))
     }
 
+    // MARK: 2b. indicator style — phase → anvil tint + pulse (the state-colored anvil)
+
+    /// The state→color/pulse rule that drives the anvil brand mark on EVERY Live Activity
+    /// surface. Pure + UI-free (no SwiftUI): recording ⇒ red + pulse; paused ⇒ blue, steady;
+    /// idle ⇒ neutral, steady. This is the unit-testable core of Task 1.
+    func testIndicatorTintAndPulsePerPhase() {
+        // recording-active: RED, and the ONLY phase that pulses.
+        XCTAssertEqual(CaptureActivityPhase.recordingActive.indicatorTint, .recording)
+        XCTAssertTrue(CaptureActivityPhase.recordingActive.indicatorPulses)
+
+        // paused: BLUE, steady (no pulse).
+        XCTAssertEqual(CaptureActivityPhase.paused.indicatorTint, .paused)
+        XCTAssertFalse(CaptureActivityPhase.paused.indicatorPulses)
+
+        // idle / listening: NEUTRAL, steady (no pulse).
+        XCTAssertEqual(CaptureActivityPhase.idle.indicatorTint, .neutral)
+        XCTAssertFalse(CaptureActivityPhase.idle.indicatorPulses)
+
+        // Only recording pulses — the property that keeps the animation battery-gated.
+        let pulsing = [CaptureActivityPhase.recordingActive, .paused, .idle].filter { $0.indicatorPulses }
+        XCTAssertEqual(pulsing, [.recordingActive])
+    }
+
     // MARK: 3. interactive-button wiring (App Intent broker → manager)
 
     /// The broker handler RootView installs: .endCurrent → endCurrentConversation(),

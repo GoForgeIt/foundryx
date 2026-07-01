@@ -39,8 +39,8 @@ struct CaptureLiveActivity: Widget {
                              : (state.phase == .paused ? "Paused" : "Listening"))
                             .font(.caption).foregroundStyle(.secondary)
                     } icon: {
-                        Image(systemName: phaseIcon(state.phase, source: state.sourceSymbol))
-                            .foregroundStyle(phaseTint(state.phase))
+                        // State-colored anvil (pulses while recording).
+                        CaptureIndicator(phase: state.phase, size: 20)
                     }
                 }
                 DynamicIslandExpandedRegion(.trailing) {
@@ -69,9 +69,10 @@ struct CaptureLiveActivity: Widget {
                     }
                 }
             } compactLeading: {
-                // Leading: rec dot while actively recording, else the source icon.
-                Image(systemName: phaseIcon(state.phase, source: state.sourceSymbol))
-                    .foregroundStyle(phaseTint(state.phase))
+                // Leading: the state-colored anvil — red+pulse while recording, steady
+                // blue when paused, calm gray when listening. The whole point of the tiny
+                // pill: color + motion carry the state where there's no room for text.
+                CaptureIndicator(phase: state.phase, size: 16)
             } compactTrailing: {
                 // Trailing: live elapsed while actively recording, else a compact level/idle bar.
                 if state.phase == .recordingActive, let started = state.startedAt {
@@ -83,10 +84,9 @@ struct CaptureLiveActivity: Widget {
                     CaptureLevelBars(step: step, compact: true)
                 }
             } minimal: {
-                Image(systemName: phaseIcon(state.phase, source: state.sourceSymbol))
-                    .foregroundStyle(phaseTint(state.phase))
+                CaptureIndicator(phase: state.phase, size: 16)
             }
-            .keylineTint(.red)
+            .keylineTint(state.phase.indicatorTint.color)
         }
     }
 
@@ -103,7 +103,7 @@ struct CaptureLiveActivity: Widget {
             }
         case .paused:
             HStack(spacing: 6) {
-                Image(systemName: "pause.circle.fill").foregroundStyle(.yellow)
+                Image(systemName: "pause.circle.fill").foregroundStyle(.blue)
                 Text("Paused — \(state.sourceLabel)").font(.footnote).foregroundStyle(.white)
             }
         case .idle:
@@ -151,21 +151,6 @@ struct CaptureLiveActivity: Widget {
         }
     }
 
-    private func phaseIcon(_ phase: CaptureActivityPhase, source: String) -> String {
-        switch phase {
-        case .recordingActive: return "record.circle.fill"
-        case .paused:          return "pause.circle.fill"
-        case .idle:            return source
-        }
-    }
-
-    private func phaseTint(_ phase: CaptureActivityPhase) -> Color {
-        switch phase {
-        case .recordingActive: return .red
-        case .paused:          return .yellow
-        case .idle:            return .secondary
-        }
-    }
 }
 
 /// The lock-screen / banner body: phase-aware header + elapsed/level/transcript while
@@ -182,8 +167,8 @@ struct CaptureLockScreenView: View {
                     Circle()
                         .fill(iconBackground)
                         .frame(width: 40, height: 40)
-                    Image(systemName: iconName)
-                        .foregroundStyle(iconTint)
+                    // State-colored anvil (pulses while actively recording).
+                    CaptureIndicator(phase: state.phase, size: 22)
                 }
                 VStack(alignment: .leading, spacing: 3) {
                     header
@@ -253,24 +238,12 @@ struct CaptureLockScreenView: View {
         }
     }
 
-    private var iconName: String {
-        switch state.phase {
-        case .recordingActive: return "waveform"
-        case .paused:          return "pause.fill"
-        case .idle:            return state.sourceSymbol
-        }
-    }
-    private var iconTint: Color {
-        switch state.phase {
-        case .recordingActive: return .red
-        case .paused:          return .yellow
-        case .idle:            return .white
-        }
-    }
+    // The soft disc behind the anvil, tinted to match the phase color (recording red /
+    // paused blue / idle a faint neutral).
     private var iconBackground: Color {
         switch state.phase {
         case .recordingActive: return Color.red.opacity(0.18)
-        case .paused:          return Color.yellow.opacity(0.18)
+        case .paused:          return Color.blue.opacity(0.18)
         case .idle:            return Color.white.opacity(0.10)
         }
     }

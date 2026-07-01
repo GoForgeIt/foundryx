@@ -35,6 +35,36 @@ public enum CaptureActivityPhase: String, Codable, Sendable, Hashable {
     public var isActivelyRecording: Bool { self == .recordingActive }
 }
 
+/// The abstract, UI-framework-free tint the anvil brand mark takes per phase — the single
+/// source of truth for the state→color mapping that drives EVERY Live Activity surface
+/// (Dynamic Island compact/minimal/expanded + lock screen). Kept as a plain enum (no
+/// SwiftUI `Color`) so the mapping is unit-testable on macOS/CI without importing UI.
+///   - `.recording`: RED — actively capturing voiced audio right now.
+///   - `.paused`:    BLUE — a conversation is open but the user paused it (steady).
+///   - `.neutral`:   a calm gray — armed/listening but no live conversation ("idle").
+public enum CaptureIndicatorTint: String, Sendable, Hashable {
+    case recording   // red
+    case paused      // blue
+    case neutral     // calm gray
+}
+
+extension CaptureActivityPhase {
+    /// The anvil's tint for this phase — the ONE place the state→color rule lives.
+    public var indicatorTint: CaptureIndicatorTint {
+        switch self {
+        case .recordingActive: return .recording
+        case .paused:          return .paused
+        case .idle:            return .neutral
+        }
+    }
+
+    /// Whether the anvil should PULSE (a subtle breathe). ONLY while actively recording —
+    /// paused/idle are steady. Gating the animation to this one phase is what keeps the
+    /// Live Activity battery-safe (a snapshot-rendered, always-visible surface shouldn't
+    /// animate unless something is genuinely live).
+    public var indicatorPulses: Bool { self == .recordingActive }
+}
+
 // ActivityKit's runtime is iOS-only even though the module imports on macOS — gate on
 // `os(iOS)` so the SwiftPM macOS build (tests/CI) doesn't try to resolve it.
 #if canImport(ActivityKit) && os(iOS)

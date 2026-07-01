@@ -1207,10 +1207,25 @@ public final class CaptureManager: ObservableObject {
     #endif
 
     /// Ask WidgetKit to reload the home-screen widget timelines (no-op off iOS).
+    ///
+    /// NOTE: this is only a FRESHNESS HINT. The home-screen widget is snapshot-rendered and
+    /// iOS THROTTLES timeline reloads (a background budget) — even with this call the tile
+    /// can lag a live capture by minutes and is NOT real-time. Real-time status is the Live
+    /// Activity's job (Dynamic Island / lock screen); the home widget is a best-effort
+    /// "current status + last conversation" glance. Do NOT try to force it fresher than the
+    /// reload hint — that just burns the budget and iOS ignores it anyway.
     private func reloadWidgetTimelines() {
         #if canImport(WidgetKit) && os(iOS)
         WidgetCenter.shared.reloadAllTimelines()
         #endif
+    }
+
+    /// Re-write the App-Group snapshot the home widget reads AND hint a reload — call this
+    /// whenever the widget's inputs (capture status / last-finished title) change OUTSIDE a
+    /// `pushLiveState` transition, e.g. the async transcript-refine or a completed finalize.
+    private func refreshHomeWidget() {
+        CaptureWidgetSnapshotStore.write(makeWidgetSnapshot())
+        reloadWidgetTimelines()
     }
 
     /// Build a WAL, threading the (test-only) per-segment upload override so every
@@ -1313,7 +1328,14 @@ public final class CaptureManager: ObservableObject {
         let title = ProvisionalTitle.from(transcript: transcript)
         let changed = ConversationCardStore.seedProvisional(
             captureId: captureId, baseDir: baseDir, transcript: transcript, title: title)
-        if changed { rebuildVisibleCaptures() }
+        if changed {
+            rebuildVisibleCaptures()
+            // The last-finished title the home widget shows is derived from the newest card.
+            // This seed (incl. the async transcript-refine after endSession) can change it,
+            // so re-write the App-Group snapshot + hint WidgetKit to reload — otherwise the
+            // widget keeps showing the earlier provisional title until the next transition.
+            refreshHomeWidget()
+        }
     }
 
     /// Manually split the conversation (Feature 2): finalize the CURRENT capture (it's
@@ -1458,6 +1480,9 @@ public final class CaptureManager: ObservableObject {
         do {
             try await finalizeCapture(id, meta)
             clearNeedsFinalize(id)
+            // The conversation is now the authoritative last-finished; make sure the home
+            // widget's snapshot reflects it the moment finalize completes (best-effort hint).
+            refreshHomeWidget()
             log?.info("capture \(id): finalized → advanced to Lore inbox")
         } catch {
             log?.warn("capture \(id): finalize failed (\((error as NSError).localizedDescription)) — staying pending, will retry")
