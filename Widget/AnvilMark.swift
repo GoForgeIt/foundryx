@@ -4,18 +4,14 @@
 // indicator's icon across every Live Activity surface (compact / minimal / expanded +
 // lock screen).
 //
-// WHY a Path and not the app icon: `AppIcon.appiconset/icon-1024.png` is a full-bleed,
-// gradient-backed 1024px PNG — it can't be tinted red/blue and reads as mud at 20pt in
-// the compact pill. A vector template gives us a mono, tintable, always-sharp mark.
+// This is the REAL brand mark, not a stand-in: `AnvilShape` is the exact anvil path from
+// the FoundryX logo (`foundry/src-tauri/icons/foundry-source.svg` — the same silhouette as
+// `AppIcon.appiconset/icon-1024.png`), ported vertex-for-vertex from its 1024 viewBox.
 //
-// SWAP-IN FOR A REAL ANVIL ASSET (one line): if a designer drops an anvil *template*
-// asset (a monochrome PDF or a "Render As: Template Image" PNG) into an asset catalog
-// that the WIDGET target compiles — e.g. add `Widget/Assets.xcassets` with an `anvil`
-// image set, then add that catalog to the FoundryXWidget target's `sources` in
-// project.yml — replace the `Path { … }`-based `shape` below with:
-//     Image("anvil").resizable().scaledToFit()
-// Everything else (tint, pulse, sizing, all call sites) stays exactly as-is because they
-// go through this ONE view.
+// WHY a Path and not the PNG icon: the app icon is a full-bleed gradient PNG — it can't be
+// tinted red/blue and reads as mud at 16–20pt in the compact pill. Porting the logo's
+// vector path gives us the SAME shape as the icon while staying mono, tintable, and always
+// sharp — so recording→red, paused→blue, idle→gray all work on the real mark.
 
 import SwiftUI
 
@@ -79,43 +75,38 @@ struct CaptureIndicator: View {
     }
 }
 
-/// A stylized anvil silhouette in a unit square (matches the app icon's form: a horn-ended
-/// top face, a waist, and a splayed base). Normalized 0…1 so it scales to any frame.
+/// The REAL FoundryX anvil silhouette — the exact single closed path from the brand logo
+/// (`foundry/src-tauri/icons/foundry-source.svg`, which is the app-icon mark), ported vert-
+/// for-vert and normalized from its 1024×1024 viewBox so it scales to any frame and tints
+/// to a state colour. One solid mass: long tapered horn (left), flat work surface, the
+/// right-hand heel step, a narrow waist, and the splayed trapezoidal base.
 struct AnvilShape: Shape {
     func path(in rect: CGRect) -> Path {
         let w = rect.width, h = rect.height
+        // Map raw logo coordinates (0…1024 viewBox) into `rect`.
         func p(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
-            CGPoint(x: rect.minX + x * w, y: rect.minY + y * h)
+            CGPoint(x: rect.minX + (x / 1024) * w, y: rect.minY + (y / 1024) * h)
         }
         var path = Path()
-
-        // Top face (the body + pointed horn on the left).
-        path.move(to: p(0.12, 0.34))       // horn tip
-        path.addLine(to: p(0.30, 0.26))    // top-left of face
-        path.addLine(to: p(0.88, 0.26))    // top-right of face
-        path.addLine(to: p(0.88, 0.40))    // right edge down
-        path.addLine(to: p(0.62, 0.40))    // step in toward the waist
-        path.addLine(to: p(0.58, 0.44))
-        path.addLine(to: p(0.42, 0.44))
-        path.addLine(to: p(0.38, 0.40))
-        path.addLine(to: p(0.30, 0.40))
-        path.addLine(to: p(0.18, 0.42))    // underside of the horn
+        path.move(to: p(140, 380))                              // horn tip (left point)
+        path.addQuadCurve(to: p(300, 295), control: p(200, 320))// horn curves up to the face
+        path.addLine(to: p(760, 295))                           // flat work surface
+        path.addLine(to: p(760, 410))                           // heel drops (right)
+        path.addLine(to: p(656, 410))
+        path.addQuadCurve(to: p(620, 460), control: p(644, 442))// step in to the waist
+        path.addLine(to: p(620, 600))
+        path.addLine(to: p(880, 600))                           // base flares out (right)
+        path.addLine(to: p(900, 660))
+        path.addLine(to: p(900, 720))
+        path.addLine(to: p(124, 720))                           // base underside
+        path.addLine(to: p(124, 660))
+        path.addLine(to: p(144, 600))                           // base flares (left)
+        path.addLine(to: p(404, 600))
+        path.addLine(to: p(404, 460))
+        path.addQuadCurve(to: p(368, 410), control: p(380, 442))// waist back up to the face
+        path.addLine(to: p(196, 410))
+        path.addQuadCurve(to: p(140, 380), control: p(168, 408))// underside of the horn
         path.closeSubpath()
-
-        // Waist (the narrow stem under the face).
-        path.move(to: p(0.42, 0.44))
-        path.addLine(to: p(0.58, 0.44))
-        path.addLine(to: p(0.56, 0.66))
-        path.addLine(to: p(0.44, 0.66))
-        path.closeSubpath()
-
-        // Base (the splayed foot).
-        path.move(to: p(0.30, 0.66))
-        path.addLine(to: p(0.70, 0.66))
-        path.addLine(to: p(0.78, 0.78))
-        path.addLine(to: p(0.22, 0.78))
-        path.closeSubpath()
-
         return path
     }
 }
