@@ -13,15 +13,22 @@ import Foundation
 
 /// The minimal capture status the home-screen widget shows.
 public struct CaptureWidgetSnapshot: Codable, Equatable, Sendable {
-    /// True while a conversation is actively being captured (and not paused).
-    public var isRecording: Bool
+    /// The DISTINCT capture phase (RECORDING-ACTIVE / PAUSED / IDLE) — the same
+    /// real-activity-derived phase the Live Activity uses, so the home widget never
+    /// claims a live conversation during silence / while paused. Defaults `.idle` so an
+    /// OLD snapshot written before this field existed decodes cleanly.
+    public var phase: CaptureActivityPhase
+    /// True while a conversation is ACTIVELY being captured (voiced now, not paused).
+    public var isRecording: Bool { phase == .recordingActive }
     /// True while capture is open but paused.
-    public var isPaused: Bool
+    public var isPaused: Bool { phase == .paused }
     /// Human source label ("Omi" / "Phone").
     public var sourceLabel: String
     /// SF Symbol for the active source.
     public var sourceSymbol: String
-    /// When the active conversation started (for an elapsed display). nil when idle.
+    /// When the current active-voice run began (for an elapsed display). ONLY set while
+    /// `.recordingActive` — nil when paused / listening, so the widget shows no running
+    /// timer during silence.
     public var startedAt: Date?
     /// The most-recently finished conversation's display title (shown when idle).
     public var lastFinishedTitle: String?
@@ -30,16 +37,14 @@ public struct CaptureWidgetSnapshot: Codable, Equatable, Sendable {
     /// When this snapshot was written — lets the widget show staleness / pick a freshness.
     public var updatedAt: Date
 
-    public init(isRecording: Bool = false,
-                isPaused: Bool = false,
+    public init(phase: CaptureActivityPhase = .idle,
                 sourceLabel: String = "Phone",
                 sourceSymbol: String = "mic.fill",
                 startedAt: Date? = nil,
                 lastFinishedTitle: String? = nil,
                 lastFinishedAt: Date? = nil,
                 updatedAt: Date = Date()) {
-        self.isRecording = isRecording
-        self.isPaused = isPaused
+        self.phase = phase
         self.sourceLabel = sourceLabel
         self.sourceSymbol = sourceSymbol
         self.startedAt = startedAt

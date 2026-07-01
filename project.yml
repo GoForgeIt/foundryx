@@ -17,6 +17,10 @@ targets:
       - App
       - Sources/FoundryXKit
       - Resources
+      # The interactive Live Activity App Intents + broker are SHARED with the widget
+      # extension: the widget attaches them to buttons, the APP performs them (a
+      # LiveActivityIntent runs in the app process, where it wires to CaptureManager).
+      - path: Widget/CaptureIntents.swift
     dependencies:
       - package: Grain
         product: Grain

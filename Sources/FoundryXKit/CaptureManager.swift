@@ -49,6 +49,13 @@ final class FrameRouter: @unchecked Sendable {
     // meter can be told apart from "no frames arriving at all."
     private var frameCount = 0
     private var lastBytes = 0
+    // Wall-clock instant (reference-date seconds) of the most recent VOICED frame in the
+    // current session (level ≥ the segmenter's silence threshold). Drives the Live
+    // Activity's RECORDING-ACTIVE-vs-IDLE phase: capture is only "actively recording" when
+    // voice was heard recently, so an extended silence while armed reads as LISTENING (not
+    // a live conversation with a ticking timer). nil until the first voiced frame; reset
+    // per session with the WAL.
+    private var lastVoicedAt: TimeInterval?
     // VOICED frames captured for the CURRENT session (level ≥ the segmenter's silence
     // threshold). Reset when a new capture's WAL is set (a fresh session begins); survives
     // silence-gap segment events. The owner reads this at endSession to decide whether the
@@ -77,11 +84,14 @@ final class FrameRouter: @unchecked Sendable {
     func setWAL(_ w: CaptureWAL?) {
         lock.lock()
         wal = w
-        if w != nil { sessionVoicedFrames = 0 }   // fresh session → reset the voiced-frame tally
+        if w != nil { sessionVoicedFrames = 0; lastVoicedAt = nil }   // fresh session → reset tallies
         lock.unlock()
     }
     /// Voiced frames captured for the current session (drives the min-substance upload gate).
     func sessionVoicedFrameCount() -> Int { lock.lock(); defer { lock.unlock() }; return sessionVoicedFrames }
+    /// Wall-clock instant (reference-date seconds) of the most recent voiced frame, or nil
+    /// if no voice yet this session — drives the Live Activity's active-vs-idle phase.
+    func lastVoicedInstant() -> TimeInterval? { lock.lock(); defer { lock.unlock() }; return lastVoicedAt }
     /// Rebaseline the segmenter's voice clock without changing open/closed state — used on
     /// an Omi reconnect so the brief disconnect gap isn't read as a silence boundary.
     func noteActiveNow() { lock.lock(); segmenter.noteActive(at: clock()); lock.unlock() }
@@ -135,8 +145,10 @@ final class FrameRouter: @unchecked Sendable {
             level = levelMeter.level(for: frame)   // true Opus→PCM RMS (perceptual 0…1)
             event = segmenter.observe(level: level, at: clock())
             // Voiced-frame accounting for the substance gate — the SAME voice/silence
-            // definition the segmenter uses (level ≥ its silence threshold).
-            if level >= segmenter.silenceThreshold { sessionVoicedFrames += 1 }
+            // definition the segmenter uses (level ≥ its silence threshold). Also stamp the
+            // most-recent voiced instant so the Live Activity can tell RECORDING-ACTIVE
+            // (recent voice) from LISTENING/IDLE (armed but silent).
+            if level >= segmenter.silenceThreshold { sessionVoicedFrames += 1; lastVoicedAt = clock() }
         }
         // Diag locals (read under lock): first few frames + every 50th, plus the
         // decode outcome, so a flat meter's cause is visible.
@@ -369,8 +381,21 @@ public final class CaptureManager: ObservableObject {
     /// audio frame rate (it would burn the system's update budget and get throttled).
     /// One refresh every few seconds is plenty; the elapsed timer ticks on-device via
     /// `Text(timerInterval:)`, so we only push to move the level indicator.
-    public nonisolated static let liveActivityThrottle: TimeInterval = 3
+    public nonisolated static let liveActivityThrottle: TimeInterval = 2
     private var lastLiveActivityPushAt: TimeInterval = 0
+    #if canImport(ActivityKit) && os(iOS)
+    /// The last ContentState we actually pushed — a coalescing gate so a throttled tick
+    /// that produces an IDENTICAL state pushes nothing (no wasted update-budget / battery).
+    /// `startedAt` is excluded from the comparison intentionally: it's the timer anchor
+    /// that ticks ON-DEVICE, so an unchanged phase/level/transcript never needs a re-push
+    /// just because wall-clock advanced.
+    @available(iOS 16.2, *)
+    private var lastPushedState: CaptureActivityAttributes.ContentState? {
+        get { _lastPushedState as? CaptureActivityAttributes.ContentState }
+        set { _lastPushedState = newValue }
+    }
+    private var _lastPushedState: Any?
+    #endif
     /// Finalize-the-conversation seam (injectable for door-free tests): given a
     /// closed capture id + its conversation metadata (start/end/location), tell the
     /// door to assemble + ingest it to Lore. Throws on failure so the capture stays
@@ -1026,15 +1051,78 @@ public final class CaptureManager: ObservableObject {
         return Double(levels.last ?? 0)
     }
 
-    /// Build the App-Group snapshot the home-screen widget reads from current state.
+    // MARK: Live Activity phase (RECORDING-ACTIVE vs PAUSED vs IDLE) — the bug fix
+
+    /// The DISTINCT capture phase for the live surfaces, derived from REAL voiced-capture
+    /// activity (recent voice), NOT merely from a session being armed. This is what stops
+    /// the Live Activity claiming a live 30-min conversation while paused / during an
+    /// extended silence. `lastVoicedAt` (router) and `now` are BOTH reference-date seconds
+    /// so the recent-voice window compares on one clock.
+    private var livePhase: CaptureActivityPhase {
+        CaptureLiveStatus.phase(
+            hasActiveSession: active != nil,
+            isPaused: isPaused,
+            lastVoicedAt: router.lastVoicedInstant(),
+            now: Date().timeIntervalSinceReferenceDate)
+    }
+
+    /// Test/inspection seam: the CURRENT Live Activity phase (RECORDING-ACTIVE / PAUSED /
+    /// IDLE) as the live surfaces would render it. Lets a door-free test prove the
+    /// "in a conversation while paused/idle" fix through the real manager, on any platform.
+    /// `now` is injectable (reference-date seconds) so a test can advance past the
+    /// active-voice window deterministically without sleeping.
+    public func liveActivityPhase(now: TimeInterval = Date().timeIntervalSinceReferenceDate)
+        -> CaptureActivityPhase {
+        CaptureLiveStatus.phase(
+            hasActiveSession: active != nil,
+            isPaused: isPaused,
+            lastVoicedAt: router.lastVoicedInstant(),
+            now: now)
+    }
+
+    /// Test/inspection seam: the most-recent voiced instant (reference-date seconds), or
+    /// nil if no voice yet this session — lets a test drive the active-voice window.
+    public func lastVoicedInstant() -> TimeInterval? { router.lastVoicedInstant() }
+
+    /// The elapsed-timer anchor for the live surfaces: the instant the CURRENT active-voice
+    /// run began, ONLY while `.recordingActive`. nil when paused / listening so the timer
+    /// never runs during silence or while armed-but-idle. Anchored to the conversation
+    /// start (stable across brief dips within the active-voice window), which reads as the
+    /// natural "how long this conversation has been going" without a per-second push.
+    private func liveStartedAt(phase: CaptureActivityPhase) -> Date? {
+        guard phase == .recordingActive, let wal = active else { return nil }
+        return conversationStartDate(wal)
+    }
+
+    /// Coarse 0…3 stepped level for the live indicator (a few discrete bars), or nil when
+    /// not actively recording. Snapshot-friendly + battery-cheap — updated ~1×/sec, never
+    /// at frame rate. Maps the 0…1 peak onto 4 steps (0 = silence … 3 = loud).
+    private func liveLevelStep(phase: CaptureActivityPhase) -> Int? {
+        guard phase == .recordingActive, let lvl = currentLiveLevel else { return nil }
+        return CaptureLiveStatus.levelStep(fromLevel: lvl)
+    }
+
+    /// The latest live transcript line, TRUNCATED for the small surfaces — only while
+    /// actively recording (empty otherwise). Prefers the volatile tail (what's being said
+    /// now); falls back to the finalized body.
+    private func liveTranscriptLine(phase: CaptureActivityPhase, maxChars: Int) -> String {
+        guard phase == .recordingActive else { return "" }
+        let text = liveTranscript.displayText
+        guard !text.isEmpty else { return "" }
+        return CaptureLiveStatus.truncatedTranscript(text, maxChars: maxChars)
+    }
+
+    /// Build the App-Group snapshot the home-screen widget reads from current state. Uses
+    /// the SAME real-activity-derived phase as the Live Activity so the home widget never
+    /// claims a live conversation during silence / while paused.
     private func makeWidgetSnapshot() -> CaptureWidgetSnapshot {
         let last = lastFinishedConversation()
+        let phase = livePhase
         return CaptureWidgetSnapshot(
-            isRecording: isCapturing,
-            isPaused: isPaused && active != nil,
+            phase: phase,
             sourceLabel: CaptureLiveStatus.sourceLabel(source: captureSource, isRecordingMic: isRecordingMic),
             sourceSymbol: CaptureLiveStatus.sourceSymbol(source: captureSource, isRecordingMic: isRecordingMic),
-            startedAt: active != nil ? conversationStartDate(active!) : nil,
+            startedAt: liveStartedAt(phase: phase),
             lastFinishedTitle: last?.title,
             lastFinishedAt: last?.at,
             updatedAt: Date())
@@ -1045,13 +1133,15 @@ public final class CaptureManager: ObservableObject {
     @available(iOS 16.2, *)
     private func makeActivityState() -> CaptureActivityAttributes.ContentState {
         let last = lastFinishedConversation()
+        let phase = livePhase
         return CaptureActivityAttributes.ContentState(
-            isRecording: isCapturing,
-            isPaused: isPaused && active != nil,
+            phase: phase,
             sourceLabel: CaptureLiveStatus.sourceLabel(source: captureSource, isRecordingMic: isRecordingMic),
             sourceSymbol: CaptureLiveStatus.sourceSymbol(source: captureSource, isRecordingMic: isRecordingMic),
-            startedAt: active != nil ? conversationStartDate(active!) : nil,
-            level: currentLiveLevel,
+            startedAt: liveStartedAt(phase: phase),
+            levelStep: liveLevelStep(phase: phase),
+            transcriptLine: liveTranscriptLine(phase: phase,
+                                               maxChars: CaptureLiveStatus.transcriptCharsLockScreen),
             lastFinishedTitle: last?.title,
             lastFinishedAt: last?.at)
     }
@@ -1069,23 +1159,52 @@ public final class CaptureManager: ObservableObject {
 
         #if canImport(ActivityKit) && os(iOS)
         guard #available(iOS 16.2, *), let controller = liveActivityController else { return }
+        let state = makeActivityState()
         switch kind {
         case .start:
             lastLiveActivityPushAt = Date().timeIntervalSince1970
-            controller.start(makeActivityState())
+            lastPushedState = state
+            controller.start(state)
         case .update:
+            // A lifecycle transition (pause/resume/source-switch) — push unconditionally,
+            // but still record it so the next throttled tick can coalesce against it.
             lastLiveActivityPushAt = Date().timeIntervalSince1970
-            controller.update(makeActivityState())
+            lastPushedState = state
+            controller.update(state)
         case .throttledUpdate:
             let now = Date().timeIntervalSince1970
             guard now - lastLiveActivityPushAt >= Self.liveActivityThrottle else { return }
+            // Coalesce: if the meaningful content is unchanged since the last push, skip —
+            // the elapsed timer ticks ON-DEVICE, so an identical phase/level/transcript
+            // never needs a re-push. This keeps the update cadence to "only when something
+            // the user sees actually changed", so battery impact stays negligible.
+            if let last = lastPushedState, Self.liveStateEquivalent(last, state) { return }
             lastLiveActivityPushAt = now
-            controller.update(makeActivityState())
+            lastPushedState = state
+            controller.update(state)
         case .end:
-            controller.end(final: makeActivityState())
+            lastPushedState = nil
+            controller.end(final: state)
         }
         #endif
     }
+
+    #if canImport(ActivityKit) && os(iOS)
+    /// Whether two ContentStates are equivalent for THROTTLE-COALESCING purposes — i.e.
+    /// nothing the user perceives differs. Compares phase, coarse level, transcript, and
+    /// source/last-finished labels but IGNORES `startedAt` (the on-device timer anchor,
+    /// which advances every second without needing a push). A pure static so it's testable.
+    @available(iOS 16.2, *)
+    static func liveStateEquivalent(_ a: CaptureActivityAttributes.ContentState,
+                                    _ b: CaptureActivityAttributes.ContentState) -> Bool {
+        a.phase == b.phase
+            && a.levelStep == b.levelStep
+            && a.transcriptLine == b.transcriptLine
+            && a.sourceLabel == b.sourceLabel
+            && a.sourceSymbol == b.sourceSymbol
+            && a.lastFinishedTitle == b.lastFinishedTitle
+    }
+    #endif
 
     /// Ask WidgetKit to reload the home-screen widget timelines (no-op off iOS).
     private func reloadWidgetTimelines() {
@@ -1210,6 +1329,24 @@ public final class CaptureManager: ObservableObject {
         router.resetSegmenter()   // fresh boundary state for the new conversation
         log?.info("capture: manual split → new conversation")
     }
+
+    /// The Live Activity "End Current" button (App Intent) target: end/finalize the CURRENT
+    /// conversation now (it becomes a discrete card, sent for transcription) and keep
+    /// capture running — the next voiced audio opens a fresh conversation. Semantically the
+    /// same end-current-start-new boundary as `splitConversation()`, just surfaced to the
+    /// user as "end this conversation". Returns whether it acted (false = nothing was
+    /// recording → the button was a no-op). No-op is intentional so a stale button press
+    /// during a lull never mints an empty conversation.
+    @discardableResult
+    public func endCurrentConversation() -> Bool {
+        guard active != nil else { return false }
+        splitConversation()
+        return true
+    }
+
+    /// Whether the Live Activity's "End Current" button should be enabled — there must be
+    /// an open conversation to end. (The button also no-ops safely if pressed when false.)
+    public var canEndCurrentConversation: Bool { active != nil }
 
     private func endSession() {
         router.setWAL(nil)
