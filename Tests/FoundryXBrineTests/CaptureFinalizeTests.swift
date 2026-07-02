@@ -100,7 +100,7 @@ final class CaptureFinalizeTests: XCTestCase {
         let firstCapture = try XCTUnwrap(mgr.active).captureId
 
         // Voice opens the conversation; feed enough frames to write ≥1 segment.
-        for _ in 0..<(SilenceSegmenter.defaultMinVoicedFramesToClose + 20) { src.onFrame?(voiceFrame()) }
+        for _ in 0..<(CaptureManager.minVoicedFramesToUpload + 20) { src.onFrame?(voiceFrame()) }
         try XCTUnwrap(mgr.active).flushAndWait()
 
         // A silent frame now exceeds the (zero) gap → conversation closes + the next
@@ -168,7 +168,7 @@ final class CaptureFinalizeTests: XCTestCase {
         src.onState?(.streaming)
         try await waitUntil { mgr.active != nil }
         let firstCapture = try XCTUnwrap(mgr.active).captureId
-        for _ in 0..<(SilenceSegmenter.defaultMinVoicedFramesToClose + 20) { src.onFrame?(voiceFrame()) }
+        for _ in 0..<(CaptureManager.minVoicedFramesToUpload + 20) { src.onFrame?(voiceFrame()) }
         try XCTUnwrap(mgr.active).flushAndWait()
         src.onFrame?(silentFrame())
         try await waitUntil { mgr.active?.captureId != firstCapture }
@@ -201,7 +201,7 @@ final class CaptureFinalizeTests: XCTestCase {
         src.onState?(.streaming)
         try await waitUntil { mgr.active != nil }
         let firstCapture = try XCTUnwrap(mgr.active).captureId
-        for _ in 0..<(SilenceSegmenter.defaultMinVoicedFramesToClose + 20) { src.onFrame?(voiceFrame()) }
+        for _ in 0..<(CaptureManager.minVoicedFramesToUpload + 20) { src.onFrame?(voiceFrame()) }
         try XCTUnwrap(mgr.active).flushAndWait()
         src.onFrame?(silentFrame())
         try await waitUntil { mgr.active?.captureId != firstCapture }

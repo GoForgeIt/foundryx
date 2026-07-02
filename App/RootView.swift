@@ -99,6 +99,15 @@ private struct MainTabs: View {
         // When a capture upload is rejected as token-expired (401), refresh the id_token
         // once / surface login — instead of the phone retry-looping with a dead token.
         mgr.onAuthExpired = { [weak remote] in Task { @MainActor in await remote?.handleAuthExpired() } }
+        // Wire the interactive Live Activity buttons (App Intents) to this live manager.
+        // The intent's perform() runs in the app process and routes through this broker.
+        CaptureIntentBroker.shared.handler = { [weak mgr] action in
+            guard let mgr else { return false }
+            switch action {
+            case .endCurrent:  return mgr.endCurrentConversation()
+            case .togglePause: mgr.togglePause(); return true
+            }
+        }
         _manager = StateObject(wrappedValue: mgr)
         // The extensible capture-source registry (track 20260628T1702): per-source
         // toggles + add-source (BT mic / Apple Watch). Its single ACTIVE source is

@@ -38,3 +38,10 @@ Feature: A live, on-device transcript preview while recording
     Given a device that does not support on-device live transcription
     When an ambient capture records a conversation
     Then no live preview is shown and capture proceeds unchanged
+
+  Scenario: a long continuous conversation keeps the live preview bounded
+    Given an ambient capture is recording a conversation
+    And on-device live transcription is available
+    When the conversation has run long enough to accumulate over a thousand words
+    Then the live preview still shows only its most recent handful of words
+    And rendering the preview stays bounded so the app does not crash

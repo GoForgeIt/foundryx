@@ -16,6 +16,9 @@ import Combine
 #if canImport(AVFoundation)
 import AVFoundation
 #endif
+#if canImport(WidgetKit)
+import WidgetKit
+#endif
 
 /// Lock-guarded routing of frames → the active WAL, gated by pause. Lives off the
 /// main actor so the source's frame callback never hops actors per frame. Also the
@@ -46,6 +49,18 @@ final class FrameRouter: @unchecked Sendable {
     // meter can be told apart from "no frames arriving at all."
     private var frameCount = 0
     private var lastBytes = 0
+    // Wall-clock instant (reference-date seconds) of the most recent VOICED frame in the
+    // current session (level ≥ the segmenter's silence threshold). Drives the Live
+    // Activity's RECORDING-ACTIVE-vs-IDLE phase: capture is only "actively recording" when
+    // voice was heard recently, so an extended silence while armed reads as LISTENING (not
+    // a live conversation with a ticking timer). nil until the first voiced frame; reset
+    // per session with the WAL.
+    private var lastVoicedAt: TimeInterval?
+    // VOICED frames captured for the CURRENT session (level ≥ the segmenter's silence
+    // threshold). Reset when a new capture's WAL is set (a fresh session begins); survives
+    // silence-gap segment events. The owner reads this at endSession to decide whether the
+    // capture has enough substance to upload (see CaptureManager.minVoicedFramesToUpload).
+    private var sessionVoicedFrames = 0
     // When true, the live-STT PCM is supplied DIRECTLY by the source (the phone mic
     // hands us its already-decoded 48 kHz PCM), so we SKIP the internal Opus→PCM decode
     // tap — avoiding an avoidable encode→decode round-trip of latency for live preview
@@ -66,7 +81,20 @@ final class FrameRouter: @unchecked Sendable {
         self.clock = clock
     }
 
-    func setWAL(_ w: CaptureWAL?) { lock.lock(); wal = w; lock.unlock() }
+    func setWAL(_ w: CaptureWAL?) {
+        lock.lock()
+        wal = w
+        if w != nil { sessionVoicedFrames = 0; lastVoicedAt = nil }   // fresh session → reset tallies
+        lock.unlock()
+    }
+    /// Voiced frames captured for the current session (drives the min-substance upload gate).
+    func sessionVoicedFrameCount() -> Int { lock.lock(); defer { lock.unlock() }; return sessionVoicedFrames }
+    /// Wall-clock instant (reference-date seconds) of the most recent voiced frame, or nil
+    /// if no voice yet this session — drives the Live Activity's active-vs-idle phase.
+    func lastVoicedInstant() -> TimeInterval? { lock.lock(); defer { lock.unlock() }; return lastVoicedAt }
+    /// Rebaseline the segmenter's voice clock without changing open/closed state — used on
+    /// an Omi reconnect so the brief disconnect gap isn't read as a silence boundary.
+    func noteActiveNow() { lock.lock(); segmenter.noteActive(at: clock()); lock.unlock() }
     func setPaused(_ p: Bool) {
         lock.lock()
         paused = p
@@ -116,6 +144,11 @@ final class FrameRouter: @unchecked Sendable {
         if !isPaused {
             level = levelMeter.level(for: frame)   // true Opus→PCM RMS (perceptual 0…1)
             event = segmenter.observe(level: level, at: clock())
+            // Voiced-frame accounting for the substance gate — the SAME voice/silence
+            // definition the segmenter uses (level ≥ its silence threshold). Also stamp the
+            // most-recent voiced instant so the Live Activity can tell RECORDING-ACTIVE
+            // (recent voice) from LISTENING/IDLE (armed but silent).
+            if level >= segmenter.silenceThreshold { sessionVoicedFrames += 1; lastVoicedAt = clock() }
         }
         // Diag locals (read under lock): first few frames + every 50th, plus the
         // decode outcome, so a flat meter's cause is visible.
@@ -190,6 +223,7 @@ public final class CaptureManager: ObservableObject {
     /// audio AND its transcript text have been pruned. Empty (0-segment) captures with
     /// no tombstone are still hidden (useless cards).
     private func isBrowsable(_ wal: CaptureWAL) -> Bool {
+        if isDiscarded(wal.captureId) { return false }   // sub-substance junk fragment — never show
         if wal.status.streaming { return true }   // the active capture always shows
         let id = wal.captureId
         // If we hold judge-able transcript text locally, HIDE empty / near-silent /
@@ -326,6 +360,42 @@ public final class CaptureManager: ObservableObject {
     private let levelBuffer = LevelBuffer()
     private var drainTimer: Timer?
     private var meterTimer: Timer?
+
+    // MARK: Live Activity + home-screen widget (Dynamic Island / WidgetKit)
+
+    /// The capture Live Activity (lock-screen banner + Dynamic Island). Driven IN-APP
+    /// (no push server in v1) on the same lifecycle transitions as capture. nil on
+    /// pre-16.1 OSes / when ActivityKit is unavailable — every use is guarded.
+    #if canImport(ActivityKit) && os(iOS)
+    private let liveActivity: Any? = {
+        if #available(iOS 16.2, *) { return CaptureLiveActivityController() }
+        return nil
+    }()
+    @available(iOS 16.2, *)
+    private var liveActivityController: CaptureLiveActivityController? {
+        liveActivity as? CaptureLiveActivityController
+    }
+    #endif
+
+    /// Throttle for live level/elapsed pushes — the Live Activity must NEVER update at
+    /// audio frame rate (it would burn the system's update budget and get throttled).
+    /// One refresh every few seconds is plenty; the elapsed timer ticks on-device via
+    /// `Text(timerInterval:)`, so we only push to move the level indicator.
+    public nonisolated static let liveActivityThrottle: TimeInterval = 2
+    private var lastLiveActivityPushAt: TimeInterval = 0
+    #if canImport(ActivityKit) && os(iOS)
+    /// The last ContentState we actually pushed — a coalescing gate so a throttled tick
+    /// that produces an IDENTICAL state pushes nothing (no wasted update-budget / battery).
+    /// `startedAt` is excluded from the comparison intentionally: it's the timer anchor
+    /// that ticks ON-DEVICE, so an unchanged phase/level/transcript never needs a re-push
+    /// just because wall-clock advanced.
+    @available(iOS 16.2, *)
+    private var lastPushedState: CaptureActivityAttributes.ContentState? {
+        get { _lastPushedState as? CaptureActivityAttributes.ContentState }
+        set { _lastPushedState = newValue }
+    }
+    private var _lastPushedState: Any?
+    #endif
     /// Finalize-the-conversation seam (injectable for door-free tests): given a
     /// closed capture id + its conversation metadata (start/end/location), tell the
     /// door to assemble + ingest it to Lore. Throws on failure so the capture stays
@@ -360,6 +430,18 @@ public final class CaptureManager: ObservableObject {
     /// backlog concurrency valve) — so a multi-day backlog drains steadily, never a storm.
     public nonisolated static let maxCapturesPerDrain = 3
 
+    /// Most-recent captures hydrated into the in-memory timeline at launch. Bounded so a
+    /// long-lived install with a large on-disk backlog doesn't enumerate + hydrate tens of
+    /// thousands of folders on the main thread at launch — which overran the iOS launch
+    /// watchdog and got the app SIGKILL'd (FRONTBOARD). Older captures stay on disk.
+    public nonisolated static let maxCapturesToLoad = 300
+
+    /// Discarded junk fragments (`.discarded`) kept on disk beyond this age are pruned — the
+    /// audio was never uploaded and is not shown, so retaining tens of thousands of tiny
+    /// folders forever only bloats the container + slows launch enumeration. A short window
+    /// preserves recent auditability without unbounded accumulation.
+    public nonisolated static let discardedRetention: TimeInterval = 2 * 24 * 60 * 60   // 2 days
+
     /// Per-capture upload retry state (consecutive failures + earliest next attempt).
     private struct RetryState { var failures = 0; var nextEligible: TimeInterval = 0 }
     private var retryStates: [String: RetryState] = [:]
@@ -393,6 +475,90 @@ public final class CaptureManager: ObservableObject {
     /// retired (`permanentPoison: false` ⇒ false).
     public nonisolated static func shouldAbandonCapture(permanentPoison: Bool) -> Bool {
         permanentPoison
+    }
+
+    // MARK: capture-substance gate + Omi reconnect coalescing (junk-fragment control)
+
+    /// The VOICED-frame bar used ONLY when there is NO on-device transcript at all (STT
+    /// unavailable on this OS, or it produced literally nothing). A capture is a real
+    /// conversation if either (a) it has meaningful transcribed SPEECH, or (b) — absent any
+    /// transcript — it ran this long. This bar is deliberately HIGH (~60 s at Omi's ~50
+    /// voiced-frames/s) because voiced-amplitude ALONE is a weak signal: ambient noise,
+    /// HVAC, keyboard clatter all clear the level threshold without being speech. Requiring
+    /// a full minute of continuous voiced audio before we'll keep a transcript-less capture
+    /// rejects the short noise fragments (the junk backlog was all < ~27 s) while still
+    /// preserving a genuinely long real conversation an old device couldn't transcribe.
+    /// (Contrast `SilenceSegmenter.minVoicedFramesToClose` ≈ 2 s, which only decides
+    /// silence-gap SEGMENT boundaries, not upload-worthiness.) Tunable.
+    public nonisolated static let minVoicedFramesToUpload = 3000
+
+    /// A transient Omi BLE disconnect within this window RESUMES the open conversation
+    /// (same captureId) instead of ending it — so a flaky link doesn't shatter one
+    /// conversation into a pile of tiny reconnect-stub fragments. A disconnect that stays
+    /// down past the window ends the conversation normally (its real boundary is preserved,
+    /// then the substance gate decides upload-vs-discard). An EXPLICIT stop (phone-mic Stop
+    /// / permission-deny) ends immediately, bypassing the grace. Tunable.
+    public nonisolated static let reconnectGraceWindow: TimeInterval = 20
+
+    /// Whether a just-closed capture is a real CONVERSATION worth finalizing + uploading to
+    /// Lore, or a JUNK FRAGMENT to drop locally. The Omi model: a conversation is SPEECH,
+    /// not merely sound above a level threshold. So:
+    ///
+    ///   1. If we hold an on-device transcript, gate on MEANINGFUL SPEECH
+    ///      (`ConversationContentFilter`, the same empty/filler bar the timeline uses).
+    ///      Ambient noise transcribes to nothing or to filler ("thank you", "okay") and is
+    ///      DROPPED however long it ran — this is what stops the junk backlog at the source.
+    ///   2. Only when there is NO transcript at all (STT unavailable / produced nothing) do
+    ///      we fall back to the raised voiced-audio bar (`minVoicedFramesToUpload`, ~60 s),
+    ///      so a genuinely long real conversation an old device couldn't transcribe is still
+    ///      kept, but short voiced-only noise is not.
+    ///
+    /// Prior behavior let ~8 s of voiced AMPLITUDE upload regardless of content, which is
+    /// exactly how thousands of noise/silence captures reached Lore.
+    public nonisolated static func hasUploadSubstance(voicedFrames: Int,
+                                                      onDeviceTranscript: String?,
+                                                      durationSeconds: TimeInterval?) -> Bool {
+        let hasTranscript = !(onDeviceTranscript?
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        if hasTranscript {
+            // Speech-gated: meaningful content keeps it; noise/filler drops it.
+            return ConversationContentFilter.isMeaningful(transcript: onDeviceTranscript,
+                                                          durationSeconds: durationSeconds)
+        }
+        // No transcript at all — keep only a genuinely long voiced capture.
+        return voicedFrames >= minVoicedFramesToUpload
+    }
+
+    /// Whether an Omi reconnect-grace hold that began at `suspendedAt` has elapsed by `now`
+    /// (the device did not reconnect in time) and must therefore end the conversation.
+    public nonisolated static func shouldEndSuspendedSession(suspendedAt: TimeInterval,
+                                                             now: TimeInterval,
+                                                             window: TimeInterval) -> Bool {
+        now - suspendedAt >= window
+    }
+
+    /// A held-open Omi conversation awaiting a possible reconnect (its WAL + when the
+    /// disconnect happened). Non-nil ⇒ `active` is SUSPENDED, not ended: a reconnect within
+    /// `reconnectGraceWindow` resumes it (same captureId), else the watchdog ends it.
+    private var suspendedSession: (wal: CaptureWAL, at: TimeInterval)?
+
+    /// True while an Omi conversation is being HELD open awaiting a possible reconnect (a
+    /// transient BLE drop inside the grace window). The capture surface can surface a
+    /// "reconnecting…" state; a reconnect within the window resumes the same conversation.
+    public var isAwaitingReconnect: Bool { suspendedSession != nil }
+
+    /// Resolve a pending Omi reconnect-grace hold: if the device did NOT reconnect within
+    /// `reconnectGraceWindow` of the disconnect, end the held conversation now (the
+    /// substance gate then decides upload-vs-discard). No-op when nothing is held or the
+    /// window hasn't elapsed. The capture watchdog calls this each tick; tests pass an
+    /// explicit `now` to advance it deterministically.
+    public func resolveReconnectGrace(now: TimeInterval = Date().timeIntervalSince1970) {
+        guard let held = suspendedSession else { return }
+        guard CaptureManager.shouldEndSuspendedSession(suspendedAt: held.at, now: now,
+                                                       window: Self.reconnectGraceWindow) else { return }
+        suspendedSession = nil
+        log?.info("capture \(held.wal.captureId): Omi reconnect grace elapsed — ending held conversation")
+        endSession()
     }
 
     /// Re-arm the drain after a fresh id_token has been obtained (the rebuilt pipeline
@@ -518,6 +684,10 @@ public final class CaptureManager: ObservableObject {
         pruneOldAudio()        // ~30d audio sweep (keeps transcripts, prunes safe-in-Lore audio)
         startDrainTimer()
         startSegmentTimer()    // wall-clock silence + runaway force-split watchdog
+        // Seed the home-screen widget with current (idle / last-conversation) state so it
+        // renders correctly before the first capture transition fires.
+        CaptureWidgetSnapshotStore.write(makeWidgetSnapshot())
+        reloadWidgetTimelines()
     }
 
     /// The durable conversation metadata (start/end/location) for a capture, for
@@ -620,6 +790,7 @@ public final class CaptureManager: ObservableObject {
             if isRecordingMic { stopMicRecording() }
             source.start()
         }
+        pushLiveState(.update)   // source switch → refresh the source label on both surfaces
         log?.info("capture source → \(kind.rawValue)")
     }
 
@@ -651,13 +822,29 @@ public final class CaptureManager: ObservableObject {
         sourceState = state
         switch state {
         case .streaming:
-            if active == nil { router.resetSegmenter(); beginSession() }  // ambient capture
+            if suspendedSession != nil {
+                // Transient Omi reconnect WITHIN the grace window → RESUME the SAME
+                // conversation (same captureId). Do NOT mint a new session or finalize a
+                // stub — this is what coalesces reconnect churn into one conversation.
+                suspendedSession = nil
+                if !isPaused { router.noteActiveNow() }   // the disconnect gap is not a silence gap
+                log?.info("capture \(active?.captureId ?? "?"): Omi reconnected within grace → resumed (no new session)")
+            } else if active == nil {
+                router.resetSegmenter(); beginSession()   // fresh ambient capture
+            }
         case .stopped, .failed:
-            // A source stopping (Omi disconnect OR a phone-mic Stop/permission-deny)
-            // ends the session and resets the mic-recording flag so the Record button
-            // returns to its idle state.
-            isRecordingMic = false
-            endSession()
+            if isRecordingMic {
+                // Phone-mic Stop / permission-deny is an EXPLICIT boundary → end now and
+                // reset the mic flag so the Record button returns to idle (no grace).
+                isRecordingMic = false
+                endSession()
+            } else if let wal = active, suspendedSession == nil {
+                // Omi BLE dropped mid-conversation → HOLD it open for a brief reconnect
+                // grace so a flaky link doesn't split the conversation into fragments. The
+                // capture watchdog ends it if the device doesn't return within the window.
+                suspendedSession = (wal, Date().timeIntervalSince1970)
+                log?.info("capture \(wal.captureId): Omi disconnected — holding \(Int(Self.reconnectGraceWindow))s for reconnect")
+            }
         case .idle, .scanning:
             break
         }
@@ -709,6 +896,8 @@ public final class CaptureManager: ObservableObject {
 
     private func tickSegmentation() {
         emitCaptureHeartbeatIfDue()   // Omi-path diagnostics (runs even while paused)
+        resolveReconnectGrace()       // end a held session the device never reconnected to
+        guard suspendedSession == nil else { return }   // don't segment/split a suspended session
         guard let wal = active, !isPaused else { return }
         // 1. Wall-clock silence boundary (fires when no frames arrive during quiet).
         if let event = router.tickSilence() {
@@ -796,6 +985,7 @@ public final class CaptureManager: ObservableObject {
     private func reconcileOrphanedCaptures() {
         for wal in captures where wal !== active {
             let id = wal.captureId
+            guard !isDiscarded(id) else { continue }   // discarded fragments are never re-queued
             guard wal.status.totalSegments > 0 else { continue }
             guard let meta = ConversationMetaStore.load(captureId: id, baseDir: baseDir),
                   meta.startedAt > 0, meta.endedAt == nil else { continue }
@@ -848,6 +1038,222 @@ public final class CaptureManager: ObservableObject {
         let s = router.stats()
         if s.count != framesReceived { framesReceived = s.count }
         if s.lastBytes != lastFrameBytes { lastFrameBytes = s.lastBytes }
+        // Move the Live Activity's live level indicator — THROTTLED to a few seconds, NOT
+        // the 12 Hz meter rate (the elapsed timer ticks on-device, so this only carries
+        // the level). No-op when not recording / the throttle window hasn't elapsed.
+        if isCapturing { pushLiveState(.throttledUpdate) }
+    }
+
+    // MARK: Live Activity / widget snapshot projection + push
+
+    /// The display title + finish time of the most recent FINISHED conversation (the
+    /// active one excluded) — shown by the Live Activity / widget when idle. Reuses the
+    /// same card tombstone + generic-title disambiguation the timeline list renders, so
+    /// the surfaces agree. nil when there is no finished conversation with a title yet.
+    private func lastFinishedConversation() -> (title: String, at: Date)? {
+        for wal in visibleCaptures where wal !== active {
+            guard let title = cardMeta(for: wal.captureId)?.title,
+                  !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            let start = conversationStartDate(wal)
+            let display = ConversationTitleDisplay.display(
+                title: title, start: start,
+                timeString: { Self.liveActivityTimeFmt.string(from: $0) })
+            // Prefer the conversation END for "finished at" when known, else its start.
+            let endedAt = conversationMeta(for: wal.captureId)?.endedAt
+            let at = endedAt.map { Date(timeIntervalSince1970: TimeInterval($0)) } ?? start
+            return (display, at)
+        }
+        return nil
+    }
+
+    private static let liveActivityTimeFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "h:mm a"
+        return f
+    }()
+
+    /// The current 0…1 level for the live indicator (the newest meter bar), or nil when
+    /// not actively recording.
+    private var currentLiveLevel: Double? {
+        guard isCapturing else { return nil }
+        return Double(levels.last ?? 0)
+    }
+
+    // MARK: Live Activity phase (RECORDING-ACTIVE vs PAUSED vs IDLE) — the bug fix
+
+    /// The DISTINCT capture phase for the live surfaces, derived from REAL voiced-capture
+    /// activity (recent voice), NOT merely from a session being armed. This is what stops
+    /// the Live Activity claiming a live 30-min conversation while paused / during an
+    /// extended silence. `lastVoicedAt` (router) and `now` are BOTH reference-date seconds
+    /// so the recent-voice window compares on one clock.
+    private var livePhase: CaptureActivityPhase {
+        CaptureLiveStatus.phase(
+            hasActiveSession: active != nil,
+            isPaused: isPaused,
+            lastVoicedAt: router.lastVoicedInstant(),
+            now: Date().timeIntervalSinceReferenceDate)
+    }
+
+    /// Test/inspection seam: the CURRENT Live Activity phase (RECORDING-ACTIVE / PAUSED /
+    /// IDLE) as the live surfaces would render it. Lets a door-free test prove the
+    /// "in a conversation while paused/idle" fix through the real manager, on any platform.
+    /// `now` is injectable (reference-date seconds) so a test can advance past the
+    /// active-voice window deterministically without sleeping.
+    public func liveActivityPhase(now: TimeInterval = Date().timeIntervalSinceReferenceDate)
+        -> CaptureActivityPhase {
+        CaptureLiveStatus.phase(
+            hasActiveSession: active != nil,
+            isPaused: isPaused,
+            lastVoicedAt: router.lastVoicedInstant(),
+            now: now)
+    }
+
+    /// Test/inspection seam: the most-recent voiced instant (reference-date seconds), or
+    /// nil if no voice yet this session — lets a test drive the active-voice window.
+    public func lastVoicedInstant() -> TimeInterval? { router.lastVoicedInstant() }
+
+    /// The elapsed-timer anchor for the live surfaces: the instant the CURRENT active-voice
+    /// run began, ONLY while `.recordingActive`. nil when paused / listening so the timer
+    /// never runs during silence or while armed-but-idle. Anchored to the conversation
+    /// start (stable across brief dips within the active-voice window), which reads as the
+    /// natural "how long this conversation has been going" without a per-second push.
+    private func liveStartedAt(phase: CaptureActivityPhase) -> Date? {
+        guard phase == .recordingActive, let wal = active else { return nil }
+        return conversationStartDate(wal)
+    }
+
+    /// Coarse 0…3 stepped level for the live indicator (a few discrete bars), or nil when
+    /// not actively recording. Snapshot-friendly + battery-cheap — updated ~1×/sec, never
+    /// at frame rate. Maps the 0…1 peak onto 4 steps (0 = silence … 3 = loud).
+    private func liveLevelStep(phase: CaptureActivityPhase) -> Int? {
+        guard phase == .recordingActive, let lvl = currentLiveLevel else { return nil }
+        return CaptureLiveStatus.levelStep(fromLevel: lvl)
+    }
+
+    /// The latest live transcript line, TRUNCATED for the small surfaces — only while
+    /// actively recording (empty otherwise). Prefers the volatile tail (what's being said
+    /// now); falls back to the finalized body.
+    private func liveTranscriptLine(phase: CaptureActivityPhase, maxChars: Int) -> String {
+        guard phase == .recordingActive else { return "" }
+        let text = liveTranscript.displayText
+        guard !text.isEmpty else { return "" }
+        return CaptureLiveStatus.truncatedTranscript(text, maxChars: maxChars)
+    }
+
+    /// Build the App-Group snapshot the home-screen widget reads from current state. Uses
+    /// the SAME real-activity-derived phase as the Live Activity so the home widget never
+    /// claims a live conversation during silence / while paused.
+    private func makeWidgetSnapshot() -> CaptureWidgetSnapshot {
+        let last = lastFinishedConversation()
+        let phase = livePhase
+        return CaptureWidgetSnapshot(
+            phase: phase,
+            sourceLabel: CaptureLiveStatus.sourceLabel(source: captureSource, isRecordingMic: isRecordingMic),
+            sourceSymbol: CaptureLiveStatus.sourceSymbol(source: captureSource, isRecordingMic: isRecordingMic),
+            startedAt: liveStartedAt(phase: phase),
+            lastFinishedTitle: last?.title,
+            lastFinishedAt: last?.at,
+            updatedAt: Date())
+    }
+
+    #if canImport(ActivityKit) && os(iOS)
+    /// Build the Live Activity content state from current capture state.
+    @available(iOS 16.2, *)
+    private func makeActivityState() -> CaptureActivityAttributes.ContentState {
+        let last = lastFinishedConversation()
+        let phase = livePhase
+        return CaptureActivityAttributes.ContentState(
+            phase: phase,
+            sourceLabel: CaptureLiveStatus.sourceLabel(source: captureSource, isRecordingMic: isRecordingMic),
+            sourceSymbol: CaptureLiveStatus.sourceSymbol(source: captureSource, isRecordingMic: isRecordingMic),
+            startedAt: liveStartedAt(phase: phase),
+            levelStep: liveLevelStep(phase: phase),
+            transcriptLine: liveTranscriptLine(phase: phase,
+                                               maxChars: CaptureLiveStatus.transcriptCharsLockScreen),
+            lastFinishedTitle: last?.title,
+            lastFinishedAt: last?.at)
+    }
+    #endif
+
+    /// Push the current state to the home-screen widget (always) and the Live Activity
+    /// (when one should be live). `kind` distinguishes the lifecycle transition so we
+    /// start/update/end the Live Activity correctly; level/elapsed pushes are throttled.
+    private enum LivePush { case start, update, throttledUpdate, end }
+    private func pushLiveState(_ kind: LivePush) {
+        // Always refresh the home-screen widget snapshot + ask WidgetKit to reload — it's
+        // cheap and the widget has no other way to learn capture changed.
+        CaptureWidgetSnapshotStore.write(makeWidgetSnapshot())
+        reloadWidgetTimelines()
+
+        #if canImport(ActivityKit) && os(iOS)
+        guard #available(iOS 16.2, *), let controller = liveActivityController else { return }
+        let state = makeActivityState()
+        switch kind {
+        case .start:
+            lastLiveActivityPushAt = Date().timeIntervalSince1970
+            lastPushedState = state
+            controller.start(state)
+        case .update:
+            // A lifecycle transition (pause/resume/source-switch) — push unconditionally,
+            // but still record it so the next throttled tick can coalesce against it.
+            lastLiveActivityPushAt = Date().timeIntervalSince1970
+            lastPushedState = state
+            controller.update(state)
+        case .throttledUpdate:
+            let now = Date().timeIntervalSince1970
+            guard now - lastLiveActivityPushAt >= Self.liveActivityThrottle else { return }
+            // Coalesce: if the meaningful content is unchanged since the last push, skip —
+            // the elapsed timer ticks ON-DEVICE, so an identical phase/level/transcript
+            // never needs a re-push. This keeps the update cadence to "only when something
+            // the user sees actually changed", so battery impact stays negligible.
+            if let last = lastPushedState, Self.liveStateEquivalent(last, state) { return }
+            lastLiveActivityPushAt = now
+            lastPushedState = state
+            controller.update(state)
+        case .end:
+            lastPushedState = nil
+            controller.end(final: state)
+        }
+        #endif
+    }
+
+    #if canImport(ActivityKit) && os(iOS)
+    /// Whether two ContentStates are equivalent for THROTTLE-COALESCING purposes — i.e.
+    /// nothing the user perceives differs. Compares phase, coarse level, transcript, and
+    /// source/last-finished labels but IGNORES `startedAt` (the on-device timer anchor,
+    /// which advances every second without needing a push). A pure static so it's testable.
+    @available(iOS 16.2, *)
+    static func liveStateEquivalent(_ a: CaptureActivityAttributes.ContentState,
+                                    _ b: CaptureActivityAttributes.ContentState) -> Bool {
+        a.phase == b.phase
+            && a.levelStep == b.levelStep
+            && a.transcriptLine == b.transcriptLine
+            && a.sourceLabel == b.sourceLabel
+            && a.sourceSymbol == b.sourceSymbol
+            && a.lastFinishedTitle == b.lastFinishedTitle
+    }
+    #endif
+
+    /// Ask WidgetKit to reload the home-screen widget timelines (no-op off iOS).
+    ///
+    /// NOTE: this is only a FRESHNESS HINT. The home-screen widget is snapshot-rendered and
+    /// iOS THROTTLES timeline reloads (a background budget) — even with this call the tile
+    /// can lag a live capture by minutes and is NOT real-time. Real-time status is the Live
+    /// Activity's job (Dynamic Island / lock screen); the home widget is a best-effort
+    /// "current status + last conversation" glance. Do NOT try to force it fresher than the
+    /// reload hint — that just burns the budget and iOS ignores it anyway.
+    private func reloadWidgetTimelines() {
+        #if canImport(WidgetKit) && os(iOS)
+        WidgetCenter.shared.reloadAllTimelines()
+        #endif
+    }
+
+    /// Re-write the App-Group snapshot the home widget reads AND hint a reload — call this
+    /// whenever the widget's inputs (capture status / last-finished title) change OUTSIDE a
+    /// `pushLiveState` transition, e.g. the async transcript-refine or a completed finalize.
+    private func refreshHomeWidget() {
+        CaptureWidgetSnapshotStore.write(makeWidgetSnapshot())
+        reloadWidgetTimelines()
     }
 
     /// Build a WAL, threading the (test-only) per-segment upload override so every
@@ -883,6 +1289,7 @@ public final class CaptureManager: ObservableObject {
         router.setWAL(wal)                        // frames now flow into this WAL
         startLiveTranscription()                  // additive live preview (no-op if unwired)
         lastHeartbeatAt = 0; lastHeartbeatFrames = router.stats().count   // fresh heartbeat baseline
+        pushLiveState(.start)   // start the Live Activity + refresh the home-screen widget
         log?.info("capture \(id): ambient session started (source=\(captureSource.rawValue), state=\(sourceStateLabel))")
     }
 
@@ -949,7 +1356,14 @@ public final class CaptureManager: ObservableObject {
         let title = ProvisionalTitle.from(transcript: transcript)
         let changed = ConversationCardStore.seedProvisional(
             captureId: captureId, baseDir: baseDir, transcript: transcript, title: title)
-        if changed { rebuildVisibleCaptures() }
+        if changed {
+            rebuildVisibleCaptures()
+            // The last-finished title the home widget shows is derived from the newest card.
+            // This seed (incl. the async transcript-refine after endSession) can change it,
+            // so re-write the App-Group snapshot + hint WidgetKit to reload — otherwise the
+            // widget keeps showing the earlier provisional title until the next transition.
+            refreshHomeWidget()
+        }
     }
 
     /// Manually split the conversation (Feature 2): finalize the CURRENT capture (it's
@@ -966,17 +1380,60 @@ public final class CaptureManager: ObservableObject {
         log?.info("capture: manual split → new conversation")
     }
 
+    /// The Live Activity "End Current" button (App Intent) target: end/finalize the CURRENT
+    /// conversation now (it becomes a discrete card, sent for transcription) and keep
+    /// capture running — the next voiced audio opens a fresh conversation. Semantically the
+    /// same end-current-start-new boundary as `splitConversation()`, just surfaced to the
+    /// user as "end this conversation". Returns whether it acted (false = nothing was
+    /// recording → the button was a no-op). No-op is intentional so a stale button press
+    /// during a lull never mints an empty conversation.
+    @discardableResult
+    public func endCurrentConversation() -> Bool {
+        guard active != nil else { return false }
+        splitConversation()
+        return true
+    }
+
+    /// Whether the Live Activity's "End Current" button should be enabled — there must be
+    /// an open conversation to end. (The button also no-ops safely if pressed when false.)
+    public var canEndCurrentConversation: Bool { active != nil }
+
     private func endSession() {
         router.setWAL(nil)
-        // Capture the on-device transcript BEFORE teardown clears it, and persist it as
-        // the conversation's PROVISIONAL content so the card shows readable text the
-        // INSTANT it's stopped — resilient to slow/failed Kiln transcription (Feature 1).
+        guard let finished = active else {
+            // No active session — still ensure any live preview is torn down.
+            endLiveTranscription()
+            router.setExternalPCM(false)
+            return
+        }
+        // Substance gate: read how much VOICED audio this capture accumulated and the
+        // on-device transcript we hold RIGHT NOW (before teardown clears it).
+        let voiced = router.sessionVoicedFrameCount()
         let onDeviceNow = liveTranscript.displayText
-        let finishedId = active?.captureId
-        if let finishedId { seedProvisionalCard(finishedId, transcript: onDeviceNow) }
+        let duration = max(0, Date().timeIntervalSince1970 - startTime(of: finished))
+        if !CaptureManager.hasUploadSubstance(voicedFrames: voiced,
+                                              onDeviceTranscript: onDeviceNow,
+                                              durationSeconds: duration) {
+            // JUNK FRAGMENT — drop it LOCALLY. Never seed a card, never mark it
+            // pending-finalize, never POST it to the door. The bytes stay on disk under a
+            // durable `.discarded` marker (nothing deleted); drain + visibility both skip it.
+            endLiveTranscription()                       // tear down the transcriber (no seed)
+            router.setExternalPCM(false)
+            finished.finish()
+            active = nil
+            discardLowSubstance(finished.captureId, voicedFrames: voiced)
+            rebuildVisibleCaptures()                     // ensure the fragment never shows
+            pushLiveState(.end)
+            log?.info("capture \(finished.captureId): DISCARDED — \(voiced) voiced frame(s) < \(Self.minVoicedFramesToUpload), no meaningful transcript; not uploaded")
+            return
+        }
+        // Above the bar — the existing real-conversation finalize path. Persist the
+        // on-device transcript as PROVISIONAL content so the card shows readable text the
+        // INSTANT it's stopped — resilient to slow/failed Kiln transcription (Feature 1).
+        let finishedId = finished.captureId
+        seedProvisionalCard(finishedId, transcript: onDeviceNow)
         endLiveTranscription(seedInto: finishedId)   // stop + (async) refine the seed
         router.setExternalPCM(false)                 // clear the mic's direct-PCM tap mode
-        guard let finished = active else { return }
         finished.finish()
         active = nil
         // A closed conversation must reach the Lore inbox: mark it pending-finalize
@@ -997,6 +1454,10 @@ public final class CaptureManager: ObservableObject {
             await finished.sync()                 // snappy first sync
             await self?.tryFinalize(finished)     // finalize once segments are ACK'd
         }
+        // End the Live Activity into a brief idle "last conversation" state + refresh the
+        // widget. The provisional card seeded above gives `lastFinishedConversation()` a
+        // title immediately; a later Kiln title refresh re-pushes via the next transition.
+        pushLiveState(.end)
         log?.info("capture \(id): session ended (pending finalize → Lore)")
     }
 
@@ -1047,6 +1508,9 @@ public final class CaptureManager: ObservableObject {
         do {
             try await finalizeCapture(id, meta)
             clearNeedsFinalize(id)
+            // The conversation is now the authoritative last-finished; make sure the home
+            // widget's snapshot reflects it the moment finalize completes (best-effort hint).
+            refreshHomeWidget()
             log?.info("capture \(id): finalized → advanced to Lore inbox")
         } catch {
             log?.warn("capture \(id): finalize failed (\((error as NSError).localizedDescription)) — staying pending, will retry")
@@ -1062,12 +1526,14 @@ public final class CaptureManager: ObservableObject {
         isPaused = true
         CaptureSettings.omiCaptureDesiredState = .paused
         router.setPaused(true)
+        pushLiveState(.update)   // reflect paused state on the Live Activity + widget
         log?.info("capture: paused")
     }
     public func resume() {
         isPaused = false
         CaptureSettings.omiCaptureDesiredState = .listening
         router.setPaused(false)
+        pushLiveState(.update)
         log?.info("capture: resumed")
     }
     public func togglePause() { isPaused ? resume() : pause() }
@@ -1101,6 +1567,8 @@ public final class CaptureManager: ObservableObject {
         for wal in captures where wal.status.pendingSegments > 0 {
             let id = wal.captureId
             if isAbandoned(id) { continue }
+            if isDiscarded(id) { continue }   // a sub-substance junk fragment never uploads
+            if let held = suspendedSession, held.wal === wal { continue }   // hold uploads until the grace resolves
             // NEVER LOSE AUDIO: there is NO size / age / failure-count abandon here. A
             // large, old, or briefly-offline capture keeps draining (resuming from its
             // watermark) until fully uploaded. The only retire is permanent poison,
@@ -1170,6 +1638,31 @@ public final class CaptureManager: ObservableObject {
         clearNeedsFinalize(captureId)
         retryStates[captureId] = nil
         log?.error("capture \(captureId): RETIRED (permanent poison: \(reason)) — audio KEPT on device, no longer retried")
+    }
+
+    // MARK: local discard (sub-substance junk fragments — audio kept, never uploaded)
+
+    private func discardMarker(_ captureId: String) -> URL {
+        baseDir.appendingPathComponent(captureId, isDirectory: true)
+            .appendingPathComponent(".discarded")
+    }
+    /// True once a capture was locally discarded as a sub-substance junk fragment — so it
+    /// stays discarded across relaunch and is never re-queued for upload nor shown.
+    private func isDiscarded(_ captureId: String) -> Bool {
+        FileManager.default.fileExists(atPath: discardMarker(captureId).path)
+    }
+    /// Locally DISCARD a sub-substance capture: write a durable `.discarded` marker (so a
+    /// relaunch keeps it discarded + never re-queues it) and clear any finalize/retry
+    /// intent. The audio bytes on disk are KEPT (nothing is deleted) but are never uploaded
+    /// to the door, and the capture is hidden from the timeline. This is the phone's
+    /// junk-fragment gate for silent blips + transient Omi BLE reconnect stubs.
+    private func discardLowSubstance(_ captureId: String, voicedFrames: Int) {
+        let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let reason = "below min-substance bar: \(voicedFrames) voiced frame(s) < \(Self.minVoicedFramesToUpload)"
+        try? Data(reason.utf8).write(to: discardMarker(captureId), options: [.atomic])
+        clearNeedsFinalize(captureId)
+        retryStates[captureId] = nil
     }
 
     // MARK: retention throttle (keep the big disk sweeps off the every-5s drain)
@@ -1271,13 +1764,48 @@ public final class CaptureManager: ObservableObject {
 
     // MARK: persistence (resume across launches)
 
+    /// Hydrate the timeline from disk — SYNCHRONOUS so a launch/resume sees its captures
+    /// immediately, but BOUNDED so it can't overrun the launch watchdog. We enumerate names
+    /// only (one cheap bulk syscall), walk them newest-first, skip discarded junk fragments,
+    /// and STOP after hydrating `maxCapturesToLoad` — so launch work is O(cap), never O(all
+    /// folders on disk). A large backlog of discarded fragments used to be hydrated in full
+    /// on the main thread and SIGKILL'd the app (FRONTBOARD watchdog). Old discarded folders
+    /// are reclaimed separately, off the launch path (`pruneDiscardedFragments`).
     private func loadExisting() {
         let fm = FileManager.default
-        guard let dirs = try? fm.contentsOfDirectory(at: baseDir, includingPropertiesForKeys: nil) else { return }
-        let ids = dirs.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }
-            .map { $0.lastPathComponent }
-        for id in ids.sorted(by: >) {
-            captures.append(makeWAL(captureId: id))
+        guard let entries = try? fm.contentsOfDirectory(at: baseDir, includingPropertiesForKeys: nil) else { return }
+        let names = entries.map { $0.lastPathComponent }
+            .filter { !$0.hasPrefix(".") }
+            .sorted(by: >)   // ids are timestamp-prefixed → newest first
+        for name in names {
+            if captures.count >= Self.maxCapturesToLoad { break }
+            let dir = baseDir.appendingPathComponent(name, isDirectory: true)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            // Discarded junk fragments are never shown or finalized — don't hydrate them.
+            if fm.fileExists(atPath: dir.appendingPathComponent(".discarded").path) { continue }
+            captures.append(makeWAL(captureId: name))
+        }
+        pruneDiscardedFragments()
+    }
+
+    /// Reclaim discarded junk-fragment folders older than `discardedRetention`, OFF the main
+    /// thread so it never touches launch latency. The audio was never uploaded and is not
+    /// shown; keeping tens of thousands of tiny folders forever only bloats the container and
+    /// slows every launch enumeration.
+    private func pruneDiscardedFragments() {
+        let base = baseDir
+        let retention = Self.discardedRetention
+        Task.detached(priority: .background) {
+            let fm = FileManager.default
+            guard let entries = try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: nil) else { return }
+            let now = Date()
+            for url in entries {
+                let marker = url.appendingPathComponent(".discarded")
+                guard fm.fileExists(atPath: marker.path) else { continue }
+                let m = (try? marker.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                if let m, now.timeIntervalSince(m) > retention { try? fm.removeItem(at: url) }
+            }
         }
     }
 

@@ -58,7 +58,9 @@ final class ConversationListHygieneTests: XCTestCase {
         src.onState?(.streaming)
         try await waitUntil { mgr.active != nil }
         let closedId = try XCTUnwrap(mgr.active).captureId
-        for _ in 0..<30 { src.onFrame?(RealOmiFrames.voiced()) }
+        // Enough voice to clear the min-substance upload bar (else the split section is
+        // dropped as a junk fragment and never gets a durable ended_at bound).
+        for _ in 0..<(CaptureManager.minVoicedFramesToUpload + 20) { src.onFrame?(RealOmiFrames.voiced()) }
 
         mgr.splitConversation()
         // recordEnd runs in endSession's async Task — wait for the durable bound.

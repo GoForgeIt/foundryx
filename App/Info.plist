@@ -60,6 +60,8 @@
 	<string>FoundryX records conversations using your phone's microphone (when your Omi isn't connected) and captures audio from your Omi wearable. Audio stays on your devices.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>FoundryX shows a live, on-device transcript preview as you speak. Speech recognition runs entirely on your phone and the text stays on your devices.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>

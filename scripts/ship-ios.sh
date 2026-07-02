@@ -11,6 +11,7 @@
 #   - build/signing/dist.pem  (Apple Distribution leaf cert, PEM)
 #   - build/signing/AppleWWDRCAG3.cer  (WWDR G3 intermediate, DER — issuer of the leaf)
 #   - build/signing/FoundryX_AppStore.mobileprovision
+#   - build/signing/FoundryX_Widget_AppStore.mobileprovision  (widget extension)
 #   - ~/.appstoreconnect/private_keys/AuthKey_TY9TX3FBAD.p8  (altool finds it here)
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -20,6 +21,7 @@ PROJECT=FoundryX.xcodeproj
 APIKEY=TY9TX3FBAD                                   # public ASC API key id
 APIISSUER=6515707a-bc3b-4391-a626-8997a04d3afa      # public ASC issuer id
 BUNDLE_ID=com.goforgeit.foundryx
+WIDGET_BUNDLE_ID=com.goforgeit.foundryx.widget
 TEAM_ID=ND7H73W8VZ
 BUILD_NUM="$(git rev-list --count HEAD)"
 
@@ -41,8 +43,11 @@ xcodebuild archive \
 APP="build/FoundryX.xcarchive/Products/Applications/FoundryX.app"
 [ -d "$APP" ] || { echo "archive produced no .app"; exit 1; }
 
-# 3. Embed the provisioning profile.
+# 3. Embed the provisioning profiles (app + widget extension).
 cp build/signing/FoundryX_AppStore.mobileprovision "$APP/embedded.mobileprovision"
+WIDGET_APPEX="$APP/PlugIns/FoundryXWidget.appex"
+[ -d "$WIDGET_APPEX" ] || { echo "archive produced no widget .appex at $WIDGET_APPEX"; exit 1; }
+cp build/signing/FoundryX_Widget_AppStore.mobileprovision "$WIDGET_APPEX/embedded.mobileprovision"
 
 # 4. Build the signing chain: PRIVATE KEY + leaf cert + WWDR G3 intermediate.
 #    (dist.pem holds ONLY the leaf cert; the key lives in dist.key — rcodesign needs
@@ -74,11 +79,36 @@ cat > build/entitlements-min.xml <<PLIST
 </plist>
 PLIST
 
-# 6. Sign with rcodesign.
-echo "==> rcodesign sign"
+# 5b. Widget extension entitlements — SAME app group, but its OWN application-identifier
+#     (com.goforgeit.foundryx.widget). A nested .appex signed with the app's identifier is
+#     rejected by App Store, so this is applied scoped to the .appex path below.
+cat > build/entitlements-widget.xml <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>application-identifier</key>
+	<string>${TEAM_ID}.${WIDGET_BUNDLE_ID}</string>
+	<key>com.apple.developer.team-identifier</key>
+	<string>${TEAM_ID}</string>
+	<key>com.apple.security.application-groups</key>
+	<array><string>group.${BUNDLE_ID}</string></array>
+	<key>keychain-access-groups</key>
+	<array><string>${TEAM_ID}.${WIDGET_BUNDLE_ID}</string></array>
+	<key>get-task-allow</key>
+	<false/>
+</dict>
+</plist>
+PLIST
+
+# 6. Sign with rcodesign. The unscoped entitlements apply to the app (and, by default, all
+#    nested entities); the scoped 'PlugIns/...appex:' entry OVERRIDES them for the widget so
+#    it gets its own application-identifier. rcodesign reads each bundle's embedded profile.
+echo "==> rcodesign sign (app + widget)"
 ~/.cargo/bin/rcodesign sign \
   --pem-file build/sign-chain.pem \
   --entitlements-xml-file build/entitlements-min.xml \
+  --entitlements-xml-file "PlugIns/FoundryXWidget.appex:build/entitlements-widget.xml" \
   --code-signature-flags runtime \
   "$APP" 2>&1 | grep -iE "cryptographic signature|error" || true
 

@@ -56,20 +56,17 @@ Feature: FoundryX captures Omi audio durably to the door
     Given the Omi is not connected
     Then I can record a conversation with the phone microphone
 
-  Scenario: the Omi connect control is a compact icon in the capture header
-    Given the Omi is not connected
-    Then the capture header shows the Omi as a small icon next to the mic record control
+  # Source connection is automatic + self-healing: the capture page auto-connects to the
+  # saved Omi and auto-reconnects on a drop. The user never hand-drives a BLE scan from
+  # here — only first-time pairing (no saved device) surfaces a tap-to-connect.
 
-  Scenario: tapping the Omi icon starts a scan and the icon expands
-    Given the Omi is not connected
-    When I tap the Omi icon in the capture header
-    Then a scan for my Omi begins
-    And the Omi control expands to show "Scanning…" with an activity indicator
+  Scenario: the capture page surfaces an inline connect affordance when nothing is connected
+    Given the Omi is not connected and nothing is being captured
+    Then the capture page shows an inline "Connect your Omi" affordance
 
-  Scenario: tapping the scanning Omi control stops the scan and collapses it
-    Given the capture header is scanning for my Omi
-    When I tap the Omi control again
-    Then the scan stops and the control collapses back to its compact icon
+  Scenario: a dropped Omi link reconnects automatically without the user driving a scan
+    Given the Omi link has dropped
+    Then the capture page shows an auto-reconnecting status and no scan control
 
   Scenario: choosing the phone microphone as the capture source does not auto-connect the Omi
     Given I choose the phone microphone as my capture source
@@ -86,6 +83,28 @@ Feature: FoundryX captures Omi audio durably to the door
     Given an ambient capture has been recording one conversation past the maximum duration
     When the segmentation watchdog next checks the conversation
     Then the conversation is finalized and a fresh one begins so nothing accumulates for hours
+
+  Scenario: a sub-substance fragment is never uploaded to the door
+    Given an ambient capture records only a brief silent or one-word fragment
+    When the conversation ends
+    Then the fragment is kept on the phone but never uploaded to the door
+    And it is not shown in the conversation list
+
+  Scenario: a real conversation clears the substance bar and is uploaded
+    Given an ambient capture records a conversation with real spoken content
+    When the conversation ends
+    Then the conversation is finalized and sent for transcription
+
+  Scenario: a transient Omi disconnect resumes the same conversation instead of fragmenting it
+    Given an ambient capture is recording a conversation
+    When the Omi link briefly drops and reconnects within the grace window
+    Then recording resumes into the same conversation
+    And no new conversation or upload stub is created
+
+  Scenario: an Omi disconnect that stays down ends the conversation after the grace window
+    Given an ambient capture is recording a conversation
+    When the Omi link drops and does not reconnect within the grace window
+    Then the conversation ends and is finalized like a normal boundary
 
   Scenario: a very short noise burst does not become its own conversation
     Given an ambient capture records only a one or two word burst
@@ -147,3 +166,18 @@ Feature: FoundryX captures Omi audio durably to the door
     Given a real Omi wearable in range
     When the app connects and subscribes to the audio stream
     Then Opus frames arrive and are written to the WAL
+
+  Scenario: only actual conversations are uploaded — ambient noise is not
+    Given ambient capture is listening
+    When a long stretch of background noise with no real speech is captured
+    Then that capture is dropped locally and never uploaded to the door
+
+  Scenario: a real spoken exchange is uploaded even if it is brief
+    Given ambient capture is listening
+    When I have a short spoken exchange that transcribes to real words
+    Then that conversation is finalized and uploaded
+
+  Scenario: a long conversation is kept even when on-device transcription is unavailable
+    Given a device without on-device transcription
+    When I have a long spoken conversation
+    Then that conversation is finalized and uploaded on the voiced-audio signal alone

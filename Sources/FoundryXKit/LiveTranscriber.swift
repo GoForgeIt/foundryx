@@ -55,19 +55,35 @@ public struct LiveTranscript: Sendable, Equatable {
     /// to full opacity the moment the recognizer finalizes it (volatile → finalized).
     /// Pure (no SwiftUI) so the `LiveTranscriptTicker` just renders the result and a
     /// brine test can assert the opacities + that no words are dropped/duplicated.
-    public func renderedSegments(fadeWindow: Int = 3, floorOpacity: Double = 0.35) -> [LiveTranscriptSegment] {
+    ///
+    /// `maxWords` bounds the result to the most-recent N words (the tail). The live
+    /// ticker only shows ~2 lines, but the full session's `finalizedText` grows without
+    /// bound during continuous capture — and the UI folds one `Text` per segment into a
+    /// nested `ConcatenatedTextStorage`, whose resolve recurses once per word. Past a few
+    /// hundred words that overflows the 1 MB main-thread stack (the build-89/90 SIGSEGV)
+    /// and pegs the widget's CPU budget. Capping the render to a tail keeps it O(1) in
+    /// session length; the authoritative full transcript still lives in Lore/Kiln. `nil`
+    /// = uncapped (unchanged behavior for existing callers/tests).
+    public func renderedSegments(fadeWindow: Int = 3,
+                                 floorOpacity: Double = 0.35,
+                                 maxWords: Int? = nil) -> [LiveTranscriptSegment] {
         let finalWords = finalizedText.split(separator: " ").map(String.init)
         let volatileWords = volatileTail.split(separator: " ").map(String.init)
         var segs = finalWords.map { LiveTranscriptSegment(text: $0, opacity: 1.0) }
         let n = volatileWords.count
-        guard n > 0 else { return segs }
-        // Newest volatile word = faintest; ramp up to full over `fadeWindow` words.
-        let window = max(1, fadeWindow)
-        let step = (1.0 - floorOpacity) / Double(window)
-        for (i, w) in volatileWords.enumerated() {
-            let fromEnd = n - 1 - i                     // 0 = newest (last) volatile word
-            let opacity = fromEnd >= window ? 1.0 : min(1.0, floorOpacity + Double(fromEnd) * step)
-            segs.append(LiveTranscriptSegment(text: w, opacity: opacity, volatile: true))
+        if n > 0 {
+            // Newest volatile word = faintest; ramp up to full over `fadeWindow` words.
+            let window = max(1, fadeWindow)
+            let step = (1.0 - floorOpacity) / Double(window)
+            for (i, w) in volatileWords.enumerated() {
+                let fromEnd = n - 1 - i                 // 0 = newest (last) volatile word
+                let opacity = fromEnd >= window ? 1.0 : min(1.0, floorOpacity + Double(fromEnd) * step)
+                segs.append(LiveTranscriptSegment(text: w, opacity: opacity, volatile: true))
+            }
+        }
+        // Bound to the most-recent `maxWords` (keep the tail — newest words + volatile).
+        if let maxWords, maxWords >= 0, segs.count > maxWords {
+            segs = Array(segs.suffix(maxWords))
         }
         return segs
     }
@@ -89,6 +105,27 @@ public struct LiveTranscriptSegment: Sendable, Equatable {
         self.text = text
         self.opacity = opacity
         self.volatile = volatile
+    }
+}
+
+/// The single shared bound for the EPHEMERAL live-transcript buffer. FoundryX captures
+/// continuously, and the on-device transcribers accumulate finalized text for the life of
+/// a conversation — unbounded, that growth fed the build-89/90 main-thread stack overflow
+/// (rendering one styled run per word) and grows memory during a long session. The live
+/// preview is display-only; Kiln's `provisionalTranscript` is the authoritative full
+/// transcript. So both backends store only a rolling tail of the most-recent words.
+public enum LiveTranscriptBuffer {
+    /// Words retained in the live buffer. ≥ the ticker's render cap (48) so the visible
+    /// preview is never starved by the bound; the rest is Kiln's job, not the phone's.
+    public static let maxRetainedWords = 80
+
+    /// Keep only the most-recent `maxWords` words of an (ever-growing) live transcript.
+    /// Both transcriber backends route their `finalizedText` through this, so the
+    /// ephemeral buffer — and everything derived from it — stays O(1) in session length.
+    public static func boundedTail(_ text: String, maxWords: Int = maxRetainedWords) -> String {
+        let words = text.split(separator: " ")
+        guard words.count > maxWords else { return text }
+        return words.suffix(maxWords).joined(separator: " ")
     }
 }
 
@@ -275,7 +312,11 @@ public final class SpeechAnalyzerLiveTranscriber: LiveTranscribing, @unchecked S
                 for try await result in transcriber.results {
                     let piece = String(result.text.characters)
                     if result.isFinal {
-                        self.finalizedText = self.appendSentence(self.finalizedText, piece)
+                        // Bound the retained buffer to a rolling tail — the live preview is
+                        // ephemeral (Kiln is authoritative); unbounded growth is what fed
+                        // the build-89/90 stack overflow.
+                        self.finalizedText = LiveTranscriptBuffer.boundedTail(
+                            self.appendSentence(self.finalizedText, piece))
                         self.publish.yield(LiveTranscript(finalizedText: self.finalizedText,
                                                           volatileTail: ""))
                     } else {
@@ -390,7 +431,10 @@ public final class SFSpeechLiveTranscriber: LiveTranscribing, @unchecked Sendabl
 
         task = recognizer.recognitionTask(with: request) { [weak self] result, _ in
             guard let self, let result else { return }
-            let text = result.bestTranscription.formattedString
+            // SFSpeech revises the WHOLE utterance each callback, so it also grows
+            // unbounded over a long session — bound the retained tail (see
+            // LiveTranscriptBuffer; the live preview is ephemeral, Kiln is authoritative).
+            let text = LiveTranscriptBuffer.boundedTail(result.bestTranscription.formattedString)
             if result.isFinal {
                 self.finalizedText = text
                 self.publish.yield(LiveTranscript(finalizedText: text, volatileTail: ""))

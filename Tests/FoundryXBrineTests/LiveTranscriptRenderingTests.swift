@@ -86,4 +86,27 @@ final class LiveTranscriptRenderingTests: XCTestCase {
     func testEmptyTranscriptHasNoSegments() {
         XCTAssertTrue(LiveTranscript.empty.renderedSegments().isEmpty)
     }
+
+    /// A LONG continuous conversation must not produce an unbounded segment list: the
+    /// live ticker only shows ~2 lines, and folding one `Text` per word into a
+    /// `ConcatenatedTextStorage` overflows the main-thread stack past a few hundred words
+    /// (the build-89/90 crash). `maxWords` caps the render to a bounded tail.
+    func testLongTranscriptIsCappedToATailWindow() {
+        let body = (1...1200).map { "word\($0)" }.joined(separator: " ")
+        let t = LiveTranscript(finalizedText: body, volatileTail: "settling now")
+        let segs = t.renderedSegments(maxWords: 48)
+
+        XCTAssertLessThanOrEqual(segs.count, 48, "render must be bounded regardless of length")
+        // The cap keeps the NEWEST words (the tail), including the volatile ones.
+        XCTAssertEqual(segs.suffix(2).map(\.text), ["settling", "now"])
+        XCTAssertTrue(segs.last?.volatile ?? false)
+    }
+
+    /// Without a cap (or with a cap larger than the content) behavior is unchanged —
+    /// existing callers/tests keep their full segment list.
+    func testUncappedRenderIsUnchanged() {
+        let t = LiveTranscript(finalizedText: "hello there", volatileTail: "world")
+        XCTAssertEqual(t.renderedSegments().count, 3)
+        XCTAssertEqual(t.renderedSegments(maxWords: 100).count, 3)
+    }
 }
