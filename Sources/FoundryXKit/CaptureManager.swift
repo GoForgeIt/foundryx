@@ -430,6 +430,18 @@ public final class CaptureManager: ObservableObject {
     /// backlog concurrency valve) — so a multi-day backlog drains steadily, never a storm.
     public nonisolated static let maxCapturesPerDrain = 3
 
+    /// Most-recent captures hydrated into the in-memory timeline at launch. Bounded so a
+    /// long-lived install with a large on-disk backlog doesn't enumerate + hydrate tens of
+    /// thousands of folders on the main thread at launch — which overran the iOS launch
+    /// watchdog and got the app SIGKILL'd (FRONTBOARD). Older captures stay on disk.
+    public nonisolated static let maxCapturesToLoad = 300
+
+    /// Discarded junk fragments (`.discarded`) kept on disk beyond this age are pruned — the
+    /// audio was never uploaded and is not shown, so retaining tens of thousands of tiny
+    /// folders forever only bloats the container + slows launch enumeration. A short window
+    /// preserves recent auditability without unbounded accumulation.
+    public nonisolated static let discardedRetention: TimeInterval = 2 * 24 * 60 * 60   // 2 days
+
     /// Per-capture upload retry state (consecutive failures + earliest next attempt).
     private struct RetryState { var failures = 0; var nextEligible: TimeInterval = 0 }
     private var retryStates: [String: RetryState] = [:]
@@ -1752,13 +1764,48 @@ public final class CaptureManager: ObservableObject {
 
     // MARK: persistence (resume across launches)
 
+    /// Hydrate the timeline from disk — SYNCHRONOUS so a launch/resume sees its captures
+    /// immediately, but BOUNDED so it can't overrun the launch watchdog. We enumerate names
+    /// only (one cheap bulk syscall), walk them newest-first, skip discarded junk fragments,
+    /// and STOP after hydrating `maxCapturesToLoad` — so launch work is O(cap), never O(all
+    /// folders on disk). A large backlog of discarded fragments used to be hydrated in full
+    /// on the main thread and SIGKILL'd the app (FRONTBOARD watchdog). Old discarded folders
+    /// are reclaimed separately, off the launch path (`pruneDiscardedFragments`).
     private func loadExisting() {
         let fm = FileManager.default
-        guard let dirs = try? fm.contentsOfDirectory(at: baseDir, includingPropertiesForKeys: nil) else { return }
-        let ids = dirs.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }
-            .map { $0.lastPathComponent }
-        for id in ids.sorted(by: >) {
-            captures.append(makeWAL(captureId: id))
+        guard let entries = try? fm.contentsOfDirectory(at: baseDir, includingPropertiesForKeys: nil) else { return }
+        let names = entries.map { $0.lastPathComponent }
+            .filter { !$0.hasPrefix(".") }
+            .sorted(by: >)   // ids are timestamp-prefixed → newest first
+        for name in names {
+            if captures.count >= Self.maxCapturesToLoad { break }
+            let dir = baseDir.appendingPathComponent(name, isDirectory: true)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            // Discarded junk fragments are never shown or finalized — don't hydrate them.
+            if fm.fileExists(atPath: dir.appendingPathComponent(".discarded").path) { continue }
+            captures.append(makeWAL(captureId: name))
+        }
+        pruneDiscardedFragments()
+    }
+
+    /// Reclaim discarded junk-fragment folders older than `discardedRetention`, OFF the main
+    /// thread so it never touches launch latency. The audio was never uploaded and is not
+    /// shown; keeping tens of thousands of tiny folders forever only bloats the container and
+    /// slows every launch enumeration.
+    private func pruneDiscardedFragments() {
+        let base = baseDir
+        let retention = Self.discardedRetention
+        Task.detached(priority: .background) {
+            let fm = FileManager.default
+            guard let entries = try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: nil) else { return }
+            let now = Date()
+            for url in entries {
+                let marker = url.appendingPathComponent(".discarded")
+                guard fm.fileExists(atPath: marker.path) else { continue }
+                let m = (try? marker.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                if let m, now.timeIntervalSince(m) > retention { try? fm.removeItem(at: url) }
+            }
         }
     }
 

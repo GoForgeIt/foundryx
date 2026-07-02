@@ -97,6 +97,23 @@ final class CaptureSubstanceGateTests: XCTestCase {
             voicedFrames: 10, onDeviceTranscript: "grab milk on the way home", durationSeconds: 4))
     }
 
+    /// Launch hydration skips discarded junk fragments — the accumulation that overran the
+    /// launch watchdog (SIGKILL) on a long-lived install. A real capture is still hydrated.
+    func testLoadExistingSkipsDiscardedFragments() throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let fm = FileManager.default
+        let real = "omi-20260701-120000-realconv"
+        let junk = "omi-20260701-110000-junkfrag"
+        try fm.createDirectory(at: dir.appendingPathComponent(real), withIntermediateDirectories: true)
+        let junkDir = dir.appendingPathComponent(junk)
+        try fm.createDirectory(at: junkDir, withIntermediateDirectories: true)
+        try Data().write(to: junkDir.appendingPathComponent(".discarded"))
+
+        let mgr = makeManager(dir, TestSource(), Recorder())   // init → loadExisting
+        XCTAssertTrue(mgr.captures.contains { $0.captureId == real }, "a real capture is hydrated at launch")
+        XCTAssertFalse(mgr.captures.contains { $0.captureId == junk }, "a discarded fragment is NOT hydrated")
+    }
+
     func testShouldEndSuspendedSession() {
         let w = CaptureManager.reconnectGraceWindow
         XCTAssertFalse(CaptureManager.shouldEndSuspendedSession(suspendedAt: 100, now: 100 + w - 0.5, window: w))
