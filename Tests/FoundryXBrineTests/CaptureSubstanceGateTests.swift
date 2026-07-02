@@ -65,13 +65,29 @@ final class CaptureSubstanceGateTests: XCTestCase {
 
     func testHasUploadSubstanceFrameBar() {
         let bar = CaptureManager.minVoicedFramesToUpload
-        // At/above the voiced-frame bar → real, regardless of transcript.
+        // With NO on-device transcript, the raised voiced-frame bar is the only gate.
         XCTAssertTrue(CaptureManager.hasUploadSubstance(voicedFrames: bar, onDeviceTranscript: nil, durationSeconds: 3))
         XCTAssertTrue(CaptureManager.hasUploadSubstance(voicedFrames: bar + 500, onDeviceTranscript: "", durationSeconds: 5))
-        // Below the bar with no / filler transcript → a fragment.
+        // No transcript + below the (high) voiced bar → a fragment.
         XCTAssertFalse(CaptureManager.hasUploadSubstance(voicedFrames: bar - 1, onDeviceTranscript: nil, durationSeconds: 3))
         XCTAssertFalse(CaptureManager.hasUploadSubstance(voicedFrames: 5, onDeviceTranscript: "Thank you", durationSeconds: 2))
         XCTAssertFalse(CaptureManager.hasUploadSubstance(voicedFrames: 0, onDeviceTranscript: "   ", durationSeconds: 1))
+    }
+
+    /// THE FIX: when a transcript exists, content — not amplitude — decides. Ambient noise
+    /// that cleared the level threshold for a long time but transcribes to nothing/filler is
+    /// DROPPED, where the old amplitude-only gate uploaded it as a junk conversation.
+    func testAmplitudeAloneNoLongerUploadsNoise() {
+        let bar = CaptureManager.minVoicedFramesToUpload
+        // Long voiced audio + a FILLER transcript (near-silent ambient) → dropped now.
+        XCTAssertFalse(CaptureManager.hasUploadSubstance(
+            voicedFrames: bar + 1000, onDeviceTranscript: "thank you. okay. you.", durationSeconds: 45))
+        // Real speech of ANY length clears it — content is what matters.
+        XCTAssertTrue(CaptureManager.hasUploadSubstance(
+            voicedFrames: 30, onDeviceTranscript: "can you grab milk on the way home", durationSeconds: 4))
+        // A genuinely long capture with NO transcript (STT failed) is still kept.
+        XCTAssertTrue(CaptureManager.hasUploadSubstance(
+            voicedFrames: bar, onDeviceTranscript: nil, durationSeconds: 200))
     }
 
     func testHasUploadSubstanceTranscriptSafetyValve() {

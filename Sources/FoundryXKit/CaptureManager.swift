@@ -467,17 +467,18 @@ public final class CaptureManager: ObservableObject {
 
     // MARK: capture-substance gate + Omi reconnect coalescing (junk-fragment control)
 
-    /// Minimum VOICED frames a capture must accumulate before it is finalized + uploaded
-    /// to Lore. Below this bar the capture is treated as a JUNK FRAGMENT — a silent /
-    /// one-word blip, or a transient Omi BLE reconnect stub — and is dropped LOCALLY (kept
-    /// on disk under a `.discarded` marker, never POSTed to the door). At the Omi's ~50
-    /// voiced-frames/s this is ~8 s of real voice: high enough to reject sub-second
-    /// reconnect stubs + filler blips, low enough to keep a normal conversation. (Contrast
-    /// `SilenceSegmenter.minVoicedFramesToClose` ≈ 2 s, which only decides silence-gap
-    /// SEGMENT boundaries, not upload-worthiness.) A genuine brief exchange that
-    /// under-voiced is still kept when its on-device transcript is already meaningful (see
-    /// `hasUploadSubstance`). Tunable.
-    public nonisolated static let minVoicedFramesToUpload = 400
+    /// The VOICED-frame bar used ONLY when there is NO on-device transcript at all (STT
+    /// unavailable on this OS, or it produced literally nothing). A capture is a real
+    /// conversation if either (a) it has meaningful transcribed SPEECH, or (b) — absent any
+    /// transcript — it ran this long. This bar is deliberately HIGH (~60 s at Omi's ~50
+    /// voiced-frames/s) because voiced-amplitude ALONE is a weak signal: ambient noise,
+    /// HVAC, keyboard clatter all clear the level threshold without being speech. Requiring
+    /// a full minute of continuous voiced audio before we'll keep a transcript-less capture
+    /// rejects the short noise fragments (the junk backlog was all < ~27 s) while still
+    /// preserving a genuinely long real conversation an old device couldn't transcribe.
+    /// (Contrast `SilenceSegmenter.minVoicedFramesToClose` ≈ 2 s, which only decides
+    /// silence-gap SEGMENT boundaries, not upload-worthiness.) Tunable.
+    public nonisolated static let minVoicedFramesToUpload = 3000
 
     /// A transient Omi BLE disconnect within this window RESUMES the open conversation
     /// (same captureId) instead of ending it — so a flaky link doesn't shatter one
@@ -487,18 +488,33 @@ public final class CaptureManager: ObservableObject {
     /// / permission-deny) ends immediately, bypassing the grace. Tunable.
     public nonisolated static let reconnectGraceWindow: TimeInterval = 20
 
-    /// Whether a just-closed capture has enough SUBSTANCE to finalize + upload to Lore, or
-    /// is a JUNK FRAGMENT to drop locally. Cleared when it holds ≥ `minVoicedFramesToUpload`
-    /// voiced frames (~8 s of real voice — the decisive test that rejects sub-second Omi
-    /// reconnect stubs + silent blips), OR — as a safety valve for a genuine BRIEF exchange
-    /// that under-voiced — when its on-device transcript already passes the same
-    /// empty/filler filter the timeline uses. Everything else is a fragment.
+    /// Whether a just-closed capture is a real CONVERSATION worth finalizing + uploading to
+    /// Lore, or a JUNK FRAGMENT to drop locally. The Omi model: a conversation is SPEECH,
+    /// not merely sound above a level threshold. So:
+    ///
+    ///   1. If we hold an on-device transcript, gate on MEANINGFUL SPEECH
+    ///      (`ConversationContentFilter`, the same empty/filler bar the timeline uses).
+    ///      Ambient noise transcribes to nothing or to filler ("thank you", "okay") and is
+    ///      DROPPED however long it ran — this is what stops the junk backlog at the source.
+    ///   2. Only when there is NO transcript at all (STT unavailable / produced nothing) do
+    ///      we fall back to the raised voiced-audio bar (`minVoicedFramesToUpload`, ~60 s),
+    ///      so a genuinely long real conversation an old device couldn't transcribe is still
+    ///      kept, but short voiced-only noise is not.
+    ///
+    /// Prior behavior let ~8 s of voiced AMPLITUDE upload regardless of content, which is
+    /// exactly how thousands of noise/silence captures reached Lore.
     public nonisolated static func hasUploadSubstance(voicedFrames: Int,
                                                       onDeviceTranscript: String?,
                                                       durationSeconds: TimeInterval?) -> Bool {
-        if voicedFrames >= minVoicedFramesToUpload { return true }
-        return ConversationContentFilter.isMeaningful(transcript: onDeviceTranscript,
-                                                      durationSeconds: durationSeconds)
+        let hasTranscript = !(onDeviceTranscript?
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        if hasTranscript {
+            // Speech-gated: meaningful content keeps it; noise/filler drops it.
+            return ConversationContentFilter.isMeaningful(transcript: onDeviceTranscript,
+                                                          durationSeconds: durationSeconds)
+        }
+        // No transcript at all — keep only a genuinely long voiced capture.
+        return voicedFrames >= minVoicedFramesToUpload
     }
 
     /// Whether an Omi reconnect-grace hold that began at `suspendedAt` has elapsed by `now`

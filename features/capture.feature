@@ -166,3 +166,18 @@ Feature: FoundryX captures Omi audio durably to the door
     Given a real Omi wearable in range
     When the app connects and subscribes to the audio stream
     Then Opus frames arrive and are written to the WAL
+
+  Scenario: only actual conversations are uploaded — ambient noise is not
+    Given ambient capture is listening
+    When a long stretch of background noise with no real speech is captured
+    Then that capture is dropped locally and never uploaded to the door
+
+  Scenario: a real spoken exchange is uploaded even if it is brief
+    Given ambient capture is listening
+    When I have a short spoken exchange that transcribes to real words
+    Then that conversation is finalized and uploaded
+
+  Scenario: a long conversation is kept even when on-device transcription is unavailable
+    Given a device without on-device transcription
+    When I have a long spoken conversation
+    Then that conversation is finalized and uploaded on the voiced-audio signal alone
