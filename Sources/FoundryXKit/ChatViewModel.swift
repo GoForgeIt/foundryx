@@ -145,13 +145,14 @@ public final class ChatViewModel: ObservableObject {
         turnStartedAt = nil
     }
 
-    /// Pull the failed turn's user text back for a retry, removing its now-orphaned user
-    /// bubble so the re-send doesn't leave a duplicate, and resetting to idle. Returns nil
-    /// when there's nothing to retry (the turn didn't fail / had no text).
+    /// Pull the failed turn's user text back for a retry, removing the WHOLE failed turn
+    /// (the user bubble AND any partially-streamed assistant text after it) so the re-send
+    /// leaves neither a duplicate user message nor an orphaned partial reply. Resets to
+    /// idle. Returns nil when there's nothing to retry (the turn didn't fail / had no text).
     public func takeRetryText() -> String? {
         guard case .failed = turnState else { return nil }
         if let idx = messages.lastIndex(where: { $0.role == "user" }) {
-            messages.remove(at: idx)
+            messages.removeSubrange(idx...)
         }
         turnState = .idle
         return lastUserText.isEmpty ? nil : lastUserText

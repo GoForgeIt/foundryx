@@ -90,10 +90,10 @@ public final class RemoteSession: ObservableObject {
     public func restore() async {
         guard remote != nil, let signedInEmail = auth.signedInEmail else { return }
         if let cached = loadCache(), cached.email == signedInEmail {
-            relay = cached.relay
+            relay = Self.relayConfig(from: cached)
             idToken = cached.idToken
-            status = .connected(host: cached.relay.tunnelId)
-            note("restore: published cached host tunnel=\(cached.relay.tunnelId) (cached)")
+            status = .connected(host: cached.tunnelId)
+            note("restore: published cached host tunnel=\(cached.tunnelId) (cached)")
             await reresolveInBackground()
         } else {
             await resolve()
@@ -244,8 +244,14 @@ public final class RemoteSession: ObservableObject {
     // launch needs the token in hand before the first `await`. This is app-sandboxed and
     // self-healing (a stale token 401s at the door → `handleAuthExpired()` refreshes it).
     // Move to the Keychain when a sync seam exists — do NOT build new Keychain infra here.
+    //
+    // SECURITY: the phone's Noise static PRIVATE key is deliberately NOT part of this
+    // cache — it stays Keychain-only (PhoneStaticKey) and the RelayConfig is REBUILT from
+    // the Keychain on load. Only the non-secret route fields are persisted here.
     private struct CachedSession: Codable {
-        var relay: RelayConfig
+        var relayURL: URL
+        var tunnelId: String
+        var expectedDoorStatic: Data?
         var idToken: String
         var email: String
     }
@@ -263,11 +269,24 @@ public final class RemoteSession: ObservableObject {
         return try? JSONDecoder().decode(CachedSession.self, from: data)
     }
 
+    /// Rebuild the full RelayConfig from a cached route: the non-secret fields come from
+    /// disk; the Noise static private key comes from the Keychain (same durable identity
+    /// `HostResolver` uses, so this is behavior-identical to a live resolve).
+    private static func relayConfig(from cached: CachedSession) -> RelayConfig {
+        RelayConfig(relayURL: cached.relayURL,
+                    tunnelId: cached.tunnelId,
+                    staticPrivate: PhoneStaticKey.loadOrCreate(),
+                    expectedDoorStatic: cached.expectedDoorStatic)
+    }
+
     /// Write the current published route as the last-good session. No-op unless we have a
     /// full route (relay + token + email) — a partial write could restore a broken state.
+    /// Persists ONLY non-secret route fields (see CachedSession).
     private func saveCache() {
         guard let url = Self.cacheURL(), let relay, let idToken, let email else { return }
-        let cached = CachedSession(relay: relay, idToken: idToken, email: email)
+        let cached = CachedSession(relayURL: relay.relayURL, tunnelId: relay.tunnelId,
+                                   expectedDoorStatic: relay.expectedDoorStatic,
+                                   idToken: idToken, email: email)
         guard let data = try? JSONEncoder().encode(cached) else { return }
         try? data.write(to: url, options: .atomic)
     }

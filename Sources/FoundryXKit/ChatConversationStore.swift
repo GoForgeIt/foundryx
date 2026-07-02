@@ -322,6 +322,14 @@ public final class ChatConversationStore: ObservableObject {
         guard let data = try? Data(contentsOf: url) else { return }
         do {
             let decoded = try JSONDecoder.iso8601.decode(Persisted.self, from: data)
+            // Residual-corruption guard: a structurally-valid envelope whose EVERY
+            // conversation failed the lossy decode (non-trivial bytes, zero survivors)
+            // is corruption too — archive it rather than silently reseeding over it. A
+            // legitimately-empty store file is tiny (<1 KB), so this never false-fires.
+            if decoded.conversations.isEmpty, data.count > 1024 {
+                archiveCorruptFile(at: url)
+                return
+            }
             conversations = decoded.conversations
             activeId = decoded.activeId
         } catch {

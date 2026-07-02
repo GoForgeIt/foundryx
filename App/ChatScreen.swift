@@ -466,7 +466,15 @@ struct ChatScreen: View {
         model.setApprovalDelivery(.sending)
         Task {
             let ok = await sendApproval(callId: callId, decision: decision)
-            if !ok { model.setApprovalDelivery(.failed) }
+            if !ok { model.setApprovalDelivery(.failed); return }
+            // Watchdog: a "successful" POST can still fail to reach kiln-session (e.g. a
+            // gateway that answers 2xx without delivering — see the answerApproval relay
+            // gap filed with the DoorClient owner). If the door's resumed stream hasn't
+            // advanced the turn within 12s, surface a recoverable failure instead of
+            // wedging in "Sending…" forever. Harmless if the card already advanced
+            // (it only renders while awaiting approval).
+            try? await Task.sleep(nanoseconds: 12_000_000_000)
+            if model.approvalDelivery == .sending { model.setApprovalDelivery(.failed) }
         }
     }
 
