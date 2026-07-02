@@ -17,6 +17,11 @@ struct ChatScreen: View {
     @ObservedObject var log: DoorLog
     /// The capture→chat bridge — delivers an "Ask in chat" seed from a transcript.
     @ObservedObject var bridge: ChatBridge
+    /// PREVIEW SEAM: inject the empty-state recall chips instead of scanning the on-disk
+    /// capture store (so the simulator can screenshot them without real captures). nil ⇒
+    /// scan disk on appear. Set from RootView's FOUNDRYX_UI_PREVIEW switch. (A `var` with a
+    /// default so it stays in the memberwise init — a `let` with a default would be dropped.)
+    var injectedRecallChips: [RecallChip]? = nil
 
     @State private var input = ""
     @State private var sessionId = ""
@@ -26,6 +31,10 @@ struct ChatScreen: View {
     /// The conversation currently hydrated into `model` — guards against reloading the
     /// live view mid-stream when nothing actually switched.
     @State private var loadedId = ""
+    /// Recall chips shown in the empty state (recent captures + the static "agreed today").
+    @State private var recallChips: [RecallChip] = []
+    /// The recall chip currently fetching its seed (drives its inline spinner).
+    @State private var loadingChip: String?
 
     private var client: DoorClient { DoorClient(target: target, log: log) }
 
@@ -53,20 +62,26 @@ struct ChatScreen: View {
             ScrollView {
                 if model.messages.isEmpty {
                     // First-run / empty chat: a warm, branded prompt instead of a blank
-                    // screen — and it reflects the current privacy posture.
-                    GrainEmptyState(
-                        systemImage: isPrivate ? "lock.fill" : "sparkles",
-                        title: "Your Foundry is ready",
-                        message: isPrivate
-                            ? "Ask anything — this chat stays on your Mac."
-                            : "Ask anything. Switch to Private anytime to keep a chat on your Mac."
-                    )
+                    // screen — and it reflects the current privacy posture. Below it,
+                    // recall chips let a tap reopen a recent conversation as chat context.
+                    VStack(spacing: GrainSpacing.x6) {
+                        GrainEmptyState(
+                            systemImage: isPrivate ? "lock.fill" : "sparkles",
+                            title: "Your Foundry is ready",
+                            message: isPrivate
+                                ? "Ask anything — this chat stays on your Mac."
+                                : "Ask anything. Switch to Private anytime to keep a chat on your Mac."
+                        )
+                        recallChipsSection
+                    }
                     .padding(GrainSpacing.x4)
                     .padding(.top, GrainSpacing.x12)
                 } else {
                     ChatView(model: model,
-                             onApprove: { answer($0, "always") },
-                             onReject: { answer($0, "reject") })
+                             onApproveOnce: { answer($0, decision: "once") },
+                             onApproveAlways: { answer($0, decision: "always") },
+                             onReject: { answer($0, decision: "reject") },
+                             onRetry: { retryLastTurn() })
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
@@ -76,7 +91,7 @@ struct ChatScreen: View {
             GrainComposer("Message your Foundry…", text: $input, isSending: streaming, onSend: send)
         }
         .grainBackground()
-        .onAppear { hydrateActive(); consumePendingSeed(); Task { await loadModels() } }
+        .onAppear { hydrateActive(); consumePendingSeed(); loadRecallChips(); Task { await loadModels() } }
         .onChange(of: store.activeId) { _ in hydrateActive() }
         .onChange(of: bridge.pendingPrompt) { _ in consumePendingSeed() }
         .sheet(isPresented: $showingChats) {
@@ -170,6 +185,139 @@ struct ChatScreen: View {
         .padding(.vertical, GrainSpacing.x2)
     }
 
+    // MARK: recall chips (empty-state) — reopen a recent conversation as chat context
+
+    @ViewBuilder private var recallChipsSection: some View {
+        if !recallChips.isEmpty {
+            VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+                Text("Pick up where you left off")
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textMuted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                ForEach(recallChips) { chip in
+                    Button { tapRecallChip(chip) } label: {
+                        HStack(spacing: GrainSpacing.x2) {
+                            if loadingChip == chip.id {
+                                GrainSpinner(size: 14)
+                            } else {
+                                Image(systemName: chip.captureId == nil
+                                      ? "checkmark.seal" : "bubble.left.and.text.bubble.right.fill")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(GrainColor.forgeBlue)
+                            }
+                            Text(chip.displayLabel)
+                                .grainTextStyle(.body)
+                                .foregroundStyle(GrainColor.ink)
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.vertical, GrainSpacing.x2)
+                        .padding(.horizontal, GrainSpacing.x3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: GrainRadius.md, style: .continuous)
+                                .fill(GrainColor.backgroundSunken)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: GrainRadius.md, style: .continuous)
+                                .strokeBorder(GrainColor.border, lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(loadingChip != nil)
+                    .accessibilityIdentifier("recall-chip")
+                }
+            }
+        }
+    }
+
+    /// Populate the recall chips: injected sample (preview) or a scan of the on-disk
+    /// capture store (newest-named-conversations first) + the static "agreed today" chip.
+    private func loadRecallChips() {
+        if let injected = injectedRecallChips {
+            recallChips = injected
+            return
+        }
+        Task {
+            // Off the main actor — the scan touches disk (and may skip many untitled dirs).
+            let recent = await Task.detached(priority: .utility) {
+                Self.scanRecentCaptures(limit: 3)
+            }.value
+            recallChips = recent + [Self.agreedTodayChip]
+        }
+    }
+
+    /// The static chip: a plain, contextless "what did I commit to" recall.
+    static let agreedTodayChip = RecallChip(id: "agreed-today", captureId: nil,
+                                            title: "What did I agree to today?", startedAt: nil)
+
+    /// Scan the on-disk capture store for the most recent NAMED conversations → recall
+    /// chips (newest first; skips discarded fragments + untitled/provisional placeholders).
+    /// A pure local read that mirrors the capture timeline's launch hydration — no
+    /// on-device analysis, no network (thin client). `nonisolated` so it can run detached.
+    nonisolated static func scanRecentCaptures(limit: Int) -> [RecallChip] {
+        let base = CaptureWAL.documentsCaptures()
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: nil) else { return [] }
+        let names = entries.map { $0.lastPathComponent }
+            .filter { !$0.hasPrefix(".") }
+            .sorted(by: >)   // ids are timestamp-prefixed → newest first
+        var chips: [RecallChip] = []
+        for name in names {
+            if chips.count >= limit { break }
+            let dir = base.appendingPathComponent(name, isDirectory: true)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            if fm.fileExists(atPath: dir.appendingPathComponent(".discarded").path) { continue }
+            guard let card = ConversationCardStore.load(captureId: name, baseDir: base),
+                  let title = card.title, !title.isEmpty, title != ProvisionalTitle.placeholder else { continue }
+            // Prefer the durable real start; fall back to the id's UTC timestamp.
+            let started = (card.startedAt ?? CaptureIdTime.startedAt(fromCaptureId: name))
+                .map { Date(timeIntervalSince1970: TimeInterval($0)) }
+            chips.append(RecallChip(id: name, captureId: name, title: title, startedAt: started))
+        }
+        return chips
+    }
+
+    /// Tap a recall chip: show a brief spinner, build its chat seed (from door content,
+    /// cached transcript, or title only), then hand it to the bridge — which opens a fresh
+    /// chat seeded with that context on the Chat tab.
+    private func tapRecallChip(_ chip: RecallChip) {
+        guard loadingChip == nil else { return }
+        loadingChip = chip.id
+        Task {
+            let seed = await buildRecallSeed(chip)
+            loadingChip = nil
+            bridge.askAbout(seed)
+        }
+    }
+
+    /// Build the seed for a recall chip. Graceful fallbacks: live door content (speaker
+    /// turns when diarized) → locally cached transcript → title-only. The static chip
+    /// (no captureId) seeds a plain prompt.
+    private func buildRecallSeed(_ chip: RecallChip) async -> String {
+        guard let captureId = chip.captureId else { return "What did I agree to today?" }
+        let timeRange = Self.recallTimeRange(chip.startedAt)
+        if let content = try? await client.captureContent(captureId: captureId), content.found {
+            return SpeakerSeedFormatter.seed(from: content, title: chip.title, timeRange: timeRange)
+        }
+        let base = CaptureWAL.documentsCaptures()
+        if let cached = TranscriptCacheStore.load(captureId: captureId, baseDir: base), !cached.transcript.isEmpty {
+            return SpeakerSeedFormatter.seed(title: chip.title, timeRange: timeRange, transcript: cached.transcript)
+        }
+        return SpeakerSeedFormatter.titleOnlySeed(title: chip.title, timeRange: timeRange)
+    }
+
+    /// Format a recall chip's start into the seed's time range (empty when unknown). A
+    /// local formatter — recall taps are occasional, so per-call cost is negligible and
+    /// we avoid a shared non-Sendable static.
+    private static func recallTimeRange(_ startedAt: Date?) -> String {
+        guard let d = startedAt else { return "" }
+        let f = DateFormatter()
+        f.dateFormat = "EEE, MMM d · h:mm a"
+        return f.string(from: d)
+    }
+
     // MARK: actions
 
     private func setModel(_ id: String?) {
@@ -203,9 +351,27 @@ struct ChatScreen: View {
         loadedId = active.id
     }
 
+    /// Send the composed message (clears the composer, then streams the turn).
     private func send() {
-        guard let active = store.active else { return }
-        let text = input; input = ""; streaming = true
+        let text = input
+        input = ""
+        sendText(text)
+    }
+
+    /// Re-send the failed turn's user text (the "tap to retry" chip). No-op when there's
+    /// nothing to retry.
+    private func retryLastTurn() {
+        guard let text = model.takeRetryText() else { return }
+        sendText(text)
+    }
+
+    /// Stream one turn of `text` in the active conversation. On any stream/transport
+    /// failure the turn is marked `.failed` (humane copy in the UI, raw detail to the log)
+    /// and NOT persisted — the retry chip re-sends it live instead.
+    private func sendText(_ text: String) {
+        guard let active = store.active,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        streaming = true
         let chatId = active.id
         model.beginUserTurn(text)
         model.setConnection(.connecting)
@@ -222,20 +388,27 @@ struct ChatScreen: View {
                 }
                 if !sawEvent {
                     log.warn("stream ended with 0 events (door closed before any reply)")
-                    await MainActor.run { model.setConnection(.error(detail: "no response from door (0 events)")) }
+                    await MainActor.run {
+                        model.setConnection(.idle)
+                        model.failTurn(reason: "Your Foundry didn’t reply — tap to retry")
+                    }
                 }
             } catch {
+                // Humane copy to the UI; the raw detail is for the log only.
                 let detail = Self.errorDetail(error)
                 log.error("turn failed: \(detail)")
                 await MainActor.run {
-                    model.setConnection(.error(detail: detail))
-                    model.apply(.boundary(label: "error: \(detail)"))
+                    model.setConnection(.idle)
+                    model.failTurn(reason: Self.humaneError(error))
                 }
             }
-            // Snapshot the rendered turn back into the durable store (only if we're still
-            // on the same conversation — the user may have switched away mid-stream).
+            // Snapshot the settled turn back into the durable store — but NOT a failed one
+            // (the message "didn't send", so we don't record it; retry re-sends it live).
+            // Only persist while we're still on the same conversation.
             await MainActor.run {
-                if store.activeId == chatId { store.setMessages(model.snapshot(), for: chatId) }
+                if store.activeId == chatId, !model.didTurnFail {
+                    store.setMessages(model.snapshot(), for: chatId)
+                }
                 streaming = false
             }
         }
@@ -256,6 +429,7 @@ struct ChatScreen: View {
         #endif
     }
 
+    /// Raw failure detail for the LOG only (never shown to the user).
     private static func errorDetail(_ error: Error) -> String {
         if let de = error as? DoorError {
             switch de {
@@ -268,48 +442,91 @@ struct ChatScreen: View {
         return "\(ns.localizedDescription) [\(ns.domain) \(ns.code)]"
     }
 
-    private func answer(_ callId: String, _ decision: String) {
-        Task { try? await client.answerApproval(sessionId: sessionId, callId: callId, decision: decision) }
+    /// Humane, user-facing copy for a turn failure (the raw detail goes to the log only).
+    private static func humaneError(_ error: Error) -> String {
+        if let de = error as? DoorError {
+            switch de {
+            case .unauthorized: return "Signed out — sign in again to continue"
+            case .http(let code): return "Your Foundry hit a snag (HTTP \(code))"
+            case .transport: return "Can’t reach your Foundry — check your connection"
+            }
+        }
+        // Offline / timeouts read as a connection problem, not a mystery.
+        if (error as NSError).domain == NSURLErrorDomain {
+            return "Can’t reach your Foundry — check your connection"
+        }
+        return "Something went wrong"
+    }
+
+    /// Relay a gate decision to the door — NOT fire-and-forget. Shows an honest "Sending…"
+    /// state while retrying with backoff; on final failure the buttons come back with an
+    /// inline "Couldn't send — try again". On success the door's resumed SSE stream advances
+    /// the turn (hiding the card), so we hold "Sending…" until then.
+    private func answer(_ callId: String, decision: String) {
+        model.setApprovalDelivery(.sending)
+        Task {
+            let ok = await sendApproval(callId: callId, decision: decision)
+            if !ok { model.setApprovalDelivery(.failed) }
+        }
+    }
+
+    /// Deliver an approval decision with 2 retries + backoff (3 attempts total). Returns
+    /// whether it landed; the raw failure detail is logged, never shown.
+    private func sendApproval(callId: String, decision: String) async -> Bool {
+        let backoff: [UInt64] = [400_000_000, 1_200_000_000]   // between attempts: 0.4s, 1.2s
+        for attempt in 0...2 {
+            do {
+                try await client.answerApproval(sessionId: sessionId, callId: callId, decision: decision)
+                return true
+            } catch {
+                log.warn("approval '\(decision)' send failed (attempt \(attempt + 1)/3): \(Self.errorDetail(error))")
+                if attempt < 2 { try? await Task.sleep(nanoseconds: backoff[attempt]) }
+            }
+        }
+        return false
     }
 }
 
-// MARK: - Chat list drawer (recent conversations)
+// MARK: - Recall chip model
+
+/// One recall chip in the chat empty state: a captured conversation to reopen ("Ask
+/// about …"), or the static "What did I agree to today?" prompt (captureId == nil).
+struct RecallChip: Identifiable, Equatable, Sendable {
+    let id: String
+    /// The capture to seed from; nil ⇒ the static "agreed today" prompt.
+    let captureId: String?
+    /// The conversation title (or the static prompt text).
+    let title: String
+    /// The conversation's real start, for the seed's time range (nil ⇒ omitted / static).
+    let startedAt: Date?
+
+    /// The chip's user-facing label.
+    var displayLabel: String {
+        captureId == nil ? title : "Ask about “\(title)”"
+    }
+}
+
+// MARK: - Chat list drawer (recent conversations · search)
 
 private struct ChatListSheet: View {
     @ObservedObject var store: ChatConversationStore
     var onDismiss: () -> Void
 
+    @State private var query = ""
+
+    private var trimmedQuery: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
+
     var body: some View {
         NavigationStack {
             List {
-                ForEach(store.conversations) { convo in
-                    Button {
-                        store.select(convo.id)
-                        onDismiss()
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-                                Text(convo.title.isEmpty ? "New chat" : convo.title)
-                                    .grainTextStyle(.body)
-                                    .foregroundStyle(GrainColor.ink)
-                                    .lineLimit(1)
-                                Text(Self.subtitle(convo))
-                                    .grainTextStyle(.caption)
-                                    .foregroundStyle(GrainColor.textFaint)
-                                    .lineLimit(1)
-                            }
-                            Spacer()
-                            if convo.id == store.activeId {
-                                Image(systemName: "checkmark").foregroundStyle(GrainColor.sage)
-                            }
-                        }
-                    }
-                    .accessibilityIdentifier("chat-row")
-                }
-                .onDelete { idx in
-                    idx.map { store.conversations[$0].id }.forEach { store.delete($0) }
+                if trimmedQuery.isEmpty {
+                    conversationRows
+                } else {
+                    searchRows
                 }
             }
+            .searchable(text: $query, prompt: "Search chats")
+            .accessibilityIdentifier("chat-search")
             .navigationTitle("Chats")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -320,6 +537,75 @@ private struct ChatListSheet: View {
                 }
             }
         }
+    }
+
+    // MARK: recent conversations (no query)
+
+    @ViewBuilder private var conversationRows: some View {
+        ForEach(store.conversations) { convo in
+            Button {
+                store.select(convo.id)
+                onDismiss()
+            } label: {
+                HStack {
+                    VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                        Text(convo.title.isEmpty ? "New chat" : convo.title)
+                            .grainTextStyle(.body)
+                            .foregroundStyle(GrainColor.ink)
+                            .lineLimit(1)
+                        Text(Self.subtitle(convo))
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(GrainColor.textFaint)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    if convo.id == store.activeId {
+                        Image(systemName: "checkmark").foregroundStyle(GrainColor.sage)
+                    }
+                }
+            }
+            .accessibilityIdentifier("chat-row")
+        }
+        .onDelete { idx in
+            idx.map { store.conversations[$0].id }.forEach { store.delete($0) }
+        }
+    }
+
+    // MARK: search results (non-empty query)
+
+    @ViewBuilder private var searchRows: some View {
+        // Agent 1's search core: case-insensitive substring over title + message texts,
+        // most-recently-updated first (see ChatConversationStore.search).
+        let hits = ChatConversationStore.search(trimmedQuery, in: store.conversations)
+        if hits.isEmpty {
+            Text("No chats match “\(trimmedQuery)”")
+                .grainTextStyle(.caption)
+                .foregroundStyle(GrainColor.textFaint)
+        } else {
+            ForEach(hits, id: \.conversationId) { hit in
+                Button {
+                    store.select(hit.conversationId)
+                    onDismiss()
+                } label: {
+                    VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                        Text(Self.title(for: hit.conversationId, in: store))
+                            .grainTextStyle(.body)
+                            .foregroundStyle(GrainColor.ink)
+                            .lineLimit(1)
+                        Text(hit.snippet)
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(GrainColor.textFaint)
+                            .lineLimit(2)
+                    }
+                }
+                .accessibilityIdentifier("chat-search-result")
+            }
+        }
+    }
+
+    private static func title(for id: String, in store: ChatConversationStore) -> String {
+        let t = store.conversation(id)?.title ?? ""
+        return t.isEmpty ? "New chat" : t
     }
 
     private static func subtitle(_ convo: ChatConversationStore.Conversation) -> String {

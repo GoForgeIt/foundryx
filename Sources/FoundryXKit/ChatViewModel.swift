@@ -35,6 +35,27 @@ public final class ChatViewModel: ObservableObject {
         /// The turn was refused/blocked. `reason` is the door's clear, human-readable
         /// explanation (confidential kept local, auth expired, …) when one was surfaced.
         case refused(reason: String?)
+        /// The turn FAILED to send/stream (transport error, auth, no reply). `reason` is
+        /// humane, user-facing copy (the raw detail is logged, never shown). Distinct from
+        /// `.refused` (the door answered with a deliberate block) — a failure is recoverable
+        /// via the "tap to retry" chip, which re-sends the same user text.
+        case failed(reason: String)
+    }
+
+    /// Whether the current/last turn failed to send — the chat surface skips persisting a
+    /// failed turn (the message "didn't send", so it isn't recorded; retry re-sends it live).
+    public var didTurnFail: Bool {
+        if case .failed = turnState { return true }
+        return false
+    }
+
+    /// Delivery state of an approval DECISION — the approval card is honest about whether
+    /// the answer actually reached the door (it used to be fire-and-forget). Drives the
+    /// "Sending…" state and a recoverable "Couldn't send — try again" on final failure.
+    public enum ApprovalDelivery: Equatable {
+        case idle        // buttons shown, awaiting the user's decision
+        case sending     // the answer is in flight (retrying with backoff)
+        case failed      // every retry exhausted — restore the buttons + inline error
     }
 
     /// Door connection/transport state — distinct from `turnState` (which tracks the
@@ -73,6 +94,11 @@ public final class ChatViewModel: ObservableObject {
     /// Tools the agent ran (or is running) this turn — surfaced so the user SEES what the
     /// agent did, not just its text. Cleared at the start of each user turn.
     @Published public private(set) var toolRuns: [ToolRun] = []
+    /// The text of the last user turn — lets the chat surface re-send it verbatim on a
+    /// failed-turn retry without the composer having to retain it.
+    @Published public private(set) var lastUserText: String = ""
+    /// Delivery state of the current approval decision (buttons → sending → failed).
+    @Published public private(set) var approvalDelivery: ApprovalDelivery = .idle
 
     /// One agent tool invocation, for display: a name + args, marked done/failed when the
     /// matching result lands.
@@ -93,12 +119,42 @@ public final class ChatViewModel: ObservableObject {
     public func beginUserTurn(_ text: String) {
         messages.append(Message(role: "user", text: text))
         messages.append(Message(role: "assistant", text: ""))
+        lastUserText = text
         turnState = .streaming
         thinkingMs = 0
         lastTiming = nil
         lastErrorReason = nil
         toolRuns = []
+        approvalDelivery = .idle
         turnStartedAt = now()
+    }
+
+    /// Drive the approval card's delivery state from the app's answer loop.
+    public func setApprovalDelivery(_ state: ApprovalDelivery) { approvalDelivery = state }
+
+    /// Mark the in-flight turn as FAILED (a stream/transport error). Drops the phantom
+    /// empty assistant bubble we opened for the reply — a failed turn must never render
+    /// (or persist) a blank assistant message — and stops the "thinking…" timer. The user
+    /// bubble stays put so the "tap to retry" chip can re-send it verbatim.
+    public func failTurn(reason: String) {
+        if let idx = messages.lastIndex(where: { $0.role == "assistant" }), messages[idx].text.isEmpty {
+            messages.remove(at: idx)
+        }
+        turnState = .failed(reason: reason)
+        thinkingMs = 0
+        turnStartedAt = nil
+    }
+
+    /// Pull the failed turn's user text back for a retry, removing its now-orphaned user
+    /// bubble so the re-send doesn't leave a duplicate, and resetting to idle. Returns nil
+    /// when there's nothing to retry (the turn didn't fail / had no text).
+    public func takeRetryText() -> String? {
+        guard case .failed = turnState else { return nil }
+        if let idx = messages.lastIndex(where: { $0.role == "user" }) {
+            messages.remove(at: idx)
+        }
+        turnState = .idle
+        return lastUserText.isEmpty ? nil : lastUserText
     }
 
     /// Injectable clock so tests are deterministic (production = real Date).
@@ -132,6 +188,7 @@ public final class ChatViewModel: ObservableObject {
                 toolRuns[i].isError = isError
             }
         case .approvalRequest(let callId, let name, let args):
+            approvalDelivery = .idle   // a fresh gate always opens with its buttons
             turnState = .awaitingApproval(callId: callId, name: name, args: args)
         case .error(_, let reason):
             // The door surfaced a clear failure (emitted just before a refused `done`).
@@ -157,12 +214,19 @@ public final class ChatViewModel: ObservableObject {
         thinkingMs = 0
         turnStartedAt = nil
         lastTiming = nil
+        approvalDelivery = .idle
     }
 
     /// Snapshot the current rendered messages back into durable form (persisted into the
-    /// ChatConversationStore at end-of-turn).
+    /// ChatConversationStore at end-of-turn). A failed turn must NEVER persist the blank
+    /// assistant bubble we opened for its (never-arriving) reply — strip a trailing EMPTY
+    /// assistant message defensively (`failTurn` already drops it from the live view).
     public func snapshot() -> [ChatConversationStore.StoredMessage] {
-        messages.map { .init(role: $0.role, text: $0.text, routedVia: $0.routedVia) }
+        var msgs = messages
+        if case .failed = turnState, let last = msgs.last, last.role == "assistant", last.text.isEmpty {
+            msgs.removeLast()
+        }
+        return msgs.map { .init(role: $0.role, text: $0.text, routedVia: $0.routedVia) }
     }
 
     /// The text of the in-flight / last assistant message — what the bubble renders.

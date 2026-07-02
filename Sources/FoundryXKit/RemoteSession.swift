@@ -78,9 +78,64 @@ public final class RemoteSession: ObservableObject {
     }
 
     /// On launch / appear: if already signed in, resolve the host silently.
+    ///
+    /// Instant launch (H usefulness slice): if a last-good resolved session is cached
+    /// for THIS signed-in account, publish it SYNCHRONOUSLY here — `relay`/`idToken`/
+    /// `status=.connected` land before the first `await`, so `makeDoorTarget()` is
+    /// non-nil immediately and RootView can drop the branded gate for the tabs after
+    /// only the 0.6s brand beat. Then re-resolve quietly in the background, swapping the
+    /// published route ONLY if it changed (RootView's `.id()` rebuild handles the swap)
+    /// and KEEPING the cached route on a transient failure. The un-cached path is
+    /// unchanged (falls through to the original `resolve()`).
     public func restore() async {
-        guard remote != nil, auth.signedInEmail != nil else { return }
-        await resolve()
+        guard remote != nil, let signedInEmail = auth.signedInEmail else { return }
+        if let cached = loadCache(), cached.email == signedInEmail {
+            relay = cached.relay
+            idToken = cached.idToken
+            status = .connected(host: cached.relay.tunnelId)
+            note("restore: published cached host tunnel=\(cached.relay.tunnelId) (cached)")
+            await reresolveInBackground()
+        } else {
+            await resolve()
+        }
+    }
+
+    /// Quiet re-resolve after an instant cached publish. Refreshes the host in the
+    /// background and swaps the published route only when it actually changed (a new
+    /// tunnel/relay/pin or a fresher bearer). On a transient failure it KEEPS the cached
+    /// route — a launch-time network hiccup must never tear down a working connection
+    /// (a genuinely dead door 401s → `handleAuthExpired()` self-heals). Only an explicit
+    /// server-side de-designation (`noHost`) clears the cache and drops the route.
+    private func reresolveInBackground() async {
+        guard let remote else { return }
+        guard let token = await auth.currentIdToken() else {
+            note("re-resolve: no fresh id_token; keeping cached route")
+            return
+        }
+        do {
+            let cfg = try await HostResolver(remote: remote, log: log).resolveRelayConfig(idToken: token)
+            let changed = cfg.tunnelId != relay?.tunnelId
+                || cfg.relayURL != relay?.relayURL
+                || cfg.expectedDoorStatic != relay?.expectedDoorStatic
+                || token != idToken
+            if changed {
+                idToken = token
+                relay = cfg
+                status = .connected(host: cfg.tunnelId)
+                saveCache()
+                note("re-resolve OK tunnel=\(cfg.tunnelId) — route changed, swapped")
+            } else {
+                note("re-resolve OK tunnel=\(cfg.tunnelId) — unchanged")
+            }
+        } catch HostResolveError.noHostDesignated {
+            relay = nil
+            idToken = nil
+            status = .noHost
+            clearCache()
+            note("re-resolve: host no longer designated → cleared cache, dropped route")
+        } catch {
+            note("re-resolve FAILED (keeping cached route): \(error.localizedDescription)")
+        }
     }
 
     public func signIn(_ provider: AuthProvider) async {
@@ -103,6 +158,8 @@ public final class RemoteSession: ObservableObject {
         auth.signOut()
         email = nil
         relay = nil
+        idToken = nil
+        clearCache()   // instant-launch invalidation: never restore a signed-out account
         status = remote == nil ? .unconfigured : .signedOut
     }
 
@@ -123,10 +180,12 @@ public final class RemoteSession: ObservableObject {
             let cfg = try await HostResolver(remote: remote, log: log).resolveRelayConfig(idToken: token)
             relay = cfg
             status = .connected(host: cfg.tunnelId)
+            saveCache()   // persist the last-good resolved session for instant launch next time
             note("resolve OK tunnel=\(cfg.tunnelId) relay=\(cfg.relayURL.absoluteString) pinned=\(cfg.expectedDoorStatic != nil)")
         } catch HostResolveError.noHostDesignated {
             relay = nil
             status = .noHost
+            clearCache()   // instant-launch invalidation: no host means no route to restore
             note("resolve: NO host designated for this account")
         } catch {
             relay = nil
@@ -151,6 +210,7 @@ public final class RemoteSession: ObservableObject {
         let fresh = await auth.currentIdToken()
         if let fresh, fresh != idToken {
             idToken = fresh
+            saveCache()   // keep the cached bearer fresh so next launch restores a live token
             note("re-auth: obtained a fresh id_token (door target rebuilds, uploads resume)")
             return
         }
@@ -159,6 +219,7 @@ public final class RemoteSession: ObservableObject {
         relay = nil
         idToken = nil
         status = .signedOut
+        clearCache()   // the token is unrefreshable → don't instant-restore a dead route
         note("re-auth: no fresh id_token → signed out (login required)")
     }
 
@@ -170,6 +231,50 @@ public final class RemoteSession: ObservableObject {
         // the gateway URL so it's a valid URL.
         return DoorTarget(baseURL: remote.gatewayHTTPURL, bearer: token, relay: relay,
                           useMux: FoundryXFeatures.mux)
+    }
+
+    // ── Instant-launch cache (last-good resolved session) ───────────────────
+    // Persist the last successfully-resolved route so a returning signed-in user gets
+    // tabs after only the brand beat, without waiting on a network host-resolve. Lives
+    // in Application Support alongside the chat store (`FoundryX/remote-session.json`).
+    //
+    // TODO(keychain): the id_token is a short-lived (~55 min) bearer; it's cached here in
+    // the app-sandbox Application Support JSON rather than the Keychain because FoundryAuth
+    // exposes no SYNCHRONOUS token accessor (only the async `currentIdToken()`), and instant
+    // launch needs the token in hand before the first `await`. This is app-sandboxed and
+    // self-healing (a stale token 401s at the door → `handleAuthExpired()` refreshes it).
+    // Move to the Keychain when a sync seam exists — do NOT build new Keychain infra here.
+    private struct CachedSession: Codable {
+        var relay: RelayConfig
+        var idToken: String
+        var email: String
+    }
+
+    private static func cacheURL() -> URL? {
+        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        else { return nil }
+        let dir = base.appendingPathComponent("FoundryX", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("remote-session.json")
+    }
+
+    private func loadCache() -> CachedSession? {
+        guard let url = Self.cacheURL(), let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(CachedSession.self, from: data)
+    }
+
+    /// Write the current published route as the last-good session. No-op unless we have a
+    /// full route (relay + token + email) — a partial write could restore a broken state.
+    private func saveCache() {
+        guard let url = Self.cacheURL(), let relay, let idToken, let email else { return }
+        let cached = CachedSession(relay: relay, idToken: idToken, email: email)
+        guard let data = try? JSONEncoder().encode(cached) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+
+    private func clearCache() {
+        guard let url = Self.cacheURL() else { return }
+        try? FileManager.default.removeItem(at: url)
     }
 
     #if DEBUG

@@ -54,9 +54,10 @@ public struct InsightTopic: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
-#if DEBUG
 public extension InsightsDigest {
-    /// Sample digest for headless screenshots (Kevin-flavored). NOT shipped data.
+    /// Sample digest for headless screenshots + the "first insights are being forged"
+    /// preview state (Kevin-flavored). NOT shipped data — only rendered under an explicit
+    /// SAMPLE banner when there's no real digest yet.
     static var sample: InsightsDigest {
         InsightsDigest(
             headline: "3 follow-ups and 2 decisions from today's 4 conversations.",
@@ -78,4 +79,3 @@ public extension InsightsDigest {
         )
     }
 }
-#endif

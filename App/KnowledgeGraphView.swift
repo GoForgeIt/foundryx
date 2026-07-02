@@ -55,7 +55,7 @@ struct KnowledgeGraphView: View {
             Text(title).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
             ForEach(nodes) { node in
                 NavigationLink {
-                    GraphNodeDetailView(node: node, bridge: bridge)
+                    GraphNodeDetailView(target: target, node: node, bridge: bridge)
                 } label: {
                     nodeRow(node)
                 }
@@ -101,6 +101,9 @@ struct KnowledgeGraphView: View {
 /// One entity's detail: its connections to other entities, the conversations it appeared
 /// in, and an "Ask in chat" to explore everything known about it.
 struct GraphNodeDetailView: View {
+    /// The resolved door target — lets an "Appears in" row deep-link into the
+    /// conversation's transcript (ConversationDetailView fetches by capture id).
+    let target: DoorTarget
     let node: GraphNode
     @ObservedObject var bridge: ChatBridge
 
@@ -139,15 +142,18 @@ struct GraphNodeDetailView: View {
                 if !node.conversations.isEmpty {
                     VStack(alignment: .leading, spacing: GrainSpacing.x2) {
                         Text("Appears in").grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                        // Each reference deep-links into the conversation's transcript —
+                        // GraphConversationRef.id is the captureId, .when the time range.
                         ForEach(node.conversations) { c in
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(c.title).grainTextStyle(.body).foregroundStyle(GrainColor.ink).lineLimit(1)
-                                if let w = c.when { Text(w).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint) }
+                            NavigationLink {
+                                ConversationDetailView(target: target, bridge: bridge,
+                                                       captureId: c.id, timeRange: c.when ?? "",
+                                                       place: nil, conversationDate: nil)
+                            } label: {
+                                conversationRefRow(c)
                             }
-                            .padding(GrainSpacing.x3)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).fill(GrainColor.surfaceElevated))
-                            .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).strokeBorder(GrainColor.border, lineWidth: 1))
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("graph-conversation-link")
                         }
                     }
                 }
@@ -157,5 +163,22 @@ struct GraphNodeDetailView: View {
         .grainBackground()
         .navigationTitle(node.label)
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    /// One "Appears in" conversation card — title + when, with a chevron marking it as a
+    /// tappable link into the transcript.
+    private func conversationRefRow(_ c: GraphConversationRef) -> some View {
+        HStack(spacing: GrainSpacing.x2) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(c.title).grainTextStyle(.body).foregroundStyle(GrainColor.ink).lineLimit(1)
+                if let w = c.when { Text(w).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint) }
+            }
+            Spacer()
+            Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(GrainColor.textFaint)
+        }
+        .padding(GrainSpacing.x3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).fill(GrainColor.surfaceElevated))
+        .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).strokeBorder(GrainColor.border, lineWidth: 1))
     }
 }

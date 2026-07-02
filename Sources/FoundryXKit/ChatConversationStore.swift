@@ -210,19 +210,166 @@ public final class ChatConversationStore: ObservableObject {
         return String(trimmed.prefix(47)).trimmingCharacters(in: .whitespaces) + "…"
     }
 
-    // MARK: - Persistence
+    // MARK: - Search
 
-    private struct Persisted: Codable {
-        var conversations: [Conversation]
-        var activeId: String
+    /// One search result: the conversation that matched plus a short, ellipsized snippet of
+    /// text around the first match (rendered as a subtitle under the title in the chat list).
+    public struct SearchHit: Equatable, Sendable {
+        public let conversationId: String
+        public let snippet: String
+        public init(conversationId: String, snippet: String) {
+            self.conversationId = conversationId
+            self.snippet = snippet
+        }
     }
 
+    /// Case-insensitive substring search over each conversation's title + message texts.
+    /// Returns one hit per matching conversation (the first match — title before messages —
+    /// wins its snippet), ordered most-recently-updated first (by `updatedAt`). An empty or
+    /// whitespace-only query yields []. Pure + static so the chat UI can search any list of
+    /// conversations without reaching through the store.
+    public static func search(_ query: String, in conversations: [Conversation]) -> [SearchHit] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return [] }
+
+        // Freshest match leads, mirroring the store's own most-recent-first ordering. `sorted`
+        // is stable, so conversations with equal `updatedAt` keep their input order.
+        let ordered = conversations.sorted { $0.updatedAt > $1.updatedAt }
+
+        var hits: [SearchHit] = []
+        for convo in ordered {
+            let fields = [convo.title] + convo.messages.map(\.text)
+            for field in fields {
+                guard let match = field.range(of: needle, options: .caseInsensitive) else { continue }
+                hits.append(SearchHit(conversationId: convo.id,
+                                      snippet: snippet(around: match, in: field)))
+                break   // one hit per conversation; first match wins the snippet
+            }
+        }
+        return hits
+    }
+
+    /// An ~80-char window centered on `match`, ellipsized on whichever end was clipped.
+    private static func snippet(around match: Range<String.Index>, in text: String,
+                                window: Int = 80) -> String {
+        let matchLen = text.distance(from: match.lowerBound, to: match.upperBound)
+        let pad = max(0, window - matchLen) / 2
+        let lo = max(0, text.distance(from: text.startIndex, to: match.lowerBound) - pad)
+        let hi = min(text.count, text.distance(from: text.startIndex, to: match.upperBound) + pad)
+        let start = text.index(text.startIndex, offsetBy: lo)
+        let end = text.index(text.startIndex, offsetBy: hi)
+        var snip = String(text[start..<end])
+        if lo > 0 { snip = "…" + snip }
+        if hi < text.count { snip += "…" }
+        return snip
+    }
+
+    // MARK: - Persistence
+
+    /// Decodes a single element WITHOUT letting one malformed entry fail the whole array —
+    /// a corrupt conversation is dropped and the rest survive. (AC: "never fail the whole
+    /// file for one bad conversation.")
+    private struct Lossy<Wrapped: Decodable>: Decodable {
+        let value: Wrapped?
+        init(from decoder: Decoder) throws {
+            value = try? decoder.singleValueContainer().decode(Wrapped.self)
+        }
+    }
+
+    /// The on-disk envelope. `schemaVersion` lets future readers migrate deliberately; a
+    /// missing version (pre-envelope files) is read as the current version and re-stamped
+    /// on the next write, so old data upgrades in place.
+    private struct Persisted: Codable {
+        /// Current on-disk envelope version — bump when the persisted shape needs migration.
+        static let currentSchemaVersion = 1
+
+        var schemaVersion: Int
+        var conversations: [Conversation]
+        var activeId: String
+
+        init(conversations: [Conversation],
+             activeId: String,
+             schemaVersion: Int = Persisted.currentSchemaVersion) {
+            self.schemaVersion = schemaVersion
+            self.conversations = conversations
+            self.activeId = activeId
+        }
+
+        private enum CodingKeys: String, CodingKey { case schemaVersion, conversations, activeId }
+
+        // Tolerant decode: unknown keys are ignored (default Codable behavior → forward
+        // compatible), a missing schemaVersion defaults to the current version, and each
+        // conversation is decoded independently so one broken entry can't nuke the list. A
+        // structurally-broken file (not valid JSON / not this object) still THROWS here —
+        // that's the signal `load()` uses to archive it as a .bak. (encode(to:) stays
+        // synthesized from CodingKeys, always stamping the current version.)
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.schemaVersion = (try? c.decode(Int.self, forKey: .schemaVersion)) ?? Persisted.currentSchemaVersion
+            let lossy = (try? c.decode([Lossy<Conversation>].self, forKey: .conversations)) ?? []
+            self.conversations = lossy.compactMap(\.value)
+            self.activeId = (try? c.decode(String.self, forKey: .activeId)) ?? ""
+        }
+    }
+
+    /// Suffix used when a corrupt file is moved aside: `<name>.bak-<epoch>`.
+    private static let backupInfix = ".bak-"
+
     private func load() {
-        guard let url = storageURL,
-              let data = try? Data(contentsOf: url),
-              let decoded = try? JSONDecoder.iso8601.decode(Persisted.self, from: data) else { return }
-        conversations = decoded.conversations
-        activeId = decoded.activeId
+        guard let url = storageURL else { return }
+        // No file yet ⇒ a clean first run; `init` will seed. (Distinct from a corrupt file:
+        // we never archive/seed unless bytes are actually present and unparseable.)
+        guard let data = try? Data(contentsOf: url) else { return }
+        do {
+            let decoded = try JSONDecoder.iso8601.decode(Persisted.self, from: data)
+            conversations = decoded.conversations
+            activeId = decoded.activeId
+        } catch {
+            // The file exists but can't be parsed as our envelope ⇒ treat it as corrupt. Move
+            // the original ASIDE (never delete/overwrite) so its bytes survive for recovery,
+            // then fall through: `conversations` stays empty and `init` seeds a fresh list +
+            // writes a clean file at `url`. This is the fix for the silent-overwrite data-loss
+            // bug — the old `load()` returned nil here and let `init` clobber the file.
+            archiveCorruptFile(at: url)
+        }
+    }
+
+    /// Move a corrupt persistence file aside to `<name>.bak-<epoch>` (epoch = whole seconds
+    /// since 1970), preserving its bytes verbatim, then prune to the newest 3 baks. All
+    /// best-effort: a filesystem hiccup is swallowed so a bad backup can never block seeding.
+    private func archiveCorruptFile(at url: URL) {
+        let fm = FileManager.default
+        let epoch = Int(Date().timeIntervalSince1970)
+        let bak = url.deletingLastPathComponent()
+            .appendingPathComponent(url.lastPathComponent + Self.backupInfix + "\(epoch)")
+        do {
+            // If a same-second bak already exists, let the freshest corrupt copy win the slot
+            // (still never touches the live file).
+            if fm.fileExists(atPath: bak.path) { try? fm.removeItem(at: bak) }
+            try fm.moveItem(at: url, to: bak)
+        } catch {
+            return   // couldn't move it aside; leave the original in place rather than lose it
+        }
+        pruneBackups(for: url, keeping: 3)
+    }
+
+    /// Keep at most `maxKeep` `<name>.bak-*` files next to `url`, removing the oldest first
+    /// (ordered by the numeric epoch suffix, newest kept).
+    private func pruneBackups(for url: URL, keeping maxKeep: Int) {
+        let fm = FileManager.default
+        let dir = url.deletingLastPathComponent()
+        let prefix = url.lastPathComponent + Self.backupInfix
+        guard let entries = try? fm.contentsOfDirectory(at: dir,
+                                                        includingPropertiesForKeys: nil) else { return }
+        let baks = entries
+            .filter { $0.lastPathComponent.hasPrefix(prefix) }
+            .sorted { Self.epochSuffix(of: $0, prefix: prefix) < Self.epochSuffix(of: $1, prefix: prefix) }
+        guard baks.count > maxKeep else { return }
+        for stale in baks.dropLast(maxKeep) { try? fm.removeItem(at: stale) }
+    }
+
+    private static func epochSuffix(of url: URL, prefix: String) -> Int {
+        Int(url.lastPathComponent.dropFirst(prefix.count)) ?? 0
     }
 
     private func persist() {

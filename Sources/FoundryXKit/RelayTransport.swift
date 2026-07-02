@@ -23,7 +23,9 @@ import FoundationNetworking
 #endif
 
 /// Where the relay lives + which desktop tunnel to claim + the phone's Noise identity.
-public struct RelayConfig: Sendable {
+/// `Codable` (additive; every stored field is natively Codable) so RemoteSession can
+/// persist the last-good resolved config as JSON for instant cached launch.
+public struct RelayConfig: Sendable, Codable {
     /// The relay WebSocket URL, e.g. `wss://relay.example.com` (or `ws://` for local/dev).
     public let relayURL: URL
     /// Per-DESKTOP-machine tunnel id (stable; derived from the door's Noise static key).

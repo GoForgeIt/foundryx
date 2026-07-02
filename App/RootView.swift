@@ -7,10 +7,13 @@ import SwiftUI
 struct RootView: View {
     @StateObject private var remote = RemoteSession()
     @State private var showingAccount = false
-    // On a FRESH launch, let the branded sign-in screen sit for ~2s before
-    // auto-advancing into the app (so an already-signed-in user still sees it).
-    // This .task runs once at launch; foregrounding an already-open app does NOT
-    // re-run it, so we never bounce back to the gate mid-session.
+    // Readiness-gated splash: the branded gate holds for a MINIMUM ~0.6s "brand beat"
+    // so an instant cached restore doesn't flash SignInView→tabs. The UPPER bound of
+    // the gate — "until a door target exists or restore concludes" — is enforced by the
+    // `if let target = makeDoorTarget()` guard in `gatedBody`: the tabs cannot appear
+    // until there's a resolved target regardless of this flag. So this timer supplies
+    // only the 0.6s floor. Net: signed-in + cached ⇒ tabs in ~0.6s; signed-out stays on
+    // the gate. Runs once per launch; foregrounding an open app never re-runs it.
     @State private var splashElapsed = false
 
     var body: some View {
@@ -52,7 +55,10 @@ struct RootView: View {
         }
         .task { await remote.restore() }
         .task {
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            // Brand beat only — the 0.6s floor. Restore publishes a cached target before
+            // its first await, so `makeDoorTarget()` is typically non-nil well within this
+            // window and the tabs appear the instant the beat ends.
+            try? await Task.sleep(nanoseconds: 600_000_000)
             splashElapsed = true
         }
     }
@@ -175,7 +181,21 @@ private struct MainTabs: View {
         // correct — so toggling the Omi off actually hands off + drops it, and a transient
         // reconnect is reflected — regardless of which tab is visible.
         .onChange(of: device.connectionState) { _ in syncOmiConnection() }
-        .onAppear { syncOmiConnection() }
+        .onAppear {
+            syncOmiConnection()
+            wireAskIntent()
+        }
+    }
+
+    /// Wire the Siri "Ask FoundryX" broker to THIS tab set's ChatBridge (mirrors how
+    /// `CaptureIntentBroker` is wired in `init`, but from `body` because `bridge` is a
+    /// `@StateObject` property, not an init local). Re-runs on each appear so a target-swap
+    /// rebuild rewires to the fresh bridge; setting the handler also flushes any question
+    /// buffered before the tabs mounted (Siri cold launch). Weak so the process-wide broker
+    /// never pins a torn-down bridge.
+    private func wireAskIntent() {
+        let bridge = self.bridge
+        AskIntentBroker.shared.handler = { [weak bridge] question in bridge?.askAbout(question) }
     }
 
     /// Mirror the live BLE connection state onto the registry's Omi row.
@@ -207,19 +227,46 @@ private struct UIPreviewRoot: View {
         return m
     }
 
+    /// A ChatViewModel showing a FAILED turn — the humane error + "tap to retry" chip.
+    @MainActor private static func failedTurnModel() -> ChatViewModel {
+        let m = ChatViewModel()
+        m.beginUserTurn("Summarize my Lantis call and add the SOW to my todos.")
+        m.failTurn(reason: "Can't reach your Foundry — check your connection")
+        return m
+    }
+
     var body: some View {
         NavigationStack {
             Group {
-                if ProcessInfo.processInfo.environment["FOUNDRYX_UI_PREVIEW"] == "insights" {
+                switch ProcessInfo.processInfo.environment["FOUNDRYX_UI_PREVIEW"] {
+                case "insights":
                     InsightsView(target: target, bridge: bridge, injected: .sample)
                         .navigationTitle("Insights")
-                } else if ProcessInfo.processInfo.environment["FOUNDRYX_UI_PREVIEW"] == "graph" {
+                case "recap":
+                    // Today-at-the-Foundry recap alone (digest empty ⇒ recap + graph entry).
+                    InsightsView(target: target, bridge: bridge, injectedRecap: .sample)
+                        .navigationTitle("Insights")
+                case "graph":
                     KnowledgeGraphView(target: target, bridge: bridge, injected: .sample)
-                } else if ProcessInfo.processInfo.environment["FOUNDRYX_UI_PREVIEW"] == "chatagent" {
+                case "chatagent":
                     ScrollView { ChatView(model: Self.agentDemoModel()) }
                         .grainBackground()
                         .navigationTitle("FoundryX")
-                } else {
+                case "chatfail":
+                    // Failed turn + "tap to retry" chip (transport error, humane copy).
+                    ScrollView { ChatView(model: Self.failedTurnModel()) }
+                        .grainBackground()
+                        .navigationTitle("FoundryX")
+                case "chips":
+                    // Empty-state recall chips, injected (no on-disk captures in the sim).
+                    ChatScreen(target: target, store: store, log: log, bridge: bridge,
+                               injectedRecallChips: [
+                                   RecallChip(id: "cap_1", captureId: "cap_1", title: "Lantis kickoff call", startedAt: Date()),
+                                   RecallChip(id: "cap_2", captureId: "cap_2", title: "Call with Mom", startedAt: Date()),
+                                   ChatScreen.agreedTodayChip,
+                               ])
+                        .navigationTitle("FoundryX")
+                default:
                     ChatScreen(target: target, store: store, log: log, bridge: bridge)
                         .navigationTitle("FoundryX")
                 }

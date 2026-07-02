@@ -14,15 +14,25 @@ import Grain
 
 public struct ChatView: View {
     @ObservedObject public var model: ChatViewModel
-    public var onApprove: (String) -> Void
+    /// Approve the pending tool JUST this once (door decision "once").
+    public var onApproveOnce: (String) -> Void
+    /// Approve + stop asking for this tool (door decision "always").
+    public var onApproveAlways: (String) -> Void
+    /// Reject the pending tool (door decision "reject").
     public var onReject: (String) -> Void
+    /// Re-send the failed turn's user text (the "tap to retry" chip).
+    public var onRetry: () -> Void
 
     public init(model: ChatViewModel,
-                onApprove: @escaping (String) -> Void = { _ in },
-                onReject: @escaping (String) -> Void = { _ in }) {
+                onApproveOnce: @escaping (String) -> Void = { _ in },
+                onApproveAlways: @escaping (String) -> Void = { _ in },
+                onReject: @escaping (String) -> Void = { _ in },
+                onRetry: @escaping () -> Void = {}) {
         self.model = model
-        self.onApprove = onApprove
+        self.onApproveOnce = onApproveOnce
+        self.onApproveAlways = onApproveAlways
         self.onReject = onReject
+        self.onRetry = onRetry
     }
 
     public var body: some View {
@@ -84,9 +94,40 @@ public struct ChatView: View {
                                 .fixedSize(horizontal: false, vertical: true)
                                 .textSelection(.enabled)
                         }
-                        HStack(spacing: GrainSpacing.x2) {
-                            GrainButton("Approve", variant: .filled, size: .sm) { onApprove(callId) }
-                            GrainButton("Reject", variant: .outlined, size: .sm) { onReject(callId) }
+                        // Honest delivery: while the answer is in flight the buttons become
+                        // "Sending…"; the door's resumed stream then advances the turn and
+                        // hides this card. A final failure restores the buttons + inline copy.
+                        switch model.approvalDelivery {
+                        case .sending:
+                            HStack(spacing: GrainSpacing.x2) {
+                                GrainSpinner(size: 16)
+                                Text("Sending…")
+                                    .grainTextStyle(.caption)
+                                    .foregroundStyle(GrainColor.textMuted)
+                            }
+                        case .idle, .failed:
+                            VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+                                if case .failed = model.approvalDelivery {
+                                    Text("Couldn’t send — try again")
+                                        .grainTextStyle(.caption)
+                                        .foregroundStyle(GrainColor.dangerRed)
+                                }
+                                // "Allow once" is the safe primary; "Reject" sits beside it.
+                                HStack(spacing: GrainSpacing.x2) {
+                                    GrainButton("Allow once", variant: .filled, size: .sm) { onApproveOnce(callId) }
+                                        .accessibilityIdentifier("approval-once")
+                                    GrainButton("Reject", variant: .outlined, size: .sm) { onReject(callId) }
+                                }
+                                // "Always allow" is the standing grant — spelled out so it's
+                                // never a surprise which tool stops asking.
+                                VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                                    GrainButton("Always allow", variant: .tonal, size: .sm) { onApproveAlways(callId) }
+                                        .accessibilityIdentifier("approval-always")
+                                    Text("Won’t ask again for \(name)")
+                                        .grainTextStyle(.caption)
+                                        .foregroundStyle(GrainColor.textMuted)
+                                }
+                            }
                         }
                     }
                 }
@@ -113,6 +154,18 @@ public struct ChatView: View {
                     .foregroundStyle(GrainColor.dangerRed)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("turn-status")
+            case .failed(let reason):
+                // The turn didn't send (transport / auth / no reply). Humane copy above a
+                // one-tap retry chip that re-sends the same user text (raw detail is logged).
+                VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+                    Text(reason)
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.dangerRed)
+                        .fixedSize(horizontal: false, vertical: true)
+                    GrainButton("Didn’t send — tap to retry", variant: .tonal, size: .sm) { onRetry() }
+                        .accessibilityIdentifier("retry-turn")
+                }
+                .accessibilityIdentifier("turn-status")
             case .streaming:
                 HStack(spacing: GrainSpacing.x2) {
                     GrainTypingIndicator()

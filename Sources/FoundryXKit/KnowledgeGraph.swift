@@ -53,9 +53,9 @@ public struct GraphConversationRef: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
-#if DEBUG
 public extension KnowledgeGraph {
-    /// Sample graph for headless screenshots (Kevin-flavored). NOT shipped data.
+    /// Sample graph for headless screenshots + preview states (Kevin-flavored). NOT
+    /// shipped data.
     static var sample: KnowledgeGraph {
         KnowledgeGraph(nodes: [
             GraphNode(id: "n_lantis", label: "Lantis", kind: "project", mentions: 6,
@@ -77,4 +77,3 @@ public extension KnowledgeGraph {
         ])
     }
 }
-#endif
