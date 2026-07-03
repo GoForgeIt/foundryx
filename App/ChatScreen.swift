@@ -232,7 +232,7 @@ private struct ModelPickerMenu: View, Equatable {
     let selectedId: String?
     let onSelect: (String?) -> Void
 
-    static func == (lhs: ModelPickerMenu, rhs: ModelPickerMenu) -> Bool {
+    nonisolated static func == (lhs: ModelPickerMenu, rhs: ModelPickerMenu) -> Bool {
         lhs.models == rhs.models && lhs.selectedId == rhs.selectedId
     }
 
