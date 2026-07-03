@@ -492,6 +492,12 @@ public final class CaptureManager: ObservableObject {
     /// silence-gap SEGMENT boundaries, not upload-worthiness.) Tunable.
     public nonisolated static let minVoicedFramesToUpload = 3000
 
+    /// A recording that opened but received 0 segments (Omi dropped before delivering any
+    /// audio) is pruned on launch once it has been open at least this long — clears the
+    /// "Recording · 0/0 · 0.0 KB" cards that otherwise linger forever. Generous so a
+    /// genuinely just-started capture is never mistaken for a stuck-empty one.
+    public nonisolated static let stuckEmptyRecordingSecs: TimeInterval = 5 * 60
+
     /// A transient Omi BLE disconnect within this window RESUMES the open conversation
     /// (same captureId) instead of ending it — so a flaky link doesn't shatter one
     /// conversation into a pile of tiny reconnect-stub fragments. A disconnect that stays
@@ -986,7 +992,26 @@ public final class CaptureManager: ObservableObject {
         for wal in captures where wal !== active {
             let id = wal.captureId
             guard !isDiscarded(id) else { continue }   // discarded fragments are never re-queued
-            guard wal.status.totalSegments > 0 else { continue }
+            // Prune STUCK-EMPTY recordings: a capture that opened but received 0 segments
+            // (Omi dropped immediately / connection never delivered a frame) is finalized by
+            // neither the branch below (which requires totalSegments > 0) nor anything else,
+            // so it lingers forever as a "Recording · 0/0 segments · 0.0 KB" card. If it's
+            // non-active, still has no segments, and has been open past the stuck threshold,
+            // discard it (durable `.discarded` marker — nothing real is lost, it's empty).
+            if wal.status.totalSegments == 0 {
+                if let meta = ConversationMetaStore.load(captureId: id, baseDir: baseDir),
+                   meta.startedAt > 0, meta.endedAt == nil,
+                   Date().timeIntervalSince1970 - TimeInterval(meta.startedAt) > Self.stuckEmptyRecordingSecs {
+                    let dir = baseDir.appendingPathComponent(id, isDirectory: true)
+                    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                    try? Data("stuck empty recording — 0 segments, never received audio".utf8)
+                        .write(to: discardMarker(id), options: [.atomic])
+                    clearNeedsFinalize(id)
+                    retryStates[id] = nil
+                    log?.info("capture \(id): pruned stuck-empty recording on launch (0 segments)")
+                }
+                continue
+            }
             guard let meta = ConversationMetaStore.load(captureId: id, baseDir: baseDir),
                   meta.startedAt > 0, meta.endedAt == nil else { continue }
             guard !isPendingFinalize(id),
