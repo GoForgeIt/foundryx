@@ -27,19 +27,8 @@ struct ChatScreen: View {
 
     private var client: DoorClient { DoorClient(target: target, log: log) }
 
-    /// Whether the active conversation uses the Auto router (the secure default) rather than a
-    /// pinned model.
-    private var isAuto: Bool { store.active?.modelTargetId == nil }
-
-    /// The door's models, grouped by provider with friendly labels + the secure Auto default.
-    /// Pure + data-driven (the door owns the list); see `ModelCatalog`.
-    private var menuData: ModelMenu { ModelCatalog.menu(from: models) }
-
-    /// The friendly label for the active conversation's pinned model (only used when not Auto).
-    private var selectedModelLabel: String {
-        guard let id = store.active?.modelTargetId else { return "Auto" }
-        return models.first(where: { $0.id == id }).map(ModelCatalog.displayName(for:)) ?? id
-    }
+    // Auto/model-label/menu derivation lives in `ModelPickerMenu` (below) so the picker is an
+    // isolated Equatable subview — this screen's frequent re-renders don't reset its scroll.
 
     var body: some View {
         VStack(spacing: 0) {
@@ -72,42 +61,14 @@ struct ChatScreen: View {
 
             Spacer(minLength: 0)
 
-            // Model picker — Auto (router) is the secure, recommended default; below it the
-            // door's models grouped by provider (Anthropic / OpenAI / Local) with friendly names.
-            Menu {
-                Section {
-                    Button { setModel(nil) } label: {
-                        // Shield badge marks Auto as the secure pick; keeps the badge even when
-                        // selected (checkmark.shield) so it always reads as the recommended choice.
-                        Label(menuData.auto.title,
-                              systemImage: isAuto ? "checkmark.shield.fill" : "lock.shield")
-                    }
-                } header: {
-                    Text(menuData.auto.recommended
-                         ? "Recommended — \(menuData.auto.caption)"
-                         : menuData.auto.caption)
-                }
-                ForEach(menuData.groups) { group in
-                    Section(group.title) {
-                        ForEach(group.options) { m in
-                            Button { setModel(m.id) } label: {
-                                Label(ModelCatalog.displayName(for: m),
-                                      systemImage: store.active?.modelTargetId == m.id ? "checkmark" : "")
-                            }
-                        }
-                    }
-                }
-            } label: {
-                HStack(spacing: GrainSpacing.x1) {
-                    // Secure default reads as a shield + "· Secure"; a pinned model reads as a cpu
-                    // + its friendly name.
-                    Image(systemName: isAuto ? "lock.shield.fill" : "cpu")
-                    Text(isAuto ? "Auto · Secure" : selectedModelLabel).grainTextStyle(.caption)
-                    Image(systemName: "chevron.down").font(.system(size: 9))
-                }
-                .foregroundStyle(isAuto ? GrainColor.sage : GrainColor.textMuted)
-            }
-            .accessibilityIdentifier("model-picker")
+            // Model picker — extracted into an Equatable subview so the per-token / elapsed-timer
+            // re-renders of this screen do NOT re-evaluate the open menu (which resets its scroll
+            // to the top — you couldn't stay scrolled down to pick a model). It re-renders ONLY when
+            // the model list or the pinned selection actually changes.
+            ModelPickerMenu(models: models,
+                            selectedId: store.active?.modelTargetId,
+                            onSelect: setModel)
+                .equatable()
 
             GrainButton("New", variant: .text, size: .sm) { store.newConversation() }
                 .accessibilityIdentifier("new-chat")
@@ -255,5 +216,63 @@ private struct ChatListSheet: View {
         let last = convo.messages.last?.text ?? ""
         if last.isEmpty { return "No messages yet" }
         return last
+    }
+}
+
+/// The chat model picker, isolated as an Equatable subview.
+///
+/// The chat screen re-renders on every streamed token and on the per-second "Thinking…"
+/// elapsed timer. When the picker Menu lived inline, each of those re-evaluated the open
+/// menu's content and the system menu snapped its scroll back to the top — so you couldn't
+/// stay scrolled down to select a model near the bottom of the list. As an `Equatable`
+/// subview keyed only on `models` + `selectedId`, SwiftUI skips re-rendering it while a turn
+/// streams, so the open menu keeps its scroll position.
+private struct ModelPickerMenu: View, Equatable {
+    let models: [ModelOption]
+    let selectedId: String?
+    let onSelect: (String?) -> Void
+
+    static func == (lhs: ModelPickerMenu, rhs: ModelPickerMenu) -> Bool {
+        lhs.models == rhs.models && lhs.selectedId == rhs.selectedId
+    }
+
+    private var menuData: ModelMenu { ModelCatalog.menu(from: models) }
+    private var isAuto: Bool { selectedId == nil }
+    private var selectedLabel: String {
+        guard let id = selectedId else { return "Auto" }
+        return models.first(where: { $0.id == id }).map(ModelCatalog.displayName(for:)) ?? id
+    }
+
+    var body: some View {
+        Menu {
+            Section {
+                Button { onSelect(nil) } label: {
+                    Label(menuData.auto.title,
+                          systemImage: isAuto ? "checkmark.shield.fill" : "lock.shield")
+                }
+            } header: {
+                Text(menuData.auto.recommended
+                     ? "Recommended — \(menuData.auto.caption)"
+                     : menuData.auto.caption)
+            }
+            ForEach(menuData.groups) { group in
+                Section(group.title) {
+                    ForEach(group.options) { m in
+                        Button { onSelect(m.id) } label: {
+                            Label(ModelCatalog.displayName(for: m),
+                                  systemImage: selectedId == m.id ? "checkmark" : "")
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: GrainSpacing.x1) {
+                Image(systemName: isAuto ? "lock.shield.fill" : "cpu")
+                Text(isAuto ? "Auto · Secure" : selectedLabel).grainTextStyle(.caption)
+                Image(systemName: "chevron.down").font(.system(size: 9))
+            }
+            .foregroundStyle(isAuto ? GrainColor.sage : GrainColor.textMuted)
+        }
+        .accessibilityIdentifier("model-picker")
     }
 }
