@@ -38,23 +38,12 @@ struct ChatScreen: View {
 
     private var client: DoorClient { DoorClient(target: target, log: log) }
 
-    /// Whether the active conversation uses the Auto router (the secure default) rather than a
-    /// pinned model.
-    private var isAuto: Bool { store.active?.modelTargetId == nil }
-
     /// Whether the active conversation is set to Private (Kiln keeps the turn on
     /// compliant / on-device targets). The core brand promise, surfaced per-chat.
     private var isPrivate: Bool { store.active?.sensitivity == ChatConversationStore.Sensitivity.private }
 
-    /// The door's models, grouped by provider with friendly labels + the secure Auto default.
-    /// Pure + data-driven (the door owns the list); see `ModelCatalog`.
-    private var menuData: ModelMenu { ModelCatalog.menu(from: models) }
-
-    /// The friendly label for the active conversation's pinned model (only used when not Auto).
-    private var selectedModelLabel: String {
-        guard let id = store.active?.modelTargetId else { return "Auto" }
-        return models.first(where: { $0.id == id }).map(ModelCatalog.displayName(for:)) ?? id
-    }
+    // Auto/model-label/menu derivation lives in `ModelPickerMenu` (below) so the picker is an
+    // isolated Equatable subview — this screen's frequent re-renders don't reset its scroll.
 
     var body: some View {
         VStack(spacing: 0) {
@@ -137,46 +126,15 @@ struct ChatScreen: View {
             .accessibilityValue(isPrivate ? "Private, stays on your Mac" : "Open, may use cloud")
             .accessibilityHint("Changes whether this chat stays on your Mac")
 
-            // Model picker — Auto (router) is the secure, recommended default; below it the
-            // door's models grouped by provider (Anthropic / OpenAI / Local) with friendly names.
-            Menu {
-                Section {
-                    Button { setModel(nil) } label: {
-                        Label(menuData.auto.title,
-                              systemImage: isAuto ? "checkmark" : "wand.and.stars")
-                    }
-                } header: {
-                    Text(menuData.auto.recommended
-                         ? "Recommended — \(menuData.auto.caption)"
-                         : menuData.auto.caption)
-                }
-                // In Private, only on-device routing (Auto) is offered — cloud models are
-                // hidden so the "Private" badge can never contradict the actual route.
-                if isPrivate {
-                    Text("Private uses on-device routing")
-                } else {
-                    ForEach(menuData.groups) { group in
-                        Section(group.title) {
-                            ForEach(group.options) { m in
-                                Button { setModel(m.id) } label: {
-                                    Label(ModelCatalog.displayName(for: m),
-                                          systemImage: store.active?.modelTargetId == m.id ? "checkmark" : "")
-                                }
-                            }
-                        }
-                    }
-                }
-            } label: {
-                HStack(spacing: GrainSpacing.x1) {
-                    // Auto = router (wand); a pinned model = a chip (cpu). No lock/shield here —
-                    // the lock belongs solely to the Privacy control.
-                    Image(systemName: isAuto ? "wand.and.stars" : "cpu")
-                    Text(isAuto ? "Auto" : selectedModelLabel).grainTextStyle(.caption)
-                    Image(systemName: "chevron.down").font(.system(size: 9))
-                }
-                .foregroundStyle(GrainColor.textMuted)
-            }
-            .accessibilityIdentifier("model-picker")
+            // Model picker — extracted into an Equatable subview so the per-token / elapsed-timer
+            // re-renders of this screen do NOT re-evaluate the open menu (which resets its scroll
+            // to the top). Re-renders ONLY when the list / selection / privacy posture changes.
+            // Carries isPrivate so Private still restricts routing to Auto (badge can't lie).
+            ModelPickerMenu(models: models,
+                            selectedId: store.active?.modelTargetId,
+                            isPrivate: isPrivate,
+                            onSelect: setModel)
+                .equatable()
 
             GrainButton("New", variant: .text, size: .sm) { store.newConversation() }
                 .accessibilityIdentifier("new-chat")
@@ -620,5 +578,74 @@ private struct ChatListSheet: View {
         let last = convo.messages.last?.text ?? ""
         if last.isEmpty { return "No messages yet" }
         return last
+    }
+}
+
+/// The chat model picker, isolated as an Equatable subview.
+///
+/// The chat screen re-renders on every streamed token and on the per-second "Thinking…"
+/// elapsed timer. When the picker Menu lived inline, each of those re-evaluated the open
+/// menu's content and the system menu snapped its scroll back to the top — so you couldn't
+/// stay scrolled down to select a model near the bottom of the list. As an `Equatable`
+/// subview keyed only on `models` + `selectedId`, SwiftUI skips re-rendering it while a turn
+/// streams, so the open menu keeps its scroll position.
+private struct ModelPickerMenu: View, Equatable {
+    let models: [ModelOption]
+    let selectedId: String?
+    /// Private restricts routing to Auto/on-device — cloud entries are hidden so the
+    /// "Private" badge can never contradict the actual route (badge-never-lies).
+    let isPrivate: Bool
+    let onSelect: (String?) -> Void
+
+    nonisolated static func == (lhs: ModelPickerMenu, rhs: ModelPickerMenu) -> Bool {
+        lhs.models == rhs.models && lhs.selectedId == rhs.selectedId && lhs.isPrivate == rhs.isPrivate
+    }
+
+    private var menuData: ModelMenu { ModelCatalog.menu(from: models) }
+    private var isAuto: Bool { selectedId == nil }
+    private var selectedLabel: String {
+        guard let id = selectedId else { return "Auto" }
+        return models.first(where: { $0.id == id }).map(ModelCatalog.displayName(for:)) ?? id
+    }
+
+    var body: some View {
+        Menu {
+            Section {
+                Button { onSelect(nil) } label: {
+                    Label(menuData.auto.title,
+                          systemImage: isAuto ? "checkmark" : "wand.and.stars")
+                }
+            } header: {
+                Text(menuData.auto.recommended
+                     ? "Recommended — \(menuData.auto.caption)"
+                     : menuData.auto.caption)
+            }
+            // In Private, only on-device routing (Auto) is offered — cloud models are
+            // hidden so the "Private" badge can never contradict the actual route.
+            if isPrivate {
+                Text("Private uses on-device routing")
+            } else {
+                ForEach(menuData.groups) { group in
+                    Section(group.title) {
+                        ForEach(group.options) { m in
+                            Button { onSelect(m.id) } label: {
+                                Label(ModelCatalog.displayName(for: m),
+                                      systemImage: selectedId == m.id ? "checkmark" : "")
+                            }
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: GrainSpacing.x1) {
+                // Auto = router (wand); a pinned model = a chip (cpu). No lock/shield here —
+                // the lock belongs solely to the Privacy control.
+                Image(systemName: isAuto ? "wand.and.stars" : "cpu")
+                Text(isAuto ? "Auto" : selectedLabel).grainTextStyle(.caption)
+                Image(systemName: "chevron.down").font(.system(size: 9))
+            }
+            .foregroundStyle(GrainColor.textMuted)
+        }
+        .accessibilityIdentifier("model-picker")
     }
 }

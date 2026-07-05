@@ -94,6 +94,9 @@ public enum DoorEvent: Equatable, Sendable {
             return .other(type: "?", raw: payload)
         }
         func str(_ k: String) -> String { (obj[k] as? String) ?? "" }
+        func str2(_ k1: String, _ k2: String) -> String {
+            let a = str(k1); return a.isEmpty ? str(k2) : a
+        }
         func int(_ k: String) -> Int { (obj[k] as? Int) ?? (obj[k] as? NSNumber)?.intValue ?? 0 }
         func args(_ k: String) -> String {
             guard let v = obj[k] else { return "" }
@@ -104,8 +107,10 @@ public enum DoorEvent: Equatable, Sendable {
         switch type {
         case "session": return .session(sessionId: str("session_id"))
         case "assistant_delta": return .assistantDelta(text: str("text"))
-        case "tool_call": return .toolCall(callId: str("call_id"), name: str("name"), args: args("args"))
-        case "tool_result": return .toolResult(callId: str("call_id"), content: str("content"), isError: (obj["is_error"] as? Bool) ?? false)
+        // kiln-runtime emits `tool_call`/`tool_result` keyed by `id`; `approval_request`
+        // keys by `call_id`. Prefer `id`, fall back to `call_id` for resilience.
+        case "tool_call": return .toolCall(callId: str2("id", "call_id"), name: str("name"), args: args("args"))
+        case "tool_result": return .toolResult(callId: str2("id", "call_id"), content: str("content"), isError: (obj["is_error"] as? Bool) ?? false)
         case "boundary": return .boundary(label: str("label"))
         case "approval_request": return .approvalRequest(callId: str("call_id"), name: str("name"), args: args("args"))
         case "keepalive": return .keepalive(ms: int("ms"))

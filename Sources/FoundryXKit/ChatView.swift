@@ -38,6 +38,7 @@ public struct ChatView: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x3) {
             connectionStatusRow
+            agenticAffordance
 
             ForEach(model.messages) { msg in
                 if msg.role == "assistant" {
@@ -60,81 +61,28 @@ public struct ChatView: View {
                 }
             }
 
-            // What the agent DID this turn — so a tool-running turn isn't a silent gap.
-            if !model.toolRuns.isEmpty {
+            // Inline tool-activity trace — one compact, expandable row per tool action the
+            // agent took this turn (Claude-Code-style visibility into read/edit/bash/…).
+            if !model.activities.isEmpty {
                 VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-                    ForEach(model.toolRuns) { run in
-                        HStack(spacing: GrainSpacing.x2) {
-                            Image(systemName: run.isError ? "xmark.circle" : (run.done ? "checkmark.circle" : "gearshape.2"))
-                                .font(.system(size: 12))
-                                .foregroundStyle(run.isError ? GrainColor.dangerRed : (run.done ? GrainColor.sage : GrainColor.textMuted))
-                            Text(run.done ? "Ran \(run.name)" : "Running \(run.name)…")
-                                .grainTextStyle(.caption)
-                                .foregroundStyle(GrainColor.textMuted)
-                            Spacer(minLength: 0)
-                        }
-                    }
+                    ForEach(model.activities) { ToolActivityRow(activity: $0) }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityIdentifier("tool-activity")
+                .accessibilityIdentifier("tool-activity-trace")
             }
 
             switch model.turnState {
             case .awaitingApproval(let callId, let name, let args):
-                GrainCard(.filled) {
-                    VStack(alignment: .leading, spacing: GrainSpacing.x3) {
-                        // Show WHAT will run + its arguments — never ask for a blind approval.
-                        Text("Run \(name)?")
-                            .grainTextStyle(.body)
-                            .foregroundStyle(GrainColor.ink)
-                        if let preview = Self.argsPreview(args) {
-                            Text(preview)
-                                .grainTextStyle(.caption)
-                                .foregroundStyle(GrainColor.textMuted)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .textSelection(.enabled)
-                        }
-                        // Honest delivery: while the answer is in flight the buttons become
-                        // "Sending…"; the door's resumed stream then advances the turn and
-                        // hides this card. A final failure restores the buttons + inline copy.
-                        switch model.approvalDelivery {
-                        case .sending:
-                            HStack(spacing: GrainSpacing.x2) {
-                                GrainSpinner(size: 16)
-                                Text("Sending…")
-                                    .grainTextStyle(.caption)
-                                    .foregroundStyle(GrainColor.textMuted)
-                            }
-                        case .idle, .failed:
-                            VStack(alignment: .leading, spacing: GrainSpacing.x2) {
-                                if case .failed = model.approvalDelivery {
-                                    Text("Couldn’t send — try again")
-                                        .grainTextStyle(.caption)
-                                        .foregroundStyle(GrainColor.dangerRed)
-                                }
-                                // "Allow once" is the safe primary; "Reject" sits beside it.
-                                HStack(spacing: GrainSpacing.x2) {
-                                    GrainButton("Allow once", variant: .filled, size: .sm) { onApproveOnce(callId) }
-                                        .accessibilityIdentifier("approval-once")
-                                    GrainButton("Reject", variant: .outlined, size: .sm) { onReject(callId) }
-                                }
-                                // "Always allow" is the standing grant — spelled out so it's
-                                // never a surprise which tool stops asking.
-                                VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-                                    GrainButton("Always allow", variant: .tonal, size: .sm) { onApproveAlways(callId) }
-                                        .accessibilityIdentifier("approval-always")
-                                    Text("Won’t ask again for \(name)")
-                                        .grainTextStyle(.caption)
-                                        .foregroundStyle(GrainColor.textMuted)
-                                }
-                            }
-                        }
-                    }
-                }
-                .accessibilityIdentifier("approval-prompt")
+                ApprovalCard(detail: ChatViewModel.approvalDetail(name: name, argsJSON: args),
+                             toolName: name,
+                             delivery: model.approvalDelivery,
+                             onApproveOnce: { onApproveOnce(callId) },
+                             onApproveAlways: { onApproveAlways(callId) },
+                             onReject: { onReject(callId) })
+                    .accessibilityIdentifier("approval-prompt")
             case .completed(let reason):
                 VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-                    Text("done: \(reason)")
+                    Text(model.statusLine ?? "done: \(reason)")
                         .grainTextStyle(.caption)
                         .textCase(.uppercase)
                         .foregroundStyle(GrainColor.sage)
@@ -169,12 +117,20 @@ public struct ChatView: View {
             case .streaming:
                 HStack(spacing: GrainSpacing.x2) {
                     GrainTypingIndicator()
+                    // Live status line: "Thinking… / Running <tool> <arg>… / Responding…".
+                    // Turns the long agentic pause into a legible, moving signal.
+                    if let status = model.statusLine {
+                        Text(status)
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(GrainColor.textMuted)
+                            .accessibilityIdentifier("status-line")
+                    }
                     // Before the first token, tick a SMOOTH local elapsed timer (every 0.5s)
                     // so it's visibly moving — qwen3's time-to-first-token can be many seconds,
                     // and the door's keepalive lands too sparsely to look alive on its own.
-                    if model.assistantText.isEmpty, let started = model.turnStartedAt {
+                    if model.assistantText.isEmpty, model.activities.isEmpty, let started = model.turnStartedAt {
                         TimelineView(.periodic(from: started, by: 0.5)) { ctx in
-                            Text("thinking… \(String(format: "%.1f", ctx.date.timeIntervalSince(started)))s")
+                            Text("\(String(format: "%.1f", ctx.date.timeIntervalSince(started)))s")
                                 .grainTextStyle(.caption)
                                 .foregroundStyle(GrainColor.textFaint)
                                 .monospacedDigit()
@@ -190,12 +146,23 @@ public struct ChatView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// A compact, human-scannable preview of a tool's args for the approval prompt
-    /// (nil when there's nothing meaningful to show).
-    private static func argsPreview(_ args: String) -> String? {
-        let t = args.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty, t != "{}", t != "null" else { return nil }
-        return t.count > 240 ? String(t.prefix(240)) + "…" : t
+    /// A quiet, always-present signal that this assistant is agentic — it can read/write
+    /// files and run commands, and asks before it acts. Sets the mental model so a powerful
+    /// capability never feels like a surprising one. (What tools exist + the approval policy
+    /// are Kiln's; this only names the capability the user is already talking to.)
+    private var agenticAffordance: some View {
+        HStack(spacing: GrainSpacing.x2) {
+            Image(systemName: "hammer.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(GrainColor.forgeBlue)
+            Text("Agent — reads & writes files, runs commands. Asks before it acts.")
+                .grainTextStyle(.caption)
+                .foregroundStyle(GrainColor.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, GrainSpacing.x1)
+        .accessibilityIdentifier("agentic-affordance")
     }
 
     /// "first token 12.4s · total 31.5s · 331 tok" — the per-turn timing under a done turn.
@@ -235,6 +202,207 @@ public struct ChatView: View {
             Spacer(minLength: 0)
         }
         .accessibilityIdentifier("connection-status")
+    }
+}
+
+// MARK: - Inline tool-activity row
+
+/// One compact, expandable row in the inline tool-activity trace: a glyph + the action
+/// ("read Foo.swift", "ran: ls -la"), a running/done/error indicator, and — once the tool
+/// finished — a tap to reveal its output. This is the core "make the agent visible" surface.
+private struct ToolActivityRow: View {
+    let activity: ChatViewModel.ToolActivity
+    @State private var expanded = false
+
+    private var canExpand: Bool { (activity.resultContent?.isEmpty == false) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+            Button {
+                if canExpand { expanded.toggle() }
+            } label: {
+                HStack(spacing: GrainSpacing.x2) {
+                    Image(systemName: activity.symbol)
+                        .font(.system(size: 11))
+                        .foregroundStyle(activity.isError ? GrainColor.dangerRed : GrainColor.forgeBlue)
+                        .frame(width: 14)
+                    Text(activity.summary)
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.textMain)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                    trailingIndicator
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if expanded, let result = activity.resultContent {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Text(result)
+                        .grainTextStyle(.caption)
+                        .monospaced()
+                        .foregroundStyle(GrainColor.textMuted)
+                        .padding(GrainSpacing.x2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxHeight: 180)
+                .background(GrainColor.backgroundSunken)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .accessibilityIdentifier("tool-activity-result")
+            }
+        }
+        .padding(.vertical, GrainSpacing.x1)
+        .padding(.horizontal, GrainSpacing.x2)
+        .background(GrainColor.surfaceSunken)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .accessibilityIdentifier("tool-activity")
+    }
+
+    @ViewBuilder private var trailingIndicator: some View {
+        if activity.isRunning {
+            GrainStatusDot(.thinking, size: .sm)
+        } else if activity.isError {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(GrainColor.dangerRed)
+        } else if canExpand {
+            Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                .font(.system(size: 9))
+                .foregroundStyle(GrainColor.textFaint)
+        }
+    }
+}
+
+// MARK: - Rich approval card
+
+/// The approval prompt, upgraded from a bare "Approve read?" to show EXACTLY what the agent
+/// wants to do — the shell command, or the file + its before/after — before the user consents.
+/// Nothing runs until the user answers; the turn stays suspended at the door.
+private struct ApprovalCard: View {
+    let detail: ChatViewModel.ApprovalDetail
+    let toolName: String
+    let delivery: ChatViewModel.ApprovalDelivery
+    let onApproveOnce: () -> Void
+    let onApproveAlways: () -> Void
+    let onReject: () -> Void
+
+    var body: some View {
+        GrainCard(.filled) {
+            VStack(alignment: .leading, spacing: GrainSpacing.x3) {
+                HStack(spacing: GrainSpacing.x2) {
+                    Image(systemName: "shield.lefthalf.filled")
+                        .font(.system(size: 12))
+                        .foregroundStyle(GrainColor.amber)
+                    Text(detail.title)
+                        .grainTextStyle(.body)
+                        .foregroundStyle(GrainColor.ink)
+                    Spacer(minLength: 0)
+                }
+
+                detailBody
+
+                // Honest consent + honest delivery: "Allow once" is the safe primary; the
+                // standing "Always allow" grant is spelled out; while the decision is in
+                // flight the buttons become "Sending…", and a final failure restores them.
+                switch delivery {
+                case .sending:
+                    HStack(spacing: GrainSpacing.x2) {
+                        GrainSpinner(size: 16)
+                        Text("Sending…")
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(GrainColor.textMuted)
+                    }
+                case .idle, .failed:
+                    VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+                        if case .failed = delivery {
+                            Text("Couldn’t send — try again")
+                                .grainTextStyle(.caption)
+                                .foregroundStyle(GrainColor.dangerRed)
+                        }
+                        HStack(spacing: GrainSpacing.x2) {
+                            GrainButton("Allow once", variant: .filled, size: .sm) { onApproveOnce() }
+                                .accessibilityIdentifier("approval-once")
+                            GrainButton("Reject", variant: .outlined, size: .sm) { onReject() }
+                        }
+                        VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                            GrainButton("Always allow", variant: .tonal, size: .sm) { onApproveAlways() }
+                                .accessibilityIdentifier("approval-always")
+                            Text("Won’t ask again for \(toolName)")
+                                .grainTextStyle(.caption)
+                                .foregroundStyle(GrainColor.textMuted)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var detailBody: some View {
+        switch detail.kind {
+        case .command:
+            codeBlock(detail.command ?? "", id: "approval-command")
+        case .fileWrite:
+            if let path = detail.filePath { pathLabel(path) }
+            if let content = detail.newText { codeBlock(content, id: "approval-content") }
+        case .fileEdit:
+            if let path = detail.filePath { pathLabel(path) }
+            diffBlock(old: detail.oldText, new: detail.newText)
+        case .generic:
+            if let body = detail.body, !body.isEmpty { codeBlock(body, id: "approval-args") }
+        }
+    }
+
+    private func pathLabel(_ path: String) -> some View {
+        Text(path)
+            .grainTextStyle(.caption)
+            .monospaced()
+            .foregroundStyle(GrainColor.textMuted)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .accessibilityIdentifier("approval-file")
+    }
+
+    private func codeBlock(_ text: String, id: String) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            Text(text)
+                .grainTextStyle(.caption)
+                .monospaced()
+                .foregroundStyle(GrainColor.textMain)
+                .padding(GrainSpacing.x2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxHeight: 200)
+        .background(GrainColor.backgroundSunken)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .accessibilityIdentifier(id)
+    }
+
+    /// A small before/after diff for an edit approval — removed lines in red, added in green.
+    @ViewBuilder private func diffBlock(old: String?, new: String?) -> some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+            if let old, !old.isEmpty {
+                diffLines(old, sign: "-", color: GrainColor.dangerRed)
+            }
+            if let new, !new.isEmpty {
+                diffLines(new, sign: "+", color: GrainColor.sage)
+            }
+        }
+        .padding(GrainSpacing.x2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(GrainColor.backgroundSunken)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .accessibilityIdentifier("approval-diff")
+    }
+
+    private func diffLines(_ text: String, sign: String, color: Color) -> some View {
+        Text(text.split(separator: "\n", omittingEmptySubsequences: false)
+                .map { "\(sign) \($0)" }.joined(separator: "\n"))
+            .grainTextStyle(.caption)
+            .monospaced()
+            .foregroundStyle(color)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 #endif
