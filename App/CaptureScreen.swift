@@ -351,7 +351,13 @@ private struct CaptureCard: View {
                 // Calm Grain status dot communicates motion: working states pulse,
                 // Ready breathes at rest, failed smolders.
                 GrainStatusDot(progress.statusDot, size: .sm)
-                Text(progress.label).grainTextStyle(name == nil ? .body : .caption)
+                // A dropped capture shows Lore's SPECIFIC honest reason ("No speech
+                // detected" / "Audio couldn't be recovered") instead of the generic —
+                // and misleading, since a drop is terminal — "…failed — retry".
+                Text(progress == .failed
+                     ? (ConversationProgress.failureMessage(droppedReason: poller.droppedReason) ?? progress.label)
+                     : progress.label)
+                    .grainTextStyle(name == nil ? .body : .caption)
                     .foregroundStyle(progress == .failed ? GrainColor.dangerRed
                                      : (name == nil ? GrainColor.ink : GrainColor.textMuted))
                 Spacer()

@@ -191,6 +191,11 @@ public struct CaptureStatusResponse: Decodable, Sendable, Equatable {
     /// the poll so the conversation CARD can show it without a separate /content call.
     public let title: String?
     public let summary: String?
+    /// Terminal drop reason from Lore (`silent_no_transcript` | `noise` |
+    /// `junk_purge` | `key_lost`) when `stage == "failed"`. Lets the card show an
+    /// honest, specific message ("No speech detected" / "Audio couldn't be
+    /// recovered") instead of a generic — and for `key_lost`, misleading — "retry".
+    public let droppedReason: String?
 
     enum CodingKeys: String, CodingKey {
         case stage
@@ -198,15 +203,18 @@ public struct CaptureStatusResponse: Decodable, Sendable, Equatable {
         case transcribed
         case title
         case summary
+        case droppedReason
     }
 
     public init(stage: String, loreCaptureId: String?, transcribed: Bool,
-                title: String? = nil, summary: String? = nil) {
+                title: String? = nil, summary: String? = nil,
+                droppedReason: String? = nil) {
         self.stage = stage
         self.loreCaptureId = loreCaptureId
         self.transcribed = transcribed
         self.title = title
         self.summary = summary
+        self.droppedReason = droppedReason
     }
 }
 

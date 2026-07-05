@@ -79,6 +79,26 @@ public enum ConversationProgress: String, Sendable, Equatable {
     /// Whether the card should offer a retry affordance.
     public var needsRetry: Bool { self == .failed }
 
+    /// A specific, honest failure line derived from Lore's terminal drop reason —
+    /// shown on a `.failed` card instead of the generic chip. `nil` when there's no
+    /// specific reason (falls back to the generic label).
+    public static func failureMessage(droppedReason: String?) -> String? {
+        switch droppedReason {
+        case "silent_no_transcript", "noise", "junk_purge": return "No speech detected"
+        case "key_lost": return "Audio couldn't be recovered"
+        case .some(let r) where !r.isEmpty: return "Couldn't transcribe (\(r))"
+        default: return nil
+        }
+    }
+
+    /// Whether retrying is actually useful. A terminal Lore DROP (silent/noise/junk/
+    /// key-lost) is Lore's final verdict — retry can't change it — so a dropped card
+    /// shows the honest reason with NO retry. A `.failed` with no drop reason (an
+    /// engine/transport failure) keeps retry.
+    public static func retryUseful(droppedReason: String?) -> Bool {
+        droppedReason == nil
+    }
+
     /// Derive the card's progress from the local WAL stage, whether the source is
     /// still streaming, the door's pipeline stage, whether a Kiln title is known, and
     /// whether a transcript has been cached locally. Pure — the view maps the result
@@ -139,6 +159,10 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
     /// The Kiln-generated summary/description once the door has it (the card's
     /// secondary line — what the conversation was about).
     @Published public private(set) var summary: String?
+    /// Lore's terminal drop reason once a capture failed (`silent_no_transcript` |
+    /// `noise` | `junk_purge` | `key_lost`) — drives the card's SPECIFIC failure line
+    /// and whether a (useless-for-a-drop) retry is offered.
+    @Published public private(set) var droppedReason: String?
 
     private let client: CaptureStatusFetching
     private let baseInterval: TimeInterval
@@ -222,6 +246,7 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
         if let t = resp.title, !t.isEmpty { title = t }
         if let s = resp.summary, !s.isEmpty { summary = s }
         lastTranscribed = resp.transcribed
+        droppedReason = resp.droppedReason
         // Persist name/description/stage into the durable card tombstone so the whole
         // timeline stays browsable (with a title + summary) offline + after pruning.
         if let baseDir {
