@@ -147,16 +147,26 @@ public enum ConversationCardStore {
                              stage: String? = nil) -> Bool {
         var card = load(captureId: captureId, baseDir: baseDir) ?? ConversationCardMeta()
         var changed = false
+        var titleChanged = false, summaryChanged = false
         // A real (Kiln) title/summary takes over a provisional card: overwrite even a
         // provisional title, and drop the provisional flag.
-        if let t = title, !t.isEmpty, t != card.title { card.title = t; changed = true }
-        if let s = summary, !s.isEmpty, s != card.summary { card.summary = s; changed = true }
+        if let t = title, !t.isEmpty, t != card.title { card.title = t; changed = true; titleChanged = true }
+        if let s = summary, !s.isEmpty, s != card.summary { card.summary = s; changed = true; summaryChanged = true }
         if let st = stage, !st.isEmpty, st != card.stage { card.stage = st; changed = true }
         let hasAuthoritative = (title.map { !$0.isEmpty } ?? false) || (summary.map { !$0.isEmpty } ?? false)
         if hasAuthoritative && card.isProvisional { card.isProvisional = false; changed = true }
         guard changed else { return false }
         card.updatedAt = UInt64(max(0, Date().timeIntervalSince1970))
         save(card, captureId: captureId, baseDir: baseDir)
+        // Append-only event log (track 20260705T1100): authoritative facts landing on
+        // the card append ON CHANGE only — repeat door polls with unchanged content
+        // never grow the log.
+        if titleChanged, let t = card.title {
+            CaptureEventLog.append(.titleSet, captureId: captureId, payload: ["title": t], baseDir: baseDir)
+        }
+        if summaryChanged, let s = card.summary {
+            CaptureEventLog.append(.summarySet, captureId: captureId, payload: ["summary": s], baseDir: baseDir)
+        }
         return true
     }
 
@@ -176,14 +186,21 @@ public enum ConversationCardStore {
         // Don't clobber an already-authoritative title (Kiln content already won).
         if let existing = card.title, !existing.isEmpty, !card.isProvisional { return false }
         var changed = false
+        var transcriptChanged = false
         if let t = title, !t.isEmpty, t != card.title { card.title = t; changed = true }
         if let body = transcript, !body.isEmpty, body != card.provisionalTranscript {
-            card.provisionalTranscript = body; changed = true
+            card.provisionalTranscript = body; changed = true; transcriptChanged = true
         }
         if !card.isProvisional { card.isProvisional = true; changed = true }
         guard changed else { return false }
         card.updatedAt = UInt64(max(0, Date().timeIntervalSince1970))
         save(card, captureId: captureId, baseDir: baseDir)
+        // The on-device provisional transcript is a conversation fact too — appended
+        // with its source so a replaying brain can prefer authoritative over provisional.
+        if transcriptChanged {
+            CaptureEventLog.append(.transcriptSet, captureId: captureId,
+                                   payload: ["source": "provisional"], baseDir: baseDir)
+        }
         return true
     }
 }

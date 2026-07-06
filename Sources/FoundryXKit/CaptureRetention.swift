@@ -64,6 +64,11 @@ public enum TranscriptCacheStore {
             try? data.write(to: transcriptURL(captureId: captureId, baseDir: baseDir), options: [.atomic])
         }
         try? Data().write(to: confirmedMarkerURL(captureId: captureId, baseDir: baseDir), options: [.atomic])
+        // Append-only event log (track 20260705T1100): the authoritative transcript
+        // landing is a conversation fact — appended once (callers gate on
+        // hasCachedTranscript before saving).
+        CaptureEventLog.append(.transcriptSet, captureId: captureId,
+                               payload: ["source": "authoritative"], baseDir: baseDir)
     }
 
     /// True once a transcript has been cached for this capture (the readable tombstone).

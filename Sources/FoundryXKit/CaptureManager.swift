@@ -1312,6 +1312,10 @@ public final class CaptureManager: ObservableObject {
         let startSecs = nowUnixSecs()
         ConversationMetaStore.recordStart(captureId: id, baseDir: baseDir, at: startSecs)
         ConversationCardStore.recordStart(captureId: id, baseDir: baseDir, startedAt: startSecs)
+        // Append-only event log (track 20260705T1100, decision #3): the durable
+        // history a future brain is seeded from by replay.
+        CaptureEventLog.append(.captureStarted, captureId: id,
+                               payload: ["source": captureSource.rawValue], baseDir: baseDir)
         wal.beginStreaming()
         router.resetLevelMeter()                  // fresh Opus decoder per conversation
         #if canImport(AVFoundation)
@@ -1543,6 +1547,7 @@ public final class CaptureManager: ObservableObject {
         do {
             try await finalizeCapture(id, meta)
             clearNeedsFinalize(id)
+            CaptureEventLog.append(.captureFinalized, captureId: id, baseDir: baseDir)
             // The conversation is now the authoritative last-finished; make sure the home
             // widget's snapshot reflects it the moment finalize completes (best-effort hint).
             refreshHomeWidget()
