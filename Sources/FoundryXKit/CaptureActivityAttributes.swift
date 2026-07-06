@@ -71,11 +71,11 @@ extension CaptureActivityPhase {
 import ActivityKit
 
 @available(iOS 16.1, *)
-public struct CaptureActivityAttributes: ActivityAttributes {
+public struct CaptureActivityAttributes: ActivityAttributes, Sendable {
     /// The dynamic, push-or-locally-updated slice of state the Live Activity renders.
     /// Keep this MINIMAL — ActivityKit serializes it on every update and over APNs in
     /// the (future) push path, so big payloads (transcripts, level arrays) stay out.
-    public struct ContentState: Codable, Hashable {
+    public struct ContentState: Codable, Hashable, Sendable {
         /// The DISTINCT capture phase: RECORDING-ACTIVE vs PAUSED vs LISTENING/IDLE. This
         /// is the fix for the "in a conversation while paused/idle" bug — it's derived
         /// from REAL voiced-capture activity (recent voice), not from the session merely
