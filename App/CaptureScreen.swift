@@ -630,7 +630,13 @@ struct ConversationDetailView: View {
         provisional = ConversationCardStore.load(captureId: captureId, baseDir: base)
         if cached != nil {
             loading = false
-            return            // instant from cache — no fetch needed
+            // The cache renders instantly but holds NO speaker segments (transcript/
+            // title/summary only) — and Lore may have diarized the capture since it
+            // was written. Refresh from the door in the background so speaker turns
+            // (and fresher titles) appear; without this, any once-opened conversation
+            // was frozen as a flat transcript forever.
+            await fetchFromDoor()
+            return
         }
         if isOlder {
             loading = false   // older + uncached → load on demand (button / pull-to-refresh)
@@ -643,7 +649,9 @@ struct ConversationDetailView: View {
     /// ready, and surface a summarizing re-fetch. Drives the "Load transcript" button
     /// and pull-to-refresh.
     private func fetchFromDoor() async {
-        loading = true
+        // Only show the spinner when there's nothing on screen yet — a background
+        // refresh over an already-rendered cached transcript must not flash loading.
+        if cached == nil { loading = true }
         loadError = nil
         didAttemptFetch = true
         do {
