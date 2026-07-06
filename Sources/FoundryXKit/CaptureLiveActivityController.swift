@@ -81,8 +81,12 @@ public final class CaptureLiveActivityController {
             if state.isRecording { start(state) }   // resurrect a dropped activity
             return
         }
+        // `Activity` is a non-Sendable class, so capturing it into the @Sendable Task
+        // trips Xcode 26.6's stricter concurrency check. ActivityKit's update/end are
+        // internally thread-safe, so opt the handle out with `nonisolated(unsafe)`.
+        nonisolated(unsafe) let handle = activity
         Task {
-            await activity.update(
+            await handle.update(
                 .init(state: state, staleDate: Date().addingTimeInterval(Self.staleAfter)))
         }
     }
@@ -93,7 +97,7 @@ public final class CaptureLiveActivityController {
     public func end(final state: CaptureActivityAttributes.ContentState,
                     dismissAfter: TimeInterval = 30) {
         guard let activity else { return }
-        let handle = activity
+        nonisolated(unsafe) let handle = activity
         self.activity = nil
         Task {
             await handle.end(
@@ -105,7 +109,7 @@ public final class CaptureLiveActivityController {
     /// Immediately tear down any live activity (e.g. on hard reset). Idempotent.
     public func endImmediately() {
         guard let activity else { return }
-        let handle = activity
+        nonisolated(unsafe) let handle = activity
         self.activity = nil
         Task { await handle.end(nil, dismissalPolicy: .immediate) }
     }
