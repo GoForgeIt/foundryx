@@ -999,16 +999,26 @@ public final class CaptureManager: ObservableObject {
             // non-active, still has no segments, and has been open past the stuck threshold,
             // discard it (durable `.discarded` marker — nothing real is lost, it's empty).
             if wal.status.totalSegments == 0 {
-                if let meta = ConversationMetaStore.load(captureId: id, baseDir: baseDir),
-                   meta.startedAt > 0, meta.endedAt == nil,
-                   Date().timeIntervalSince1970 - TimeInterval(meta.startedAt) > Self.stuckEmptyRecordingSecs {
+                // Discard ANY stale zero-segment capture. The old rule required a meta
+                // with `endedAt == nil`, which let two flavors linger forever as
+                // "Processing · 0/0" cards: ended-but-empty captures (endedAt set) and
+                // meta-less ones. Age comes from the durable start-time resolution
+                // (meta → card tombstone → the capture-id's baked timestamp), so a
+                // meta-less empty still ages out. Never discard anything Lore confirmed
+                // or that has a cached transcript (nothing real is ever lost — the
+                // marker hides an EMPTY card, it doesn't delete audio).
+                let started = startTime(of: wal)
+                if !wal.status.streaming,
+                   Date().timeIntervalSince1970 - started > Self.stuckEmptyRecordingSecs,
+                   !TranscriptCacheStore.isConfirmedInLore(captureId: id, baseDir: baseDir),
+                   !hasCachedTranscript(id) {
                     let dir = baseDir.appendingPathComponent(id, isDirectory: true)
                     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                     try? Data("stuck empty recording — 0 segments, never received audio".utf8)
                         .write(to: discardMarker(id), options: [.atomic])
                     clearNeedsFinalize(id)
                     retryStates[id] = nil
-                    log?.info("capture \(id): pruned stuck-empty recording on launch (0 segments)")
+                    log?.info("capture \(id): pruned stuck-empty capture (0 segments, aged out)")
                 }
                 continue
             }
