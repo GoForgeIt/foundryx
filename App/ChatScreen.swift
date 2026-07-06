@@ -96,6 +96,11 @@ struct ChatScreen: View {
     private func send() {
         guard let active = store.active else { return }
         let text = input; input = ""; streaming = true
+        // iOS quirk: a vertical-axis TextField can keep its rendered glyphs when the
+        // bound string is reset within the same tap/return submit cycle, so the message
+        // you just sent lingers in the composer. Re-clear on the next runloop tick so
+        // the field reliably empties after every send (button OR return key).
+        DispatchQueue.main.async { self.input = "" }
         let chatId = active.id
         model.beginUserTurn(text)
         model.setConnection(.connecting)
