@@ -73,6 +73,8 @@ cat > build/entitlements-min.xml <<PLIST
 	<array><string>group.${BUNDLE_ID}</string></array>
 	<key>keychain-access-groups</key>
 	<array><string>${TEAM_ID}.${BUNDLE_ID}</string></array>
+	<key>com.apple.developer.applesignin</key>
+	<array><string>Default</string></array>
 	<key>get-task-allow</key>
 	<false/>
 </dict>
