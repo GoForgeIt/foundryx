@@ -20,7 +20,7 @@ import Foundation
 
 /// One ordered transcript segment, attributed to a per-capture speaker SLOT (e.g.
 /// `speaker_0`). `startMs`/`endMs` are optional (some diarizers omit timing).
-public struct TranscriptSegment: Decodable, Sendable, Equatable, Identifiable {
+public struct TranscriptSegment: Codable, Sendable, Equatable, Identifiable {
     public let seq: Int
     public let startMs: Int?
     public let endMs: Int?
@@ -45,7 +45,7 @@ public struct TranscriptSegment: Decodable, Sendable, Equatable, Identifiable {
 }
 
 /// A per-capture speaker slot's identity state (the read-path `speakers` entry).
-public enum SpeakerStatus: String, Sendable, Equatable {
+public enum SpeakerStatus: String, Codable, Sendable, Equatable {
     case anonymous
     case inferred
     case confirmed
@@ -59,7 +59,7 @@ public enum SpeakerStatus: String, Sendable, Equatable {
 
 /// A per-capture speaker slot + its identity state. `name` is the inferred name (when
 /// `inferred`) or the confirmed name (when `confirmed`); `nil` when anonymous.
-public struct CaptureSpeaker: Decodable, Sendable, Equatable, Identifiable {
+public struct CaptureSpeaker: Codable, Sendable, Equatable, Identifiable {
     public let slot: String
     public let status: SpeakerStatus
     /// The inferred (tentative) or confirmed name, per `status`. `nil` when anonymous.

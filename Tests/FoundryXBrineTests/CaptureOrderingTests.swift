@@ -58,7 +58,7 @@ final class CaptureOrderingTests: XCTestCase {
         let poller = CaptureStatusPoller(captureId: "omi-z", client: StubFetcher(stage: "in_lore"),
                                          baseInterval: 0.01)
         let terminal = await poller.pollOnce()
-        XCTAssertFalse(terminal, "in_lore is not terminal")
+        XCTAssertTrue(terminal, "in_lore + transcribed + title has delivered everything status polling can provide")
         let stage = await MainActor.run { poller.stage }
         let title = await MainActor.run { poller.title }
         let lore = await MainActor.run { poller.loreCaptureId }

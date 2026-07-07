@@ -21,6 +21,32 @@ private extension ConversationProgress {
 /// device + a Pause/Resume control. Below: the Omi-style timeline (each capture
 /// Recording → Saved on phone → Saved to computer) + a global "your data is safe"
 /// sync indicator so nothing ever feels lost into the phone.
+/// The live audio meter strip — isolated so the 12 Hz level tick re-renders ONLY
+/// this small view, never the conversation list above it (deep-review perf fix).
+private struct MeterStrip: View {
+    @ObservedObject var meter: CaptureManager.AudioMeterModel
+    let isPaused: Bool
+    let isRecordingMic: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+            LevelMeterView(levels: meter.levels, active: !isPaused)
+            Text(isPaused ? "Paused — not listening"
+                 : (isRecordingMic ? "Recording from phone mic — bars rise as it hears you"
+                                   : "Listening — bars rise as it hears you"))
+                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            // Diagnostic: definitive "are frames arriving?" signal. framesReceived
+            // stuck at 0 ⇒ the Omi isn't notifying (not a meter bug).
+            Text("frames \(meter.framesReceived) · last \(meter.lastFrameBytes)B")
+                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                .monospacedDigit()
+        }
+        .padding(.horizontal, GrainSpacing.x4)
+        .padding(.vertical, GrainSpacing.x2)
+        .overlay(alignment: .bottom) { Rectangle().fill(GrainColor.borderHairline).frame(height: 1) }
+    }
+}
+
 struct CaptureScreen: View {
     // Shared with the Device tab (owned by MainTabs) so both surfaces see one BLE
     // link + one capture pipeline.
@@ -31,6 +57,7 @@ struct CaptureScreen: View {
     @ObservedObject var sources: CaptureSourceRegistry
     /// The resolved door target — lets a tapped card open its transcript (Phase B).
     let target: DoorTarget
+    @State private var pendingDeleteId: String?
 
     /// Whether the Omi is still an enabled capture source (device-page toggle). When off,
     /// the capture page neither auto-starts nor shows the Omi scan affordance.
@@ -61,6 +88,19 @@ struct CaptureScreen: View {
         // Power on the Omi only when it's still an enabled source; always drive the meter.
         .onAppear { if omiEnabled { manager.startSource() }; manager.startMeter() }
         .onDisappear { manager.stopMeter() }
+        .confirmationDialog("Delete conversation?",
+                            isPresented: Binding(
+                                get: { pendingDeleteId != nil },
+                                set: { if !$0 { pendingDeleteId = nil } }),
+                            titleVisibility: .visible) {
+            Button("Delete", role: .destructive) {
+                if let id = pendingDeleteId { manager.deleteConversation(id) }
+                pendingDeleteId = nil
+            }
+            Button("Cancel", role: .cancel) { pendingDeleteId = nil }
+        } message: {
+            Text("Removes it from your phone, your computer, and your library.")
+        }
     }
 
     // MARK: conversation list — grouped into dated sections (Feature 5)
@@ -99,6 +139,7 @@ struct CaptureScreen: View {
         NavigationLink {
             ConversationDetailView(
                 target: target,
+                manager: manager,
                 captureId: wal.captureId,
                 timeRange: manager.conversationMeta(for: wal.captureId)
                     .map { CaptureCard.timeRangeString(meta: $0, fallback: wal.status.startedAt) }
@@ -109,37 +150,36 @@ struct CaptureScreen: View {
                     ?? wal.status.startedAt
             )
         } label: {
-            CaptureCard(
-                wal: wal,
-                meta: manager.conversationMeta(for: wal.captureId),
-                card: manager.cardMeta(for: wal.captureId),
-                poller: manager.statusPoller(for: wal.captureId),
-                hasCachedTranscript: manager.hasCachedTranscript(wal.captureId),
-                // Cache RECENT (~14d) transcripts on sight (no-op for older / already-cached).
-                onSight: { manager.ensureRecentTranscriptCached(wal.captureId) }
-            )
+            if let poller = manager.statusPoller(for: wal.captureId) {
+                CaptureCard(
+                    wal: wal,
+                    meta: manager.conversationMeta(for: wal.captureId),
+                    card: manager.cardMeta(for: wal.captureId),
+                    poller: poller,
+                    hasCachedTranscript: manager.hasCachedTranscript(wal.captureId),
+                    // Cache RECENT (~14d) transcripts on sight (no-op for older / already-cached).
+                    onSight: { manager.ensureRecentTranscriptCached(wal.captureId) }
+                )
+            }
         }
         .buttonStyle(.plain)
+        .swipeActions {
+            Button(role: .destructive) { pendingDeleteId = wal.captureId } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
     }
 
     // MARK: live audio meter (req 8) — shows the Omi is actually hearing sound
 
     private var meterBar: some View {
-        VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-            LevelMeterView(levels: manager.levels, active: !manager.isPaused)
-            Text(manager.isPaused ? "Paused — not listening"
-                 : (manager.isRecordingMic ? "Recording from phone mic — bars rise as it hears you"
-                                           : "Listening — bars rise as it hears you"))
-                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-            // Diagnostic: definitive "are frames arriving?" signal. framesReceived
-            // stuck at 0 ⇒ the Omi isn't notifying (not a meter bug).
-            Text("frames \(manager.framesReceived) · last \(manager.lastFrameBytes)B")
-                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-                .monospacedDigit()
-        }
-        .padding(.horizontal, GrainSpacing.x4)
-        .padding(.vertical, GrainSpacing.x2)
-        .overlay(alignment: .bottom) { Rectangle().fill(GrainColor.borderHairline).frame(height: 1) }
+        // The 12 Hz meter lives in its own subview observing ONLY manager.meter — its
+        // tick must never invalidate this screen's body (which re-groups the whole
+        // list and re-reads per-row metadata). isPaused/isRecordingMic change rarely
+        // and are passed as plain values.
+        MeterStrip(meter: manager.meter,
+                   isPaused: manager.isPaused,
+                   isRecordingMic: manager.isRecordingMic)
     }
 
     // MARK: header — ambient control when connected, else the auto-connect status + the
@@ -278,7 +318,8 @@ struct CaptureScreen: View {
         if case .failed = manager.sourceState {
             return "\(n) segment\(n == 1 ? "" : "s") waiting to sync — will retry"
         }
-        return "\(n) segment\(n == 1 ? "" : "s") saved on phone · syncing…"
+        let suffix = manager.drainActive ? " · syncing…" : ""
+        return "\(n) segment\(n == 1 ? "" : "s") saved on phone\(suffix)"
     }
 
     private var emptyState: some View {
@@ -461,6 +502,7 @@ private struct CaptureCard: View {
 /// subject/summary generation is a later slice).
 struct ConversationDetailView: View {
     let target: DoorTarget
+    @ObservedObject var manager: CaptureManager
     let captureId: String
     let timeRange: String
     let place: String?
@@ -474,6 +516,8 @@ struct ConversationDetailView: View {
     @State private var loadError: String?
     @State private var loading = true
     @State private var didAttemptFetch = false
+    @State private var confirmDelete = false
+    @Environment(\.dismiss) private var dismiss
 
     /// True when the conversation is OLDER than the ~14-day transcript-cache window:
     /// its transcript text isn't kept locally, so it loads on demand (a button /
@@ -507,6 +551,15 @@ struct ConversationDetailView: View {
             && !((provisional?.provisionalTranscript ?? "").isEmpty)
     }
     private var summaryText: String? { content?.summary ?? cached?.summary }
+    /// One speaker-rendering source for both live door content and cached content, so
+    /// a second open does not flash flat text while waiting for `/content` again.
+    private var diarizedTranscript: SpeakerTranscript? {
+        if let diarized = content?.diarized, diarized.hasSegments { return diarized }
+        if let cached, !cached.segments.isEmpty {
+            return SpeakerTranscript(speakers: cached.speakers, segments: cached.segments)
+        }
+        return nil
+    }
 
     var body: some View {
         ScrollView {
@@ -538,7 +591,7 @@ struct ConversationDetailView: View {
                     // Speaker-diarized transcript (Lore 0.5.53): when the door forwards
                     // segments, render colour-coded speaker turns with tag/confirm/correct.
                     // Falls back to the flat transcript for non-diarized / legacy captures.
-                    if let diarized = content?.diarized, diarized.hasSegments {
+                    if let diarized = diarizedTranscript {
                         SpeakerTranscriptSection(
                             target: target,
                             captureId: captureId,
@@ -582,6 +635,25 @@ struct ConversationDetailView: View {
         .grainBackground()
         .navigationTitle(navTitle)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button("Delete", role: .destructive) { confirmDelete = true }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+            }
+        }
+        .confirmationDialog("Delete conversation?", isPresented: $confirmDelete,
+                            titleVisibility: .visible) {
+            Button("Delete", role: .destructive) {
+                manager.deleteConversation(captureId)
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Removes it from your phone, your computer, and your library.")
+        }
         .refreshable { await fetchFromDoor() }   // pull-to-refresh loads on demand
         .task { await initialLoad() }
         .onDisappear { player?.stop() }
@@ -655,8 +727,11 @@ struct ConversationDetailView: View {
         loadError = nil
         didAttemptFetch = true
         do {
-            content = try await DoorClient(target: target).captureContent(captureId: captureId)
-            cacheIfReady(content)
+            let fetched = try await DoorClient(target: target).captureContent(captureId: captureId)
+            if cached == nil || contentDiffersFromCache(fetched) {
+                content = fetched
+                cacheIfReady(fetched)
+            }
         } catch {
             // Door unreachable — keep the cached transcript if we have one; only show
             // an error when there's nothing cached to fall back to.
@@ -669,10 +744,17 @@ struct ConversationDetailView: View {
         if content?.summarizing == true, (content?.title ?? "").isEmpty {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             if let refreshed = try? await DoorClient(target: target).captureContent(captureId: captureId) {
-                content = refreshed
-                cacheIfReady(refreshed)
+                if cached == nil || contentDiffersFromCache(refreshed) {
+                    content = refreshed
+                    cacheIfReady(refreshed)
+                }
             }
         }
+    }
+
+    private func contentDiffersFromCache(_ c: CaptureContent) -> Bool {
+        guard let cached else { return true }
+        return c.transcript != cached.transcript || c.segments.count != cached.segments.count
     }
 
     /// Persist the transcript locally once the door returns it, so it survives audio
@@ -682,7 +764,8 @@ struct ConversationDetailView: View {
         guard let c, c.found, !c.transcript.isEmpty else { return }
         let baseDir = CaptureWAL.documentsCaptures()
         let entry = CachedTranscript(transcript: c.transcript, title: c.title,
-                                     summary: c.summary, fetchedAt: UInt64(max(0, Date().timeIntervalSince1970)))
+                                     summary: c.summary, segments: c.segments, speakers: c.speakers,
+                                     fetchedAt: UInt64(max(0, Date().timeIntervalSince1970)))
         TranscriptCacheStore.save(entry, captureId: captureId, baseDir: baseDir)
         // Seed the durable all-time name/description tombstone too.
         ConversationCardStore.merge(captureId: captureId, baseDir: baseDir,

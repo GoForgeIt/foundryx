@@ -104,7 +104,9 @@ final class CaptureSubstanceGateTests: XCTestCase {
         let fm = FileManager.default
         let real = "omi-20260701-120000-realconv"
         let junk = "omi-20260701-110000-junkfrag"
-        try fm.createDirectory(at: dir.appendingPathComponent(real), withIntermediateDirectories: true)
+        let realDir = dir.appendingPathComponent(real)
+        try fm.createDirectory(at: realDir, withIntermediateDirectories: true)
+        try Data([1, 2, 3, 4]).write(to: realDir.appendingPathComponent(CaptureWAL.segName(0)))
         let junkDir = dir.appendingPathComponent(junk)
         try fm.createDirectory(at: junkDir, withIntermediateDirectories: true)
         try Data().write(to: junkDir.appendingPathComponent(".discarded"))

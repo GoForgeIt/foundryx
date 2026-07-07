@@ -662,6 +662,46 @@ public final class DoorClient: @unchecked Sendable {
         log?.info("✓ finalize capture=\(captureId) accepted by door")
     }
 
+    /// Delete a conversation everywhere (`DELETE /foundryx/capture/{id}`). The phone
+    /// treats 200/404/410 as success so the operation is idempotent across retries and
+    /// across a desktop that may already have removed the capture. Any other status (or
+    /// transport failure) throws so the durable `.needs-delete` marker remains queued.
+    public func deleteCapture(captureId: String) async throws {
+        log?.info("→ DELETE capture=\(captureId)")
+        if let relay = target.relay {
+            let resp = try await RelayHTTP.roundTrip(
+                relay: relay, bearer: target.bearer, method: "DELETE",
+                path: "/foundryx/capture/\(captureId)",
+                session: session, log: log, useMux: target.useMux)
+            if resp.status == 401 { throw DoorError.unauthorized }
+            guard resp.status == 200 || resp.status == 404 || resp.status == 410 else {
+                log?.warn("delete capture=\(captureId) → HTTP \(resp.status) (will retry)")
+                throw DoorError.http(resp.status)
+            }
+            log?.info("✓ delete capture=\(captureId) accepted by door (relay)")
+            return
+        }
+        let s = target.baseURL.absoluteString
+        let base = s.hasSuffix("/") ? String(s.dropLast()) : s
+        guard let url = URL(string: "\(base)/foundryx/capture/\(captureId)") else {
+            throw DoorError.transport("bad delete url")
+        }
+        var r = URLRequest(url: url)
+        r.httpMethod = "DELETE"
+        r.setValue("Bearer \(target.bearer)", forHTTPHeaderField: "Authorization")
+        r.timeoutInterval = 30
+        let (_, response) = try await session.data(for: r)
+        guard let http = response as? HTTPURLResponse else {
+            throw DoorError.transport("non-HTTP response")
+        }
+        if http.statusCode == 401 { throw DoorError.unauthorized }
+        guard http.statusCode == 200 || http.statusCode == 404 || http.statusCode == 410 else {
+            log?.warn("delete capture=\(captureId) → HTTP \(http.statusCode) (will retry)")
+            throw DoorError.http(http.statusCode)
+        }
+        log?.info("✓ delete capture=\(captureId) accepted by door")
+    }
+
     /// Poll the door for a capture's pipeline stage (the phone→Lore join, F3),
     /// keyed by the PHONE's capture id — the door owns the lore-id mapping. Returns
     /// the stage + (once in Lore) the lore capture id. Phase A is stage-only.

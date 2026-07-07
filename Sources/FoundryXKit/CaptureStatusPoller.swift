@@ -115,7 +115,10 @@ public enum ConversationProgress: String, Sendable, Equatable {
         if hasCachedTranscript { return .ready }
         switch wal {
         case .recording:
-            return .recording
+            // The WAL only reports .recording while segments are still absent; trust
+            // it ONLY while genuinely streaming. A dead empty capture must never
+            // render as a live recording (the "Recording · 0/0" zombie cards).
+            return streaming ? .recording : .savedOnPhone
         case .savedOnPhone:
             return streaming ? .recording : .savedOnPhone
         case .savedToComputer:
@@ -204,8 +207,13 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
     @MainActor public func start() {
         // Poll if not terminal, OR if we're terminal but still have no title (an
         // already-organized capture still needs its background-generated title for
-        // the card). Nothing to do once terminal AND titled.
-        guard task == nil, !(stage.isTerminal && title != nil) else { return }
+        // the card). Nothing to do once terminal AND titled. An in_lore capture whose
+        // durable card already carries a title has likewise received everything a
+        // poll can deliver (title exists ⇒ transcript exists) — never re-poll it on
+        // relaunch/scroll (this was the standing ~2,000 polls/hour storm).
+        guard task == nil,
+              !(stage.isTerminal && title != nil),
+              !(stage == .inLore && title != nil) else { return }
         // Detached so the loop (fetch + decode + sleep) runs off the main actor; only
         // the @Published mutation in `apply` hops back to main.
         task = Task.detached(priority: .utility) { [weak self] in await self?.loop() }
@@ -256,7 +264,14 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
         // Keep polling past a terminal stage ONLY while a transcribed (non-failed)
         // capture is still waiting on its background-generated title.
         let titlePending = title == nil && lastTranscribed && next != .failed
-        return PollOutcome(terminal: next.isTerminal, titlePending: titlePending, stored: next == .stored)
+        // in_lore + transcribed + titled = everything a status poll can EVER deliver
+        // has been delivered (the door never advances captures past in_lore today, so
+        // "wait for organized" meant polling every 5s forever — measured ~2,000
+        // polls/hour across the visible list, 65% of all door traffic). Treat it as
+        // terminal-for-polling; the transcript/speakers load on open via /content.
+        let doneDelivering = next == .inLore && resp.transcribed && title != nil
+        return PollOutcome(terminal: next.isTerminal || doneDelivering,
+                           titlePending: titlePending, stored: next == .stored)
     }
 
     private func loop() async {

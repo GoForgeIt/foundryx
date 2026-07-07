@@ -224,6 +224,7 @@ public final class CaptureManager: ObservableObject {
     /// no tombstone are still hidden (useless cards).
     private func isBrowsable(_ wal: CaptureWAL) -> Bool {
         if isDiscarded(wal.captureId) { return false }   // sub-substance junk fragment — never show
+        if isDeleted(wal.captureId) { return false }     // user-deleted captures never show again
         if wal.status.streaming { return true }   // the active capture always shows
         let id = wal.captureId
         // If we hold judge-able transcript text locally, HIDE empty / near-silent /
@@ -315,20 +316,36 @@ public final class CaptureManager: ObservableObject {
     public nonisolated static func isWorthShowing(_ status: CaptureStatus) -> Bool {
         status.totalSegments > 0 || status.streaming
     }
+
+    /// The live audio meter's observable state, deliberately SEPARATE from the
+    /// manager so its 12 Hz tick invalidates only the small meter strip view.
+    @MainActor public final class AudioMeterModel: ObservableObject {
+        /// Rolling audio-level bars (0…1, oldest→newest) for the live meter (req 8).
+        @Published public fileprivate(set) var levels: [Float]
+        /// Diagnostics (surfaced on the capture screen): total Opus frames the BLE
+        /// source has delivered into the pipeline, and the last frame's byte size. A
+        /// flat meter with framesReceived==0 ⇒ the device isn't notifying; >0 ⇒ frames
+        /// arrive (then the meter/levels are the thing to look at).
+        @Published public fileprivate(set) var framesReceived: Int = 0
+        @Published public fileprivate(set) var lastFrameBytes: Int = 0
+        /// Whether every bar is already zero — lets the tick skip publishing entirely
+        /// while idle (no invalidation at all when nothing is audible).
+        fileprivate var isFlat = true
+        fileprivate init(barCount: Int) { levels = Array(repeating: 0, count: barCount) }
+    }
     @Published public private(set) var active: CaptureWAL?
     @Published public private(set) var sourceState: AudioSourceState = .idle
     /// Ambient capture is paused (device stays connected; frames are dropped).
     @Published public private(set) var isPaused: Bool = false
-    /// Rolling audio-level bars (0…1, oldest→newest) for the live meter (req 8).
-    @Published public private(set) var levels: [Float]
+    /// The 12 Hz live audio meter, ISOLATED in its own observable so its tick
+    /// invalidates only the meter strip — not the whole capture screen. When these
+    /// lived as @Published vars on the manager, every 1/12 s tick re-rendered the
+    /// entire conversation list, and each row re-read meta.json/card.json off disk:
+    /// ~250 synchronous main-thread file reads PER SECOND (deep-review finding,
+    /// 2026-07-07 — the single biggest "app feels slow" cause).
+    public let meter: AudioMeterModel
     /// Silence gap (seconds) that auto-ends a conversation (req 9). Persisted.
     @Published public private(set) var silenceGapSeconds: TimeInterval
-    /// Diagnostics (surfaced on the capture screen): total Opus frames the BLE
-    /// source has delivered into the pipeline, and the last frame's byte size. A
-    /// flat meter with framesReceived==0 ⇒ the device isn't notifying; >0 ⇒ frames
-    /// arrive (then the meter/levels are the thing to look at).
-    @Published public private(set) var framesReceived: Int = 0
-    @Published public private(set) var lastFrameBytes: Int = 0
 
     /// The live, on-device PROVISIONAL transcript for the ACTIVE conversation
     /// (Feature 1). An ephemeral PREVIEW only — it empties when no conversation is
@@ -336,6 +353,10 @@ public final class CaptureManager: ObservableObject {
     /// Kiln). Stays `.empty` when live transcription is unavailable (older OS / no
     /// model / no factory wired), so the UI simply shows nothing extra.
     @Published public private(set) var liveTranscript: LiveTranscript = .empty
+    /// True while the retry/drain loop is actively trying to move local work toward
+    /// the desktop (segment upload, finalize retry, or delete retry). The sync banner
+    /// uses this instead of equating "unsynced bytes exist" with "a drain is in flight".
+    @Published public private(set) var drainActive = false
 
     /// Number of bars in the meter window (~4s at the 12 Hz sample tick).
     public static let meterBarCount = 48
@@ -401,6 +422,10 @@ public final class CaptureManager: ObservableObject {
     /// door to assemble + ingest it to Lore. Throws on failure so the capture stays
     /// pending-finalize and is retried.
     private let finalizeCapture: @Sendable (String, ConversationMeta?) async throws -> Void
+    /// Delete-the-conversation seam (injectable for door-free tests): tells the door to
+    /// remove the capture + Lore content. Throws on retryable failure so the durable
+    /// `.needs-delete` marker remains queued.
+    private let deleteCaptureRemote: @Sendable (String) async throws -> Void
     /// Fetch a capture's transcript content from the door (injectable for door-free
     /// tests). Drives the proactive 14-day transcript cache ("fetch on sight"). Returns
     /// nil on any transport error (the cache just stays empty until next sight).
@@ -600,6 +625,7 @@ public final class CaptureManager: ObservableObject {
                 source: AudioFrameSource,
                 micSource: AudioFrameSource? = nil,
                 finalize: (@Sendable (String, ConversationMeta?) async throws -> Void)? = nil,
+                deleteCapture: (@Sendable (String) async throws -> Void)? = nil,
                 fetchContent: (@Sendable (String) async -> CaptureContent?)? = nil,
                 locationProvider: ConversationLocationProviding? = nil,
                 liveTranscriber: LiveTranscriberFactory? = nil,
@@ -620,6 +646,14 @@ public final class CaptureManager: ObservableObject {
             let client = DoorClient(target: target, log: log)
             self.finalizeCapture = { captureId, meta in
                 try await client.finalize(captureId: captureId, meta: meta)
+            }
+        }
+        if let deleteCapture {
+            self.deleteCaptureRemote = deleteCapture
+        } else {
+            let client = DoorClient(target: target, log: log)
+            self.deleteCaptureRemote = { captureId in
+                try await client.deleteCapture(captureId: captureId)
             }
         }
         // Default content fetch = the real door /content call. Tests inject a stub to
@@ -649,7 +683,7 @@ public final class CaptureManager: ObservableObject {
         // re-applies this via router.setPaused(isPaused) on the next (re)connect, so a
         // paused desired-state means the Omi connects but stays paused.
         self.isPaused = (CaptureSettings.omiCaptureDesiredState == .paused)
-        self.levels = Array(repeating: 0, count: Self.meterBarCount)
+        self.meter = AudioMeterModel(barCount: Self.meterBarCount)
         self.router = FrameRouter(segmenter: SilenceSegmenter(silenceGap: gap))
         // Frame path: serial source queue → router → WAL io queue. No main hop.
         source.onFrame = { [router] frame in router.route(frame) }
@@ -696,16 +730,34 @@ public final class CaptureManager: ObservableObject {
         reloadWidgetTimelines()
     }
 
+    /// Memoised meta.json loads: the timeline re-reads conversationMeta up to 3× per
+    /// row per render (deep-review perf finding). Meta is written only through the
+    /// manager's own recordStart/recordEnd call sites, which invalidate the entry —
+    /// so rendering is memory-only after the first load. `.some(nil)` memoises the
+    /// "no meta on disk" answer too (pre-F1 captures would otherwise re-stat forever).
+    private var metaCache: [String: ConversationMeta?] = [:]
+
+    /// Drop a capture's memoised meta after writing meta.json (recordStart/recordEnd).
+    private func invalidateMeta(_ captureId: String) { metaCache[captureId] = nil }
+
     /// The durable conversation metadata (start/end/location) for a capture, for
     /// the timeline card (F1). `nil` for captures recorded before this shipped.
     public func conversationMeta(for captureId: String) -> ConversationMeta? {
-        ConversationMetaStore.load(captureId: captureId, baseDir: baseDir)
+        if let hit = metaCache[captureId] { return hit }
+        let loaded = ConversationMetaStore.load(captureId: captureId, baseDir: baseDir)
+        metaCache[captureId] = loaded
+        return loaded
     }
 
     /// The durable, lightweight card metadata (name/description/stage) for a capture —
     /// the all-time tombstone that lets EVERY conversation show a title + summary in
     /// the list, even after its transcript text has been pruned. `nil` for a capture
     /// the door hasn't reported a title/summary for yet.
+    ///
+    /// NOT memoised: card.json is also written by each capture's status poller (title/
+    /// summary merges) outside the manager's sight, and the render path reads it once
+    /// per row (the title/summary a row shows live come from the poller's @Published
+    /// state, so a slightly-stale disk read here has no visible effect anyway).
     public func cardMeta(for captureId: String) -> ConversationCardMeta? {
         ConversationCardStore.load(captureId: captureId, baseDir: baseDir)
     }
@@ -717,7 +769,8 @@ public final class CaptureManager: ObservableObject {
 
     /// The status poller for a capture, creating one on first ask. The card calls
     /// `.start()` on appear and `.stop()` on disappear.
-    public func statusPoller(for captureId: String) -> CaptureStatusPoller {
+    public func statusPoller(for captureId: String) -> CaptureStatusPoller? {
+        guard !isDeleted(captureId) else { return nil }
         if let existing = pollers[captureId] { return existing }
         let client = DoorClient(target: target, log: log)
         // Pass baseDir so the poller persists title/summary/stage into the durable card
@@ -740,6 +793,7 @@ public final class CaptureManager: ObservableObject {
     /// window (those load on demand from the detail view), or when a fetch is already
     /// in flight. Offline-safe: a failed/empty fetch simply caches nothing.
     public func ensureRecentTranscriptCached(_ captureId: String) {
+        guard !isDeleted(captureId) else { return }
         guard !TranscriptCacheStore.hasCachedTranscript(captureId: captureId, baseDir: baseDir) else { return }
         guard CaptureRetention.isRecentForTranscriptCache(conversationAge: conversationAgeSeconds(captureId)) else { return }
         guard !cachingTranscripts.contains(captureId) else { return }
@@ -748,9 +802,10 @@ public final class CaptureManager: ObservableObject {
         let fetch = self.fetchContent
         Task { [weak self] in
             defer { self?.cachingTranscripts.remove(captureId) }
+            guard self?.isDeleted(captureId) == false else { return }
             guard let c = await fetch(captureId), c.found, !c.transcript.isEmpty else { return }
             let entry = CachedTranscript(transcript: c.transcript, title: c.title,
-                                         summary: c.summary,
+                                         summary: c.summary, segments: c.segments, speakers: c.speakers,
                                          fetchedAt: UInt64(max(0, Date().timeIntervalSince1970)))
             TranscriptCacheStore.save(entry, captureId: captureId, baseDir: baseDir)
             // Also seed the durable card tombstone with the name/description.
@@ -989,9 +1044,17 @@ public final class CaptureManager: ObservableObject {
     /// pending-finalize, and not confirmed in Lore. (Forward-only: this bounds + ingests
     /// an already-merged capture; it cannot un-merge one.)
     private func reconcileOrphanedCaptures() {
+        // Track whether this pass discarded anything: the markers land on DISK, but the
+        // published list was built BEFORE they existed — without republishing, a pruned
+        // zombie card stays visible for the entire (days-long) iOS session and only
+        // vanished on a cold relaunch. Removing the WALs from `captures` (not just
+        // re-filtering) also removes their segments from the sync banner count and
+        // their WALs from every later drain/prune iteration.
+        var discardedAny = false
         for wal in captures where wal !== active {
             let id = wal.captureId
             guard !isDiscarded(id) else { continue }   // discarded fragments are never re-queued
+            guard !isDeleted(id) else { continue }     // user-deleted captures never re-queued
             // Prune STUCK-EMPTY recordings: a capture that opened but received 0 segments
             // (Omi dropped immediately / connection never delivered a frame) is finalized by
             // neither the branch below (which requires totalSegments > 0) nor anything else,
@@ -1018,6 +1081,7 @@ public final class CaptureManager: ObservableObject {
                         .write(to: discardMarker(id), options: [.atomic])
                     clearNeedsFinalize(id)
                     retryStates[id] = nil
+                    discardedAny = true
                     log?.info("capture \(id): pruned stuck-empty capture (0 segments, aged out)")
                 }
                 continue
@@ -1034,8 +1098,12 @@ public final class CaptureManager: ObservableObject {
                 endSecs = nowUnixSecs()
             }
             ConversationMetaStore.recordEnd(captureId: id, baseDir: baseDir, at: endSecs, location: nil)
+            invalidateMeta(id)
             markNeedsFinalize(id)
             log?.info("capture \(id): orphan reconciled on launch — bounded (ended_at set) + pending finalize")
+        }
+        if discardedAny {
+            captures.removeAll { isDiscarded($0.captureId) }   // didSet republishes the list
         }
     }
 
@@ -1060,19 +1128,25 @@ public final class CaptureManager: ObservableObject {
     /// Stop sampling + flatten the bars (call from onDisappear).
     public func stopMeter() {
         meterTimer?.invalidate(); meterTimer = nil
-        levels = Array(repeating: 0, count: Self.meterBarCount)
+        meter.levels = Array(repeating: 0, count: Self.meterBarCount)
+        meter.isFlat = true
     }
 
     private func tickMeter() {
         let peak = isPaused ? 0 : levelBuffer.drainPeak()
-        var ring = levels
-        if !ring.isEmpty { ring.removeFirst() }
-        ring.append(peak)
-        levels = ring
+        // Idle skip: nothing audible and the ring is already flat → publish NOTHING
+        // (zero invalidations while the room is quiet / capture is idle).
+        if peak > 0 || !meter.isFlat {
+            var ring = meter.levels
+            if !ring.isEmpty { ring.removeFirst() }
+            ring.append(peak)
+            meter.levels = ring
+            meter.isFlat = ring.allSatisfy { $0 == 0 }
+        }
         // Surface the frame diagnostics on the same 12 Hz tick (no per-frame main hop).
         let s = router.stats()
-        if s.count != framesReceived { framesReceived = s.count }
-        if s.lastBytes != lastFrameBytes { lastFrameBytes = s.lastBytes }
+        if s.count != meter.framesReceived { meter.framesReceived = s.count }
+        if s.lastBytes != meter.lastFrameBytes { meter.lastFrameBytes = s.lastBytes }
         // Move the Live Activity's live level indicator — THROTTLED to a few seconds, NOT
         // the 12 Hz meter rate (the elapsed timer ticks on-device, so this only carries
         // the level). No-op when not recording / the throttle window hasn't elapsed.
@@ -1111,7 +1185,7 @@ public final class CaptureManager: ObservableObject {
     /// not actively recording.
     private var currentLiveLevel: Double? {
         guard isCapturing else { return nil }
-        return Double(levels.last ?? 0)
+        return Double(meter.levels.last ?? 0)
     }
 
     // MARK: Live Activity phase (RECORDING-ACTIVE vs PAUSED vs IDLE) — the bug fix
@@ -1311,6 +1385,7 @@ public final class CaptureManager: ObservableObject {
         // if its meta sidecar is ever pruned (track 20260628T1609).
         let startSecs = nowUnixSecs()
         ConversationMetaStore.recordStart(captureId: id, baseDir: baseDir, at: startSecs)
+        invalidateMeta(id)
         ConversationCardStore.recordStart(captureId: id, baseDir: baseDir, startedAt: startSecs)
         // Append-only event log (track 20260705T1100, decision #3): the durable
         // history a future brain is seeded from by replay.
@@ -1490,6 +1565,7 @@ public final class CaptureManager: ObservableObject {
             let fix = await provider.currentLocation()
             ConversationMetaStore.recordEnd(captureId: id, baseDir: baseDir,
                                             at: nowUnixSecs(), location: fix)
+            self?.invalidateMeta(id)
             await finished.sync()                 // snappy first sync
             await self?.tryFinalize(finished)     // finalize once segments are ACK'd
         }
@@ -1595,7 +1671,8 @@ public final class CaptureManager: ObservableObject {
     public func drainPending() async {
         guard !isDraining else { return }   // a drain is already in flight — skip this tick
         isDraining = true
-        defer { isDraining = false }
+        drainActive = true
+        defer { isDraining = false; drainActive = false }
 
         // Storm-stop: a known-expired bearer means EVERY upload will 401 — fire none.
         // `onAuthExpired` drives a one-shot token refresh / login; the rebuilt pipeline
@@ -1608,6 +1685,7 @@ public final class CaptureManager: ObservableObject {
             let id = wal.captureId
             if isAbandoned(id) { continue }
             if isDiscarded(id) { continue }   // a sub-substance junk fragment never uploads
+            if isDeleted(id) { continue }     // user-deleted captures never resurrect/re-upload
             if let held = suspendedSession, held.wal === wal { continue }   // hold uploads until the grace resolves
             // NEVER LOSE AUDIO: there is NO size / age / failure-count abandon here. A
             // large, old, or briefly-offline capture keeps draining (resuming from its
@@ -1637,6 +1715,7 @@ public final class CaptureManager: ObservableObject {
         // all ACK'd — this is the retry path for a finalize that didn't complete at
         // conversation-close (door/Lore was down, or segments weren't ACK'd yet).
         await retryPendingFinalizes()
+        await retryPendingDeletes()
         maybePrune()   // retention sweeps — throttled OFF the every-5s main path
     }
 
@@ -1705,6 +1784,78 @@ public final class CaptureManager: ObservableObject {
         retryStates[captureId] = nil
     }
 
+    // MARK: delete conversation (user intent — instant local hide, durable remote retry)
+
+    private func deletedMarker(_ captureId: String) -> URL {
+        baseDir.appendingPathComponent(captureId, isDirectory: true)
+            .appendingPathComponent(".deleted")
+    }
+
+    private func needsDeleteMarker(_ captureId: String) -> URL {
+        baseDir.appendingPathComponent(captureId, isDirectory: true)
+            .appendingPathComponent(".needs-delete")
+    }
+
+    /// True once the user deleted the capture. This is checked anywhere a discarded
+    /// fragment is checked: hydration, browsing, reconcile, drain, poll/cache refresh.
+    /// The marker is the choke point that prevents a status refresh or relaunch from
+    /// rebuilding a row after the card vanished locally.
+    public func isDeleted(_ captureId: String) -> Bool {
+        FileManager.default.fileExists(atPath: deletedMarker(captureId).path)
+    }
+
+    private func markNeedsDelete(_ captureId: String) {
+        let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? Data().write(to: needsDeleteMarker(captureId), options: [.atomic])
+    }
+
+    private func isPendingDelete(_ captureId: String) -> Bool {
+        FileManager.default.fileExists(atPath: needsDeleteMarker(captureId).path)
+    }
+
+    private func deleteConversationFilesKeepingMarkers(_ captureId: String) {
+        let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        for f in files {
+            let name = f.lastPathComponent
+            if name == ".deleted" || name == ".needs-delete" { continue }
+            try? FileManager.default.removeItem(at: f)
+        }
+    }
+
+    /// Delete a conversation from the phone immediately and queue the desktop/Lore
+    /// removal durably. Idempotent by design: a second delete re-writes the two tiny
+    /// markers, finds no content files, and keeps the row hidden.
+    public func deleteConversation(_ captureId: String) {
+        let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? Data().write(to: deletedMarker(captureId), options: [.atomic])
+        markNeedsDelete(captureId)
+
+        if active?.captureId == captureId {
+            source.stop()
+            micSource?.stop()
+            suspendedSession = nil
+            router.setWAL(nil)
+            router.setExternalPCM(false)
+            endLiveTranscription()
+            active?.finish()
+            active = nil
+            isRecordingMic = false
+            pushLiveState(.end)
+        }
+        clearNeedsFinalize(captureId)
+        retryStates[captureId] = nil
+        finalizing.remove(captureId)
+        cachingTranscripts.remove(captureId)
+        if let poller = pollers.removeValue(forKey: captureId) { poller.stop() }
+        deleteConversationFilesKeepingMarkers(captureId)
+        metaCache[captureId] = nil
+        captures.removeAll { $0.captureId == captureId }   // didSet republishes immediately
+        log?.info("capture \(captureId): deleted locally; remote delete queued")
+    }
+
     // MARK: retention throttle (keep the big disk sweeps off the every-5s drain)
 
     /// The retention sweeps iterate ALL captures touching disk; running them every 5s on
@@ -1730,6 +1881,7 @@ public final class CaptureManager: ObservableObject {
     public func pruneOldTranscripts() {
         for wal in captures where wal !== active {
             let id = wal.captureId
+            guard !isDeleted(id) else { continue }
             guard TranscriptCacheStore.hasCachedTranscript(captureId: id, baseDir: baseDir) else { continue }
             guard CaptureRetention.shouldPruneTranscript(conversationAge: conversationAgeSeconds(id)) else { continue }
             // Preserve the readable name/description before dropping the transcript text.
@@ -1754,6 +1906,7 @@ public final class CaptureManager: ObservableObject {
         var prunedAny = false
         for wal in captures where wal !== active {
             let id = wal.captureId
+            guard !isDeleted(id) else { continue }
             guard let age = newestSegmentAge(id) else { continue }   // nil ⇒ no audio (already pruned)
             let confirmed = TranscriptCacheStore.isConfirmedInLore(captureId: id, baseDir: baseDir)
             // A readable tombstone survives locally as either the cached transcript or —
@@ -1797,8 +1950,28 @@ public final class CaptureManager: ObservableObject {
     /// Retry finalize for every capture still marked pending-finalize. Safe to call
     /// from the drain timer and on app-foreground (mirrors the WAL drain ethos).
     public func retryPendingFinalizes() async {
-        for wal in captures where wal !== active && isPendingFinalize(wal.captureId) {
+        for wal in captures where wal !== active && !isDeleted(wal.captureId) && isPendingFinalize(wal.captureId) {
             await tryFinalize(wal)
+        }
+    }
+
+    /// Retry all durable remote-deletion intents. This enumerates disk rather than
+    /// `captures` because deleted captures intentionally do NOT hydrate into memory.
+    /// On ACK, the whole capture dir is removed; until then only `.deleted` +
+    /// `.needs-delete` remain, so the row cannot resurrect while offline.
+    public func retryPendingDeletes() async {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(at: baseDir, includingPropertiesForKeys: nil) else { return }
+        for dir in entries {
+            let id = dir.lastPathComponent
+            guard !id.hasPrefix("."), isPendingDelete(id) else { continue }
+            do {
+                try await deleteCaptureRemote(id)
+                try? fm.removeItem(at: dir)
+                log?.info("capture \(id): remote delete acknowledged; local tombstone removed")
+            } catch {
+                log?.warn("capture \(id): remote delete failed (\((error as NSError).localizedDescription)) — staying pending")
+            }
         }
     }
 
@@ -1817,15 +1990,24 @@ public final class CaptureManager: ObservableObject {
         let names = entries.map { $0.lastPathComponent }
             .filter { !$0.hasPrefix(".") }
             .sorted(by: >)   // ids are timestamp-prefixed → newest first
+        // Hydrate into a LOCAL array and publish ONCE. Appending to `captures`
+        // per-capture fired the didSet → rebuildVisibleCaptures (dedup + isBrowsable
+        // + sort over everything so far) after EVERY append — O(N²): ~45,000
+        // isBrowsable evaluations at the 300-capture cap, each reading transcript
+        // metadata off disk, all on the main thread at launch (deep-review finding).
+        var hydrated: [CaptureWAL] = []
+        hydrated.reserveCapacity(Self.maxCapturesToLoad)
         for name in names {
-            if captures.count >= Self.maxCapturesToLoad { break }
+            if hydrated.count >= Self.maxCapturesToLoad { break }
             let dir = baseDir.appendingPathComponent(name, isDirectory: true)
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { continue }
             // Discarded junk fragments are never shown or finalized — don't hydrate them.
             if fm.fileExists(atPath: dir.appendingPathComponent(".discarded").path) { continue }
-            captures.append(makeWAL(captureId: name))
+            if fm.fileExists(atPath: dir.appendingPathComponent(".deleted").path) { continue }
+            hydrated.append(makeWAL(captureId: name))
         }
+        captures.append(contentsOf: hydrated)   // one didSet → one rebuild
         pruneDiscardedFragments()
     }
 

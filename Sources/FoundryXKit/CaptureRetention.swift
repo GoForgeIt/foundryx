@@ -22,14 +22,39 @@ public struct CachedTranscript: Codable, Sendable, Equatable {
     public let transcript: String
     public let title: String?
     public let summary: String?
+    /// Speaker-diarized turns from the door's `/content` response. Stored with the
+    /// transcript so reopening a conversation does not regress to "flat text first,
+    /// speaker bubbles later" while the background refresh catches up.
+    public let segments: [TranscriptSegment]
+    /// Per-capture speaker slots paired with `segments`; empty for legacy / flat
+    /// captures. Defaults during decode keep old transcript.json files readable.
+    public let speakers: [CaptureSpeaker]
     /// When the phone fetched this from the door (unix seconds).
     public let fetchedAt: UInt64
 
-    public init(transcript: String, title: String?, summary: String?, fetchedAt: UInt64) {
+    enum CodingKeys: String, CodingKey {
+        case transcript, title, summary, segments, speakers, fetchedAt
+    }
+
+    public init(transcript: String, title: String?, summary: String?,
+                segments: [TranscriptSegment] = [], speakers: [CaptureSpeaker] = [],
+                fetchedAt: UInt64) {
         self.transcript = transcript
         self.title = title
         self.summary = summary
+        self.segments = segments
+        self.speakers = speakers
         self.fetchedAt = fetchedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        transcript = try c.decodeIfPresent(String.self, forKey: .transcript) ?? ""
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+        summary = try c.decodeIfPresent(String.self, forKey: .summary)
+        segments = try c.decodeIfPresent([TranscriptSegment].self, forKey: .segments) ?? []
+        speakers = try c.decodeIfPresent([CaptureSpeaker].self, forKey: .speakers) ?? []
+        fetchedAt = try c.decodeIfPresent(UInt64.self, forKey: .fetchedAt) ?? 0
     }
 }
 

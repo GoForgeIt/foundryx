@@ -15,7 +15,7 @@ final class ConversationProgressTests: XCTestCase {
     }
 
     func testRecordingWhileStreaming() {
-        XCTAssertEqual(resolve(.recording), .recording)
+        XCTAssertEqual(resolve(.recording, streaming: true), .recording)
         XCTAssertEqual(resolve(.savedOnPhone, streaming: true), .recording,
                        "a segment flushed mid-stream still reads as Recording")
     }

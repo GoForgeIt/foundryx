@@ -82,6 +82,49 @@ final class CaptureRetentionTests: XCTestCase {
                       "caching a transcript also confirms the capture reached Lore")
     }
 
+    func testTranscriptCacheRoundTripsSpeakerSegments() throws {
+        let dir = try tempDir("retention-cache-speakers")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let entry = CachedTranscript(
+            transcript: "Alice said hello. Bob answered.",
+            title: "Speaker chat",
+            summary: nil,
+            segments: [
+                TranscriptSegment(seq: 0, startMs: 0, endMs: 800, text: "Alice said hello.", speaker: "speaker_0"),
+                TranscriptSegment(seq: 1, startMs: 900, endMs: 1400, text: "Bob answered.", speaker: "speaker_1"),
+            ],
+            speakers: [
+                CaptureSpeaker(slot: "speaker_0", status: .confirmed, name: "Alice"),
+                CaptureSpeaker(slot: "speaker_1", status: .anonymous),
+            ],
+            fetchedAt: 456)
+
+        TranscriptCacheStore.save(entry, captureId: "c-speakers", baseDir: dir)
+
+        let loaded = try XCTUnwrap(TranscriptCacheStore.load(captureId: "c-speakers", baseDir: dir))
+        XCTAssertEqual(loaded, entry)
+        XCTAssertEqual(loaded.segments.count, 2)
+        XCTAssertEqual(loaded.speakers.first?.name, "Alice")
+    }
+
+    func testOldTranscriptCacheWithoutSpeakersStillDecodes() throws {
+        let json = """
+        {
+          "transcript": "legacy transcript",
+          "title": "Legacy",
+          "summary": "Old shape",
+          "fetchedAt": 123
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(CachedTranscript.self, from: json)
+
+        XCTAssertEqual(decoded.transcript, "legacy transcript")
+        XCTAssertEqual(decoded.title, "Legacy")
+        XCTAssertEqual(decoded.segments, [])
+        XCTAssertEqual(decoded.speakers, [])
+    }
+
     // MARK: end-to-end prune pass (seeded from disk)
 
     /// Seed a capture dir with one segment + ack, optionally aged + confirmed + cached.

@@ -357,7 +357,11 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         // INSIDE the io queue (e.g. `beginStreaming`), so a reentrant `io.sync` traps.
         // The real fix for the cross-drain race that crashed here is the single-drain
         // guard in CaptureManager.drainPending (no two `computeStatus` run concurrently).
-        let stage: CaptureStage = all.isEmpty ? .recording
+        // An empty WAL is "recording" ONLY while genuinely streaming. A dead capture
+        // with zero segments (ended, orphaned, or audio pruned by retention) must NOT
+        // claim to be recording — that's how 6-day-old cards read "Recording · 0/0"
+        // with a live green dot (deep-review finding, 2026-07-07).
+        let stage: CaptureStage = all.isEmpty ? (streaming ? .recording : .savedOnPhone)
             : (syncedCount == all.count && !streaming ? .savedToComputer : .savedOnPhone)
         var s = status
         s.totalSegments = all.count
