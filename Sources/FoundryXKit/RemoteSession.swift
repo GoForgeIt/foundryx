@@ -114,6 +114,21 @@ public final class RemoteSession: ObservableObject {
             return
         }
         idToken = token
+        // Account signup (track 20260705T1100, decision #5): the forced login IS
+        // the account creation — ship the identity-only signup event ONCE per
+        // account. Self-healing: the flag is set only on a 2xx, so a failed POST
+        // retries on the next sign-in/restore. Fire-and-forget; never blocks
+        // resolve. (Name flows in with Apple sign-in — Apple only surfaces it on
+        // the very first authorization.)
+        if let account = email ?? auth.signedInEmail,
+           AccountClient.shouldPostSignup(account: account) {
+            let client = AccountClient(baseURL: remote.gatewayHTTPURL)
+            Task {
+                if await client.postSignup(idToken: token, name: nil) {
+                    AccountClient.markSignupPosted(account: account)
+                }
+            }
+        }
         do {
             let cfg = try await HostResolver(remote: remote, log: log).resolveRelayConfig(idToken: token)
             relay = cfg
