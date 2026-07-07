@@ -13,26 +13,64 @@ struct RootView: View {
     // re-run it, so we never bounce back to the gate mid-session.
     @State private var splashElapsed = false
 
+    @StateObject private var brains = BrainStore()
+
     var body: some View {
+        let dest = RootGate.destination(signedIn: remote.email != nil,
+                                        splashElapsed: splashElapsed,
+                                        brain: brains.choice,
+                                        hostResolved: remote.makeDoorTarget() != nil)
         Group {
-            if let target = remote.makeDoorTarget(), splashElapsed {
-                MainTabs(target: target, remote: remote, showingAccount: $showingAccount)
-                    // A resolved-host change OR a refreshed bearer (after a token-expiry
-                    // re-auth) rebuilds the tabs (+ their clients) so every door request
-                    // uses the fresh id_token — never a stale, expired one.
-                    .id((target.relay?.tunnelId ?? "remote") + "#" + target.bearer.suffix(12))
+            switch dest {
+            case .signInGate:
+                // The forced identity login (track 20260705T1100 decision #5) +
+                // the branded launch splash.
+                SignInView(remote: remote, onDone: { }, dismissable: false)
+            case .computerBrain:
+                if let target = remote.makeDoorTarget() {
+                    MainTabs(target: target, remote: remote, brains: brains, local: false,
+                             showingAccount: $showingAccount)
+                        // A resolved-host change OR a refreshed bearer (after a token-expiry
+                        // re-auth) rebuilds the tabs (+ their clients) so every door request
+                        // uses the fresh id_token — never a stale, expired one.
+                        .id((target.relay?.tunnelId ?? "remote") + "#" + target.bearer.suffix(12))
+                        .sheet(isPresented: $showingAccount) {
+                            SignInView(remote: remote) { showingAccount = false }
+                        }
+                }
+            case .phoneBrain:
+                // The phone-only tier: whole without a brain (zero content egress).
+                MainTabs(target: DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!,
+                                            bearer: "local"),
+                         remote: remote, brains: brains, local: true,
+                         showingAccount: $showingAccount)
+                    .id("local-brain")
                     .sheet(isPresented: $showingAccount) {
                         SignInView(remote: remote) { showingAccount = false }
                     }
-            } else {
-                // Sign-in gate: not signed in, no host yet, or the launch splash.
-                SignInView(remote: remote, onDone: { }, dismissable: false)
             }
         }
         .task { await remote.restore() }
         .task {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             splashElapsed = true
+        }
+        // Pre-picker installs that already pair with a desktop stay on the computer
+        // brain (migration safety) — adopted exactly once, never overriding an
+        // explicit later choice.
+        .onChange(of: remote.status) { st in
+            if case .connected = st, !brains.hasExplicitChoice {
+                brains.select(.myComputer)
+            }
+        }
+        // Phase 7: choosing the computer brain replay-seeds it — every phone-only
+        // conversation is re-queued for the door drain (additive; Lore-confirmed
+        // captures untouched).
+        .onChange(of: brains.choice) { c in
+            if c == .myComputer {
+                let n = BrainSeeder.rearmForDoorSeed(baseDir: CaptureWAL.documentsCaptures())
+                if n > 0 { print("[brain-seed] re-queued \(n) local conversation(s) for the door") }
+            }
         }
     }
 }
@@ -41,7 +79,7 @@ struct RootView: View {
 /// the tab bar from anywhere in the process (track 20260705T1100, Phase 5).
 @MainActor
 final class TabRouter: ObservableObject {
-    enum Tab: Hashable { case chat, capture, device }
+    enum Tab: Hashable { case chat, capture, device, settings }
     @Published var selected: Tab = .chat
     @Published var showActionChooser = false
 }
@@ -52,6 +90,11 @@ final class TabRouter: ObservableObject {
 private struct MainTabs: View {
     let target: DoorTarget
     let remote: RemoteSession
+    let brains: BrainStore
+    /// Phone-only tier: capture finalizes through LocalBackend (WhisperKit +
+    /// Foundation Models), chat is the local whole-library surface, and nothing
+    /// ever dials a door.
+    let local: Bool
     @Binding var showingAccount: Bool
 
     @StateObject private var device: DeviceManager
@@ -63,9 +106,12 @@ private struct MainTabs: View {
     @StateObject private var chats = ChatConversationStore(storageURL: ChatConversationStore.defaultStorageURL())
     @StateObject private var router = TabRouter()
 
-    init(target: DoorTarget, remote: RemoteSession, showingAccount: Binding<Bool>) {
+    init(target: DoorTarget, remote: RemoteSession, brains: BrainStore, local: Bool,
+         showingAccount: Binding<Bool>) {
         self.target = target
         self.remote = remote
+        self.brains = brains
+        self.local = local
         _showingAccount = showingAccount
         let log = DoorLog()
         // Ship the phone's BLE/audio/capture/chat log to the relay diag sink so
@@ -77,12 +123,27 @@ private struct MainTabs: View {
         // Live on-device transcription preview (Feature 1). The factory builds the
         // SpeechAnalyzer transcriber on iOS 26+, falling back to SFSpeechRecognizer on
         // iOS 16–25; it's additive + ephemeral (Kiln stays authoritative).
-        let mgr = CaptureManager(
-            target: target, log: log, source: dm,
-            // The phone's own mic as a second capture source (Record button when the
-            // Omi is disconnected) — flows through the identical Opus/WAL/finalize path.
-            micSource: MicFrameSource(log: log),
-            liveTranscriber: LiveTranscription.defaultFactory())
+        let mgr: CaptureManager
+        if local {
+            // "Just my phone" (track 20260705T1100): the SAME capture pipeline, but
+            // finalize runs through the on-device brain — WhisperKit STT + Foundation
+            // Models title/summary — and segments self-ack (durable = on this phone).
+            let backend = LocalBackend(baseDir: CaptureWAL.documentsCaptures(),
+                                       stt: WhisperKitSTT(),
+                                       titler: makeSystemTitler())
+            mgr = CaptureManager(
+                target: target, backend: backend, log: log, source: dm,
+                micSource: MicFrameSource(log: log),
+                liveTranscriber: LiveTranscription.defaultFactory(),
+                localMode: true)
+        } else {
+            mgr = CaptureManager(
+                target: target, log: log, source: dm,
+                // The phone's own mic as a second capture source (Record button when the
+                // Omi is disconnected) — flows through the identical Opus/WAL/finalize path.
+                micSource: MicFrameSource(log: log),
+                liveTranscriber: LiveTranscription.defaultFactory())
+        }
         // When a capture upload is rejected as token-expired (401), refresh the id_token
         // once / surface login — instead of the phone retry-looping with a dead token.
         mgr.onAuthExpired = { [weak remote] in Task { @MainActor in await remote?.handleAuthExpired() } }
@@ -136,9 +197,15 @@ private struct MainTabs: View {
     var body: some View {
         TabView(selection: $router.selected) {
             NavigationStack {
-                ChatScreen(target: target, store: chats, log: log)
-                    .navigationTitle("FoundryX")
-                    .toolbar { Button("Account") { showingAccount = true } }
+                Group {
+                    if local {
+                        LocalChatScreen(baseDir: CaptureWAL.documentsCaptures(), remote: remote)
+                    } else {
+                        ChatScreen(target: target, store: chats, log: log)
+                    }
+                }
+                .navigationTitle("FoundryX")
+                .toolbar { Button("Account") { showingAccount = true } }
             }
             .tabItem { Label("Chat", systemImage: "message") }
             .tag(TabRouter.Tab.chat)
@@ -158,6 +225,13 @@ private struct MainTabs: View {
             }
             .tabItem { Label("Device", systemImage: "antenna.radiowaves.left.and.right") }
             .tag(TabRouter.Tab.device)
+
+            NavigationStack {
+                SettingsScreen(brains: brains, remote: remote)
+                    .navigationTitle("Settings")
+            }
+            .tabItem { Label("Settings", systemImage: "gearshape") }
+            .tag(TabRouter.Tab.settings)
         }
         // The Action Button's "Ask me" chooser (Phase 5, decision #4).
         .confirmationDialog("FoundryX", isPresented: $router.showActionChooser) {

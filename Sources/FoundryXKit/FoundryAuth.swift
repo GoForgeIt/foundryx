@@ -15,6 +15,7 @@ import Security
 // oauth-client-setup.md) supplied via Info.plist (FoundryXOAuth dict).
 
 public enum AuthProvider: String, Sendable, CaseIterable {
+    case apple
     case google
     case microsoft
 }
@@ -25,6 +26,30 @@ public struct AuthIdentity: Sendable, Codable {
     public let refreshToken: String?
     public let expiresAt: Date
     public let email: String?
+    /// Display name — Apple surfaces it ONLY on the very first authorization
+    /// (track 20260705T1100 decision #5), so it is captured here or lost.
+    public let name: String?
+
+    public init(provider: String, idToken: String, refreshToken: String?,
+                expiresAt: Date, email: String?, name: String? = nil) {
+        self.provider = provider
+        self.idToken = idToken
+        self.refreshToken = refreshToken
+        self.expiresAt = expiresAt
+        self.email = email
+        self.name = name
+    }
+
+    // Tolerate identities stored before `name` existed.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try c.decode(String.self, forKey: .provider)
+        idToken = try c.decode(String.self, forKey: .idToken)
+        refreshToken = try c.decodeIfPresent(String.self, forKey: .refreshToken)
+        expiresAt = try c.decode(Date.self, forKey: .expiresAt)
+        email = try c.decodeIfPresent(String.self, forKey: .email)
+        name = try c.decodeIfPresent(String.self, forKey: .name)
+    }
 }
 
 public enum AuthError: Error, LocalizedError {
@@ -53,6 +78,12 @@ public struct OAuthConfig: Sendable {
     public let microsoftClientID: String?
     public let microsoftTenant: String
 
+    public init(googleClientID: String?, microsoftClientID: String?, microsoftTenant: String) {
+        self.googleClientID = googleClientID
+        self.microsoftClientID = microsoftClientID
+        self.microsoftTenant = microsoftTenant
+    }
+
     public static func fromBundle(_ bundle: Bundle = .main) -> OAuthConfig {
         let dict = bundle.object(forInfoDictionaryKey: "FoundryXOAuth") as? [String: Any] ?? [:]
         let g = (dict["GoogleIOSClientID"] as? String)?.nonEmpty
@@ -63,6 +94,7 @@ public struct OAuthConfig: Sendable {
 
     public func clientID(for provider: AuthProvider) -> String? {
         switch provider {
+        case .apple: return nil          // native ASAuthorization flow — no OAuth client
         case .google: return googleClientID
         case .microsoft: return microsoftClientID
         }
@@ -72,6 +104,8 @@ public struct OAuthConfig: Sendable {
     /// uses the MSAL-standard `msauth.<bundle-id>://auth` form.
     public func redirectURI(for provider: AuthProvider, bundleID: String) -> String? {
         switch provider {
+        case .apple:
+            return nil                   // native flow — no redirect
         case .google:
             guard let cid = googleClientID else { return nil }
             // "NNN-xxxx.apps.googleusercontent.com" → reversed scheme.
@@ -97,13 +131,19 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
 
     /// Whether at least one provider is configured (drives the sign-in UI).
     public func isConfigured(_ provider: AuthProvider) -> Bool {
-        config.clientID(for: provider) != nil
+        if provider == .apple { return true }   // native, no client-id needed
+        return config.clientID(for: provider) != nil
     }
 
     /// Run the interactive OAuth flow for `provider`, persist the identity, and
     /// return it. Throws `AuthError.notConfigured` if the client-id is missing.
     @MainActor
     public func signIn(_ provider: AuthProvider) async throws -> AuthIdentity {
+        if provider == .apple {
+            let id = try await AppleSignInCoordinator().run()
+            AuthStore.save(id)
+            return id
+        }
         guard let clientID = config.clientID(for: provider) else {
             throw AuthError.notConfigured("\(provider.rawValue) client id not set in Info.plist FoundryXOAuth")
         }
@@ -148,12 +188,16 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
 
     public func signOut() { AuthStore.clear() }
     public var signedInEmail: String? { AuthStore.load()?.email }
+    /// Display name when the provider surfaced one (Apple: first auth only).
+    public var signedInName: String? { AuthStore.load()?.name }
 
     // MARK: provider endpoints
 
     private func authorizeURL(_ provider: AuthProvider, clientID: String, redirect: String, challenge: String, state: String) throws -> URL {
         var comps: URLComponents
         switch provider {
+        case .apple:
+            throw AuthError.providerError("apple uses the native flow")
         case .google:
             comps = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
         case .microsoft:
@@ -182,6 +226,7 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
 
     private func tokenEndpoint(_ provider: AuthProvider) -> URL {
         switch provider {
+        case .apple: preconditionFailure("apple uses the native flow, never the PKCE token endpoint")
         case .google: return URL(string: "https://oauth2.googleapis.com/token")!
         case .microsoft: return URL(string: "https://login.microsoftonline.com/\(config.microsoftTenant)/oauth2/v2.0/token")!
         }

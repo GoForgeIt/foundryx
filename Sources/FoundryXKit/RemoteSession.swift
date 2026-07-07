@@ -124,7 +124,7 @@ public final class RemoteSession: ObservableObject {
            AccountClient.shouldPostSignup(account: account) {
             let client = AccountClient(baseURL: remote.gatewayHTTPURL)
             Task {
-                if await client.postSignup(idToken: token, name: nil) {
+                if await client.postSignup(idToken: token, name: auth.signedInName) {
                     AccountClient.markSignupPosted(account: account)
                 }
             }

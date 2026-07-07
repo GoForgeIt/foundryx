@@ -39,6 +39,8 @@ public enum CaptureEventKind: String, Sendable {
     case transcriptSet = "transcript_set"
     case titleSet = "title_set"
     case summarySet = "summary_set"
+    /// Phase 7: this capture was re-queued for the door drain on brain connect.
+    case brainSeedRearmed = "brain_seed_rearmed"
 }
 
 /// Append-only JSONL store. Mirrors the ConversationCardStore/TranscriptCacheStore

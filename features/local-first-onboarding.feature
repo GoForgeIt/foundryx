@@ -6,6 +6,7 @@ Feature: FoundryX is whole without a brain — local-first onboarding
   on-device. Conversations live in an append-only local event log so connecting a
   brain later is a replay-seed, never a migration.
 
+  @phase6
   Scenario: first launch requires a one-tap identity sign-in before anything else
     Given a fresh install that has never signed in
     When I launch the app
@@ -79,6 +80,7 @@ Feature: FoundryX is whole without a brain — local-first onboarding
     Then the conversation is transcribed on-device
     And instead of a title and summary I see an upgrade prompt to connect a brain
 
+  @phase6
   Scenario: the brain picker defaults to just my phone
     Given I have signed in
     When I open the brain picker in settings
@@ -97,6 +99,7 @@ Feature: FoundryX is whole without a brain — local-first onboarding
     When the team reviews the signup sheet
     Then each waitlist signup shows name, email, provider, company when inferable, and coarse location
 
+  @phase7
   Scenario: connecting a computer brain seeds it with the local library
     Given I have signed in
     And I have transcribed conversations recorded phone-only
@@ -104,6 +107,7 @@ Feature: FoundryX is whole without a brain — local-first onboarding
     Then my local conversations are seeded into the brain by replaying the event log
     And my local conversations remain readable on the phone
 
+  @phase7
   Scenario: disconnecting the brain returns to local-only with everything readable
     Given my computer is connected as the brain
     And my conversations have been enriched by the brain

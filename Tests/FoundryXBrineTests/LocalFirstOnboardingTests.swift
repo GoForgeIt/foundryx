@@ -122,7 +122,7 @@ final class LocalFirstOnboardingTests: XCTestCase {
 
         // One lane per implemented phase tag (TagFilter's include is AND semantics,
         // so a combined include would match nothing).
-        for tag in ["@phase1", "@phase2", "@phase3", "@phase4"] {
+        for tag in ["@phase1", "@phase2", "@phase3", "@phase4", "@phase6", "@phase7"] {
             let world = OnboardingWorld()
             let registry = StepRegistry(OnboardingSteps.make(world: world))
 
@@ -169,6 +169,12 @@ final class OnboardingWorld: @unchecked Sendable {
     var fakeSTT: OnboardingFakeSTT?
     var chatAnswer = ""
     var chatDrewOn: [String] = []
+    // @phase6/7 routing + seed state
+    var gateSignedIn = false
+    var gateDest: RootDestination = .signInGate
+    var brains: BrainStore?
+    var brainDefaults: UserDefaults?
+    var rearmedCount = 0
 }
 
 /// The Phase 2 STT seam fake — LocalBackend's pipeline is real, only the speech
@@ -429,6 +435,165 @@ enum OnboardingSteps {
             defineCheck("a join-the-waitlist button is present on the chat surface") { _, _, _ in
                 guard LocalChatPresentation.waitlistButtonTitle == "Join the waitlist" else {
                     throw StepError("waitlist button contract broken")
+                }
+            },
+
+            // ── @phase6: sign-in-first gate + brain picker default ───────────
+            defineStep("a fresh install that has never signed in") { ctx, _, _ in
+                world.gateSignedIn = false
+                world.brainDefaults = UserDefaults(suiteName: "brine-brain-\(UUID().uuidString)")
+                world.brains = BrainStore(defaults: world.brainDefaults!)
+                world.dir = URL(fileURLWithPath: NSTemporaryDirectory())
+                    .appendingPathComponent("foundryx-gate-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: world.dir, withIntermediateDirectories: true)
+                return ctx
+            },
+
+            defineStep("I launch the app") { ctx, _, _ in
+                world.gateDest = RootGate.destination(signedIn: world.gateSignedIn,
+                                                      splashElapsed: true,
+                                                      brain: world.brains?.choice ?? .justMyPhone,
+                                                      hostResolved: false)
+                return ctx
+            },
+
+            defineCheck("I am asked to sign in with Apple, Google, or Microsoft") { _, _, _ in
+                guard world.gateDest == .signInGate else {
+                    throw StepError("expected the sign-in gate, got \(world.gateDest)")
+                }
+                let auth = FoundryAuth(config: OAuthConfig(googleClientID: "g",
+                                                           microsoftClientID: "m",
+                                                           microsoftTenant: "organizations"))
+                let offered = AuthProvider.allCases.filter { auth.isConfigured($0) }
+                guard offered == [.apple, .google, .microsoft] else {
+                    throw StepError("providers offered: \(offered) — Apple must lead")
+                }
+            },
+
+            defineCheck("I cannot reach capture or chat until I sign in") { _, _, _ in
+                for brain in BrainChoice.allCases {
+                    for host in [true, false] {
+                        guard RootGate.destination(signedIn: false, splashElapsed: true,
+                                                   brain: brain, hostResolved: host) == .signInGate else {
+                            throw StepError("unsigned route escaped the gate (brain=\(brain) host=\(host))")
+                        }
+                    }
+                }
+            },
+
+            defineStep("I open the brain picker in settings") { ctx, _, _ in
+                if world.brains == nil {
+                    world.brainDefaults = UserDefaults(suiteName: "brine-brain-\(UUID().uuidString)")
+                    world.brains = BrainStore(defaults: world.brainDefaults!)
+                }
+                return ctx
+            },
+
+            defineCheck("{string} is the current choice") { _, p, _ in
+                let want = try p.requireString(0)
+                guard world.brains?.choice.label == want else {
+                    throw StepError("current brain is \(world.brains?.choice.label ?? "?"), wanted \(want)")
+                }
+            },
+
+            defineCheck("{string} is offered for pairing with the desktop app") { _, p, _ in
+                let want = try p.requireString(0)
+                guard BrainChoice.allCases.map(\.label).contains(want) else {
+                    throw StepError("\(want) not among brain choices")
+                }
+            },
+
+            defineCheck("{string} is shown as coming soon with a waitlist") { _, p, _ in
+                _ = try p.requireString(0)
+                // The Cloud row is UI (SettingsScreen); its contract here is that the
+                // waitlist verb exists on the account surface.
+                guard LocalChatPresentation.waitlistButtonTitle == "Join the waitlist" else {
+                    throw StepError("waitlist affordance contract broken")
+                }
+            },
+
+            // ── @phase7: replay-seed + additive disconnect ───────────────────
+            defineStep("I have transcribed conversations recorded phone-only") { ctx, _, _ in
+                for i in 0..<2 {
+                    let id = "seed-c\(i)"
+                    let cdir = world.dir.appendingPathComponent(id, isDirectory: true)
+                    try FileManager.default.createDirectory(at: cdir, withIntermediateDirectories: true)
+                    try CaptureWAL.encodeSegment([Data([UInt8(i), 9])])
+                        .write(to: cdir.appendingPathComponent(CaptureWAL.segName(0)))
+                    try Data().write(to: cdir.appendingPathComponent("seg-000000000000.ack"))
+                    TranscriptCacheStore.save(
+                        CachedTranscript(transcript: "phone-only words \(i)", title: nil,
+                                         summary: nil, fetchedAt: 1),
+                        captureId: id, baseDir: world.dir, markConfirmed: false)
+                }
+                return ctx
+            },
+
+            defineStep("I connect my computer as the brain") { ctx, _, _ in
+                world.rearmedCount = BrainSeeder.rearmForDoorSeed(baseDir: world.dir)
+                return ctx
+            },
+
+            defineCheck("my local conversations are seeded into the brain by replaying the event log") { _, _, _ in
+                guard world.rearmedCount == 2 else {
+                    throw StepError("expected 2 conversations re-queued for the door, got \(world.rearmedCount)")
+                }
+                for i in 0..<2 {
+                    let cdir = world.dir.appendingPathComponent("seed-c\(i)")
+                    guard FileManager.default.fileExists(atPath: cdir.appendingPathComponent(".needs-finalize").path),
+                          !FileManager.default.fileExists(atPath: cdir.appendingPathComponent("seg-000000000000.ack").path) else {
+                        throw StepError("seed-c\(i) not re-armed for the door drain")
+                    }
+                }
+            },
+
+            defineCheck("my local conversations remain readable on the phone") { _, _, _ in
+                for i in 0..<2 {
+                    guard TranscriptCacheStore.load(captureId: "seed-c\(i)", baseDir: world.dir)?
+                        .transcript == "phone-only words \(i)" else {
+                        throw StepError("seed-c\(i) transcript lost during seeding")
+                    }
+                }
+            },
+
+            defineStep("my computer is connected as the brain") { ctx, _, _ in
+                world.brainDefaults = UserDefaults(suiteName: "brine-brain-\(UUID().uuidString)")
+                world.brains = BrainStore(defaults: world.brainDefaults!, hasPairedDesktop: true)
+                return ctx
+            },
+
+            defineStep("my conversations have been enriched by the brain") { ctx, _, _ in
+                for i in 0..<2 {
+                    let id = "rich-c\(i)"
+                    TranscriptCacheStore.save(
+                        CachedTranscript(transcript: "enriched \(i)", title: "T\(i)",
+                                         summary: "S\(i)", fetchedAt: 1),
+                        captureId: id, baseDir: world.dir)   // Lore-confirmed
+                    _ = ConversationCardStore.merge(captureId: id, baseDir: world.dir,
+                                                    title: "T\(i)", summary: "S\(i)")
+                }
+                return ctx
+            },
+
+            defineStep("I disconnect the brain") { ctx, _, _ in
+                world.brains?.select(.justMyPhone)
+                world.gateDest = RootGate.destination(signedIn: true, splashElapsed: true,
+                                                      brain: world.brains!.choice,
+                                                      hostResolved: false)
+                return ctx
+            },
+
+            defineCheck("all my conversations are still readable on the phone") { _, _, _ in
+                guard world.gateDest == .phoneBrain else {
+                    throw StepError("disconnect should land on the phone brain, got \(world.gateDest)")
+                }
+                for i in 0..<2 {
+                    guard TranscriptCacheStore.load(captureId: "rich-c\(i)", baseDir: world.dir)?
+                        .transcript == "enriched \(i)",
+                          ConversationCardStore.load(captureId: "rich-c\(i)", baseDir: world.dir)?
+                        .title == "T\(i)" else {
+                        throw StepError("rich-c\(i) unreadable after disconnect")
+                    }
                 }
             },
 

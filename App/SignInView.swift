@@ -97,7 +97,8 @@ struct SignInView: View {
                 Button { Task { await remote.signIn(p) } } label: {
                     HStack(spacing: GrainSpacing.x2) {
                         Image(systemName: p == .google ? "globe" : "building.2.fill")
-                        Text("Continue with \(p == .google ? "Google" : "Microsoft")")
+                        Text(p == .apple ? "Sign in with Apple"
+                             : "Continue with \(p == .google ? "Google" : "Microsoft")")
                             .fontWeight(.semibold)
                     }
                     .frame(maxWidth: .infinity)

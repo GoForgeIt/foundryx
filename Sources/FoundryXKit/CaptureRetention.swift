@@ -57,11 +57,21 @@ public enum TranscriptCacheStore {
     /// Durably cache a transcript (atomic write) AND stamp the `.lore-confirmed`
     /// marker — a cached transcript proves the audio reached + was transcribed by
     /// Lore. Creates the capture dir if needed.
-    public static func save(_ t: CachedTranscript, captureId: String, baseDir: URL) {
+    /// `markConfirmed` distinguishes a transcript that PROVES Lore ingested the
+    /// audio (the door path, default) from one produced ON-PHONE by the local
+    /// brain (track 20260705T1100) — a local transcript must NOT claim
+    /// Lore-confirmed, or the connect-a-brain seed would skip the capture.
+    public static func save(_ t: CachedTranscript, captureId: String, baseDir: URL,
+                            markConfirmed: Bool = true) {
         let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         if let data = try? JSONEncoder().encode(t) {
             try? data.write(to: transcriptURL(captureId: captureId, baseDir: baseDir), options: [.atomic])
+        }
+        guard markConfirmed else {
+            CaptureEventLog.append(.transcriptSet, captureId: captureId,
+                                   payload: ["source": "on_phone"], baseDir: baseDir)
+            return
         }
         try? Data().write(to: confirmedMarkerURL(captureId: captureId, baseDir: baseDir), options: [.atomic])
         // Append-only event log (track 20260705T1100): the authoritative transcript

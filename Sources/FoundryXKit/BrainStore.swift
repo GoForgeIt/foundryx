@@ -26,6 +26,9 @@ public final class BrainStore: ObservableObject, @unchecked Sendable {
     private let defaults: UserDefaults
 
     @Published public private(set) var choice: BrainChoice
+    /// True once the user (or the pairing migration) explicitly picked a brain —
+    /// lets RootView adopt `.myComputer` for pre-picker installs exactly once.
+    public var hasExplicitChoice: Bool { defaults.string(forKey: Self.key) != nil }
 
     public init(defaults: UserDefaults = .standard, hasPairedDesktop: Bool = false) {
         self.defaults = defaults

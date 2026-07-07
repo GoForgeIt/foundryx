@@ -61,7 +61,8 @@ public final class LocalBackend: CaptureBackend, @unchecked Sendable {
         TranscriptCacheStore.save(
             CachedTranscript(transcript: text, title: nil, summary: nil,
                              fetchedAt: UInt64(max(0, Date().timeIntervalSince1970))),
-            captureId: captureId, baseDir: baseDir)
+            captureId: captureId, baseDir: baseDir,
+            markConfirmed: false)   // on-phone transcript ≠ Lore-confirmed (seed depends on this)
         ConversationCardStore.merge(captureId: captureId, baseDir: baseDir, stage: "transcribed")
 
         if let titler, titler.isAvailable,
