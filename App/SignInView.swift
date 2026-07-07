@@ -5,10 +5,8 @@ import Grain
 // Microsoft" → resolve the account's designated desktop host → connect off-LAN
 // through the blind relay. Styled with the Grain design system to match the app.
 //
-// LOGO: uses a placeholder brand mark (SF Symbol) until the real Foundry / Ville
-// logo assets are added to Resources/Assets.xcassets (then swap `brandMark`).
-//
-// NOT YET COMPILE-VERIFIED in CI — validate in Xcode.
+// LOGO: the real Grain brand mark (`GrainMark`, the Foundry blue anvil) on its warm
+// app-icon card — vectorized in the design system, so no asset-catalog imageset needed.
 struct SignInView: View {
     @ObservedObject var remote: RemoteSession
     var onDone: () -> Void
@@ -48,7 +46,7 @@ struct SignInView: View {
                     .padding(.top, GrainSpacing.x2)
 
                     Spacer()
-                    Text("End-to-end encrypted to your Mac · you choose what stays private")
+                    Text("End-to-end encrypted to your Foundry · you choose what stays private")
                         .grainTextStyle(.caption)
                         .foregroundStyle(GrainColor.textFaint)
                         .padding(.bottom, GrainSpacing.x3)
@@ -67,23 +65,10 @@ struct SignInView: View {
         }
     }
 
-    /// Placeholder brand mark — a forge-blue rounded tile with an anvil/spark
-    /// glyph. Swap for the real logo imageset once it's in the asset catalog.
+    /// The Foundry brand mark — Grain's blue-anvil `GrainMark` on its warm rounded
+    /// card. `onCard: true` already supplies the card fill and shadow, so no wrapper.
     private var brandMark: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [GrainColor.forgeBlue, GrainColor.forgeBlue.opacity(0.7)],
-                        startPoint: .topLeading, endPoint: .bottomTrailing
-                    )
-                )
-                .frame(width: 84, height: 84)
-                .shadow(color: GrainColor.forgeBlue.opacity(0.35), radius: 16, y: 6)
-            Image(systemName: "hammer.fill")
-                .font(.system(size: 36, weight: .semibold))
-                .foregroundStyle(.white)
-        }
+        GrainMark(size: 84, onCard: true)
     }
 
     @ViewBuilder private var content: some View {
@@ -123,7 +108,7 @@ struct SignInView: View {
         } else if case .error(let detail) = remote.status {
             VStack(spacing: GrainSpacing.x3) {
                 GrainErrorState(
-                    title: "Can't reach your Mac",
+                    title: "Can't reach your Foundry",
                     message: detail,
                     retry: { Task { await remote.resolve() } }
                 )
@@ -164,7 +149,7 @@ struct SignInView: View {
     private var statusText: String {
         switch remote.status {
         case .unconfigured: return "Remote not available in this build"
-        case .signedOut: return "Sign in to reach your Mac"
+        case .signedOut: return "Sign in to reach your Foundry"
         case .resolving: return "Connecting…"
         case .connected: return "Connected\(remote.email.map { " · \($0)" } ?? "")"
         case .noHost: return "No Mac is your host yet"

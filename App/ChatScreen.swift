@@ -58,8 +58,8 @@ struct ChatScreen: View {
                             systemImage: isPrivate ? "lock.fill" : "sparkles",
                             title: "Your Foundry is ready",
                             message: isPrivate
-                                ? "Ask anything — this chat stays on your Mac."
-                                : "Ask anything. Switch to Private anytime to keep a chat on your Mac."
+                                ? "Ask anything — this chat stays in your Foundry."
+                                : "Ask anything. Switch to Private anytime to keep a chat in your Foundry."
                         )
                         recallChipsSection
                     }
@@ -104,7 +104,7 @@ struct ChatScreen: View {
             // the router may use a faster cloud model.
             Menu {
                 Button { setPrivacy(true) } label: {
-                    Label("Private · stays on your Mac",
+                    Label("Private · stays in your Foundry",
                           systemImage: isPrivate ? "checkmark" : "lock.fill")
                 }
                 Button { setPrivacy(false) } label: {
@@ -123,8 +123,8 @@ struct ChatScreen: View {
             }
             .accessibilityIdentifier("privacy-picker")
             .accessibilityLabel("Privacy")
-            .accessibilityValue(isPrivate ? "Private, stays on your Mac" : "Open, may use cloud")
-            .accessibilityHint("Changes whether this chat stays on your Mac")
+            .accessibilityValue(isPrivate ? "Private, stays in your Foundry" : "Open, may use cloud")
+            .accessibilityHint("Changes whether this chat stays in your Foundry")
 
             // Model picker — extracted into an Equatable subview so the per-token / elapsed-timer
             // re-renders of this screen do NOT re-evaluate the open menu (which resets its scroll
