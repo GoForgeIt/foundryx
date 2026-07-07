@@ -19,14 +19,27 @@ import AVFoundation
 public actor WhisperKitSTT: LocalSTT {
     private let modelName: String
     private var engine: WhisperKit?
+    /// Main-actor status sink for the "setting up your private on-device brain"
+    /// banner (nil = no UI, e.g. background use). Reported to as download/load
+    /// proceed; only ever touched on the main actor.
+    private let status: LocalBrainStatus?
 
-    public init(model: String = "base") {
+    public init(model: String = "base", status: LocalBrainStatus? = nil) {
         self.modelName = model
+        self.status = status
     }
 
     /// WhisperKit runs wherever the app runs (iOS 17+ deployment target); the
-    /// model download happens lazily inside `transcribe`.
+    /// model download happens on first need (or an explicit `prewarm`).
     public nonisolated var isAvailable: Bool { true }
+
+    /// Kick the model fetch/load NOW (call when the phone tier mounts) so the
+    /// first recording isn't the first time ~150 MB downloads. Idempotent; safe to
+    /// call repeatedly. Failures are surfaced on the banner, never fatal — the
+    /// next transcribe retries.
+    public func prewarm() async {
+        _ = try? await loadEngine()
+    }
 
     public func transcribe(opusFrames: [Data]) async throws -> String {
         let samples = Self.pcm16k(from: opusFrames)
@@ -38,10 +51,39 @@ public actor WhisperKitSTT: LocalSTT {
     }
 
     private func loadEngine() async throws -> WhisperKit {
-        if let engine { return engine }
-        let fresh = try await WhisperKit(WhisperKitConfig(model: modelName))
-        engine = fresh
-        return fresh
+        if let engine {
+            await report { $0.setReady() }
+            return engine
+        }
+        do {
+            // Download WITH progress into WhisperKit's default cache, then build
+            // the engine from that local folder (download:false → no re-fetch).
+            // Capture only the (main-actor, Sendable) status — never `self` — so the
+            // progress closure is Sendable for WhisperKit's downloader.
+            let sink = status
+            let folder = try await WhisperKit.download(
+                variant: modelName,
+                progressCallback: { @Sendable progress in
+                    let f = progress.fractionCompleted
+                    Task { @MainActor in sink?.setDownloading(f) }
+                })
+            await report { $0.setLoading() }
+            let config = WhisperKitConfig(model: modelName,
+                                          modelFolder: folder.path,
+                                          download: false)
+            let fresh = try await WhisperKit(config)
+            engine = fresh
+            await report { $0.setReady() }
+            return fresh
+        } catch {
+            await report { $0.setFailed(error.localizedDescription) }
+            throw error
+        }
+    }
+
+    private func report(_ body: @escaping @MainActor (LocalBrainStatus) -> Void) async {
+        guard let status else { return }
+        await MainActor.run { body(status) }
     }
 
     /// Opus frames → 16 kHz mono Float samples (WhisperKit's input format).

@@ -1,4 +1,5 @@
 import SwiftUI
+import Grain
 
 // M5 R1b: login-gated, remote-managed. You must sign in (Google/Microsoft) and
 // have a designated desktop host before entering the app — there are no manual
@@ -105,6 +106,13 @@ private struct MainTabs: View {
     // tab switches and app foregrounding (its own Application Support JSON file).
     @StateObject private var chats = ChatConversationStore(storageURL: ChatConversationStore.defaultStorageURL())
     @StateObject private var router = TabRouter()
+    // Phone-tier only: on-device brain readiness for the "setting up your private
+    // on-device brain" banner (the model download UX). Held so the STT engine can
+    // report into it. Unused (`.idle`) in computer mode.
+    @StateObject private var brainStatus = LocalBrainStatus()
+    /// The phone-tier STT engine (nil in computer mode) — kept so we can prewarm it
+    /// on entry rather than on the first finalize.
+    private let localSTT: WhisperKitSTT?
 
     init(target: DoorTarget, remote: RemoteSession, brains: BrainStore, local: Bool,
          showingAccount: Binding<Bool>) {
@@ -123,13 +131,18 @@ private struct MainTabs: View {
         // Live on-device transcription preview (Feature 1). The factory builds the
         // SpeechAnalyzer transcriber on iOS 26+, falling back to SFSpeechRecognizer on
         // iOS 16–25; it's additive + ephemeral (Kiln stays authoritative).
+        let status = LocalBrainStatus()
+        _brainStatus = StateObject(wrappedValue: status)
         let mgr: CaptureManager
         if local {
             // "Just my phone" (track 20260705T1100): the SAME capture pipeline, but
             // finalize runs through the on-device brain — WhisperKit STT + Foundation
             // Models title/summary — and segments self-ack (durable = on this phone).
+            // The STT reports download/load into `status` for the setup banner.
+            let stt = WhisperKitSTT(status: status)
+            localSTT = stt
             let backend = LocalBackend(baseDir: CaptureWAL.documentsCaptures(),
-                                       stt: WhisperKitSTT(),
+                                       stt: stt,
                                        titler: makeSystemTitler())
             mgr = CaptureManager(
                 target: target, backend: backend, log: log, source: dm,
@@ -137,6 +150,7 @@ private struct MainTabs: View {
                 liveTranscriber: LiveTranscription.defaultFactory(),
                 localMode: true)
         } else {
+            localSTT = nil
             mgr = CaptureManager(
                 target: target, log: log, source: dm,
                 // The phone's own mic as a second capture source (Record button when the
@@ -211,9 +225,16 @@ private struct MainTabs: View {
             .tag(TabRouter.Tab.chat)
 
             NavigationStack {
-                CaptureScreen(device: device, manager: manager, sources: sources, target: target)
-                    .navigationTitle("Capture")
-                    .toolbar { Button("Account") { showingAccount = true } }
+                VStack(spacing: 0) {
+                    // Phone tier: the model-download banner sits above capture so the
+                    // first recording's ~150 MB fetch is visible, not a silent hang.
+                    if local, let text = brainStatus.bannerText {
+                        brainSetupBanner(text)
+                    }
+                    CaptureScreen(device: device, manager: manager, sources: sources, target: target)
+                }
+                .navigationTitle("Capture")
+                .toolbar { Button("Account") { showingAccount = true } }
             }
             .tabItem { Label("Capture", systemImage: "waveform") }
             .tag(TabRouter.Tab.capture)
@@ -247,7 +268,28 @@ private struct MainTabs: View {
         // correct — so toggling the Omi off actually hands off + drops it, and a transient
         // reconnect is reflected — regardless of which tab is visible.
         .onChange(of: device.connectionState) { _ in syncOmiConnection() }
-        .onAppear { syncOmiConnection() }
+        .onAppear {
+            syncOmiConnection()
+            // Start the model fetch the moment the phone tier appears — so the
+            // download runs (visibly) during first-run exploration, not silently on
+            // the first "stop recording". Best-effort; the banner shows progress.
+            if local, let stt = localSTT {
+                Task { await stt.prewarm() }
+            }
+        }
+    }
+
+    /// The "setting up your private on-device brain" banner (model download UX).
+    @ViewBuilder private func brainSetupBanner(_ text: String) -> some View {
+        HStack(spacing: GrainSpacing.x2) {
+            ProgressView()
+            Text(text).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+            Spacer()
+        }
+        .padding(.horizontal, GrainSpacing.x4)
+        .padding(.vertical, GrainSpacing.x2)
+        .background(GrainColor.surfaceElevated)
+        .overlay(alignment: .bottom) { Rectangle().fill(GrainColor.borderHairline).frame(height: 1) }
     }
 
     /// Mirror the live BLE connection state onto the registry's Omi row.
