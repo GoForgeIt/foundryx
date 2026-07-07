@@ -34,6 +34,7 @@ Feature: FoundryX is whole without a brain — local-first onboarding
     Then my name and email from Apple are recorded on the account backend
     And signing in again later does not lose them
 
+  @phase3
   Scenario: a conversation is captured, transcribed, titled, and summarized entirely offline
     Given I have signed in
     And the phone has no network connection
@@ -53,6 +54,15 @@ Feature: FoundryX is whole without a brain — local-first onboarding
     When I record a conversation and stop
     Then the capture, transcript, title, and summary are appended to the local event log
     And no prior event in the log is modified or deleted
+
+  @phase2
+  Scenario: with no brain connected, a finished conversation is transcribed on the phone
+    Given I have signed in
+    And no brain is connected
+    When I record a conversation and stop
+    Then the conversation is transcribed on-device
+    And the transcript is readable on the conversation
+    And the transcript is recorded in the local event log
 
   Scenario: local chat answers over the whole library with an honesty notice
     Given I have signed in

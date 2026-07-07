@@ -120,28 +120,32 @@ final class LocalFirstOnboardingTests: XCTestCase {
         let parsed = parseFeatureText(text)
         XCTAssertFalse(parsed.features.isEmpty, "no features parsed")
 
-        let world = OnboardingWorld()
-        let registry = StepRegistry(OnboardingSteps.make(world: world))
+        // One lane per implemented phase tag (TagFilter's include is AND semantics,
+        // so a combined include would match nothing).
+        for tag in ["@phase1", "@phase2"] {
+            let world = OnboardingWorld()
+            let registry = StepRegistry(OnboardingSteps.make(world: world))
 
-        var collected: [JSONValue] = []
-        let result = try await Resources.run(parsed.features, registry: registry, resources: [],
-                                             tagFilter: TagFilter(include: ["@phase1"]),
-                                             collector: { collected.append($0) })
+            var collected: [JSONValue] = []
+            let result = try await Resources.run(parsed.features, registry: registry, resources: [],
+                                                 tagFilter: TagFilter(include: [tag]),
+                                                 collector: { collected.append($0) })
 
-        var failures: [String] = []
-        for ev in collected {
-            guard case .object(let o) = ev,
-                  case .string("scenario_end")? = o["type"],
-                  case .string(let status)? = o["status"], status != "passed" else { continue }
-            let name: String = { if case .string(let s)? = o["name"] { return s }; return "?" }()
-            let err: String = { if case .string(let e)? = o["error"] { return e }; return "(no error)" }()
-            failures.append("[\(status)] \(name): \(err)")
+            var failures: [String] = []
+            for ev in collected {
+                guard case .object(let o) = ev,
+                      case .string("scenario_end")? = o["type"],
+                      case .string(let status)? = o["status"], status != "passed" else { continue }
+                let name: String = { if case .string(let s)? = o["name"] { return s }; return "?" }()
+                let err: String = { if case .string(let e)? = o["error"] { return e }; return "(no error)" }()
+                failures.append("[\(status)] \(name): \(err)")
+            }
+            XCTAssertTrue(failures.isEmpty, "\(tag) scenarios failed:\n" + failures.joined(separator: "\n"))
+            XCTAssertEqual(result.failed, 0)
+            let tagged = parsed.features[0].scenarios.filter { $0.tags.contains(tag) }.count
+            XCTAssertEqual(result.passed, tagged, "every \(tag) scenario runs and passes")
+            XCTAssertGreaterThan(result.passed, 0, "the \(tag) lane must not be empty")
         }
-        XCTAssertTrue(failures.isEmpty, "phase1 scenarios failed:\n" + failures.joined(separator: "\n"))
-        XCTAssertEqual(result.failed, 0)
-        let phase1Count = parsed.features[0].scenarios.filter { $0.tags.contains("@phase1") }.count
-        XCTAssertEqual(result.passed, phase1Count, "every @phase1 scenario runs and passes")
-        XCTAssertGreaterThan(result.passed, 0, "the @phase1 lane must not be empty")
     }
 }
 
@@ -158,6 +162,22 @@ final class OnboardingWorld: @unchecked Sendable {
     // touched from MainActor.run blocks).
     var manager: CaptureManager?
     var source: OnboardingSteps.TestSource?
+    /// @phase2: "no brain is connected" — finalize runs through a LocalBackend
+    /// (on-device STT) instead of the stubbed door.
+    var localOnly = false
+    var localBackend: LocalBackend?
+    var fakeSTT: OnboardingFakeSTT?
+}
+
+/// The Phase 2 STT seam fake — LocalBackend's pipeline is real, only the speech
+/// engine is substituted (WhisperKit isn't runnable in CI).
+final class OnboardingFakeSTT: LocalSTT, @unchecked Sendable {
+    var isAvailable: Bool { true }
+    var framesSeen = 0
+    func transcribe(opusFrames: [Data]) async throws -> String {
+        framesSeen = opusFrames.count
+        return "on-device transcript of \(opusFrames.count) frames"
+    }
 }
 
 enum OnboardingSteps {
@@ -177,7 +197,15 @@ enum OnboardingSteps {
     static func make(world: OnboardingWorld) -> [StepDefinition] {
         [
             defineStep("I have signed in") { ctx, _, _ in
+                // Scenario reset point (each scenario begins signed-in on a fresh store).
                 world.signedIn = true
+                world.localOnly = false
+                world.localBackend = nil
+                world.fakeSTT = nil
+                world.manager = nil
+                world.source = nil
+                world.midSnapshot = []
+                world.captureId = ""
                 world.dir = URL(fileURLWithPath: NSTemporaryDirectory())
                     .appendingPathComponent("foundryx-onboarding-\(UUID().uuidString)", isDirectory: true)
                 try FileManager.default.createDirectory(at: world.dir, withIntermediateDirectories: true)
@@ -190,13 +218,25 @@ enum OnboardingSteps {
                 await MainActor.run {
                     let src = TestSource()
                     let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
-                    // Real CaptureManager; the brain round-trips are stubbed at the
-                    // SAME seams the app wires (finalize + per-segment upload).
-                    let mgr = CaptureManager(
-                        target: target, baseDir: dir, source: src,
-                        finalize: { _, _ in },                    // brain accepts the capture
-                        uploadSegment: { _, _, _ in }             // every segment ACKs instantly
-                    )
+                    let mgr: CaptureManager
+                    if world.localOnly {
+                        // @phase2 — the REAL LocalBackend is the brain; only its STT
+                        // engine is faked.
+                        let stt = OnboardingFakeSTT()
+                        let backend = LocalBackend(baseDir: dir, stt: stt)
+                        world.fakeSTT = stt
+                        world.localBackend = backend
+                        mgr = CaptureManager(target: target, backend: backend,
+                                             baseDir: dir, source: src)
+                    } else {
+                        // Real CaptureManager; the brain round-trips are stubbed at
+                        // the SAME seams the app wires (finalize + per-segment upload).
+                        mgr = CaptureManager(
+                            target: target, baseDir: dir, source: src,
+                            finalize: { _, _ in },                    // brain accepts the capture
+                            uploadSegment: { _, _, _ in }             // every segment ACKs instantly
+                        )
+                    }
                     world.manager = mgr
                     world.source = src
                     src.onState?(.streaming)                      // ambient auto-start
@@ -247,16 +287,18 @@ enum OnboardingSteps {
                 if let mgr = world.manager { await mgr.retryPendingFinalizes() }
                 world.midSnapshot = CaptureEventLog.events(baseDir: dir)
 
-                // The brain reports back: transcript content lands in the cache…
-                TranscriptCacheStore.save(
-                    CachedTranscript(transcript: "we talked about the relay deploy",
-                                     title: nil, summary: nil, fetchedAt: 1),
-                    captureId: world.captureId, baseDir: dir)
-                // …and a status poll merges the authoritative title + summary
-                // (the exact call CaptureStatusPoller makes).
-                _ = ConversationCardStore.merge(captureId: world.captureId, baseDir: dir,
-                                                title: "Relay deploy chat",
-                                                summary: "Shipped the account endpoints")
+                if !world.localOnly {
+                    // Door brain reports back: transcript content lands in the cache…
+                    TranscriptCacheStore.save(
+                        CachedTranscript(transcript: "we talked about the relay deploy",
+                                         title: nil, summary: nil, fetchedAt: 1),
+                        captureId: world.captureId, baseDir: dir)
+                    // …and a status poll merges the authoritative title + summary
+                    // (the exact call CaptureStatusPoller makes).
+                    _ = ConversationCardStore.merge(captureId: world.captureId, baseDir: dir,
+                                                    title: "Relay deploy chat",
+                                                    summary: "Shipped the account endpoints")
+                }
                 return ctx
             },
 
@@ -267,6 +309,38 @@ enum OnboardingSteps {
                     guard kinds.contains(expected) else {
                         throw StepError("missing \(expected) in event log; got \(kinds)")
                     }
+                }
+            },
+
+            defineStep("no brain is connected") { ctx, _, _ in
+                world.localOnly = true
+                return ctx
+            },
+
+            defineCheck("the conversation is transcribed on-device") { _, _, _ in
+                guard let stt = world.fakeSTT, stt.framesSeen > 0 else {
+                    throw StepError("on-device STT never ran")
+                }
+                let cached = TranscriptCacheStore.load(captureId: world.captureId, baseDir: world.dir)
+                guard cached?.transcript == "on-device transcript of \(stt.framesSeen) frames" else {
+                    throw StepError("transcript not persisted: \(String(describing: cached?.transcript))")
+                }
+            },
+
+            defineCheck("the transcript is readable on the conversation") { _, _, _ in
+                guard let backend = world.localBackend else { throw StepError("no local backend") }
+                let content = try await backend.captureContent(captureId: world.captureId)
+                guard content.found, !content.transcript.isEmpty else {
+                    throw StepError("content not readable: found=\(content.found)")
+                }
+                let status = try await backend.captureStatus(captureId: world.captureId)
+                guard status.transcribed else { throw StepError("status not transcribed") }
+            },
+
+            defineCheck("the transcript is recorded in the local event log") { _, _, _ in
+                let kinds = CaptureEventLog.events(baseDir: world.dir).map(\.kind)
+                guard kinds.contains("transcript_set") else {
+                    throw StepError("no transcript_set in event log: \(kinds)")
                 }
             },
 

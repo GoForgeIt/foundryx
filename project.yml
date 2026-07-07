@@ -9,6 +9,9 @@ packages:
   BlakeHash:
     url: https://github.com/trancee/blake-hash.git
     exactVersion: 1.1.1
+  WhisperKit:
+    url: https://github.com/argmaxinc/WhisperKit.git
+    from: 0.9.0
 targets:
   FoundryX:
     type: application
@@ -26,6 +29,8 @@ targets:
         product: Grain
       - package: BlakeHash
         product: BlakeHash
+      - package: WhisperKit
+        product: WhisperKit
       # Embed the widget extension into the app bundle (Live Activity + WidgetKit).
       - target: FoundryXWidget
     info:

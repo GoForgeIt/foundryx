@@ -165,7 +165,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     }
 
     /// Segment encoding: length-prefixed frames so boundaries survive for decode.
-    static func encodeSegment(_ frames: [Data]) -> Data {
+    public static func encodeSegment(_ frames: [Data]) -> Data {
         var out = Data()
         for f in frames {
             var len = UInt32(f.count).bigEndian
@@ -175,7 +175,24 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         return out
     }
 
-    static func segName(_ seq: UInt64) -> String { String(format: "seg-%012llu.opus", seq) }
+    /// Inverse of `encodeSegment`: split a stored segment back into its raw Opus
+    /// frames. Tolerant of a torn tail (a truncated final frame is dropped) — the
+    /// local brain must be able to transcribe whatever survived.
+    public static func decodeSegment(_ data: Data) -> [Data] {
+        var frames: [Data] = []
+        var i = data.startIndex
+        while data.distance(from: i, to: data.endIndex) >= 4 {
+            let len = data[i..<data.index(i, offsetBy: 4)].reduce(0) { ($0 << 8) | UInt32($1) }
+            let start = data.index(i, offsetBy: 4)
+            guard len > 0, data.distance(from: start, to: data.endIndex) >= Int(len) else { break }
+            let end = data.index(start, offsetBy: Int(len))
+            frames.append(Data(data[start..<end]))
+            i = end
+        }
+        return frames
+    }
+
+    public static func segName(_ seq: UInt64) -> String { String(format: "seg-%012llu.opus", seq) }
     private func ackURL(_ segURL: URL) -> URL { segURL.deletingPathExtension().appendingPathExtension("ack") }
 
     // MARK: sync (mark synced ONLY on the door's 200 ACK)
