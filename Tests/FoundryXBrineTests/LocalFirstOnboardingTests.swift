@@ -122,7 +122,7 @@ final class LocalFirstOnboardingTests: XCTestCase {
 
         // One lane per implemented phase tag (TagFilter's include is AND semantics,
         // so a combined include would match nothing).
-        for tag in ["@phase1", "@phase2", "@phase3"] {
+        for tag in ["@phase1", "@phase2", "@phase3", "@phase4"] {
             let world = OnboardingWorld()
             let registry = StepRegistry(OnboardingSteps.make(world: world))
 
@@ -167,6 +167,8 @@ final class OnboardingWorld: @unchecked Sendable {
     var localOnly = false
     var localBackend: LocalBackend?
     var fakeSTT: OnboardingFakeSTT?
+    var chatAnswer = ""
+    var chatDrewOn: [String] = []
 }
 
 /// The Phase 2 STT seam fake — LocalBackend's pipeline is real, only the speech
@@ -378,6 +380,55 @@ enum OnboardingSteps {
                 let kinds = CaptureEventLog.events(baseDir: world.dir).map(\.kind)
                 guard kinds.contains("transcript_set") else {
                     throw StepError("no transcript_set in event log: \(kinds)")
+                }
+            },
+
+            // ── @phase4: whole-library local chat ────────────────────────────
+            defineStep("I have several transcribed conversations") { ctx, _, _ in
+                for (i, text) in ["we planted tomatoes by the fence",
+                                  "the tomatoes joke at standup",
+                                  "sandwiches only"].enumerated() {
+                    let id = "chat-c\(i)"
+                    ConversationCardStore.save(
+                        .init(title: "Convo \(i)", summary: nil, stage: "ready",
+                              updatedAt: 1, startedAt: UInt64(100 + i)),
+                        captureId: id, baseDir: world.dir)
+                    TranscriptCacheStore.save(
+                        CachedTranscript(transcript: text, title: nil, summary: nil, fetchedAt: 1),
+                        captureId: id, baseDir: world.dir)
+                }
+                return ctx
+            },
+
+            defineStep("I ask a question in chat that spans multiple conversations") { ctx, _, _ in
+                final class Echo: LocalChatModel, @unchecked Sendable {
+                    var isAvailable: Bool { true }
+                    func respond(to prompt: String) async throws -> String { "they came up twice" }
+                }
+                let engine = LocalChatEngine(baseDir: world.dir, model: Echo())
+                let (text, drewOn) = try await engine.answer("what did we say about tomatoes?")
+                world.chatAnswer = text
+                world.chatDrewOn = drewOn
+                return ctx
+            },
+
+            defineCheck("the answer draws on more than the open conversation") { _, _, _ in
+                guard world.chatDrewOn.count > 1 else {
+                    throw StepError("answer drew on \(world.chatDrewOn) — not cross-conversation")
+                }
+                guard !world.chatAnswer.isEmpty else { throw StepError("empty answer") }
+            },
+
+            defineCheck("a persistent honesty notice says answers run entirely on my phone and may be inaccurate") { _, _, _ in
+                let n = LocalChatPresentation.honestyNotice
+                guard n.contains("entirely on your phone"), n.contains("inaccurate") else {
+                    throw StepError("honesty notice missing the locked copy: \(n)")
+                }
+            },
+
+            defineCheck("a join-the-waitlist button is present on the chat surface") { _, _, _ in
+                guard LocalChatPresentation.waitlistButtonTitle == "Join the waitlist" else {
+                    throw StepError("waitlist button contract broken")
                 }
             },
 

@@ -64,6 +64,7 @@ Feature: FoundryX is whole without a brain — local-first onboarding
     And the transcript is readable on the conversation
     And the transcript is recorded in the local event log
 
+  @phase4
   Scenario: local chat answers over the whole library with an honesty notice
     Given I have signed in
     And I have several transcribed conversations
