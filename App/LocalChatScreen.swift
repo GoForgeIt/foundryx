@@ -5,7 +5,6 @@
 
 import SwiftUI
 import Grain
-import FoundryXKit
 
 struct LocalChatScreen: View {
     /// The library the engine answers over.
@@ -35,7 +34,7 @@ struct LocalChatScreen: View {
                         ForEach(Array(messages.enumerated()), id: \.offset) { _, m in
                             Text(m.text)
                                 .grainTextStyle(.body)
-                                .foregroundStyle(m.role == "user" ? GrainColor.textMuted : GrainColor.text)
+                                .foregroundStyle(m.role == "user" ? GrainColor.textMuted : GrainColor.ink)
                                 .frame(maxWidth: .infinity, alignment: m.role == "user" ? .trailing : .leading)
                         }
                         if thinking {

@@ -14,12 +14,11 @@
 import Foundation
 import AVFoundation
 #if canImport(WhisperKit)
-import WhisperKit
+@preconcurrency import WhisperKit
 
-public final class WhisperKitSTT: LocalSTT, @unchecked Sendable {
+public actor WhisperKitSTT: LocalSTT {
     private let modelName: String
     private var engine: WhisperKit?
-    private let engineLock = NSLock()
 
     public init(model: String = "base") {
         self.modelName = model
@@ -27,7 +26,7 @@ public final class WhisperKitSTT: LocalSTT, @unchecked Sendable {
 
     /// WhisperKit runs wherever the app runs (iOS 17+ deployment target); the
     /// model download happens lazily inside `transcribe`.
-    public var isAvailable: Bool { true }
+    public nonisolated var isAvailable: Bool { true }
 
     public func transcribe(opusFrames: [Data]) async throws -> String {
         let samples = Self.pcm16k(from: opusFrames)
@@ -39,14 +38,9 @@ public final class WhisperKitSTT: LocalSTT, @unchecked Sendable {
     }
 
     private func loadEngine() async throws -> WhisperKit {
-        engineLock.lock()
-        let cached = engine
-        engineLock.unlock()
-        if let cached { return cached }
+        if let engine { return engine }
         let fresh = try await WhisperKit(WhisperKitConfig(model: modelName))
-        engineLock.lock()
         engine = fresh
-        engineLock.unlock()
         return fresh
     }
 

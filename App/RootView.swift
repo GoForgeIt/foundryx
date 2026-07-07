@@ -37,6 +37,15 @@ struct RootView: View {
     }
 }
 
+/// Routes intent-driven navigation (Action Button / Siri / Control Center) onto
+/// the tab bar from anywhere in the process (track 20260705T1100, Phase 5).
+@MainActor
+final class TabRouter: ObservableObject {
+    enum Tab: Hashable { case chat, capture, device }
+    @Published var selected: Tab = .chat
+    @Published var showActionChooser = false
+}
+
 /// Owns the ONE DeviceManager + CaptureManager so Capture + Device tabs share a
 /// single BLE link + capture pipeline. All tabs talk to the resolved remote door
 /// `target` (relay tunnel + id_token bearer). Chat is independent.
@@ -52,6 +61,7 @@ private struct MainTabs: View {
     // The durable, resumable chat conversation list — owned here so it persists across
     // tab switches and app foregrounding (its own Application Support JSON file).
     @StateObject private var chats = ChatConversationStore(storageURL: ChatConversationStore.defaultStorageURL())
+    @StateObject private var router = TabRouter()
 
     init(target: DoorTarget, remote: RemoteSession, showingAccount: Binding<Bool>) {
         self.target = target
@@ -78,11 +88,25 @@ private struct MainTabs: View {
         mgr.onAuthExpired = { [weak remote] in Task { @MainActor in await remote?.handleAuthExpired() } }
         // Wire the interactive Live Activity buttons (App Intents) to this live manager.
         // The intent's perform() runs in the app process and routes through this broker.
-        CaptureIntentBroker.shared.handler = { [weak mgr] action in
+        let router = TabRouter()
+        _router = StateObject(wrappedValue: router)
+        CaptureIntentBroker.shared.handler = { [weak mgr, weak router] action in
             guard let mgr else { return false }
             switch action {
             case .endCurrent:  return mgr.endCurrentConversation()
             case .togglePause: mgr.togglePause(); return true
+            // Quick-start surfaces (Phase 5, decision #4): Action Button / Control
+            // Center / Siri land here with the app foregrounded by the intent.
+            case .startRecording:
+                router?.selected = .capture
+                mgr.startMicRecording()
+                return true
+            case .openChat:
+                router?.selected = .chat
+                return true
+            case .askChooser:
+                router?.showActionChooser = true
+                return true
             }
         }
         _manager = StateObject(wrappedValue: mgr)
@@ -110,13 +134,14 @@ private struct MainTabs: View {
     }
 
     var body: some View {
-        TabView {
+        TabView(selection: $router.selected) {
             NavigationStack {
                 ChatScreen(target: target, store: chats, log: log)
                     .navigationTitle("FoundryX")
                     .toolbar { Button("Account") { showingAccount = true } }
             }
             .tabItem { Label("Chat", systemImage: "message") }
+            .tag(TabRouter.Tab.chat)
 
             NavigationStack {
                 CaptureScreen(device: device, manager: manager, sources: sources, target: target)
@@ -124,6 +149,7 @@ private struct MainTabs: View {
                     .toolbar { Button("Account") { showingAccount = true } }
             }
             .tabItem { Label("Capture", systemImage: "waveform") }
+            .tag(TabRouter.Tab.capture)
 
             NavigationStack {
                 DeviceScreen(device: device, manager: manager, sources: sources)
@@ -131,6 +157,15 @@ private struct MainTabs: View {
                     .toolbar { Button("Account") { showingAccount = true } }
             }
             .tabItem { Label("Device", systemImage: "antenna.radiowaves.left.and.right") }
+            .tag(TabRouter.Tab.device)
+        }
+        // The Action Button's "Ask me" chooser (Phase 5, decision #4).
+        .confirmationDialog("FoundryX", isPresented: $router.showActionChooser) {
+            Button("Start recording") {
+                router.selected = .capture
+                manager.startMicRecording()
+            }
+            Button("Open chat") { router.selected = .chat }
         }
         // Keep the registry's Omi liveness in step with the BLE link from a SINGLE,
         // always-mounted place (not just the Device tab's onChange, which doesn't fire

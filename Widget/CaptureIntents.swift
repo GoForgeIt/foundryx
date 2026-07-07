@@ -28,6 +28,13 @@ public enum CaptureLiveActivityAction: String, Sendable {
     case endCurrent
     /// Toggle capture pause/resume. Backed by CaptureManager.togglePause().
     case togglePause
+    /// Quick-start a phone-mic recording (track 20260705T1100 decision #4 — Action
+    /// Button / Control Center / Siri). Backed by CaptureManager.startMicRecording().
+    case startRecording
+    /// Jump straight into chat. Backed by the tab router.
+    case openChat
+    /// The Action-Button "Ask me" chooser (two-button sheet: Record | Chat).
+    case askChooser
 }
 
 /// Process-wide broker between the Live Activity's App Intents and the live capture
