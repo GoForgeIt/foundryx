@@ -33,7 +33,7 @@ struct SignInView: View {
                     Text("FoundryX")
                         .grainTextStyle(.title)
                         .foregroundStyle(GrainColor.ink)
-                    Text("Your Foundry — in your pocket, anywhere.")
+                    Text("Record, transcribe, and chat — all on your phone. Sign in once; your recordings never leave this device.")
                         .grainTextStyle(.body)
                         .foregroundStyle(GrainColor.textMuted)
                         .multilineTextAlignment(.center)
@@ -143,11 +143,13 @@ struct SignInView: View {
     }
     private var statusText: String {
         switch remote.status {
-        case .unconfigured: return "Remote not available in this build"
-        case .signedOut: return "Sign in to reach your Mac"
-        case .resolving: return "Connecting…"
+        case .unconfigured: return "Sign-in not available in this build"
+        case .signedOut: return "Sign in to get started"
+        case .resolving: return "Signing in…"
         case .connected: return "Connected\(remote.email.map { " · \($0)" } ?? "")"
-        case .noHost: return "No Mac is your host yet — on your Mac: Foundry → Remote host → “Make this machine the host”"
+        // A phone-only user has no host by design — this is NOT an error. The app
+        // runs entirely on-device; a computer is an optional upgrade in Settings.
+        case .noHost: return "You're all set — everything runs on your phone. Add your computer anytime in Settings → Brain."
         case .error(let e): return e
         }
     }
