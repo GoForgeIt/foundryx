@@ -90,6 +90,67 @@ final class LocalBackendTests: XCTestCase {
         XCTAssertEqual(content.transcript, "hello from the phone brain")
     }
 
+    // MARK: Phase 3 — on-device title + summary (Foundation Models seam)
+
+    final class FakeTitler: LocalTitleSummary, @unchecked Sendable {
+        var available = true
+        var shouldThrow = false
+        var isAvailable: Bool { available }
+        func titleAndSummary(for transcript: String) async throws -> (title: String, summary: String) {
+            if shouldThrow { throw LocalBackendError.sttUnavailable }
+            return ("Standup", "Discussed \(transcript.prefix(10))")
+        }
+    }
+
+    func testFinalizeGeneratesTitleAndSummaryWhenTitlerAvailable() async throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try seedCapture("cap-t1", dir: dir, segments: [[Data([1, 1])]])
+        let backend = LocalBackend(baseDir: dir, stt: FakeSTT(), titler: FakeTitler())
+        try await backend.finalize(captureId: "cap-t1", meta: nil)
+
+        let status = try await backend.captureStatus(captureId: "cap-t1")
+        XCTAssertEqual(status.title, "Standup")
+        XCTAssertEqual(status.summary, "Discussed hello from")
+        XCTAssertEqual(status.stage, "ready", "titled+summarized locally ⇒ ready")
+
+        let kinds = CaptureEventLog.events(baseDir: dir).map(\.kind)
+        XCTAssertTrue(kinds.contains("title_set") && kinds.contains("summary_set"),
+                      "on-device title/summary append to the event log: \(kinds)")
+    }
+
+    func testUnavailableTitlerStillTranscribes() async throws {
+        // The no-Apple-Intelligence phone: transcript lands, title/summary honestly
+        // absent (the upgrade-prompt state) — never fabricated, never fatal.
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try seedCapture("cap-t2", dir: dir, segments: [[Data([2, 2])]])
+        let titler = FakeTitler()
+        titler.available = false
+        let backend = LocalBackend(baseDir: dir, stt: FakeSTT(), titler: titler)
+        try await backend.finalize(captureId: "cap-t2", meta: nil)
+
+        let status = try await backend.captureStatus(captureId: "cap-t2")
+        XCTAssertTrue(status.transcribed)
+        XCTAssertNil(status.title)
+        XCTAssertEqual(status.stage, "transcribed")
+        XCTAssertFalse(CaptureEventLog.events(baseDir: dir).map(\.kind).contains("title_set"))
+    }
+
+    func testTitlerFailureNeverLosesTheTranscript() async throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try seedCapture("cap-t3", dir: dir, segments: [[Data([3, 3])]])
+        let titler = FakeTitler()
+        titler.shouldThrow = true
+        let backend = LocalBackend(baseDir: dir, stt: FakeSTT(), titler: titler)
+        try await backend.finalize(captureId: "cap-t3", meta: nil)   // must NOT throw
+
+        let status = try await backend.captureStatus(captureId: "cap-t3")
+        XCTAssertTrue(status.transcribed, "a titler failure is best-effort, the transcript survives")
+        XCTAssertNil(status.title)
+    }
+
     func testUnavailableSTTThrowsSoTheCaptureStaysPending() async throws {
         let dir = try tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }

@@ -122,7 +122,7 @@ final class LocalFirstOnboardingTests: XCTestCase {
 
         // One lane per implemented phase tag (TagFilter's include is AND semantics,
         // so a combined include would match nothing).
-        for tag in ["@phase1", "@phase2"] {
+        for tag in ["@phase1", "@phase2", "@phase3"] {
             let world = OnboardingWorld()
             let registry = StepRegistry(OnboardingSteps.make(world: world))
 
@@ -180,6 +180,14 @@ final class OnboardingFakeSTT: LocalSTT, @unchecked Sendable {
     }
 }
 
+/// The Phase 3 title/summary seam fake (Foundation Models isn't runnable in CI).
+final class OnboardingFakeTitler: LocalTitleSummary, @unchecked Sendable {
+    var isAvailable: Bool { true }
+    func titleAndSummary(for transcript: String) async throws -> (title: String, summary: String) {
+        ("Kitchen catch-up", "A short chat, transcribed on the phone.")
+    }
+}
+
 enum OnboardingSteps {
     struct StepError: Error, CustomStringConvertible {
         let description: String
@@ -223,7 +231,8 @@ enum OnboardingSteps {
                         // @phase2 — the REAL LocalBackend is the brain; only its STT
                         // engine is faked.
                         let stt = OnboardingFakeSTT()
-                        let backend = LocalBackend(baseDir: dir, stt: stt)
+                        let backend = LocalBackend(baseDir: dir, stt: stt,
+                                                   titler: OnboardingFakeTitler())
                         world.fakeSTT = stt
                         world.localBackend = backend
                         mgr = CaptureManager(target: target, backend: backend,
@@ -315,6 +324,34 @@ enum OnboardingSteps {
             defineStep("no brain is connected") { ctx, _, _ in
                 world.localOnly = true
                 return ctx
+            },
+
+            // Hermetically the local lane makes zero network calls by construction;
+            // the REAL airplane-mode acceptance is the on-device e2e.
+            defineStep("the phone has no network connection") { ctx, _, _ in
+                world.localOnly = true
+                return ctx
+            },
+
+            defineCheck("it receives an on-device title and summary") { _, _, _ in
+                guard let backend = world.localBackend else { throw StepError("no local backend") }
+                let status = try await backend.captureStatus(captureId: world.captureId)
+                guard status.title == "Kitchen catch-up",
+                      status.summary == "A short chat, transcribed on the phone." else {
+                    throw StepError("title/summary missing: \(String(describing: status.title))")
+                }
+            },
+
+            defineCheck("it appears as a browsable conversation card") { _, _, _ in
+                guard let card = ConversationCardStore.load(captureId: world.captureId,
+                                                            baseDir: world.dir),
+                      card.title?.isEmpty == false else {
+                    throw StepError("no browsable card with a title")
+                }
+                let visible = await MainActor.run {
+                    world.manager?.visibleCaptures.contains { $0.captureId == world.captureId } ?? false
+                }
+                guard visible else { throw StepError("conversation not in the visible timeline") }
             },
 
             defineCheck("the conversation is transcribed on-device") { _, _, _ in

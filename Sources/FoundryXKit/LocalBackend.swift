@@ -26,20 +26,33 @@ public enum LocalBackendError: Error, Equatable {
     case noAudio(String)
 }
 
+/// On-device title + summary over a finished transcript (Phase 3). The real engine
+/// is Apple Foundation Models; on phones without Apple-Intelligence hardware
+/// `isAvailable` is false and the conversation honestly stays untitled (the
+/// upgrade-prompt state, locked decision #2 — no MLX fallback, ever).
+public protocol LocalTitleSummary: Sendable {
+    var isAvailable: Bool { get }
+    func titleAndSummary(for transcript: String) async throws -> (title: String, summary: String)
+}
+
 /// The phone-only brain. Stage vocabulary mirrors the door's (`transcribed` is what
-/// the poller/card logic keys on), with `on_phone` marking where processing ran.
+/// the poller/card logic keys on); `ready` once title+summary landed too.
 public final class LocalBackend: CaptureBackend, @unchecked Sendable {
     private let baseDir: URL
     private let stt: LocalSTT
+    private let titler: LocalTitleSummary?
 
-    public init(baseDir: URL, stt: LocalSTT) {
+    public init(baseDir: URL, stt: LocalSTT, titler: LocalTitleSummary? = nil) {
         self.baseDir = baseDir
         self.stt = stt
+        self.titler = titler
     }
 
     /// "Assemble + process" locally: segments → frames → on-device STT → the same
     /// durable stores the door reply path writes (TranscriptCacheStore emits the
-    /// `transcript_set` event; the card merge sets the stage).
+    /// `transcript_set` event; the card merge sets the stage). Title + summary are
+    /// BEST-EFFORT on top: unavailable or failing Foundation Models never cost the
+    /// transcript — the conversation just stays at `transcribed`, untitled.
     public func finalize(captureId: String, meta: ConversationMeta?) async throws {
         guard stt.isAvailable else { throw LocalBackendError.sttUnavailable }
         let frames = Self.loadFrames(captureId: captureId, baseDir: baseDir)
@@ -50,6 +63,12 @@ public final class LocalBackend: CaptureBackend, @unchecked Sendable {
                              fetchedAt: UInt64(max(0, Date().timeIntervalSince1970))),
             captureId: captureId, baseDir: baseDir)
         ConversationCardStore.merge(captureId: captureId, baseDir: baseDir, stage: "transcribed")
+
+        if let titler, titler.isAvailable,
+           let (title, summary) = try? await titler.titleAndSummary(for: text) {
+            ConversationCardStore.merge(captureId: captureId, baseDir: baseDir,
+                                        title: title, summary: summary, stage: "ready")
+        }
     }
 
     public func captureStatus(captureId: String) async throws -> CaptureStatusResponse {
