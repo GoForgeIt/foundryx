@@ -144,13 +144,17 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
     /// source callback queue) and the Int16 accumulator single-threaded.
     private let queue = DispatchQueue(label: "foundryx.mic-source")
     private var pending: [Int16] = []    // accumulates to 960-sample frames (queue only)
-    private var running = false          // queue only
+    private var running = false          // queue only — the user's INTENT to record
+    private var engineLive = false       // queue only — the AVAudioEngine is actually tapping
+    private var interrupted = false      // queue only — paused by an OS audio interruption
     private var frameCount = 0           // diagnostics (queue only)
 
     public init(log: DoorLog? = nil) {
         self.log = log
         super.init()
     }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
 
     public func start() {
         // Request mic permission first; start the engine only once granted.
@@ -174,6 +178,24 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
     private func startLocked() {
         guard !running else { return }
         guard encoder.isReady else { onState?(.failed("opus encoder unavailable")); return }
+        running = true
+        interrupted = false
+        // Observe OS audio-session interruptions (phone calls, Siri, other apps),
+        // route changes (BT connect/disconnect, unplug), and media-server resets —
+        // ANY of which stops the engine's input tap. Without these the recording
+        // silently dies mid-conversation and never resumes (the phone-call data-loss
+        // bug). Registered once per start; torn down on stop.
+        registerAudioObservers()
+        if !activateEngine() { running = false; tearDownAudioObservers() }
+    }
+
+    /// Activate the session + tap + engine. Reusable for BOTH the initial start and an
+    /// auto-resume after an interruption/reset — resuming re-taps into the SAME capture
+    /// (the WAL keeps every frame captured before the interruption). Returns whether the
+    /// engine is live; on failure emits `.failed` so the capture can finalize its partial.
+    @discardableResult
+    private func activateEngine() -> Bool {
+        guard running, !engineLive else { return engineLive }
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playAndRecord, mode: .measurement,
@@ -186,42 +208,128 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
                   let conv = AVAudioConverter(from: inFormat, to: target48k) else {
                 try? session.setActive(false)
                 onState?(.failed("no microphone input available"))
-                return
+                return false
             }
             converter = conv
             pending.removeAll(keepingCapacity: true)
-            frameCount = 0
+            input.removeTap(onBus: 0)   // defensive: never stack taps on a resume
             // Tap the raw hardware PCM; we normalise + encode on our serial queue.
-            // SMALLER tap buffer = the direct live-STT PCM tap (onPCM) fires ~twice as
-            // often (~20 ms chunks at 48 kHz vs ~40 ms), so the on-device recognizer
-            // gets fed sooner and volatile partials appear closer to real time
-            // (Feature 1 latency). The durable WAL/upload path is unchanged — we still
-            // regroup into 960-sample (20 ms) Opus frames downstream.
             input.installTap(onBus: 0, bufferSize: Self.tapBufferSize, format: inFormat) { [weak self] buf, _ in
                 self?.ingest(buf)
             }
             engine.prepare()
             try engine.start()
-            running = true
+            engineLive = true
             onState?(.streaming)
-            log?.info("phone mic: capture started (input \(Int(inFormat.sampleRate))Hz → Opus 48k/960)")
+            log?.info("phone mic: engine live (input \(Int(inFormat.sampleRate))Hz → Opus 48k/960)")
+            return true
         } catch {
             engine.inputNode.removeTap(onBus: 0)
             try? AVAudioSession.sharedInstance().setActive(false)
             onState?(.failed("mic start failed: \((error as NSError).localizedDescription)"))
+            return false
+        }
+    }
+
+    /// Tear down the live engine WITHOUT ending the user's record intent — used on an
+    /// interruption so the call gets the audio session while the capture stays "open"
+    /// (its already-captured frames are durable in the WAL) and can resume.
+    private func deactivateEngine(releaseSession: Bool) {
+        guard engineLive else { return }
+        engineLive = false
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        pending.removeAll(keepingCapacity: false)
+        converter = nil
+        if releaseSession {
+            try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
         }
     }
 
     private func stopLocked() {
         guard running else { onState?(.stopped); return }
         running = false
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        pending.removeAll(keepingCapacity: false)
-        converter = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        interrupted = false
+        tearDownAudioObservers()
+        deactivateEngine(releaseSession: true)
         log?.info("phone mic: capture stopped (\(frameCount) frames)")
+        frameCount = 0
         onState?(.stopped)
+    }
+
+    // MARK: interruption / route-change / reset resilience
+
+    private func registerAudioObservers() {
+        let nc = NotificationCenter.default
+        nc.removeObserver(self)
+        nc.addObserver(self, selector: #selector(handleInterruption(_:)),
+                       name: AVAudioSession.interruptionNotification, object: nil)
+        nc.addObserver(self, selector: #selector(handleRouteChange(_:)),
+                       name: AVAudioSession.routeChangeNotification, object: nil)
+        nc.addObserver(self, selector: #selector(handleMediaReset(_:)),
+                       name: AVAudioSession.mediaServicesWereResetNotification, object: nil)
+        nc.addObserver(self, selector: #selector(handleEngineConfigChange(_:)),
+                       name: .AVAudioEngineConfigurationChange, object: engine)
+    }
+
+    private func tearDownAudioObservers() {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func handleInterruption(_ note: Notification) {
+        guard let info = note.userInfo,
+              let raw = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+        queue.async { [weak self] in
+            guard let self, self.running else { return }
+            switch type {
+            case .began:
+                // A call/Siri/other app grabbed audio. Release the engine so the OS is
+                // happy; KEEP the capture open. Everything captured so far is already
+                // durable in the WAL — nothing is lost.
+                self.interrupted = true
+                self.deactivateEngine(releaseSession: false)
+                self.log?.warn("phone mic: interrupted (call/Siri) — paused, audio preserved, will resume")
+            case .ended:
+                // Resume capture into the SAME conversation. iOS sets shouldResume when
+                // the interruption cleanly ended; we resume regardless (best-effort) so
+                // the user's recording keeps going.
+                self.interrupted = false
+                if !self.activateEngine() {
+                    self.log?.error("phone mic: resume after interruption FAILED")
+                }
+            @unknown default:
+                break
+            }
+        }
+    }
+
+    @objc private func handleRouteChange(_ note: Notification) {
+        // A route change (BT (dis)connect, unplug) can silence the input node. Rebuild
+        // the tap so capture continues on the new route rather than going quiet.
+        queue.async { [weak self] in
+            guard let self, self.running, !self.interrupted else { return }
+            self.deactivateEngine(releaseSession: false)
+            _ = self.activateEngine()
+        }
+    }
+
+    @objc private func handleEngineConfigChange(_ note: Notification) {
+        queue.async { [weak self] in
+            guard let self, self.running, !self.interrupted, self.engineLive else { return }
+            self.deactivateEngine(releaseSession: false)
+            _ = self.activateEngine()
+        }
+    }
+
+    @objc private func handleMediaReset(_ note: Notification) {
+        // mediaservicesd reset invalidates the whole audio stack — rebuild from scratch.
+        queue.async { [weak self] in
+            guard let self, self.running else { return }
+            self.deactivateEngine(releaseSession: false)
+            self.interrupted = false
+            _ = self.activateEngine()
+        }
     }
 
     // MARK: PCM → 48 kHz mono Int16 → 960-sample Opus frames
