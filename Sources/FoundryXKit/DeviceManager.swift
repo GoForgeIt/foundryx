@@ -126,6 +126,18 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     @Published public private(set) var discovered: [DiscoveredDevice] = []
     /// The remembered Omi (device page). nil until the user first connects one.
     @Published public private(set) var saved: SavedOmi?
+    /// The connected device's battery level (0…100) read from the standard BLE Battery
+    /// Service. `nil` when disconnected OR the device doesn't expose a battery — the UI
+    /// then shows no battery rather than a fake value.
+    @Published public private(set) var batteryLevel: Int?
+
+    /// True when the connected device's battery is low enough to warrant a warning tint.
+    public var isBatteryLow: Bool { (batteryLevel ?? 100) < 20 }
+
+    private func setBatteryLevel(_ level: Int?) {
+        let clamped = level.map { max(0, min(100, $0)) }
+        DispatchQueue.main.async { self.batteryLevel = clamped }
+    }
 
     private let log: DoorLog?
     private let bleQueue = DispatchQueue(label: "foundryx.device-ble")
@@ -340,7 +352,9 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
 
     public func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) {
         log?.info("Omi: connected \(p.name ?? "?") — discovering audio service")
-        p.discoverServices([OmiUUID.audioService])
+        // Discover the audio service AND the standard battery service — the battery
+        // read is best-effort (a device without it just never reports a level).
+        p.discoverServices([OmiUUID.audioService, OmiUUID.batteryService])
     }
 
     public func centralManager(_ c: CBCentralManager, didFailToConnect p: CBPeripheral, error: Error?) {
@@ -348,6 +362,7 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     public func centralManager(_ c: CBCentralManager, didDisconnectPeripheral p: CBPeripheral, error: Error?) {
+        setBatteryLevel(nil)          // the level is stale once the link drops
         onState?(.stopped)            // ends the ambient capture session
         // A USER-suspended link (Omi toggled off) must stay down — don't fight the
         // toggle with an auto-reconnect. A transient drop (in/out of range) re-arms it.
@@ -358,13 +373,23 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     public func peripheral(_ p: CBPeripheral, didDiscoverServices error: Error?) {
-        guard let svc = p.services?.first(where: { $0.uuid == OmiUUID.audioService }) else { return }
-        p.discoverCharacteristics([OmiUUID.audioDataChar, OmiUUID.codecChar], for: svc)
+        for svc in p.services ?? [] {
+            if svc.uuid == OmiUUID.audioService {
+                p.discoverCharacteristics([OmiUUID.audioDataChar, OmiUUID.codecChar], for: svc)
+            } else if svc.uuid == OmiUUID.batteryService {
+                p.discoverCharacteristics([OmiUUID.batteryLevelChar], for: svc)
+            }
+        }
     }
 
     public func peripheral(_ p: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         for ch in service.characteristics ?? [] {
             if ch.uuid == OmiUUID.codecChar { p.readValue(for: ch) }
+            if ch.uuid == OmiUUID.batteryLevelChar {
+                p.readValue(for: ch)              // initial level
+                p.setNotifyValue(true, for: ch)   // updates as it drains/charges
+                log?.info("Omi: battery service found — reading level")
+            }
             if ch.uuid == OmiUUID.audioDataChar {
                 p.setNotifyValue(true, for: ch)
                 markConnected(p.identifier, name: p.name ?? "Omi")
@@ -378,6 +403,11 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
     public func peripheral(_ p: CBPeripheral, didUpdateValueFor ch: CBCharacteristic, error: Error?) {
         if let error { log?.warn("Omi: didUpdateValue error: \(error.localizedDescription)") }
         guard let data = ch.value else { log?.warn("Omi: notify with nil value"); return }
+        if ch.uuid == OmiUUID.batteryLevelChar {
+            // Battery Level is a single byte, 0…100 (Bluetooth SIG 0x2A19).
+            if let pct = data.first { setBatteryLevel(Int(pct)); log?.info("Omi: battery \(pct)%") }
+            return
+        }
         if ch.uuid == OmiUUID.codecChar { log?.info("Omi: codec=\(data.map { String($0) }.joined(separator: ","))"); return }
         guard ch.uuid == OmiUUID.audioDataChar else { return }
         // Diagnostics: count RAW notifications (before the header filter) so a
@@ -400,6 +430,11 @@ public enum OmiUUID {
     public nonisolated(unsafe) static let audioService = CBUUID(string: "19B10000-E8F2-537E-4F6C-D104768A1214")
     public nonisolated(unsafe) static let audioDataChar = CBUUID(string: "19B10001-E8F2-537E-4F6C-D104768A1214")
     public nonisolated(unsafe) static let codecChar = CBUUID(string: "19B10002-E8F2-537E-4F6C-D104768A1214")
+    /// The STANDARD Bluetooth Battery Service (0x180F) + Battery Level characteristic
+    /// (0x2A19) — a single byte 0…100. The Omi exposes these; any device that does not
+    /// simply never fires the read, and the level stays nil (no fake value).
+    public nonisolated(unsafe) static let batteryService = CBUUID(string: "180F")
+    public nonisolated(unsafe) static let batteryLevelChar = CBUUID(string: "2A19")
 }
 
 #else
@@ -410,6 +445,8 @@ public final class DeviceManager: ObservableObject, AudioFrameSource, @unchecked
     @Published public private(set) var connectionState: DeviceConnectionState = .poweredOff
     @Published public private(set) var discovered: [DiscoveredDevice] = []
     @Published public private(set) var saved: SavedOmi?
+    @Published public private(set) var batteryLevel: Int?
+    public var isBatteryLow: Bool { (batteryLevel ?? 100) < 20 }
     public init(log: DoorLog? = nil) { _ = log }
     public func start() { onState?(.failed("CoreBluetooth unavailable")) }
     public func stop() { onState?(.stopped) }

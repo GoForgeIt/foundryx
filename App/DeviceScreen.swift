@@ -112,6 +112,10 @@ struct DeviceScreen: View {
                 Text(device.saved?.name ?? "No Omi paired yet")
                     .grainTextStyle(.title).foregroundStyle(GrainColor.ink)
                 Spacer()
+                // Battery — only when the connected device actually reports one.
+                if let level = device.batteryLevel {
+                    BatteryBadge(level: level, low: device.isBatteryLow)
+                }
             }
             Text(stateLabel).grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
             if let s = device.saved {
@@ -280,5 +284,33 @@ private struct AddSourceSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).fill(GrainColor.surfaceElevated))
         .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).strokeBorder(GrainColor.border, lineWidth: 1))
+    }
+}
+
+/// A compact battery indicator (SF Symbol + %) for a connected audio device. Only
+/// rendered when a level is actually known — a device that doesn't publish the BLE
+/// Battery Service never shows one. Low battery (<20%) tints amber.
+struct BatteryBadge: View {
+    let level: Int          // 0…100
+    let low: Bool
+
+    private var symbol: String {
+        switch level {
+        case ..<13: return "battery.0percent"
+        case ..<38: return "battery.25percent"
+        case ..<63: return "battery.50percent"
+        case ..<88: return "battery.75percent"
+        default: return "battery.100percent"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: GrainSpacing.x1) {
+            Image(systemName: symbol)
+            Text("\(level)%").grainTextStyle(.caption).monospacedDigit()
+        }
+        .foregroundStyle(low ? GrainColor.amber : GrainColor.textMuted)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Device battery \(level) percent\(low ? ", low" : "")")
     }
 }
