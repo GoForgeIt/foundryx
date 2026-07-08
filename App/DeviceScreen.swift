@@ -10,6 +10,7 @@ import Grain
 ///      Reconnect / Scan / Forget, and the conversation-segmentation (silence-gap) setting.
 struct DeviceScreen: View {
     @ObservedObject var device: DeviceManager
+    @ObservedObject var battery: BatteryMonitor
     @ObservedObject var manager: CaptureManager
     @ObservedObject var sources: CaptureSourceRegistry
 
@@ -20,6 +21,7 @@ struct DeviceScreen: View {
             VStack(alignment: .leading, spacing: GrainSpacing.x4) {
                 captureSourcesCard
                 savedCard
+                bluetoothBatteryCard
                 actions
                 settingsCard
             }
@@ -101,6 +103,79 @@ struct DeviceScreen: View {
     private func connectionLabel(_ src: CaptureSourceDescriptor) -> String {
         if let detail = src.detail, !detail.isEmpty { return "\(src.connection.label) · \(detail)" }
         return src.connection.label
+    }
+
+    // MARK: generic BLE battery monitor
+
+    private var bluetoothBatteryCard: some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+            HStack(spacing: GrainSpacing.x2) {
+                Text("Bluetooth device battery").grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                Spacer()
+                if battery.isScanning {
+                    ProgressView()
+                }
+            }
+
+            if let name = battery.monitoredName {
+                HStack(spacing: GrainSpacing.x2) {
+                    Image(systemName: "battery.100percent")
+                        .foregroundStyle(GrainColor.forgeBlue)
+                        .frame(width: 24)
+                    Text(name).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                    Spacer()
+                    if let level = battery.level {
+                        BatteryBadge(level: level, low: battery.isLow)
+                    }
+                    GrainButton("Stop", variant: .text, size: .sm) { battery.stopMonitoring() }
+                }
+                .padding(.vertical, GrainSpacing.x1)
+            } else {
+                GrainButton("Find Bluetooth devices", variant: .tonal, size: .sm) {
+                    battery.startScan()
+                }
+
+                if !battery.discovered.isEmpty {
+                    VStack(spacing: 0) {
+                        ForEach(battery.discovered) { device in
+                            Button { battery.monitor(device) } label: {
+                                HStack(spacing: GrainSpacing.x2) {
+                                    Image(systemName: "dot.radiowaves.left.and.right")
+                                        .foregroundStyle(GrainColor.forgeBlue)
+                                        .frame(width: 24)
+                                    Text(device.name).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                                    Spacer()
+                                    Text(signalHint(device.rssi))
+                                        .grainTextStyle(.caption)
+                                        .foregroundStyle(GrainColor.textFaint)
+                                }
+                                .padding(.vertical, GrainSpacing.x2)
+                            }
+                            .buttonStyle(.plain)
+
+                            if device.id != battery.discovered.last?.id {
+                                Divider().overlay(GrainColor.border)
+                            }
+                        }
+                    }
+                    .padding(.top, GrainSpacing.x1)
+                }
+            }
+
+            Text("Shows battery for Bluetooth devices that publish it over Bluetooth LE. AirPods and most headphones keep their battery private to iOS and won't appear here.")
+                .grainTextStyle(.caption)
+                .foregroundStyle(GrainColor.textFaint)
+        }
+        .padding(GrainSpacing.x3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).fill(GrainColor.surfaceElevated))
+        .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).strokeBorder(GrainColor.border, lineWidth: 1))
+    }
+
+    private func signalHint(_ rssi: Int) -> String {
+        if rssi >= -55 { return "Strong" }
+        if rssi >= -75 { return "Nearby" }
+        return "Weak"
     }
 
     // MARK: remembered device

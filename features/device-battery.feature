@@ -24,3 +24,26 @@ Feature: Battery indicator for connected audio devices
     Given a connected device that does not expose a battery service
     When I look at the device indicator
     Then no battery percentage is shown
+
+  Scenario: find and monitor a Bluetooth device's battery
+    Given a nearby Bluetooth device publishes its battery level
+    When I choose to find Bluetooth devices
+    And I select that Bluetooth device
+    Then I see the Bluetooth device's battery percentage
+
+  Scenario: the monitored device reconnects on relaunch
+    Given I am monitoring a Bluetooth device's battery
+    When I relaunch the app
+    Then the app reconnects to that Bluetooth device
+    And I see its battery percentage when it reports one
+
+  Scenario: stop monitoring clears it
+    Given I am monitoring a Bluetooth device's battery
+    When I stop monitoring that Bluetooth device
+    Then the app forgets that Bluetooth device
+    And no Bluetooth device battery percentage is shown
+
+  Scenario: a device without a battery service is not offered
+    Given a nearby Bluetooth device does not publish its battery level
+    When I choose to find Bluetooth devices
+    Then that Bluetooth device is not offered for battery monitoring

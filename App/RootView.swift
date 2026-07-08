@@ -99,6 +99,7 @@ private struct MainTabs: View {
     @Binding var showingAccount: Bool
 
     @StateObject private var device: DeviceManager
+    @StateObject private var battery: BatteryMonitor
     @StateObject private var manager: CaptureManager
     @StateObject private var sources: CaptureSourceRegistry
     @StateObject private var log: DoorLog
@@ -128,6 +129,7 @@ private struct MainTabs: View {
         let dm = DeviceManager(log: log)
         _log = StateObject(wrappedValue: log)
         _device = StateObject(wrappedValue: dm)
+        _battery = StateObject(wrappedValue: BatteryMonitor())
         // Live on-device transcription preview (Feature 1). The factory builds the
         // SpeechAnalyzer transcriber on iOS 26+, falling back to SFSpeechRecognizer on
         // iOS 16–25; it's additive + ephemeral (Kiln stays authoritative).
@@ -240,7 +242,7 @@ private struct MainTabs: View {
             .tag(TabRouter.Tab.capture)
 
             NavigationStack {
-                DeviceScreen(device: device, manager: manager, sources: sources)
+                DeviceScreen(device: device, battery: battery, manager: manager, sources: sources)
                     .navigationTitle("Device")
                     .toolbar { Button("Account") { showingAccount = true } }
             }
