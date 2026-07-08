@@ -306,12 +306,14 @@ struct CaptureScreen: View {
 
     private var syncBar: some View {
         HStack(spacing: GrainSpacing.x2) {
-            if manager.hasPending {
-                Circle().fill(GrainColor.amber).frame(width: 8, height: 8)
-                Text(syncMessage).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+            if let message = syncMessage {
+                Circle().fill(anyWorkPending ? GrainColor.amber : GrainColor.sage)
+                    .frame(width: 8, height: 8)
+                Text(message).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
             } else if !manager.captures.isEmpty {
                 Circle().fill(GrainColor.sage).frame(width: 8, height: 8)
-                Text("All captures saved to computer").grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                Text(local ? "All conversations saved" : "All captures saved to computer")
+                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
             }
             Spacer()
         }
@@ -319,13 +321,29 @@ struct CaptureScreen: View {
         .padding(.vertical, GrainSpacing.x2)
     }
 
-    private var syncMessage: String {
-        let n = manager.pendingSegments
-        if case .failed = manager.sourceState {
-            return "\(n) segment\(n == 1 ? "" : "s") waiting to sync — will retry"
+    private var anyWorkPending: Bool {
+        manager.processingConversationCount > 0 || manager.hasPending
+    }
+
+    /// The processing banner: conversation-level progress FIRST ("N conversations
+    /// processing" — the thing the user actually cares about), then the segment-upload
+    /// detail. `nil` when there's genuinely nothing in flight.
+    private var syncMessage: String? {
+        var parts: [String] = []
+        let convos = manager.processingConversationCount
+        if convos > 0 {
+            parts.append("\(convos) conversation\(convos == 1 ? "" : "s") processing")
         }
-        let suffix = manager.drainActive ? " · syncing…" : ""
-        return "\(n) segment\(n == 1 ? "" : "s") saved on phone\(suffix)"
+        let n = manager.pendingSegments
+        if n > 0 {
+            if case .failed = manager.sourceState {
+                parts.append("\(n) segment\(n == 1 ? "" : "s") waiting to sync — will retry")
+            } else {
+                let suffix = manager.drainActive ? " · syncing…" : ""
+                parts.append("\(n) segment\(n == 1 ? "" : "s") saved on phone\(suffix)")
+            }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private var emptyState: some View {

@@ -198,10 +198,26 @@ public final class CaptureManager: ObservableObject {
     /// streaming) — useless empty cards; keep ones with real audio, still-streaming, or a
     /// pruned-to-transcript tombstone. Order newest-first by the durable conversation start.
     private func rebuildVisibleCaptures() {
-        visibleCaptures = CaptureManager.deduplicatedByCaptureId(captures)
+        let visible = CaptureManager.deduplicatedByCaptureId(captures)
             .filter { self.isBrowsable($0) }
             .sorted { self.startTime(of: $0) > self.startTime(of: $1) }
+        visibleCaptures = visible
+        // Count "still processing" conversations HERE (the single list-rebuild choke
+        // point) so the processing banner reads a cached count — no per-render disk
+        // churn. A conversation is processing when it has real audio but no transcript
+        // yet (not cached, not confirmed in Lore) and isn't the live recording.
+        processingConversationCount = visible.filter { wal in
+            wal !== active
+                && wal.status.totalSegments > 0
+                && bestLocalTranscript(wal.captureId) == nil
+                && !TranscriptCacheStore.isConfirmedInLore(captureId: wal.captureId, baseDir: baseDir)
+        }.count
     }
+
+    /// How many visible conversations are still being processed (audio captured, no
+    /// transcript yet) — drives the top-of-list processing banner. Recomputed only on
+    /// list rebuild, so reading it per render is free.
+    @Published public private(set) var processingConversationCount: Int = 0
 
     /// Collapse any duplicate capture-ids, keeping the FIRST occurrence. The door keys
     /// transcript `/content` by exact `externalId == capture_id`, so the ONLY way one

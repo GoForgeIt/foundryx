@@ -36,3 +36,10 @@ Feature: The conversation list tells the truth and stays fast
     When I read the sync banner
     Then the pending count includes only the real conversation's segments
     And the banner says syncing only while uploads are actually running
+
+  Scenario: the banner surfaces how many conversations are processing
+    Given two conversations are still being transcribed
+    And a third conversation's transcript is ready
+    When I look at the top of the list
+    Then the banner says two conversations are processing
+    And it does not count the ready conversation
