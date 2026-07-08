@@ -218,4 +218,18 @@ public struct SpeakerTranscript: Sendable, Equatable {
 
     /// Whether this capture has any tentative (inferred, unconfirmed) speaker to review.
     public var hasUnconfirmedInferred: Bool { !inferredSlots.isEmpty }
+
+    /// The whole transcript as plain, paste-ready text — one labelled block per speaker
+    /// turn ("Speaker 1: …" / "Alice: …", using the same `displayLabel` the UI shows),
+    /// turns in spoken order, blank-line separated. This is what the Copy action puts on
+    /// the clipboard for a diarized conversation. Pure (no UI) so it's unit-testable.
+    public var plainText: String {
+        turns
+            .map { turn in
+                let body = turn.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                return "\(displayLabel(for: turn.slot)): \(body)"
+            }
+            .filter { !$0.hasSuffix(": ") }   // drop turns that folded to empty text
+            .joined(separator: "\n\n")
+    }
 }

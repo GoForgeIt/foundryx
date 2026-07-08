@@ -7,6 +7,35 @@ import Foundation
 /// call. Pure-model + a URLProtocol-stubbed DoorClient — no live door.
 final class SpeakerTranscriptTests: XCTestCase {
 
+    // MARK: - copy: whole transcript as paste-ready plain text
+
+    func testPlainTextLabelsEachTurnBySpeakerInSpokenOrder() {
+        let t = SpeakerTranscript(
+            speakers: [
+                CaptureSpeaker(slot: "speaker_0", status: .confirmed, name: "Alice"),
+                CaptureSpeaker(slot: "speaker_1", status: .anonymous),
+            ],
+            segments: [
+                TranscriptSegment(seq: 0, text: "Hey, did it work?", speaker: "speaker_0"),
+                TranscriptSegment(seq: 1, text: "Yeah, all green.", speaker: "speaker_1"),
+                TranscriptSegment(seq: 2, text: "Nice.", speaker: "speaker_0"),
+            ])
+        // Confirmed name for slot 0; "Speaker 2" for the anonymous slot 1; spoken order.
+        XCTAssertEqual(
+            t.plainText,
+            "Alice: Hey, did it work?\n\nSpeaker 2: Yeah, all green.\n\nAlice: Nice.")
+    }
+
+    func testPlainTextSkipsEmptyTurns() {
+        let t = SpeakerTranscript(
+            speakers: [],
+            segments: [
+                TranscriptSegment(seq: 0, text: "  ", speaker: "speaker_0"),
+                TranscriptSegment(seq: 1, text: "real words", speaker: "speaker_1"),
+            ])
+        XCTAssertEqual(t.plainText, "Speaker 2: real words")
+    }
+
     // MARK: - segment → speaker turn grouping
 
     func testConsecutiveSameSpeakerFoldIntoOneTurn() {

@@ -1,6 +1,9 @@
 import SwiftUI
 import AVFoundation
 import Grain
+#if canImport(UIKit)
+import UIKit
+#endif
 
 private extension ConversationProgress {
     /// The Grain status dot energy for this chip: live capture pulses warm, the
@@ -527,6 +530,7 @@ struct ConversationDetailView: View {
     @State private var loading = true
     @State private var didAttemptFetch = false
     @State private var confirmDelete = false
+    @State private var didCopy = false
     @Environment(\.dismiss) private var dismiss
 
     /// True when the conversation is OLDER than the ~14-day transcript-cache window:
@@ -561,6 +565,25 @@ struct ConversationDetailView: View {
             && !((provisional?.provisionalTranscript ?? "").isEmpty)
     }
     private var summaryText: String? { content?.summary ?? cached?.summary }
+    /// The whole conversation as paste-ready text for the Copy action: speaker-labelled
+    /// turns when diarized, else the flat transcript. nil when there's nothing to copy
+    /// yet (drives whether the Copy affordance is offered at all).
+    private var copyableTranscript: String? {
+        if let diarized = diarizedTranscript, diarized.hasSegments {
+            let text = diarized.plainText
+            if !text.isEmpty { return text }
+        }
+        if let t = transcriptText, !t.isEmpty { return t }
+        return nil
+    }
+    private func copyTranscript() {
+        guard let text = copyableTranscript else { return }
+        #if canImport(UIKit)
+        UIPasteboard.general.string = text
+        #endif
+        didCopy = true
+        Task { try? await Task.sleep(nanoseconds: 1_600_000_000); await MainActor.run { didCopy = false } }
+    }
     /// One speaker-rendering source for both live door content and cached content, so
     /// a second open does not flash flat text while waiting for `/content` again.
     private var diarizedTranscript: SpeakerTranscript? {
@@ -597,7 +620,21 @@ struct ConversationDetailView: View {
                         Text("On-device transcript · finishing on your computer…")
                             .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
                     }
-                    Text("Transcript").grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                    HStack {
+                        Text("Transcript").grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                        Spacer()
+                        // One-tap copy of the whole transcript (speaker-labelled when
+                        // diarized). Shows a brief "Copied" confirmation.
+                        Button {
+                            copyTranscript()
+                        } label: {
+                            Label(didCopy ? "Copied" : "Copy",
+                                  systemImage: didCopy ? "checkmark" : "doc.on.doc")
+                                .grainTextStyle(.caption)
+                                .foregroundStyle(didCopy ? GrainColor.sage : GrainColor.textMuted)
+                        }
+                        .accessibilityIdentifier("copy-transcript")
+                    }
                     // Speaker-diarized transcript (Lore 0.5.53): when the door forwards
                     // segments, render colour-coded speaker turns with tag/confirm/correct.
                     // Falls back to the flat transcript for non-diarized / legacy captures.
@@ -648,6 +685,13 @@ struct ConversationDetailView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
+                    if copyableTranscript != nil {
+                        Button {
+                            copyTranscript()
+                        } label: {
+                            Label("Copy transcript", systemImage: "doc.on.doc")
+                        }
+                    }
                     Button("Delete", role: .destructive) { confirmDelete = true }
                 } label: {
                     Image(systemName: "ellipsis.circle")
