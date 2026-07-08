@@ -1406,6 +1406,60 @@ public final class CaptureManager: ObservableObject {
         return CaptureWAL(captureId: id, target: target, baseDir: baseDir, log: log, upload: upload)
     }
 
+    private func hasLocalAudio(_ captureId: String) -> Bool {
+        let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        return files.contains { $0.pathExtension == "opus" }
+    }
+
+    /// A conversation can be resumed only when its original local audio is still present,
+    /// it has not been deleted/discarded, and no other source is currently recording.
+    /// This is intentionally local-first: the WAL on this phone is the append target.
+    public func canResumeRecording(captureId: String) -> Bool {
+        guard active == nil, suspendedSession == nil else { return false }
+        guard !isDeleted(captureId), !isDiscarded(captureId), !isAbandoned(captureId) else { return false }
+        return hasLocalAudio(captureId)
+    }
+
+    /// Re-open an existing capture as the active conversation, appending new frames to
+    /// the same WAL/capture id. Ending it later follows the normal finalize path, which
+    /// re-ingests the fuller audio under the same external id.
+    @discardableResult
+    public func resumeRecording(captureId: String) -> Bool {
+        guard canResumeRecording(captureId: captureId) else { return false }
+        let wal = captures.first(where: { $0.captureId == captureId }) ?? makeWAL(captureId: captureId)
+        active = wal
+        captures.removeAll { $0.captureId == captureId }
+        captures.insert(wal, at: 0)
+        clearNeedsFinalize(captureId)
+        retryStates[captureId] = nil
+        finalizing.remove(captureId)
+        if captureSource == .phoneMic, micSource != nil { isRecordingMic = true }
+        ConversationMetaStore.recordOpen(captureId: captureId, baseDir: baseDir, at: nowUnixSecs())
+        invalidateMeta(captureId)
+        ConversationCardStore.recordStart(captureId: captureId, baseDir: baseDir, startedAt: nowUnixSecs())
+        CaptureEventLog.append(.captureStarted, captureId: captureId,
+                               payload: ["source": captureSource.rawValue, "resume": "true"],
+                               baseDir: baseDir)
+        wal.beginStreaming()
+        router.resetLevelMeter()
+        #if canImport(AVFoundation)
+        router.resetPCMDecoder()
+        #endif
+        router.resetSegmenter()
+        router.setExternalPCM(isRecordingMic)
+        router.setPaused(isPaused)
+        router.setWAL(wal)
+        startLiveTranscription()
+        lastHeartbeatAt = 0; lastHeartbeatFrames = router.stats().count
+        pushLiveState(.start)
+        rebuildVisibleCaptures()
+        if isRecordingMic { micSource?.start() }
+        else { source.start() }
+        log?.info("capture \(captureId): resumed existing conversation (source=\(captureSource.rawValue))")
+        return true
+    }
+
     private func beginSession() {
         let id = Self.newCaptureId()
         let wal = makeWAL(captureId: id)

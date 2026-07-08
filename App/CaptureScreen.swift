@@ -650,6 +650,7 @@ struct ConversationDetailView: View {
                     Text(place).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                 }
                 listenRow
+                resumeRow
                 receiptSection
                 Divider().background(GrainColor.borderHairline)
 
@@ -768,6 +769,15 @@ struct ConversationDetailView: View {
         .refreshable { await fetchFromDoor() }   // pull-to-refresh loads on demand
         .task { await initialLoad() }
         .onDisappear { player?.stop() }
+    }
+
+    @ViewBuilder private var resumeRow: some View {
+        if manager.canResumeRecording(captureId: captureId) {
+            GrainButton("Resume recording", variant: .filled, size: .sm) {
+                if manager.resumeRecording(captureId: captureId) { dismiss() }
+            }
+            .accessibilityIdentifier("resume-recording")
+        }
     }
 
     /// "Listen" affordance — replays the conversation audio via the door's `/audio`
