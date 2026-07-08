@@ -85,6 +85,65 @@ public enum ConversationProgress: String, Sendable, Equatable {
     /// Whether the card should offer a retry affordance.
     public var needsRetry: Bool { self == .failed }
 
+    // MARK: - stepper (visible "where is this conversation" progress)
+
+    /// The ordered pipeline steps a conversation moves through, for the visual
+    /// stepper on the detail view. Deliberately coarse + honest — only steps the
+    /// phone has a real signal for (we never claim "diarizing"/"titling" as their
+    /// own step without a signal; those happen inside the transcribe→ready span).
+    public enum Step: Int, CaseIterable, Sendable {
+        case recorded = 0    // audio captured
+        case saved           // durable (on phone, or safely on the computer)
+        case transcribing    // transcript being produced (STT + speakers + title)
+        case ready           // openable — transcript/title available
+
+        /// Brand-honest label. In the phone-only tier there is no computer, so the
+        /// "saved" step stays on-device and transcription is "on this phone".
+        public func label(local: Bool) -> String {
+            switch self {
+            case .recorded: return "Recorded"
+            case .saved: return local ? "Saved on phone" : "Saved to computer"
+            case .transcribing: return local ? "Transcribing on phone" : "Transcribing"
+            case .ready: return "Ready"
+            }
+        }
+    }
+
+    /// How a single step should render in the stepper for THIS progress.
+    public enum StepState: Sendable, Equatable { case done, active, pending, failed }
+
+    /// The state of `step` for this progress — the whole stepper is `Step.allCases`
+    /// mapped through this. Pure + unit-tested: no clever UI derivation, just the
+    /// honest "have we finished this, are we on it, or is it still ahead."
+    public func state(of step: Step) -> StepState {
+        // The furthest step reached (as an index), and whether we're mid-flight ON it.
+        // ready ⇒ every step done; failed ⇒ the transcribing step shows the failure.
+        switch self {
+        case .failed:
+            switch step {
+            case .recorded, .saved: return .done
+            case .transcribing: return .failed
+            case .ready: return .pending
+            }
+        case .ready:
+            return .done
+        case .recording:
+            return step == .recorded ? .active : .pending
+        case .savedOnPhone:
+            switch step {
+            case .recorded: return .done
+            case .saved: return .active
+            default: return .pending
+            }
+        case .savedToComputer, .transcribing:
+            switch step {
+            case .recorded, .saved: return .done
+            case .transcribing: return .active
+            case .ready: return .pending
+            }
+        }
+    }
+
     /// A specific, honest failure line derived from Lore's terminal drop reason —
     /// shown on a `.failed` card instead of the generic chip. `nil` when there's no
     /// specific reason (falls back to the generic label).

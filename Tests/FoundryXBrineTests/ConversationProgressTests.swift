@@ -67,4 +67,43 @@ final class ConversationProgressTests: XCTestCase {
         XCTAssertEqual(ConversationProgress.ready.label, "Ready")
         XCTAssertTrue(ConversationProgress.failed.needsRetry)
     }
+
+    // MARK: - stepper step states (the visible "where is this" progress)
+
+    private typealias Step = ConversationProgress.Step
+
+    func testTranscribingStepperMarksPastDoneCurrentActiveFutureAhead() {
+        let p = ConversationProgress.transcribing
+        XCTAssertEqual(p.state(of: .recorded), .done)
+        XCTAssertEqual(p.state(of: .saved), .done)
+        XCTAssertEqual(p.state(of: .transcribing), .active)
+        XCTAssertEqual(p.state(of: .ready), .pending)
+    }
+
+    func testReadyStepperIsAllDone() {
+        for step in Step.allCases {
+            XCTAssertEqual(ConversationProgress.ready.state(of: step), .done)
+        }
+    }
+
+    func testFailedStepperMarksTranscribingFailed() {
+        let p = ConversationProgress.failed
+        XCTAssertEqual(p.state(of: .recorded), .done)
+        XCTAssertEqual(p.state(of: .saved), .done)
+        XCTAssertEqual(p.state(of: .transcribing), .failed)
+        XCTAssertEqual(p.state(of: .ready), .pending)
+    }
+
+    func testSavedOnPhoneStepperIsOnTheSavedStep() {
+        let p = ConversationProgress.savedOnPhone
+        XCTAssertEqual(p.state(of: .recorded), .done)
+        XCTAssertEqual(p.state(of: .saved), .active)
+        XCTAssertEqual(p.state(of: .transcribing), .pending)
+    }
+
+    func testStepLabelsAreTierHonest() {
+        XCTAssertEqual(Step.saved.label(local: false), "Saved to computer")
+        XCTAssertEqual(Step.saved.label(local: true), "Saved on phone")
+        XCTAssertEqual(Step.transcribing.label(local: true), "Transcribing on phone")
+    }
 }

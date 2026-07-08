@@ -522,6 +522,8 @@ struct ConversationDetailView: View {
     /// When the conversation happened — used to decide whether its transcript is
     /// recent (auto-loaded/cached) or older (loaded on demand from the door).
     let conversationDate: Date?
+    /// Phone-only tier → on-device stepper labels ("Saved on phone", etc.).
+    var local: Bool = false
 
     @State private var content: CaptureContent?
     @State private var cached: CachedTranscript?   // local fallback (pruned audio / offline)
@@ -594,6 +596,17 @@ struct ConversationDetailView: View {
         return nil
     }
 
+    /// The pipeline position to show in the stepper — only while we're genuinely
+    /// WAITING on processing (fetching, or the door has no transcript yet). Once a
+    /// transcript exists the transcript itself is the answer, so the stepper hides.
+    private var stepperProgress: ConversationProgress? {
+        if copyableTranscript != nil { return nil }                 // ready → shown below
+        let waiting = loading || (didAttemptFetch && content?.found == false)
+        guard waiting else { return nil }                            // older/on-demand: no stepper
+        if manager.statusPoller(for: captureId)?.stage == .failed { return .failed }
+        return .transcribing
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GrainSpacing.x3) {
@@ -603,6 +616,14 @@ struct ConversationDetailView: View {
                 }
                 listenRow
                 Divider().background(GrainColor.borderHairline)
+
+                // Visible pipeline progress while the conversation is still being
+                // processed — so the user sees WHERE it is instead of a bare spinner.
+                if let sp = stepperProgress {
+                    ConversationStepper(progress: sp, local: local)
+                        .padding(.vertical, GrainSpacing.x1)
+                    Divider().background(GrainColor.borderHairline)
+                }
 
                 if let transcript = transcriptText {
                     // Kiln-generated summary when ready; a subtle "Summarizing…" hint
