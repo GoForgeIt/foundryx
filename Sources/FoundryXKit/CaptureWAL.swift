@@ -58,8 +58,13 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
 
     /// Cap the segments uploaded in ONE `sync()` pass so a giant backlog (e.g. a stuck
     /// capture with thousands of segments) drains at a sane, steady rate instead of
-    /// firing thousands of POSTs back-to-back. The remainder drains on the next tick.
-    public static let maxSegmentsPerSync = 8
+    /// firing thousands of POSTs back-to-back.
+    public static let maxSegmentsPerSync = 16
+
+    /// Segment uploads within one WAL sync are concurrent but bounded. This keeps a
+    /// single long conversation from trickling one POST at a time for hours while still
+    /// avoiding the unbounded launch storm that older per-WAL background sync caused.
+    public static let maxConcurrentSegmentUploads = 4
 
     private let dir: URL
     private let target: DoorTarget
@@ -206,47 +211,114 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     public func sync() async -> SyncOutcome {
         let pending = pendingSegmentURLs()
         guard !pending.isEmpty else { lastError = nil; publish(); return .idle }
-        var uploaded = 0
+        var jobs: [(seq: UInt64, url: URL, bytes: Data)] = []
+        jobs.reserveCapacity(min(Self.maxSegmentsPerSync, pending.count))
         for (seq, segURL) in pending.prefix(Self.maxSegmentsPerSync) {
             // The segment's OWN file must be readable. A missing/corrupt file is
             // unrecoverable — retrying can never succeed — so it's permanent poison.
             // The audio that remains is KEPT (the owner writes a durable marker, it
             // never deletes), but this poisoned capture stops wedging the drain.
-            let bytes: Data
             do {
-                bytes = try Data(contentsOf: segURL)
+                let bytes = try Data(contentsOf: segURL)
+                jobs.append((seq, segURL, bytes))
             } catch {
                 lastError = "segment \(seq) unreadable: \((error as NSError).localizedDescription)"
                 log?.error("capture \(captureId): segment \(seq) file missing/corrupt — permanent poison, retiring (audio kept)")
                 publish()
                 return .poisoned(seq: seq, reason: "segment file missing/corrupt")
             }
-            do {
-                try await upload(seq: seq, body: bytes)
-                try Data().write(to: ackURL(segURL), options: [.atomic])   // 200 ACK ⇒ saved to computer
-                advanceWatermark(throughAcked: seq)                        // durable resume point moves forward
-                lastError = nil
-                uploaded += 1
-                log?.info("capture \(captureId): segment \(seq) ACK'd by desktop (saved to computer)")
-                publish()
-            } catch DoorError.unauthorized {
-                lastError = "unauthorized (id_token expired)"
-                log?.warn("capture \(captureId): segment \(seq) rejected 401 (token expired) — stopping uploads, re-auth required")
-                publish()
-                return .authExpired   // do NOT keep firing with a known-expired token
-            } catch DoorError.http(let status) where CaptureWAL.isPermanentRejection(status) {
-                lastError = "door permanently rejected segment \(seq): HTTP \(status)"
-                log?.error("capture \(captureId): segment \(seq) permanently rejected (HTTP \(status)) — retiring (audio kept)")
-                publish()
-                return .poisoned(seq: seq, reason: "door rejected HTTP \(status)")
-            } catch {
-                lastError = (error as NSError).localizedDescription
-                log?.warn("capture \(captureId): segment \(seq) not synced (\(lastError ?? "?")) — staying pending, will retry")
-                publish()
-                return .failed  // transient — stop on first failure; the rest stay pending for the next tick
+        }
+
+        var uploaded = 0
+        var firstTransientError: String?
+        var firstPoison: (seq: UInt64, reason: String)?
+        var sawAuthExpired = false
+
+        await withTaskGroup(of: SegmentUploadResult.self) { group in
+            var next = 0
+            let initial = min(Self.maxConcurrentSegmentUploads, jobs.count)
+            for _ in 0..<initial {
+                let job = jobs[next]
+                next += 1
+                group.addTask { [self] in await uploadPreparedSegment(seq: job.seq, body: job.bytes) }
+            }
+
+            while let result = await group.next() {
+                switch result {
+                case .success(let seq):
+                    guard let job = jobs.first(where: { $0.seq == seq }) else { break }
+                    do {
+                        try Data().write(to: ackURL(job.url), options: [.atomic])   // 200 ACK ⇒ saved to computer
+                        advanceWatermark(throughAcked: seq)                        // durable resume point moves forward
+                        uploaded += 1
+                        log?.info("capture \(captureId): segment \(seq) ACK'd by desktop (saved to computer)")
+                        publish()
+                    } catch {
+                        firstTransientError = "ack marker write failed for segment \(seq): \((error as NSError).localizedDescription)"
+                    }
+                case .authExpired(let seq):
+                    sawAuthExpired = true
+                    lastError = "unauthorized (id_token expired)"
+                    log?.warn("capture \(captureId): segment \(seq) rejected 401 (token expired) — stopping uploads, re-auth required")
+                    group.cancelAll()
+                case .permanent(let seq, let status):
+                    if firstPoison == nil {
+                        firstPoison = (seq, "door rejected HTTP \(status)")
+                    }
+                    lastError = "door permanently rejected segment \(seq): HTTP \(status)"
+                    log?.error("capture \(captureId): segment \(seq) permanently rejected (HTTP \(status)) — retiring (audio kept)")
+                    group.cancelAll()
+                case .transient(let seq, let message):
+                    if firstTransientError == nil {
+                        firstTransientError = message
+                    }
+                    lastError = message
+                    log?.warn("capture \(captureId): segment \(seq) not synced (\(message)) — staying pending, will retry")
+                }
+
+                if !sawAuthExpired, firstPoison == nil, firstTransientError == nil, next < jobs.count {
+                    let job = jobs[next]
+                    next += 1
+                    group.addTask { [self] in await uploadPreparedSegment(seq: job.seq, body: job.bytes) }
+                }
             }
         }
+
+        if sawAuthExpired {
+            publish()
+            return .authExpired
+        }
+        if let poison = firstPoison {
+            publish()
+            return .poisoned(seq: poison.seq, reason: poison.reason)
+        }
+        if let error = firstTransientError {
+            lastError = error
+            publish()
+            return .failed
+        }
+        lastError = nil
         return uploaded > 0 ? .progressed : .idle
+    }
+
+    private enum SegmentUploadResult: Sendable {
+        case success(seq: UInt64)
+        case authExpired(seq: UInt64)
+        case permanent(seq: UInt64, status: Int)
+        case transient(seq: UInt64, message: String)
+    }
+
+    private func uploadPreparedSegment(seq: UInt64, body: Data) async -> SegmentUploadResult {
+        do {
+            try await upload(seq: seq, body: body)
+            return .success(seq: seq)
+        } catch DoorError.unauthorized {
+            return .authExpired(seq: seq)
+        } catch DoorError.http(let status) where CaptureWAL.isPermanentRejection(status) {
+            return .permanent(seq: seq, status: status)
+        } catch {
+            return .transient(seq: seq, message: (error as NSError).localizedDescription)
+        }
     }
 
     /// POST one segment. Throws on any non-200 so the segment stays pending. In

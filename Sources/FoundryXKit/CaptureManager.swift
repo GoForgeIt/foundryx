@@ -1765,9 +1765,53 @@ public final class CaptureManager: ObservableObject {
         // (or `clearAuthExpired`) re-arms the drain.
         guard !authExpired else { return }
 
-        let now = Date().timeIntervalSince1970
-        var attempted = 0
-        for wal in captures where wal.status.pendingSegments > 0 {
+        while !authExpired {
+            let now = Date().timeIntervalSince1970
+            let batch = drainBatch(now: now)
+            guard !batch.isEmpty else { break }
+
+            var madeProgress = false
+            var shouldStop = false
+            await withTaskGroup(of: (CaptureWAL, SyncOutcome).self) { group in
+                for wal in batch {
+                    group.addTask { (wal, await wal.sync()) }
+                }
+                while let (wal, outcome) = await group.next() {
+                    let id = wal.captureId
+                    switch outcome {
+                    case .idle:
+                        retryStates[id] = nil
+                    case .progressed:
+                        retryStates[id] = nil                 // healthy → reset backoff
+                        madeProgress = true
+                    case .failed:
+                        recordUploadFailure(id, now: now)     // transient — back off; retry FOREVER
+                    case .poisoned(let seq, let reason):
+                        // Permanent poison on a specific segment — retire so it can't wedge the
+                        // drain. The audio is KEPT (durable marker, no delete).
+                        abandon(id, reason: "segment \(seq): \(reason)")
+                    case .authExpired:
+                        recordUploadFailure(id, now: now)
+                        handleUploadAuthExpired()             // stop everything + request re-auth
+                        shouldStop = true
+                    }
+                }
+            }
+            if shouldStop || !madeProgress { break }
+        }
+        // After syncing, retry any pending-finalize captures whose segments are now
+        // all ACK'd — this is the retry path for a finalize that didn't complete at
+        // conversation-close (door/Lore was down, or segments weren't ACK'd yet).
+        await retryPendingFinalizes()
+        await retryPendingDeletes()
+        maybePrune()   // retention sweeps — throttled OFF the every-5s main path
+    }
+
+    private func drainBatch(now: TimeInterval) -> [CaptureWAL] {
+        var batch: [CaptureWAL] = []
+        batch.reserveCapacity(Self.maxCapturesPerDrain)
+        for wal in captures {
+            guard wal.snapshot().pendingSegments > 0 else { continue }
             let id = wal.captureId
             if isAbandoned(id) { continue }
             if isDiscarded(id) { continue }   // a sub-substance junk fragment never uploads
@@ -1776,33 +1820,15 @@ public final class CaptureManager: ObservableObject {
             // NEVER LOSE AUDIO: there is NO size / age / failure-count abandon here. A
             // large, old, or briefly-offline capture keeps draining (resuming from its
             // watermark) until fully uploaded. The only retire is permanent poison,
-            // surfaced by `wal.sync()` returning `.poisoned` below.
+            // surfaced by `wal.sync()` returning `.poisoned`.
             // Backoff gate: skip a failing capture until its next-eligible instant.
             if let st = retryStates[id], now < st.nextEligible { continue }
-            // Concurrency / backlog valve: bound how many captures one tick attempts.
-            if attempted >= Self.maxCapturesPerDrain { break }
-            attempted += 1
-            switch await wal.sync() {
-            case .idle, .progressed:
-                retryStates[id] = nil                 // healthy → reset backoff
-            case .failed:
-                recordUploadFailure(id, now: now)     // transient — back off; retry FOREVER
-            case .poisoned(let seq, let reason):
-                // Permanent poison on a specific segment — retire so it can't wedge the
-                // drain. The audio is KEPT (durable marker, no delete).
-                abandon(id, reason: "segment \(seq): \(reason)")
-            case .authExpired:
-                recordUploadFailure(id, now: now)
-                handleUploadAuthExpired()             // stop everything + request re-auth
-                return
+            batch.append(wal)
+            if batch.count >= Self.maxCapturesPerDrain {
+                break
             }
         }
-        // After syncing, retry any pending-finalize captures whose segments are now
-        // all ACK'd — this is the retry path for a finalize that didn't complete at
-        // conversation-close (door/Lore was down, or segments weren't ACK'd yet).
-        await retryPendingFinalizes()
-        await retryPendingDeletes()
-        maybePrune()   // retention sweeps — throttled OFF the every-5s main path
+        return batch
     }
 
     /// Record an upload failure: bump the consecutive-failure count and schedule the

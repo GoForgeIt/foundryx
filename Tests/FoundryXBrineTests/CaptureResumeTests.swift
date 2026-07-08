@@ -47,8 +47,10 @@ final class CaptureResumeTests: XCTestCase {
         private let lock = NSLock()
         private(set) var seqs: [UInt64] = []
         var failAfter: Int = .max          // throw a TRANSIENT error after this many sends
+        var failSeq: UInt64?
         func send(_ seq: UInt64) throws {
             lock.lock(); seqs.append(seq); let n = seqs.count; let cap = failAfter; lock.unlock()
+            if seq == failSeq { throw DoorError.http(503) }
             if n > cap { throw DoorError.http(503) }   // door transiently down
         }
         var count: Int { lock.lock(); defer { lock.unlock() }; return seqs.count }
@@ -102,7 +104,7 @@ final class CaptureResumeTests: XCTestCase {
 
         await drainToDone(wal)
 
-        XCTAssertEqual(rec.seqs, [5, 6, 7, 8, 9], "resumes AFTER the watermark — never re-sends 0…4")
+        XCTAssertEqual(rec.seqs.sorted(), [5, 6, 7, 8, 9], "resumes AFTER the watermark — never re-sends 0…4")
         XCTAssertEqual(wal.uploadWatermark(), 9, "watermark advances to the last segment")
         XCTAssertEqual(wal.snapshot().pendingSegments, 0, "the large capture fully uploads")
     }
@@ -114,13 +116,15 @@ final class CaptureResumeTests: XCTestCase {
         let id = "omi-resume-interrupted"
         try seedSegments(dir: dir, captureId: id, n: 10, ackedThrough: -1)   // nothing ACK'd yet
 
-        // First run fails transiently after the 3rd send → seqs 0,1,2 ACK'd, 3 fails.
-        let rec1 = SeqRecorder(); rec1.failAfter = 3
+        // First run fails transiently on seq 3 → seqs 0,1,2 ACK'd, 3 fails.
+        let rec1 = SeqRecorder(); rec1.failSeq = 3
         let wal1 = CaptureWAL(captureId: id, target: target(), baseDir: dir,
                               upload: { seq, _ in try rec1.send(seq) })
         let out1 = await wal1.sync()
         XCTAssertEqual(out1, .failed, "a transient door error stops the pass (not poison)")
-        XCTAssertEqual(rec1.seqs, [0, 1, 2, 3], "attempted through the failing seq")
+        XCTAssertTrue(Set(rec1.seqs).isSuperset(of: [0, 1, 2, 3]), "attempted through the failing seq")
+        XCTAssertLessThanOrEqual(rec1.seqs.count, CaptureWAL.maxConcurrentSegmentUploads * 2,
+                                 "a transient failure may have a few already-scheduled uploads, but remains bounded")
         XCTAssertEqual(wal1.uploadWatermark(), 2, "progress persisted: watermark advanced over 0,1,2")
 
         // Relaunch: a brand-new WAL on the same dir resumes from the persisted watermark.
@@ -131,7 +135,8 @@ final class CaptureResumeTests: XCTestCase {
 
         await drainToDone(wal2)
 
-        XCTAssertEqual(rec2.seqs, [3, 4, 5, 6, 7, 8, 9], "the next run advances past the watermark, no re-sends")
+        XCTAssertTrue(rec2.seqs.allSatisfy { $0 >= 3 }, "the next run advances past the watermark, no re-sends")
+        XCTAssertTrue(rec2.seqs.contains(3), "the failed sequence is retried after relaunch")
         XCTAssertEqual(wal2.snapshot().pendingSegments, 0, "the capture completes across the interruption")
     }
 

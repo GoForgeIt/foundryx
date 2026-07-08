@@ -29,13 +29,28 @@ final class CaptureStormTests: XCTestCase {
     /// Records upload attempts; can be made to throw a chosen error to exercise the
     /// transient-failure and expired-token paths.
     private final class UploadRecorder: @unchecked Sendable {
-        private let lock = NSLock()
+        private let queue = DispatchQueue(label: "foundryx.upload-recorder")
         private var _attempts = 0
+        private var _inFlight = 0
+        private var _maxInFlight = 0
         var error: Error?
-        var attempts: Int { lock.lock(); defer { lock.unlock() }; return _attempts }
+        var attempts: Int { queue.sync { _attempts } }
+        var maxInFlight: Int { queue.sync { _maxInFlight } }
         func record() throws {
-            lock.lock(); _attempts += 1; let e = error; lock.unlock()
+            let e = queue.sync { () -> Error? in
+                _attempts += 1
+                return error
+            }
             if let e { throw e }
+        }
+        func recordSlowSuccess() async throws {
+            queue.sync {
+                _attempts += 1
+                _inFlight += 1
+                _maxInFlight = max(_maxInFlight, _inFlight)
+            }
+            try await Task.sleep(nanoseconds: 5_000_000)
+            queue.sync { _inFlight -= 1 }
         }
     }
 
@@ -151,7 +166,9 @@ final class CaptureStormTests: XCTestCase {
 
         await mgr.drainPending()
         let afterFirst = rec.attempts
-        XCTAssertEqual(afterFirst, 1, "one failed attempt (sync stops on the first failure)")
+        XCTAssertGreaterThanOrEqual(afterFirst, 1, "the failed backlog is attempted")
+        XCTAssertLessThanOrEqual(afterFirst, CaptureWAL.maxConcurrentSegmentUploads,
+                                 "one failed drain only spends the bounded in-flight batch")
         XCTAssertFalse(mgr.authExpired, "a transient failure does NOT trip the expired-token state")
 
         // Immediately drain again: the capture is in backoff (next-eligible is seconds
@@ -159,6 +176,37 @@ final class CaptureStormTests: XCTestCase {
         await mgr.drainPending()
         await mgr.drainPending()
         XCTAssertEqual(rec.attempts, afterFirst, "a backing-off capture is skipped, not hammered")
+    }
+
+    // MARK: successful backlog → continuous bounded drain
+
+    func testReachableDoorContinuouslyDrainsLargeBacklogWithBoundedSegmentConcurrency() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let id = "omi-20260708-081100-throughput"
+        let cdir = dir.appendingPathComponent(id, isDirectory: true)
+        try FileManager.default.createDirectory(at: cdir, withIntermediateDirectories: true)
+        let backlog = CaptureWAL.maxSegmentsPerSync * 3
+        for seq in 0..<backlog {
+            try Data([1, 2, 3, 4]).write(
+                to: cdir.appendingPathComponent(String(format: "seg-%012llu.opus", seq)))
+        }
+
+        let rec = UploadRecorder()
+        let src = TestSource()
+        let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
+        let mgr = CaptureManager(target: target, baseDir: dir, source: src,
+                                 uploadSegment: { _, _, _ in try await rec.recordSlowSuccess() })
+
+        XCTAssertEqual(mgr.captures.first?.snapshot().pendingSegments, backlog, "test starts with a real backlog")
+
+        await mgr.drainPending()
+
+        XCTAssertEqual(rec.attempts, backlog, "one drain invocation keeps going until the reachable backlog is empty")
+        XCTAssertGreaterThan(rec.maxInFlight, 1, "segments upload concurrently instead of one at a time")
+        XCTAssertLessThanOrEqual(rec.maxInFlight, CaptureWAL.maxConcurrentSegmentUploads,
+                                 "segment concurrency stays inside the bounded upload limit")
+        XCTAssertEqual(mgr.captures.first?.snapshot().pendingSegments, 0,
+                       "all saved phone segments are ACK'd without waiting for later timer ticks")
     }
 
     // MARK: large/old/failing capture → KEEPS DRAINING (never abandoned)
