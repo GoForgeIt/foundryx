@@ -838,6 +838,7 @@ public final class CaptureManager: ObservableObject {
             guard let c = await fetch(captureId), c.found, !c.transcript.isEmpty else { return }
             let entry = CachedTranscript(transcript: c.transcript, title: c.title,
                                          summary: c.summary, segments: c.segments, speakers: c.speakers,
+                                         paragraphs: c.paragraphs,
                                          fetchedAt: UInt64(max(0, Date().timeIntervalSince1970)))
             TranscriptCacheStore.save(entry, captureId: captureId, baseDir: baseDir)
             // Also seed the durable card tombstone with the name/description.

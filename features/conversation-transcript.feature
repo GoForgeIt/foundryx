@@ -35,3 +35,14 @@ Feature: See a conversation's transcript on the phone (Phase B)
     Then the transcript is not auto-fetched and I see a Load transcript affordance
     When I tap Load transcript or pull to refresh
     Then the phone fetches the transcript from the door and shows it
+
+  Scenario: A confirmed speaker name replaces the numbered label after refresh
+    Given a diarized conversation whose speaker I named on the door
+    When the detail view refreshes
+    Then the confirmed name replaces "Speaker 1"
+
+  Scenario: Deepgram paragraphs render as readable chapters
+    Given a transcribed conversation with Deepgram paragraphs and chapters
+    When I open the conversation detail
+    Then I should see paragraph blocks instead of one flat transcript wall
+    And I should see collapsible chapter sections with timestamp markers

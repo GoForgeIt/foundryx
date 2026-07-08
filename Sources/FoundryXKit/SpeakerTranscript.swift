@@ -44,6 +44,74 @@ public struct TranscriptSegment: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+/// One Deepgram paragraph from the door's flat transcript path. Timings are seconds.
+public struct TranscriptParagraph: Codable, Sendable, Equatable {
+    public let start: Double
+    public let end: Double
+    public let speaker: String?
+    public let text: String
+
+    enum CodingKeys: String, CodingKey {
+        case start, end, speaker, text
+    }
+
+    public init(start: Double, end: Double, speaker: String?, text: String) {
+        self.start = start
+        self.end = end
+        self.speaker = speaker
+        self.text = text
+    }
+}
+
+/// A readable section of consecutive Deepgram paragraphs. Chapters split on speaker
+/// changes or a long silence so flat transcripts keep Deepgram's structure.
+public struct Chapter: Sendable, Equatable, Identifiable {
+    public static let defaultGapThresholdSeconds: Double = 12
+
+    public let startMs: Int
+    public let endMs: Int
+    public let paragraphs: [TranscriptParagraph]
+
+    public var id: Int { startMs }
+
+    public init(startMs: Int, endMs: Int, paragraphs: [TranscriptParagraph]) {
+        self.startMs = startMs
+        self.endMs = endMs
+        self.paragraphs = paragraphs
+    }
+
+    public static func group(_ paragraphs: [TranscriptParagraph],
+                             gapThresholdSeconds: Double = defaultGapThresholdSeconds) -> [Chapter] {
+        let ordered = paragraphs.sorted { lhs, rhs in
+            if lhs.start == rhs.start { return lhs.end < rhs.end }
+            return lhs.start < rhs.start
+        }
+        var chapters: [Chapter] = []
+        var current: [TranscriptParagraph] = []
+
+        func appendCurrent() {
+            guard let first = current.first, let last = current.last else { return }
+            chapters.append(Chapter(
+                startMs: Int((first.start * 1000).rounded()),
+                endMs: Int((last.end * 1000).rounded()),
+                paragraphs: current))
+        }
+
+        for paragraph in ordered {
+            if let previous = current.last {
+                let gap = paragraph.start - previous.end
+                if previous.speaker != paragraph.speaker || gap > gapThresholdSeconds {
+                    appendCurrent()
+                    current = []
+                }
+            }
+            current.append(paragraph)
+        }
+        appendCurrent()
+        return chapters
+    }
+}
+
 /// A per-capture speaker slot's identity state (the read-path `speakers` entry).
 public enum SpeakerStatus: String, Codable, Sendable, Equatable {
     case anonymous

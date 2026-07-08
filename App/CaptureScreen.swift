@@ -631,6 +631,14 @@ struct ConversationDetailView: View {
         return nil
     }
 
+    /// Deepgram paragraphs for flat transcripts. Lower priority than diarized
+    /// segments, higher priority than one undifferentiated transcript wall.
+    private var transcriptParagraphs: [TranscriptParagraph] {
+        if let c = content, c.found, c.segments.isEmpty, !c.paragraphs.isEmpty { return c.paragraphs }
+        if let cached, cached.segments.isEmpty, !cached.paragraphs.isEmpty { return cached.paragraphs }
+        return []
+    }
+
     /// The pipeline position to show in the stepper — only while we're genuinely
     /// WAITING on processing (fetching, or the door has no transcript yet). Once a
     /// transcript exists the transcript itself is the answer, so the stepper hides.
@@ -703,6 +711,8 @@ struct ConversationDetailView: View {
                             transcript: diarized,
                             onChanged: { await fetchFromDoor() }
                         )
+                    } else if !transcriptParagraphs.isEmpty {
+                        ParagraphTranscriptSection(paragraphs: transcriptParagraphs)
                     } else {
                         Text(transcript)
                             .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
@@ -924,8 +934,7 @@ struct ConversationDetailView: View {
     }
 
     private func contentDiffersFromCache(_ c: CaptureContent) -> Bool {
-        guard let cached else { return true }
-        return c.transcript != cached.transcript || c.segments.count != cached.segments.count
+        CaptureContentCachePolicy.contentDiffers(c, from: cached)
     }
 
     /// Persist the transcript locally once the door returns it, so it survives audio
@@ -936,6 +945,7 @@ struct ConversationDetailView: View {
         let baseDir = CaptureWAL.documentsCaptures()
         let entry = CachedTranscript(transcript: c.transcript, title: c.title,
                                      summary: c.summary, segments: c.segments, speakers: c.speakers,
+                                     paragraphs: c.paragraphs,
                                      fetchedAt: UInt64(max(0, Date().timeIntervalSince1970)))
         TranscriptCacheStore.save(entry, captureId: captureId, baseDir: baseDir)
         // Seed the durable all-time name/description tombstone too.
@@ -1009,6 +1019,71 @@ private struct MicSphereButton: View {
             withAnimation(.easeOut(duration: 1.1).repeatForever(autoreverses: false)) { pulse = true }
         } else {
             withAnimation(.easeOut(duration: 0.2)) { pulse = false }
+        }
+    }
+}
+
+/// Deepgram paragraph rendering for flat transcripts. Diarized captures use
+/// `SpeakerTranscriptSection`; this keeps non-diarized transcripts readable without
+/// inventing speaker turns.
+private struct ParagraphTranscriptSection: View {
+    let paragraphs: [TranscriptParagraph]
+
+    private var chapters: [Chapter] { Chapter.group(paragraphs) }
+
+    var body: some View {
+        if chapters.count > 1 {
+            VStack(alignment: .leading, spacing: GrainSpacing.x3) {
+                ForEach(Array(chapters.enumerated()), id: \.offset) { index, chapter in
+                    DisclosureGroup {
+                        ParagraphBlock(paragraphs: chapter.paragraphs)
+                            .padding(.top, GrainSpacing.x2)
+                    } label: {
+                        HStack(spacing: GrainSpacing.x2) {
+                            Text("Chapter \(index + 1)")
+                                .grainTextStyle(.caption)
+                                .foregroundStyle(GrainColor.ink)
+                            Text(Self.timestamp(chapter.startMs))
+                                .grainTextStyle(.caption)
+                                .foregroundStyle(GrainColor.textFaint)
+                        }
+                    }
+                    .padding(GrainSpacing.x3)
+                    .background(
+                        RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
+                            .fill(GrainColor.surfaceElevated)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
+                            .strokeBorder(GrainColor.borderHairline, lineWidth: 1)
+                    )
+                }
+            }
+        } else {
+            ParagraphBlock(paragraphs: paragraphs)
+        }
+    }
+
+    private static func timestamp(_ ms: Int) -> String {
+        let totalSeconds = max(0, ms / 1000)
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
+private struct ParagraphBlock: View {
+    let paragraphs: [TranscriptParagraph]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x3) {
+            ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, paragraph in
+                Text(paragraph.text.trimmingCharacters(in: .whitespacesAndNewlines))
+                    .grainTextStyle(.body)
+                    .foregroundStyle(GrainColor.ink)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 }

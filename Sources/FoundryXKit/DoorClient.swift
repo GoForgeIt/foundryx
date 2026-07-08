@@ -241,6 +241,9 @@ public struct CaptureContent: Decodable, Sendable, Equatable {
     /// Per-capture speaker slots + their inferred/confirmed/anonymous state. Pairs with
     /// `segments`; empty for a non-diarized capture / pre-door-change reply.
     public let speakers: [CaptureSpeaker]
+    /// Deepgram paragraph structure for non-diarized captures. Empty for legacy replies
+    /// or when diarized `segments` are present.
+    public let paragraphs: [TranscriptParagraph]
 
     /// The grouped, slot-aware view of the diarized transcript (segments → speaker
     /// turns + stable numbering/colour). Empty `segments` → `hasSegments` is false and
@@ -251,7 +254,7 @@ public struct CaptureContent: Decodable, Sendable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case transcript, capturedAt, found, title, summary, titleModel, summarizing
-        case segments, speakers
+        case segments, speakers, paragraphs
     }
 
     public init(from decoder: Decoder) throws {
@@ -265,12 +268,14 @@ public struct CaptureContent: Decodable, Sendable, Equatable {
         summarizing = try c.decodeIfPresent(Bool.self, forKey: .summarizing) ?? false
         segments = try c.decodeIfPresent([TranscriptSegment].self, forKey: .segments) ?? []
         speakers = try c.decodeIfPresent([CaptureSpeaker].self, forKey: .speakers) ?? []
+        paragraphs = try c.decodeIfPresent([TranscriptParagraph].self, forKey: .paragraphs) ?? []
     }
 
     public init(transcript: String, capturedAt: Int, found: Bool,
                 title: String? = nil, summary: String? = nil,
                 titleModel: String? = nil, summarizing: Bool = false,
-                segments: [TranscriptSegment] = [], speakers: [CaptureSpeaker] = []) {
+                segments: [TranscriptSegment] = [], speakers: [CaptureSpeaker] = [],
+                paragraphs: [TranscriptParagraph] = []) {
         self.transcript = transcript
         self.capturedAt = capturedAt
         self.found = found
@@ -280,6 +285,7 @@ public struct CaptureContent: Decodable, Sendable, Equatable {
         self.summarizing = summarizing
         self.segments = segments
         self.speakers = speakers
+        self.paragraphs = paragraphs
     }
 }
 
