@@ -64,17 +64,23 @@ public enum ConversationProgress: String, Sendable, Equatable {
     case ready              // transcript/title available — openable
     case failed             // terminal transcription failure (retry affordance)
 
-    /// The calm chip label.
-    public var label: String {
+    /// The calm chip label. In the phone-only tier (`local`) there is NO computer —
+    /// segments are durable ON THE PHONE — so the "saved to computer" / generic
+    /// "transcribing" vocabulary would be a lie; the labels stay on-device instead.
+    public func label(local: Bool) -> String {
         switch self {
         case .recording: return "Recording"
         case .savedOnPhone: return "Saved on phone"
-        case .savedToComputer: return "Saved to computer"
-        case .transcribing: return "Transcribing…"
+        case .savedToComputer: return local ? "Saved on phone" : "Saved to computer"
+        case .transcribing: return local ? "Transcribing on this phone…" : "Transcribing…"
         case .ready: return "Ready"
         case .failed: return "Transcription failed — retry"
         }
     }
+
+    /// The calm chip label (computer-brain default). Prefer `label(local:)` where the
+    /// brain mode is known.
+    public var label: String { label(local: false) }
 
     /// Whether the card should offer a retry affordance.
     public var needsRetry: Bool { self == .failed }

@@ -57,6 +57,8 @@ struct CaptureScreen: View {
     @ObservedObject var sources: CaptureSourceRegistry
     /// The resolved door target — lets a tapped card open its transcript (Phase B).
     let target: DoorTarget
+    /// Phone-only tier: labels stay on-device ("Saved on phone", not "…to computer").
+    var local: Bool = false
     @State private var pendingDeleteId: String?
 
     /// Whether the Omi is still an enabled capture source (device-page toggle). When off,
@@ -158,7 +160,8 @@ struct CaptureScreen: View {
                     poller: poller,
                     hasCachedTranscript: manager.hasCachedTranscript(wal.captureId),
                     // Cache RECENT (~14d) transcripts on sight (no-op for older / already-cached).
-                    onSight: { manager.ensureRecentTranscriptCached(wal.captureId) }
+                    onSight: { manager.ensureRecentTranscriptCached(wal.captureId) },
+                    local: local
                 )
             }
         }
@@ -326,8 +329,13 @@ struct CaptureScreen: View {
         VStack(spacing: GrainSpacing.x3) {
             Spacer()
             Image(systemName: "waveform").font(.system(size: 40)).foregroundStyle(GrainColor.inkTertiary)
-            Text("No captures yet").grainTextStyle(.title).foregroundStyle(GrainColor.ink)
-            Text("Connect your Omi above. Capture runs ambiently while it's connected — audio is held on your phone and synced to your computer; nothing leaves your devices.")
+            Text("No conversations yet").grainTextStyle(.title).foregroundStyle(GrainColor.ink)
+            // Phone-only tier: no computer, no required Omi — record with the mic and
+            // everything is transcribed + stays on-device. Computer tier keeps the
+            // ambient-Omi + sync story.
+            Text(local
+                 ? "Tap record to capture your first conversation. It’s transcribed and titled right here on your phone — nothing ever leaves this device."
+                 : "Connect your Omi above, or tap record. Capture runs ambiently while your Omi is connected — audio is held on your phone and synced to your computer; nothing leaves your devices.")
                 .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
                 .multilineTextAlignment(.center).padding(.horizontal, GrainSpacing.x6)
             Spacer()
@@ -351,6 +359,8 @@ private struct CaptureCard: View {
     let hasCachedTranscript: Bool
     /// Cache this conversation's transcript on sight if it's recent (~14d) + uncached.
     let onSight: () -> Void
+    /// Phone-only tier: on-device labels (no "computer").
+    var local: Bool = false
 
     /// The conversation's NAME — the live poll's title, falling back to the durable card.
     private var name: String? {
@@ -396,8 +406,8 @@ private struct CaptureCard: View {
                 // detected" / "Audio couldn't be recovered") instead of the generic —
                 // and misleading, since a drop is terminal — "…failed — retry".
                 Text(progress == .failed
-                     ? (ConversationProgress.failureMessage(droppedReason: poller.droppedReason) ?? progress.label)
-                     : progress.label)
+                     ? (ConversationProgress.failureMessage(droppedReason: poller.droppedReason) ?? progress.label(local: local))
+                     : progress.label(local: local))
                     .grainTextStyle(name == nil ? .body : .caption)
                     .foregroundStyle(progress == .failed ? GrainColor.dangerRed
                                      : (name == nil ? GrainColor.ink : GrainColor.textMuted))

@@ -81,7 +81,7 @@ struct RootView: View {
 @MainActor
 final class TabRouter: ObservableObject {
     enum Tab: Hashable { case chat, capture, device, settings }
-    @Published var selected: Tab = .chat
+    @Published var selected: Tab = .capture
     @Published var showActionChooser = false
 }
 
@@ -231,7 +231,7 @@ private struct MainTabs: View {
                     if local, let text = brainStatus.bannerText {
                         brainSetupBanner(text)
                     }
-                    CaptureScreen(device: device, manager: manager, sources: sources, target: target)
+                    CaptureScreen(device: device, manager: manager, sources: sources, target: target, local: local)
                 }
                 .navigationTitle("Capture")
                 .toolbar { Button("Account") { showingAccount = true } }

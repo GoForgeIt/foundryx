@@ -25,6 +25,22 @@ final class ConversationProgressTests: XCTestCase {
         XCTAssertEqual(resolve(.savedToComputer, door: .stored), .savedToComputer)
     }
 
+    func testPhoneTierLabelsNeverSayComputer() {
+        // Phone-only tier: there is NO computer — segments are durable on the phone —
+        // so "saved to computer" / generic "transcribing" would be a lie.
+        XCTAssertEqual(ConversationProgress.savedToComputer.label(local: true), "Saved on phone")
+        XCTAssertEqual(ConversationProgress.transcribing.label(local: true), "Transcribing on this phone…")
+        // Computer-brain tier keeps the desktop vocabulary.
+        XCTAssertEqual(ConversationProgress.savedToComputer.label(local: false), "Saved to computer")
+        XCTAssertEqual(ConversationProgress.transcribing.label(local: false), "Transcribing…")
+        // Shared labels are brain-agnostic.
+        for local in [true, false] {
+            XCTAssertEqual(ConversationProgress.recording.label(local: local), "Recording")
+            XCTAssertEqual(ConversationProgress.ready.label(local: local), "Ready")
+            XCTAssertEqual(ConversationProgress.savedOnPhone.label(local: local), "Saved on phone")
+        }
+    }
+
     func testDoorPipelineProgression() {
         XCTAssertEqual(resolve(.savedToComputer, door: .transcribing), .transcribing)
         // in_lore but not yet transcribed reads as Transcribing… (something IS happening).
