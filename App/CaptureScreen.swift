@@ -239,6 +239,14 @@ struct CaptureScreen: View {
                 if p.showsConnectAffordance {
                     GrainButton("Connect your Omi", variant: .filled, size: .sm) { device.start() }
                 }
+                NavigationLink {
+                    StatsView(summary: manager.statsSummary)
+                } label: {
+                    Image(systemName: "chart.bar.xaxis")
+                        .foregroundStyle(GrainColor.textMuted)
+                        .frame(width: 32, height: 32)
+                }
+                .accessibilityLabel("Stats")
                 // The phone-mic record sphere — a manual capture source, always available.
                 if manager.phoneMicAvailable {
                     MicSphereButton(recording: manager.isRecordingMic) { manager.toggleMicRecording() }
@@ -291,6 +299,14 @@ struct CaptureScreen: View {
             if manager.isCapturing {
                 GrainButton("New", variant: .tonal, size: .sm) { manager.splitConversation() }
             }
+            NavigationLink {
+                StatsView(summary: manager.statsSummary)
+            } label: {
+                Image(systemName: "chart.bar.xaxis")
+                    .foregroundStyle(GrainColor.textMuted)
+                    .frame(width: 32, height: 32)
+            }
+            .accessibilityLabel("Stats")
             // The single record/pause control.
             GrainButton(manager.isPaused ? "Resume" : "Pause",
                         variant: manager.isPaused ? .filled : .tonal, size: .sm) {
@@ -551,6 +567,7 @@ struct ConversationDetailView: View {
     @State private var didAttemptFetch = false
     @State private var confirmDelete = false
     @State private var didCopy = false
+    @State private var receiptExpanded = false
     @Environment(\.dismiss) private var dismiss
 
     /// True when the conversation is OLDER than the ~14-day transcript-cache window:
@@ -633,6 +650,7 @@ struct ConversationDetailView: View {
                     Text(place).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                 }
                 listenRow
+                receiptSection
                 Divider().background(GrainColor.borderHairline)
 
                 // Visible pipeline progress while the conversation is still being
@@ -768,6 +786,56 @@ struct ConversationDetailView: View {
         case .failed(let why):
             Text("Couldn't play audio: \(why)").grainTextStyle(.caption).foregroundStyle(GrainColor.amber)
         }
+    }
+
+    private var receiptSection: some View {
+        DisclosureGroup(isExpanded: $receiptExpanded) {
+            VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+                receiptRow("Recording", receiptDuration)
+                receiptRow("Transcription", "Transcribed in the cloud (Deepgram)")
+                receiptRow("Speakers", "Speakers found on-device (WeSpeaker)")
+                receiptRow("Device cost", "$0 on your device")
+            }
+            .padding(.top, GrainSpacing.x2)
+        } label: {
+            HStack(spacing: GrainSpacing.x2) {
+                Image(systemName: "receipt")
+                    .foregroundStyle(GrainColor.textMuted)
+                Text("Processing receipt")
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textMuted)
+            }
+        }
+        .grainTextStyle(.caption)
+        .foregroundStyle(GrainColor.textMuted)
+        .padding(.vertical, GrainSpacing.x1)
+    }
+
+    private func receiptRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: GrainSpacing.x2) {
+            Text(label)
+                .grainTextStyle(.caption)
+                .foregroundStyle(GrainColor.textFaint)
+                .frame(width: 92, alignment: .leading)
+            Text(value)
+                .grainTextStyle(.caption)
+                .foregroundStyle(GrainColor.ink)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var receiptDuration: String {
+        guard let seconds = manager.conversationMeta(for: captureId)?.durationSeconds else {
+            return "Recording duration unavailable"
+        }
+        let minutes = Int(seconds) / 60
+        let remainder = Int(seconds) % 60
+        if minutes >= 60 {
+            let hours = minutes / 60
+            let mins = minutes % 60
+            return mins == 0 ? "\(hours)h" : "\(hours)h \(mins)m"
+        }
+        return remainder == 0 ? "\(minutes)m" : "\(minutes)m \(remainder)s"
     }
 
     /// Prefer the Kiln-generated title; fall back to the cached title, then the first

@@ -212,12 +212,28 @@ public final class CaptureManager: ObservableObject {
                 && bestLocalTranscript(wal.captureId) == nil
                 && !TranscriptCacheStore.isConfirmedInLore(captureId: wal.captureId, baseDir: baseDir)
         }.count
+        statsSummary = makeStatsSummary(for: visible)
     }
 
     /// How many visible conversations are still being processed (audio captured, no
     /// transcript yet) — drives the top-of-list processing banner. Recomputed only on
     /// list rebuild, so reading it per render is free.
     @Published public private(set) var processingConversationCount: Int = 0
+
+    /// Cached local library stats for the "Your library" page. Recomputed only when
+    /// the visible conversation list is rebuilt, so SwiftUI renders never read disk.
+    @Published public private(set) var statsSummary: StatsSummary = .empty
+
+    private func makeStatsSummary(for visible: [CaptureWAL]) -> StatsSummary {
+        let snapshots = visible.map { wal in
+            StatsConversationSnapshot(
+                captureId: wal.captureId,
+                meta: conversationMeta(for: wal.captureId),
+                transcript: TranscriptCacheStore.load(captureId: wal.captureId, baseDir: baseDir)
+            )
+        }
+        return StatsSummary.build(from: snapshots)
+    }
 
     /// Collapse any duplicate capture-ids, keeping the FIRST occurrence. The door keys
     /// transcript `/content` by exact `externalId == capture_id`, so the ONLY way one
