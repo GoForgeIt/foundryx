@@ -210,6 +210,27 @@ public struct SpeakerTranscript: Sendable, Equatable {
         return "Speaker \(displayNumber(for: slot))"
     }
 
+    /// The ms window of `slot`'s LONGEST timestamped utterance — the clip that
+    /// "Hear this voice" plays so the user can recognize a speaker before naming
+    /// them. Longest = the clearest, most identifiable stretch of that voice.
+    /// Capped at `maxDurationMs` so the fetched slice stays small; `nil` when the
+    /// slot has no timestamped segments (the sheet then offers no playback —
+    /// never a broken button). Pure (no UI/network) so it's unit-testable.
+    public func voiceSampleWindow(
+        for slot: String, maxDurationMs: Int = 10_000
+    ) -> (startMs: Int, endMs: Int)? {
+        let timed: [(Int, Int)] = segments
+            .filter { $0.speaker == slot }
+            .compactMap { seg in
+                guard let s = seg.startMs, let e = seg.endMs, e > s else { return nil }
+                return (s, e)
+            }
+        guard let longest = timed.max(by: { ($0.1 - $0.0) < ($1.1 - $1.0) }) else {
+            return nil
+        }
+        return (longest.0, min(longest.1, longest.0 + maxDurationMs))
+    }
+
     /// Slots that carry an UNCONFIRMED inferred match — the backlog the "review
     /// speakers" affordance works through (tentative labels awaiting confirm/reject).
     public var inferredSlots: [String] {

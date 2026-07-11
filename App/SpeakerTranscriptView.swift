@@ -16,6 +16,7 @@
 // + the confirm/correct calls through DoorClient.
 
 import SwiftUI
+import AVFoundation
 import Grain
 
 // MARK: - Speaker palette
@@ -79,6 +80,7 @@ struct SpeakerTranscriptSection: View {
                 captureId: captureId,
                 speaker: speaker,
                 displayLabel: transcript.displayLabel(for: speaker.slot),
+                sampleWindow: transcript.voiceSampleWindow(for: speaker.slot),
                 onChanged: { await onChanged() }
             )
         }
@@ -218,6 +220,10 @@ struct SpeakerTagSheet: View {
     let captureId: String
     let speaker: CaptureSpeaker
     let displayLabel: String
+    /// The ms window of this speaker's longest utterance ("Hear this voice" plays
+    /// it so the user can recognize the person before naming them). `nil` when the
+    /// slot has no timestamped segments — then no playback control is shown.
+    var sampleWindow: (startMs: Int, endMs: Int)? = nil
     let onChanged: () async -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -226,6 +232,12 @@ struct SpeakerTagSheet: View {
     @State private var error: String?
     @State private var offer: ConfirmOutcome?
     @State private var applied = false
+
+    /// Voice-sample playback: idle → loading → playing; unavailable when the door
+    /// 404s (audio pruned) or the bytes don't decode. Sheet-local — closing stops it.
+    private enum SampleState: Equatable { case idle, loading, playing, unavailable, failed }
+    @State private var sampleState: SampleState = .idle
+    @State private var samplePlayer: AVAudioPlayer?
 
     var body: some View {
         GrainSheetContainer(title: "Tag speaker", onClose: { dismiss() }) {
@@ -244,11 +256,21 @@ struct SpeakerTagSheet: View {
             .padding(GrainSpacing.x4)
         }
         .onAppear { name = speaker.name ?? "" }
+        .onDisappear {
+            samplePlayer?.stop()
+            samplePlayer = nil
+        }
     }
 
     // The main edit surface: confirm an inferred match and/or name the speaker.
     @ViewBuilder private var editSection: some View {
         Text(displayLabel).grainTextStyle(.title).foregroundStyle(GrainColor.ink)
+
+        // Hear the voice you're about to name — plays this speaker's longest
+        // utterance. Only offered when the slot has timestamped segments.
+        if sampleWindow != nil {
+            voiceSampleRow
+        }
 
         if speaker.isInferred, let inferred = speaker.name {
             Text(scoreCaption(inferred))
@@ -279,6 +301,70 @@ struct SpeakerTagSheet: View {
     }
 
     private var saveTitle: String { speaker.isConfirmed ? "Save changes" : "Save name" }
+
+    // ── "Hear this voice" ────────────────────────────────────────────────────
+
+    @ViewBuilder private var voiceSampleRow: some View {
+        switch sampleState {
+        case .idle, .playing:
+            GrainButton(
+                sampleState == .playing ? "Stop" : "▶ Hear this voice",
+                variant: .outlined, size: .regular
+            ) {
+                if sampleState == .playing {
+                    samplePlayer?.stop()
+                    samplePlayer = nil
+                    sampleState = .idle
+                } else {
+                    Task { await playVoiceSample() }
+                }
+            }
+        case .loading:
+            HStack(spacing: GrainSpacing.x2) {
+                ProgressView().controlSize(.small)
+                Text("Fetching voice sample…")
+                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+            }
+        case .unavailable:
+            Text("Voice sample unavailable (audio no longer on the desktop).")
+                .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+        case .failed:
+            Text("Couldn't play the voice sample.")
+                .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+        }
+    }
+
+    /// Fetch the speaker's sample window from the door (a few seconds of Ogg-Opus,
+    /// sliced desktop-side) and play it. 404 → unavailable (pruned audio); a decode
+    /// failure → failed. The sheet stays fully usable for naming either way.
+    private func playVoiceSample() async {
+        guard let window = sampleWindow else { return }
+        sampleState = .loading
+        do {
+            guard let data = try await DoorClient(target: target).captureAudio(
+                captureId: captureId, startMs: window.startMs, endMs: window.endMs)
+            else {
+                sampleState = .unavailable
+                return
+            }
+            let player = try AVAudioPlayer(data: data)
+            player.play()
+            samplePlayer = player
+            sampleState = .playing
+            // Flip back to idle when the clip ends (poll the player — no delegate
+            // plumbing needed for a few-second sample).
+            let clipSeconds = player.duration
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64((clipSeconds + 0.3) * 1_000_000_000))
+                if samplePlayer === player, player.isPlaying == false {
+                    sampleState = .idle
+                    samplePlayer = nil
+                }
+            }
+        } catch {
+            sampleState = .failed
+        }
+    }
 
     // After a confirm that matched PAST captures — offer to apply, never auto-applied.
     @ViewBuilder private func offerSection(_ outcome: ConfirmOutcome) -> some View {

@@ -36,6 +36,46 @@ final class SpeakerTranscriptTests: XCTestCase {
         XCTAssertEqual(t.plainText, "Speaker 2: real words")
     }
 
+    // MARK: - "Hear this voice" sample window
+
+    func testVoiceSampleWindowPicksTheLongestUtterance() {
+        let t = SpeakerTranscript(
+            speakers: [],
+            segments: [
+                TranscriptSegment(seq: 0, startMs: 0, endMs: 2_000, text: "short", speaker: "speaker_1"),
+                TranscriptSegment(seq: 1, startMs: 10_000, endMs: 18_000, text: "the long one", speaker: "speaker_1"),
+                TranscriptSegment(seq: 2, startMs: 20_000, endMs: 21_000, text: "another", speaker: "speaker_1"),
+                TranscriptSegment(seq: 3, startMs: 30_000, endMs: 90_000, text: "other speaker", speaker: "speaker_2"),
+            ])
+        let window = t.voiceSampleWindow(for: "speaker_1")
+        XCTAssertEqual(window?.startMs, 10_000, "longest speaker_1 utterance wins")
+        XCTAssertEqual(window?.endMs, 18_000)
+    }
+
+    func testVoiceSampleWindowIsCappedToKeepTheSliceSmall() {
+        let t = SpeakerTranscript(
+            speakers: [],
+            segments: [
+                TranscriptSegment(seq: 0, startMs: 5_000, endMs: 65_000, text: "a monologue", speaker: "speaker_1"),
+            ])
+        let window = t.voiceSampleWindow(for: "speaker_1", maxDurationMs: 10_000)
+        XCTAssertEqual(window?.startMs, 5_000)
+        XCTAssertEqual(window?.endMs, 15_000, "a 60s monologue samples only its first 10s")
+    }
+
+    func testVoiceSampleWindowNilWithoutTimestamps() {
+        let t = SpeakerTranscript(
+            speakers: [],
+            segments: [
+                TranscriptSegment(seq: 0, text: "untimed", speaker: "speaker_1"),
+                TranscriptSegment(seq: 1, startMs: 100, endMs: 100, text: "degenerate", speaker: "speaker_1"),
+            ])
+        XCTAssertNil(
+            t.voiceSampleWindow(for: "speaker_1"),
+            "no timestamped utterance → no sample (the sheet offers no playback)")
+        XCTAssertNil(t.voiceSampleWindow(for: "speaker_9"), "unknown slot → nil")
+    }
+
     // MARK: - segment → speaker turn grouping
 
     func testConsecutiveSameSpeakerFoldIntoOneTurn() {

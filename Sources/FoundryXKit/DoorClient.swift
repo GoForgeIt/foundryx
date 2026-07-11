@@ -779,11 +779,22 @@ public final class DoorClient: @unchecked Sendable {
     ///
     /// NOTE: the desktop door's `/audio` endpoint is being added by a parallel change.
     /// Until it ships, this 404s and the caller surfaces "Audio not available" — no crash.
-    public func captureAudio(captureId: String) async throws -> Data? {
+    ///
+    /// `startMs`/`endMs` (both together) scope the reply to that window — the door
+    /// slices the stored Opus to just the packets overlapping it, so "Hear this
+    /// voice" ships a few seconds over the tunnel instead of the whole recording.
+    /// A window wholly past the recording's end is a 404 → `nil`.
+    public func captureAudio(
+        captureId: String, startMs: Int? = nil, endMs: Int? = nil
+    ) async throws -> Data? {
+        var path = "/foundryx/capture/\(captureId)/audio"
+        if let sMs = startMs, let eMs = endMs {
+            path += "?start_ms=\(sMs)&end_ms=\(eMs)"
+        }
         if let relay = target.relay?.interactive() {
             let resp = try await RelayHTTP.roundTrip(
                 relay: relay, bearer: target.bearer, method: "GET",
-                path: "/foundryx/capture/\(captureId)/audio",
+                path: path,
                 session: session, log: log, useMux: target.useMux)
             if resp.status == 401 { throw DoorError.unauthorized }
             if resp.status == 404 { return nil }
@@ -792,7 +803,7 @@ public final class DoorClient: @unchecked Sendable {
         }
         let s = target.baseURL.absoluteString
         let base = s.hasSuffix("/") ? String(s.dropLast()) : s
-        guard let url = URL(string: "\(base)/foundryx/capture/\(captureId)/audio") else {
+        guard let url = URL(string: "\(base)\(path)") else {
             throw DoorError.transport("bad audio url")
         }
         var r = URLRequest(url: url)
