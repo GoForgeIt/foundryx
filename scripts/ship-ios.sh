@@ -23,7 +23,10 @@ APIISSUER=6515707a-bc3b-4391-a626-8997a04d3afa      # public ASC issuer id
 BUNDLE_ID=com.goforgeit.foundryx
 WIDGET_BUNDLE_ID=com.goforgeit.foundryx.widget
 TEAM_ID=ND7H73W8VZ
-BUILD_NUM="$(git rev-list --count HEAD)"
+# Build number defaults to the commit count; pass an explicit one as $1 when the
+# count collides with an already-uploaded build (e.g. shipping from a branch whose
+# count trails a previous upload): ./scripts/ship-ios.sh 134
+BUILD_NUM="${1:-$(git rev-list --count HEAD)}"
 
 echo "==> FoundryX TestFlight ship — build #$BUILD_NUM"
 
