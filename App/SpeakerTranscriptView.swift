@@ -348,15 +348,23 @@ struct SpeakerTagSheet: View {
                 return
             }
             let player = try AVAudioPlayer(data: data)
+            let windowSeconds = Double(window.endMs - window.startMs) / 1000.0
+            // LEGACY-DOOR fallback: a door predating range support ignores the
+            // query and returns the WHOLE recording — seek into the window so the
+            // sample still plays THIS speaker, and stop after the window elapses.
+            if player.duration > windowSeconds * 2 + 1 {
+                player.currentTime = Double(window.startMs) / 1000.0
+            }
             player.play()
             samplePlayer = player
             sampleState = .playing
-            // Flip back to idle when the clip ends (poll the player — no delegate
-            // plumbing needed for a few-second sample).
-            let clipSeconds = player.duration
+            // Stop when the sample window (or the clip) ends — poll the player; no
+            // delegate plumbing needed for a few-second sample.
+            let playSeconds = min(max(player.duration - player.currentTime, 0), windowSeconds)
             Task {
-                try? await Task.sleep(nanoseconds: UInt64((clipSeconds + 0.3) * 1_000_000_000))
-                if samplePlayer === player, player.isPlaying == false {
+                try? await Task.sleep(nanoseconds: UInt64((playSeconds + 0.3) * 1_000_000_000))
+                if samplePlayer === player {
+                    player.stop()
                     sampleState = .idle
                     samplePlayer = nil
                 }
