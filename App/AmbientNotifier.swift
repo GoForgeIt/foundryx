@@ -18,7 +18,7 @@ import UserNotifications
 /// without this, iOS silently swallows local notifications when the app is open,
 /// which is exactly the situation when the user is testing the lane with the app
 /// in hand. Installed as the notification-center delegate at wiring time.
-final class AmbientNotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
+final class AmbientNotificationPresenter: NSObject, UNUserNotificationCenterDelegate, Sendable {
     static let shared = AmbientNotificationPresenter()
 
     func userNotificationCenter(
