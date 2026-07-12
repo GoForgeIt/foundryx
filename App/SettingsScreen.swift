@@ -100,6 +100,19 @@ struct SettingsScreen: View {
 
                     NavigationLink("What it's noticing") { AmbientDebugView() }
                 }
+
+                // Owner voice: the read-aloud key that lets only YOU command your
+                // agent. Teachable here any time (also offered at first run).
+                NavigationLink {
+                    OnboardingVoiceStandalone()
+                } label: {
+                    HStack {
+                        Text("Your voice").grainTextStyle(.body)
+                        Spacer()
+                        Text(voiceStatusLabel)
+                            .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                    }
+                }
             }
 
             Section("Account") {
@@ -128,6 +141,14 @@ struct SettingsScreen: View {
             }
         }
         .buttonStyle(.plain)
+    }
+
+    private var voiceStatusLabel: String {
+        switch OwnerVoiceStore.state(baseDir: CaptureWAL.documentsCaptures()) {
+        case .none: return "Not taught"
+        case .recorded: return "Captured"
+        case .enrolled: return "Enrolled"
+        }
     }
 
     private func joinWaitlist() {

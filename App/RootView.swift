@@ -13,6 +13,7 @@ struct RootView: View {
     // This .task runs once at launch; foregrounding an already-open app does NOT
     // re-run it, so we never bounce back to the gate mid-session.
     @State private var splashElapsed = false
+    @State private var showingOnboarding = false
 
     @StateObject private var brains = BrainStore()
 
@@ -55,6 +56,30 @@ struct RootView: View {
         .task {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             splashElapsed = true
+            // Already signed in from a restored session: the destination never
+            // *changes*, so check the first-run gate here too. Existing installs
+            // (any recordings on disk) are migrated to "onboarded" silently.
+            OnboardingPrefs.migrateIfPriorUse(baseDir: CaptureWAL.documentsCaptures())
+            if remote.email != nil,
+               OnboardingGate.shouldPresent(signedIn: true, completed: OnboardingPrefs.completed) {
+                showingOnboarding = true
+            }
+        }
+        // First-run onboarding (runs ONCE, after the first sign-in): teach the owner's
+        // voice + the ambient opt-in. Dismissing counts as done — never re-prompts;
+        // both steps stay reachable from Settings.
+        .onChange(of: dest) { d in
+            if d != .signInGate {
+                OnboardingPrefs.migrateIfPriorUse(baseDir: CaptureWAL.documentsCaptures())
+                if OnboardingGate.shouldPresent(signedIn: true, completed: OnboardingPrefs.completed) {
+                    showingOnboarding = true
+                }
+            }
+        }
+        .fullScreenCover(isPresented: $showingOnboarding) {
+            OnboardingFlowView(baseDir: CaptureWAL.documentsCaptures()) {
+                showingOnboarding = false
+            }
         }
         // Pre-picker installs that already pair with a desktop stay on the computer
         // brain (migration safety) — adopted exactly once, never overriding an
