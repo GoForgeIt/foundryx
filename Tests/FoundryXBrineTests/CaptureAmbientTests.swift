@@ -74,3 +74,45 @@ final class CaptureAmbientTests: XCTestCase {
         }
     }
 }
+
+// MARK: - Phone-mic × Omi reconnect-grace interaction (the "recording but nothing
+// records" bug, 2026-07-12): the mic's .streaming must never be mistaken for an Omi
+// reconnect, and a held Omi session must never eat the mic's frames.
+extension CaptureAmbientTests {
+
+    func testMicRecordingWhileOmiHeldForReconnectStartsAFreshUnpausedSession() async throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("foundryx-mic-grace-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let omi = TestSource()
+        let mic = TestSource()
+        let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "t")
+        let mgr = CaptureManager(target: target, baseDir: dir, source: omi, micSource: mic,
+                                 finalize: { _, _ in })
+
+        // Omi conversation starts, streams, then BLE drops → held for reconnect grace.
+        omi.onState?(.streaming)
+        try await waitUntil { mgr.active != nil }
+        let omiCaptureId = mgr.active?.captureId
+        omi.onState?(.stopped)
+        try await waitUntil { mgr.isAwaitingReconnect }
+
+        // User hits Record (phone mic). The guard must ALLOW it despite the held
+        // session, and the mic's .streaming must start a FRESH UNPAUSED session —
+        // never resume the held (paused) Omi capture (the "recording but nothing
+        // records" bug: the mic's frames fed the paused Omi pipeline and were eaten).
+        await MainActor.run { mgr.startMicRecording() }
+        XCTAssertTrue(mgr.isRecordingMic, "record allowed while a session is merely held")
+        mic.onState?(.streaming)
+        try await waitUntil { !mgr.isAwaitingReconnect && mgr.active?.captureId != omiCaptureId
+                              && mgr.active != nil }
+        XCTAssertFalse(mgr.isPaused, "a new recording is never born paused")
+        let wal = try XCTUnwrap(mgr.active, "a FRESH mic session is open")
+
+        // The mic's frames land in the NEW session's WAL.
+        for _ in 0..<60 { mic.onFrame?(Data(repeating: 2, count: 40)) }
+        wal.flushAndWait()
+        XCTAssertGreaterThan(wal.snapshot().totalSegments, 0, "mic frames are WAL'd, not eaten")
+    }
+}

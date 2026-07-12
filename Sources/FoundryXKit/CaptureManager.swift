@@ -892,7 +892,10 @@ public final class CaptureManager: ObservableObject {
     /// when the Omi is disconnected). Drives the normal lifecycle via the mic's
     /// `.streaming` state → beginSession.
     public func startMicRecording() {
-        guard let micSource, !isRecordingMic, active == nil else { return }
+        // Allowed when idle OR when the only "active" session is an Omi conversation
+        // HELD for reconnect-grace (the user's explicit record outranks the hold —
+        // onSourceState closes it and begins a fresh mic session).
+        guard let micSource, !isRecordingMic, active == nil || suspendedSession != nil else { return }
         isRecordingMic = true
         router.resetSegmenter()
         micSource.start()
@@ -915,7 +918,21 @@ public final class CaptureManager: ObservableObject {
         sourceState = state
         switch state {
         case .streaming:
-            if suspendedSession != nil {
+            if isRecordingMic {
+                // PHONE-MIC start. This `.streaming` came from the MIC, not the Omi —
+                // it must NEVER be mistaken for an Omi reconnect (that hijack resumed
+                // the PAUSED held Omi capture and silently ate the mic's frames:
+                // "recording but nothing records"). An explicit user recording
+                // outranks the reconnect-grace hold: close the held conversation now
+                // and start a FRESH, UNPAUSED mic session.
+                if suspendedSession != nil {
+                    suspendedSession = nil
+                    log?.info("phone mic: closing Omi conversation held for reconnect — user chose to record")
+                    endSession()
+                }
+                if isPaused { isPaused = false }   // a new recording is never born paused
+                if active == nil { router.resetSegmenter(); beginSession() }
+            } else if suspendedSession != nil {
                 // Transient Omi reconnect WITHIN the grace window → RESUME the SAME
                 // conversation (same captureId). Do NOT mint a new session or finalize a
                 // stub — this is what coalesces reconnect churn into one conversation.
