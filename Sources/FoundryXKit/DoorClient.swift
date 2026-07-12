@@ -829,15 +829,16 @@ public final class DoorClient: @unchecked Sendable {
     /// local notification.
     public func ambientCandidate(
         captureId: String, utterance: String, summary: String,
-        confidence: Double, window: String
+        confidence: Double, window: String, windowAudioB64: String? = nil
     ) async throws -> AmbientRouteOutcome {
         struct Req: Encodable {
             let captureId: String, utterance: String, summary: String
             let confidence: Double, window: String
+            let windowAudioB64: String?
         }
         let payload = try JSONEncoder().encode(Req(
             captureId: captureId, utterance: utterance, summary: summary,
-            confidence: confidence, window: window))
+            confidence: confidence, window: window, windowAudioB64: windowAudioB64))
         if let relay = target.relay?.interactive() {
             let resp = try await RelayHTTP.roundTrip(
                 relay: relay, bearer: target.bearer, method: "POST",

@@ -97,6 +97,13 @@ enum AmbientNotifier {
             title = "FoundryX"
             body = "You wanted to look something up — I checked your memory but didn't find it: “\(candidate.utterance)”"
         case ("agent", _):
+            // OWNER GATE: an agent command whose voice did NOT match the enrolled
+            // owner is offered to NO ONE (a bystander/TV saying the agent's name
+            // commands nothing). Suppressed silently, logged for the council.
+            guard outcome?.ownerVerified == true else {
+                AmbientCardBroker.dismissed(seed: "owner-unverified: \(candidate.utterance)")
+                return
+            }
             title = "You called your agent"
             body = "Want me to: \(ask)?"
             seed = chatSeed(candidate)

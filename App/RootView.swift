@@ -205,7 +205,25 @@ private struct MainTabs: View {
             mgr.onAmbientCandidate = { [weak mgr] candidate in
                 let window = mgr?.liveTranscript.displayText ?? ""
                 let captureId = mgr?.active?.captureId ?? ""
+                // OWNER GATE payload: when the window addresses the named agent,
+                // ship the last ~10s of captured audio so the door can verify WHO
+                // spoke (lore identify vs the confirmed enrolled corpus) before any
+                // agent card is offered.
+                let agentName = UserDefaults.standard.string(forKey: AmbientPrefs.agentNameKey)
+                let mentionsAgent = agentName.map {
+                    !$0.isEmpty && (window.range(of: $0, options: .caseInsensitive) != nil
+                        || candidate.utterance.range(of: $0, options: .caseInsensitive) != nil)
+                } ?? false
                 Task.detached(priority: .utility) {
+                    var audioB64: String?
+                    if mentionsAgent, !captureId.isEmpty {
+                        let frames = LocalBackend.loadFrames(
+                            captureId: captureId, baseDir: CaptureWAL.documentsCaptures())
+                        if !frames.isEmpty {
+                            audioB64 = CaptureWAL.encodeSegment(Array(frames.suffix(500)))
+                                .base64EncodedString()
+                        }
+                    }
                     let outcome: AmbientRouteOutcome?
                     if local {
                         outcome = nil   // phone-only tier: no door to route through
@@ -215,7 +233,8 @@ private struct MainTabs: View {
                             utterance: candidate.utterance,
                             summary: candidate.summary,
                             confidence: candidate.confidence,
-                            window: window)
+                            window: window,
+                            windowAudioB64: audioB64)
                     }
                     AmbientNotifier.post(candidate: candidate, outcome: outcome)
                 }

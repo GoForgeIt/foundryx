@@ -42,10 +42,19 @@ public struct AmbientRouteOutcome: Codable, Equatable, Sendable {
     /// `lookup` | `todo` | `workflow` | `agent`
     public let route: String
     public let answer: String?
+    /// Agent route only: did the command's VOICE match a confirmed enrolled
+    /// speaker (the owner gate)? Absent/false ⇒ never offer the agent card.
+    public let ownerVerified: Bool?
 
-    public init(route: String, answer: String? = nil) {
+    enum CodingKeys: String, CodingKey {
+        case route, answer
+        case ownerVerified = "owner_verified"
+    }
+
+    public init(route: String, answer: String? = nil, ownerVerified: Bool? = nil) {
         self.route = route
         self.answer = answer
+        self.ownerVerified = ownerVerified
     }
 }
 
