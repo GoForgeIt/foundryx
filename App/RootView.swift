@@ -198,7 +198,28 @@ private struct MainTabs: View {
                 gate: gate,
                 isEnabled: { UserDefaults.standard.bool(forKey: AmbientPrefs.enabledKey) },
                 decisionLogURL: AmbientPrefs.decisionLogURL())
-            mgr.onAmbientCandidate = { candidate in AmbientNotifier.post(candidate: candidate) }
+            // Tier 2: route the candidate through the door (lookup answers come from
+            // the user's OWN memory — lore search + local compile) and notify with the
+            // routed outcome. Door unreachable / phone-only tier → an honest local
+            // notification of the raw moment (never silence, never a fake answer).
+            mgr.onAmbientCandidate = { [weak mgr] candidate in
+                let window = mgr?.liveTranscript.displayText ?? ""
+                let captureId = mgr?.active?.captureId ?? ""
+                Task.detached(priority: .utility) {
+                    let outcome: AmbientRouteOutcome?
+                    if local {
+                        outcome = nil   // phone-only tier: no door to route through
+                    } else {
+                        outcome = try? await DoorClient(target: target).ambientCandidate(
+                            captureId: captureId,
+                            utterance: candidate.utterance,
+                            summary: candidate.summary,
+                            confidence: candidate.confidence,
+                            window: window)
+                    }
+                    AmbientNotifier.post(candidate: candidate, outcome: outcome)
+                }
+            }
             AmbientNotifier.requestAuthorizationIfNeeded()
         }
         // When a capture upload is rejected as token-expired (401), refresh the id_token

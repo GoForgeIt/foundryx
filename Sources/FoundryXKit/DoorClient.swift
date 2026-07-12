@@ -820,6 +820,54 @@ public final class DoorClient: @unchecked Sendable {
         return data
     }
 
+    /// Route an ambient-gate candidate through the door's Tier-2 router
+    /// (`POST /foundryx/ambient/candidate`): the door classifies it
+    /// (lookup/todo/workflow/agent) and, for lookups, answers from the user's OWN
+    /// memory (lore search + local-model compile) — so the phone's notification can
+    /// carry the actual answer. Read-only server-side; nothing executes. Relay-aware
+    /// like chat; throws on transport failure so the caller can fall back to a plain
+    /// local notification.
+    public func ambientCandidate(
+        captureId: String, utterance: String, summary: String,
+        confidence: Double, window: String
+    ) async throws -> AmbientRouteOutcome {
+        struct Req: Encodable {
+            let captureId: String, utterance: String, summary: String
+            let confidence: Double, window: String
+        }
+        let payload = try JSONEncoder().encode(Req(
+            captureId: captureId, utterance: utterance, summary: summary,
+            confidence: confidence, window: window))
+        if let relay = target.relay?.interactive() {
+            let resp = try await RelayHTTP.roundTrip(
+                relay: relay, bearer: target.bearer, method: "POST",
+                path: "/foundryx/ambient/candidate",
+                contentType: "application/json", body: payload,
+                session: session, log: log, useMux: target.useMux)
+            if resp.status == 401 { throw DoorError.unauthorized }
+            guard resp.status == 200 else { throw DoorError.http(resp.status) }
+            return try JSONDecoder().decode(AmbientRouteOutcome.self, from: resp.body)
+        }
+        let s = target.baseURL.absoluteString
+        let base = s.hasSuffix("/") ? String(s.dropLast()) : s
+        guard let url = URL(string: "\(base)/foundryx/ambient/candidate") else {
+            throw DoorError.transport("bad ambient url")
+        }
+        var r = URLRequest(url: url)
+        r.httpMethod = "POST"
+        r.httpBody = payload
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.setValue("Bearer \(target.bearer)", forHTTPHeaderField: "Authorization")
+        r.timeoutInterval = 90
+        let (data, response) = try await session.data(for: r)
+        guard let http = response as? HTTPURLResponse else {
+            throw DoorError.transport("non-HTTP response")
+        }
+        if http.statusCode == 401 { throw DoorError.unauthorized }
+        guard http.statusCode == 200 else { throw DoorError.http(http.statusCode) }
+        return try JSONDecoder().decode(AmbientRouteOutcome.self, from: data)
+    }
+
     /// Confirm or correct a capture's speaker SLOT (door forwards Lore's
     /// `POST /api/admin/captures/:id/speakers/:slot/confirm`). The state machine:
     ///   * `speakerId`  → confirm the slot for that EXISTING speaker (assign).

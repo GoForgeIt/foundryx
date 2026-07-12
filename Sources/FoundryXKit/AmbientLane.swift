@@ -35,6 +35,20 @@ public struct AmbientCandidate: Codable, Equatable, Sendable {
     }
 }
 
+/// The door's Tier-2 verdict on a candidate: how it routed, and — for lookups —
+/// the answer compiled from the user's OWN memory (nil = memory had nothing, or a
+/// non-lookup route). Wire shape of `POST /foundryx/ambient/candidate`.
+public struct AmbientRouteOutcome: Codable, Equatable, Sendable {
+    /// `lookup` | `todo` | `workflow` | `agent`
+    public let route: String
+    public let answer: String?
+
+    public init(route: String, answer: String? = nil) {
+        self.route = route
+        self.answer = answer
+    }
+}
+
 /// The on-device gate: evaluate a transcript window, answer `nil` (the DEFAULT — not
 /// actionable) or a candidate. Real engine: Apple Foundation Models (App target,
 /// availability-gated); tests drive fakes.

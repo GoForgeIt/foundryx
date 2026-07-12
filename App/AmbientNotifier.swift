@@ -14,23 +14,59 @@ import Foundation
 import UserNotifications
 // (FoundryXKit types are same-module — the App target compiles Sources/FoundryXKit directly)
 
+/// Presents ambient notifications as BANNERS even while the app is foregrounded —
+/// without this, iOS silently swallows local notifications when the app is open,
+/// which is exactly the situation when the user is testing the lane with the app
+/// in hand. Installed as the notification-center delegate at wiring time.
+final class AmbientNotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
+    static let shared = AmbientNotificationPresenter()
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+    }
+}
+
 enum AmbientNotifier {
-    /// Ask once for notification permission (banner + sound). Best-effort — a denied
-    /// user simply never sees ambient nudges; nothing else changes.
+    /// Ask once for notification permission (banner + sound) and install the
+    /// foreground presenter. Best-effort — a denied user simply never sees ambient
+    /// nudges; nothing else changes.
     static func requestAuthorizationIfNeeded() {
         let center = UNUserNotificationCenter.current()
+        center.delegate = AmbientNotificationPresenter.shared
         center.getNotificationSettings { settings in
             guard settings.authorizationStatus == .notDetermined else { return }
             center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
         }
     }
 
-    /// Post a notification for a real gate candidate.
-    static func post(candidate: AmbientCandidate) {
-        deliver(
-            title: "FoundryX",
-            body: "\(candidate.summary.isEmpty ? "Something I can help with" : candidate.summary) — “\(candidate.utterance)”",
-            preview: false)
+    /// Post the ROUTED outcome of a real gate candidate — the notification carries
+    /// the actual answer when the door found one in the user's memory.
+    static func post(candidate: AmbientCandidate, outcome: AmbientRouteOutcome?) {
+        let title: String
+        let body: String
+        switch (outcome?.route, outcome?.answer) {
+        case ("lookup", .some(let answer)):
+            title = "From your memory"
+            body = answer
+        case ("lookup", nil):
+            title = "FoundryX"
+            body = "You wanted to look something up — I checked your memory but didn't find it: “\(candidate.utterance)”"
+        case ("agent", _):
+            title = "You called your agent"
+            body = candidate.summary.isEmpty ? candidate.utterance : candidate.summary
+        case ("todo", _), ("workflow", _):
+            title = "Noticed a to-do"
+            body = candidate.summary.isEmpty ? candidate.utterance : candidate.summary
+        default:
+            // Door unreachable — still surface the raw moment honestly.
+            title = "FoundryX"
+            body = "\(candidate.summary.isEmpty ? "Something I can help with" : candidate.summary) — “\(candidate.utterance)”"
+        }
+        deliver(title: title, body: body, preview: false)
     }
 
     /// Fire a sample notification so the user can experience the surface before any
