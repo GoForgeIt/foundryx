@@ -160,22 +160,22 @@ private struct MainTabs: View {
                 micSource: MicFrameSource(log: log),
                 liveTranscriber: LiveTranscription.defaultFactory())
         }
-        // Ambient-intelligence Tier-1 lane (track 20260710T2030 v3): OPT-IN on-device
-        // rolling transcript + default-NO gate while recording. Wired only where the
+        // Ambient-intelligence Tier-1 lane (track 20260710T2030 v3): OPT-IN default-NO
+        // gate over the LIVE transcript (the SpeechAnalyzer preview already streaming —
+        // no re-transcription) while recording, about every 10s. Wired only where the
         // OS has Foundation Models (the gate); the lane re-reads the user toggle per
-        // tick, so Settings flips apply immediately. Reuses the local-mode WhisperKit
-        // engine when present (one model in memory), else its own instance.
-        #if canImport(WhisperKit)
+        // call, so Settings flips apply immediately. A surfaced candidate posts a
+        // local notification (Tier-3 preview slice).
         if let gate = makeSystemGate(agentName: {
             UserDefaults.standard.string(forKey: AmbientPrefs.agentNameKey)
         }) {
             mgr.ambientLane = AmbientLane(
-                baseDir: CaptureWAL.documentsCaptures(),
-                stt: localSTT ?? WhisperKitSTT(),
                 gate: gate,
-                isEnabled: { UserDefaults.standard.bool(forKey: AmbientPrefs.enabledKey) })
+                isEnabled: { UserDefaults.standard.bool(forKey: AmbientPrefs.enabledKey) },
+                decisionLogURL: AmbientPrefs.decisionLogURL())
+            mgr.onAmbientCandidate = { candidate in AmbientNotifier.post(candidate: candidate) }
+            AmbientNotifier.requestAuthorizationIfNeeded()
         }
-        #endif
         // When a capture upload is rejected as token-expired (401), refresh the id_token
         // once / surface login — instead of the phone retry-looping with a dead token.
         mgr.onAuthExpired = { [weak remote] in Task { @MainActor in await remote?.handleAuthExpired() } }

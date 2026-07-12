@@ -20,13 +20,19 @@ Feature: Ambient intelligence is opt-in and finds actionable moments privately
     And no gate evaluation occurs
     And no ambient decision is recorded
 
-  Scenario: while enabled, new audio grows the rolling transcript and is gated
+  Scenario: while enabled, the live transcript window is gated on a cadence
     Given ambient intelligence is enabled
     And a conversation is being recorded
-    When a minute of new speech arrives
-    Then the rolling transcript grows
-    And the gate evaluates the newest window
+    When new speech arrives on the live transcript
+    Then the gate evaluates the newest window
     And the decision is recorded
+
+  Scenario: an unchanged window during silence is skipped for free
+    Given ambient intelligence is enabled
+    And the live transcript has not changed since the last check
+    When the lane is asked to consider it again
+    Then the gate is not called
+    And no decision is recorded
 
   Scenario: an ordinary conversation produces no candidates
     Given ambient intelligence is enabled

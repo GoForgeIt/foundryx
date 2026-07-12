@@ -92,4 +92,23 @@ public struct ToggleCapturePauseIntent: LiveActivityIntent {
         return .result()
     }
 }
+
+/// "Record" for the Control Center / Action Button control (iOS 18 ControlWidget).
+/// Plain AppIntent (not LiveActivityIntent) so it can OPEN the app, then start a
+/// phone-mic recording through the broker — same path as the Shortcut/Siri intent,
+/// but defined in the SHARED file so the widget extension can reference it.
+@available(iOS 16.0, *)
+public struct StartRecordingControlIntent: AppIntent {
+    public static let title: LocalizedStringResource = "Start FoundryX Recording"
+    public static let description = IntentDescription("Start recording from the phone microphone.")
+    public static let openAppWhenRun: Bool = true
+
+    public init() {}
+
+    @MainActor
+    public func perform() async throws -> some IntentResult {
+        _ = CaptureIntentBroker.shared.perform(.startRecording)
+        return .result()
+    }
+}
 #endif

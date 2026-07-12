@@ -978,22 +978,35 @@ public final class CaptureManager: ObservableObject {
     // MARK: Ambient-intelligence lane (track 20260710T2030 v3, Tier 1)
 
     /// The opt-in on-device ambient lane. `nil` (default) = feature absent. Wired at
-    /// app startup; the lane itself re-checks the user toggle per tick, so flipping
+    /// app startup; the lane itself re-checks the user toggle per call, so flipping
     /// Settings applies immediately without rewiring.
     public var ambientLane: AmbientLane?
-    /// 5s segmentation ticks between lane ticks (12 × 5s ≈ the ~60s chunk cadence).
+    /// Called with a surfaced candidate (App wires the local notification). Runs on
+    /// the main actor.
+    public var onAmbientCandidate: (@MainActor (AmbientCandidate) -> Void)?
+    /// Segmentation ticks (5s each) between gate evaluations. 2 ⇒ the gate runs on
+    /// the rolling LIVE transcript about every 10s — responsive without hammering the
+    /// on-device model (running an LLM every second is 60× the battery for no gain;
+    /// a conversation's meaning barely moves in a second). Tunable from AC0 data.
+    public static let ambientGateEveryNTicks = 2
     private var ambientTickDivider = 0
 
-    /// Every ~60s while a capture is actively recording, tick the ambient lane on a
-    /// background task (never blocks segmentation). Candidate escalation is Tier 2;
-    /// v0 records it in the decision log (the lane already logged it).
+    /// About every 10s while a capture is actively recording, gate the current rolling
+    /// LIVE transcript window (the SpeechAnalyzer preview already streaming — no
+    /// re-transcription). Runs on a detached task so it never blocks segmentation; a
+    /// surfaced candidate is handed to `onAmbientCandidate` (Tier 2/notification).
     private func tickAmbientLane(captureId: String) {
         guard let lane = ambientLane else { return }
         ambientTickDivider += 1
-        guard ambientTickDivider >= 12 else { return }
+        guard ambientTickDivider >= Self.ambientGateEveryNTicks else { return }
         ambientTickDivider = 0
+        let window = liveTranscript.displayText
+        guard !window.isEmpty else { return }
+        let onCandidate = onAmbientCandidate
         Task.detached(priority: .utility) {
-            _ = await lane.tick(captureId: captureId)
+            if let candidate = await lane.consider(captureId: captureId, window: window) {
+                if let onCandidate { await onCandidate(candidate) }
+            }
         }
     }
 

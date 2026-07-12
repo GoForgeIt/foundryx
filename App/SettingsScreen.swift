@@ -14,6 +14,12 @@ import Grain
 enum AmbientPrefs {
     static let enabledKey = "foundryx.ambient.enabled"
     static let agentNameKey = "foundryx.ambient.agentName"
+
+    /// The Tier-1 gate decision log (shared by the lane wiring, the debug readout,
+    /// and — later — the Temper scorer). One place so they never disagree.
+    static func decisionLogURL() -> URL {
+        CaptureWAL.documentsCaptures().appendingPathComponent("ambient-decisions.jsonl")
+    }
 }
 
 struct SettingsScreen: View {
@@ -87,6 +93,12 @@ struct SettingsScreen: View {
                     }
                     Text("Say this name in a conversation to ask your agent for something. Only offered — nothing runs without your confirmation.")
                         .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+
+                    Button("Preview a notification") { AmbientNotifier.postPreview() }
+                    Text("See how a nudge feels before anything real triggers.")
+                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+
+                    NavigationLink("What it's noticing") { AmbientDebugView() }
                 }
             }
 

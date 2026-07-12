@@ -9,6 +9,7 @@ struct FoundryXWidgetBundle: WidgetBundle {
     var body: some Widget {
         CaptureStatusWidget()
         liveActivityWidgets
+        controlWidgets
     }
 
     // Live Activities are iOS 16.1+; gate the Live Activity widget so the bundle still
@@ -17,6 +18,14 @@ struct FoundryXWidgetBundle: WidgetBundle {
     private var liveActivityWidgets: some Widget {
         if #available(iOS 16.1, *) {
             CaptureLiveActivity()
+        }
+    }
+
+    // Controls (Control Center / Action Button) are iOS 18+.
+    @WidgetBundleBuilder
+    private var controlWidgets: some Widget {
+        if #available(iOS 18.0, *) {
+            FoundryXRecordControl()
         }
     }
 }
