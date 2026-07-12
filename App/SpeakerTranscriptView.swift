@@ -341,13 +341,29 @@ struct SpeakerTagSheet: View {
         guard let window = sampleWindow else { return }
         sampleState = .loading
         do {
-            guard let data = try await DoorClient(target: target).captureAudio(
+            // Cache (app-session, ≤1 day) → replaying a sample never re-downloads.
+            let cacheKey = await AudioReplayCache.shared.key(
                 captureId: captureId, startMs: window.startMs, endMs: window.endMs)
-            else {
-                sampleState = .unavailable
-                return
+            var wav = await AudioReplayCache.shared.get(cacheKey)
+            if wav == nil {
+                guard let data = try await DoorClient(target: target).captureAudio(
+                    captureId: captureId, startMs: window.startMs, endMs: window.endMs)
+                else {
+                    sampleState = .unavailable
+                    return
+                }
+                // Ogg-Opus → WAV on-device (AVAudioPlayer can't decode Opus).
+                guard let converted = OggOpusReplay.wav(fromOggOpus: data) else {
+                    sampleState = .failed
+                    return
+                }
+                await AudioReplayCache.shared.put(cacheKey, wav: converted)
+                wav = converted
             }
-            let player = try AVAudioPlayer(data: data)
+            // Own the audio session for playback (else iOS plays silently).
+            try? AVAudioSession.sharedInstance().setCategory(.playback, options: [])
+            try? AVAudioSession.sharedInstance().setActive(true)
+            let player = try AVAudioPlayer(data: wav!)
             let windowSeconds = Double(window.endMs - window.startMs) / 1000.0
             // LEGACY-DOOR fallback: a door predating range support ignores the
             // query and returns the WHOLE recording — seek into the window so the

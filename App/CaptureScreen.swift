@@ -937,15 +937,30 @@ struct ConversationDetailView: View {
     private func playAudio() async {
         audioState = .loading
         do {
-            guard let bytes = try await DoorClient(target: target).captureAudio(captureId: captureId) else {
-                audioState = .unavailable   // 404 — endpoint not ready / audio pruned on desktop
-                return
+            // Cache first (app-session, ≤1 day): re-listening never re-downloads.
+            let cacheKey = await AudioReplayCache.shared.key(
+                captureId: captureId, startMs: nil, endMs: nil)
+            var wav = await AudioReplayCache.shared.get(cacheKey)
+            if wav == nil {
+                guard let bytes = try await DoorClient(target: target).captureAudio(captureId: captureId) else {
+                    audioState = .unavailable   // 404 — endpoint not ready / audio pruned on desktop
+                    return
+                }
+                // The door assembles Ogg-Opus, which AVAudioPlayer can't decode —
+                // demux + decode to WAV on-device (OggOpusReplay), then cache the
+                // CONVERTED result so replays are instant.
+                guard let converted = OggOpusReplay.wav(fromOggOpus: bytes) else {
+                    audioState = .failed("undecodable audio")
+                    return
+                }
+                await AudioReplayCache.shared.put(cacheKey, wav: converted)
+                wav = converted
             }
-            // TODO: the door assembles Ogg-Opus; AVAudioPlayer can't decode Opus on all
-            // iOS versions. If playback fails here, route the bytes through an Opus
-            // decoder (or have the door transcode to AAC/m4a) — tracked with the
-            // parallel /audio endpoint work.
-            let p = try AVAudioPlayer(data: bytes)
+            // Playback must own the audio session — without this, iOS keeps the
+            // record/ambient category and the clip plays SILENTLY.
+            try? AVAudioSession.sharedInstance().setCategory(.playback, options: [])
+            try? AVAudioSession.sharedInstance().setActive(true)
+            let p = try AVAudioPlayer(data: wav!)
             player = p
             p.play()
             audioState = .playing
