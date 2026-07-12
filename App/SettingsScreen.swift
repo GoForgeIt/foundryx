@@ -8,12 +8,24 @@
 import SwiftUI
 import Grain
 
+/// Ambient-intelligence preference keys (track 20260710T2030 v3). One place so the
+/// lane wiring (RootView), the Settings toggle, and tests agree. DEFAULT OFF —
+/// `bool(forKey:)` on a missing key is false, which IS the opt-out state.
+enum AmbientPrefs {
+    static let enabledKey = "foundryx.ambient.enabled"
+    static let agentNameKey = "foundryx.ambient.agentName"
+}
+
 struct SettingsScreen: View {
     @ObservedObject var brains: BrainStore
     @ObservedObject var remote: RemoteSession
     @State private var actionChoice = ActionButtonChoice.current
     @State private var waitlistJoined =
         UserDefaults.standard.bool(forKey: "foundryx.waitlist.joined")
+    @State private var ambientEnabled =
+        UserDefaults.standard.bool(forKey: AmbientPrefs.enabledKey)
+    @State private var agentName =
+        UserDefaults.standard.string(forKey: AmbientPrefs.agentNameKey) ?? ""
 
     var body: some View {
         List {
@@ -48,6 +60,34 @@ struct SettingsScreen: View {
                 .onChange(of: actionChoice) { c in ActionButtonChoice.current = c }
                 Text("Bind “FoundryX Action” to the Action Button, Control Center, or back-tap in iOS Settings; Siri: “Start FoundryX recording”.")
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            }
+
+            Section("Ambient intelligence") {
+                Toggle("Act on conversations", isOn: $ambientEnabled)
+                    .onChange(of: ambientEnabled) { on in
+                        UserDefaults.standard.set(on, forKey: AmbientPrefs.enabledKey)
+                    }
+                Text(ambientEnabled
+                     ? "While recording, your phone privately watches for moments like “I'll have to look that up” and offers to help. Everything stays on this phone until you accept."
+                     : "Off. Recordings are captured exactly as before — no live analysis of any kind.")
+                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                if ambientEnabled {
+                    HStack {
+                        Text("Agent name").grainTextStyle(.body)
+                        Spacer()
+                        TextField("e.g. Forge", text: $agentName)
+                            .multilineTextAlignment(.trailing)
+                            .autocorrectionDisabled()
+                            .onChange(of: agentName) { name in
+                                let trimmed = name.trimmingCharacters(in: .whitespaces)
+                                UserDefaults.standard.set(
+                                    trimmed.isEmpty ? nil : trimmed,
+                                    forKey: AmbientPrefs.agentNameKey)
+                            }
+                    }
+                    Text("Say this name in a conversation to ask your agent for something. Only offered — nothing runs without your confirmation.")
+                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                }
             }
 
             Section("Account") {

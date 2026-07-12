@@ -975,6 +975,28 @@ public final class CaptureManager: ObservableObject {
 
     private var segmentTimer: Timer?
 
+    // MARK: Ambient-intelligence lane (track 20260710T2030 v3, Tier 1)
+
+    /// The opt-in on-device ambient lane. `nil` (default) = feature absent. Wired at
+    /// app startup; the lane itself re-checks the user toggle per tick, so flipping
+    /// Settings applies immediately without rewiring.
+    public var ambientLane: AmbientLane?
+    /// 5s segmentation ticks between lane ticks (12 × 5s ≈ the ~60s chunk cadence).
+    private var ambientTickDivider = 0
+
+    /// Every ~60s while a capture is actively recording, tick the ambient lane on a
+    /// background task (never blocks segmentation). Candidate escalation is Tier 2;
+    /// v0 records it in the decision log (the lane already logged it).
+    private func tickAmbientLane(captureId: String) {
+        guard let lane = ambientLane else { return }
+        ambientTickDivider += 1
+        guard ambientTickDivider >= 12 else { return }
+        ambientTickDivider = 0
+        Task.detached(priority: .utility) {
+            _ = await lane.tick(captureId: captureId)
+        }
+    }
+
     /// Always-on watchdog: closes a conversation after a real silence gap EVEN when the
     /// source has stopped delivering frames (the Omi BLE stream goes quiet during
     /// silence, so the frame-driven segmenter never sees the gap — the root cause of one
@@ -992,6 +1014,7 @@ public final class CaptureManager: ObservableObject {
         resolveReconnectGrace()       // end a held session the device never reconnected to
         guard suspendedSession == nil else { return }   // don't segment/split a suspended session
         guard let wal = active, !isPaused else { return }
+        tickAmbientLane(captureId: wal.captureId)   // opt-in Tier-1 lane, ~60s cadence
         // 1. Wall-clock silence boundary (fires when no frames arrive during quiet).
         if let event = router.tickSilence() {
             handleSegment(event)
@@ -1655,6 +1678,9 @@ public final class CaptureManager: ObservableObject {
         do {
             try await finalizeCapture(id, meta)
             clearNeedsFinalize(id)
+            // The ambient lane's rolling buffer is ephemeral by design — the finalized
+            // capture's authoritative transcript comes from the normal pipeline.
+            if let lane = ambientLane { Task.detached { await lane.endCapture(captureId: id) } }
             CaptureEventLog.append(.captureFinalized, captureId: id, baseDir: baseDir)
             // The conversation is now the authoritative last-finished; make sure the home
             // widget's snapshot reflects it the moment finalize completes (best-effort hint).
