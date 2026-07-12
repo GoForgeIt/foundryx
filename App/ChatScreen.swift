@@ -45,11 +45,26 @@ struct ChatScreen: View {
             GrainComposer("Message the local brain…", text: $input, isSending: streaming, onSend: send)
         }
         .grainBackground()
-        .onAppear { hydrateActive(); Task { await loadModels() } }
+        .onAppear { hydrateActive(); Task { await loadModels() }; consumeAmbientSeed() }
         .onChange(of: store.activeId) { _ in hydrateActive() }
+        // An accepted ambient card ([Run]) — also fires when already on the chat tab.
+        .onReceive(AmbientCardBroker.shared.$pendingSeed) { _ in consumeAmbientSeed() }
         .sheet(isPresented: $showingChats) {
             ChatListSheet(store: store) { showingChats = false }
         }
+    }
+
+    /// Start the seeded conversation an accepted ambient card requested: a FRESH
+    /// chat (its own context), the moment as the first turn, sent immediately —
+    /// the user watches the agent work right here.
+    private func consumeAmbientSeed() {
+        guard !streaming, let seed = AmbientCardBroker.shared.pendingSeed else { return }
+        AmbientCardBroker.shared.pendingSeed = nil
+        let convo = store.newConversation()
+        store.select(convo.id)
+        hydrateActive()
+        input = seed
+        send()
     }
 
     // MARK: header — chats drawer · model picker · new chat

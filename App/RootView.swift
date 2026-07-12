@@ -229,6 +229,9 @@ private struct MainTabs: View {
         // The intent's perform() runs in the app process and routes through this broker.
         let router = TabRouter()
         _router = StateObject(wrappedValue: router)
+        // An accepted ambient card ([Run]) lands on the chat tab; ChatScreen consumes
+        // the broker's pendingSeed and starts the seeded kiln conversation there.
+        AmbientCardBroker.shared.onNavigate = { [weak router] in router?.selected = .chat }
         CaptureIntentBroker.shared.handler = { [weak mgr, weak router] action in
             guard let mgr else { return false }
             switch action {

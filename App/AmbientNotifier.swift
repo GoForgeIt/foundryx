@@ -28,26 +28,67 @@ final class AmbientNotificationPresenter: NSObject, UNUserNotificationCenterDele
     ) {
         completionHandler([.banner, .sound])
     }
+
+    /// Card responses: RUN (or tapping the banner) seeds a kiln chat with the moment;
+    /// DISMISS just logs the outcome (the council's labeled false positive).
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let info = response.notification.request.content.userInfo
+        let seed = info["seed"] as? String
+        switch response.actionIdentifier {
+        case AmbientNotifier.runAction, UNNotificationDefaultActionIdentifier:
+            if let seed {
+                Task { @MainActor in AmbientCardBroker.shared.run(seed: seed) }
+            }
+        case AmbientNotifier.dismissAction, UNNotificationDismissActionIdentifier:
+            if let seed { AmbientCardBroker.dismissed(seed: seed) }
+        default:
+            break
+        }
+        completionHandler()
+    }
 }
 
 enum AmbientNotifier {
-    /// Ask once for notification permission (banner + sound) and install the
-    /// foreground presenter. Best-effort — a denied user simply never sees ambient
-    /// nudges; nothing else changes.
+    static let cardCategory = "AMBIENT_CARD"
+    static let runAction = "AMBIENT_RUN"
+    static let dismissAction = "AMBIENT_DISMISS"
+
+    /// Ask once for notification permission (banner + sound), install the foreground
+    /// presenter, and register the confirm-card category (Run/Dismiss). Best-effort —
+    /// a denied user simply never sees ambient nudges; nothing else changes.
     static func requestAuthorizationIfNeeded() {
         let center = UNUserNotificationCenter.current()
         center.delegate = AmbientNotificationPresenter.shared
+        center.setNotificationCategories([
+            UNNotificationCategory(
+                identifier: cardCategory,
+                actions: [
+                    UNNotificationAction(identifier: runAction, title: "Run",
+                                         options: [.foreground]),
+                    UNNotificationAction(identifier: dismissAction, title: "Dismiss",
+                                         options: []),
+                ],
+                intentIdentifiers: [], options: [.customDismissAction]),
+        ])
         center.getNotificationSettings { settings in
             guard settings.authorizationStatus == .notDetermined else { return }
             center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
         }
     }
 
-    /// Post the ROUTED outcome of a real gate candidate — the notification carries
-    /// the actual answer when the door found one in the user's memory.
+    /// Post the ROUTED outcome of a real gate candidate. Lookups notify with the
+    /// actual answer from the user's memory (informational). todo/workflow/agent
+    /// become CONFIRM CARDS — "Want me to X?" with Run/Dismiss; Run seeds a kiln
+    /// chat with the moment (nothing executes without it).
     static func post(candidate: AmbientCandidate, outcome: AmbientRouteOutcome?) {
         let title: String
         let body: String
+        var seed: String?
+        let ask = candidate.summary.isEmpty ? candidate.utterance : candidate.summary
         switch (outcome?.route, outcome?.answer) {
         case ("lookup", .some(let answer)):
             title = "From your memory"
@@ -57,16 +98,26 @@ enum AmbientNotifier {
             body = "You wanted to look something up — I checked your memory but didn't find it: “\(candidate.utterance)”"
         case ("agent", _):
             title = "You called your agent"
-            body = candidate.summary.isEmpty ? candidate.utterance : candidate.summary
+            body = "Want me to: \(ask)?"
+            seed = chatSeed(candidate)
         case ("todo", _), ("workflow", _):
             title = "Noticed a to-do"
-            body = candidate.summary.isEmpty ? candidate.utterance : candidate.summary
+            body = "Want me to: \(ask)?"
+            seed = chatSeed(candidate)
         default:
-            // Door unreachable — still surface the raw moment honestly.
+            // Door unreachable — still surface the raw moment honestly, and let a
+            // tap seed a chat (the chat itself will fail honestly if the door is down).
             title = "FoundryX"
             body = "\(candidate.summary.isEmpty ? "Something I can help with" : candidate.summary) — “\(candidate.utterance)”"
+            seed = chatSeed(candidate)
         }
-        deliver(title: title, body: body, preview: false)
+        deliver(title: title, body: body, preview: false, seed: seed)
+    }
+
+    /// The first chat turn an accepted card sends — the moment + the ask, so the
+    /// agent has the context the user's own ears had.
+    private static func chatSeed(_ c: AmbientCandidate) -> String {
+        "While I was recording, this came up: “\(c.utterance)”\n\nPlease \(c.summary.isEmpty ? "help with that" : c.summary)."
     }
 
     /// Fire a sample notification so the user can experience the surface before any
@@ -78,7 +129,7 @@ enum AmbientNotifier {
             preview: true)
     }
 
-    private static func deliver(title: String, body: String, preview: Bool) {
+    private static func deliver(title: String, body: String, preview: Bool, seed: String? = nil) {
         let center = UNUserNotificationCenter.current()
         let fire: () -> Void = {
             let content = UNMutableNotificationContent()
@@ -86,6 +137,10 @@ enum AmbientNotifier {
             content.body = body
             content.sound = .default
             content.userInfo = ["ambient": true, "preview": preview]
+            if let seed {
+                content.categoryIdentifier = cardCategory   // Run/Dismiss actions
+                content.userInfo["seed"] = seed
+            }
             let req = UNNotificationRequest(
                 identifier: "ambient-\(UUID().uuidString)",
                 content: content,

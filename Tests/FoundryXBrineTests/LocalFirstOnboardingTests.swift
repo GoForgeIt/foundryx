@@ -363,6 +363,11 @@ enum OnboardingSteps {
             },
 
             defineCheck("the conversation is transcribed on-device") { _, _, _ in
+                // finalize runs on a detached task after the stop step — poll briefly
+                // instead of racing it (the flake: "on-device STT never ran" under load).
+                for _ in 0..<100 where (world.fakeSTT?.framesSeen ?? 0) == 0 {
+                    try await Task.sleep(nanoseconds: 50_000_000)
+                }
                 guard let stt = world.fakeSTT, stt.framesSeen > 0 else {
                     throw StepError("on-device STT never ran")
                 }
