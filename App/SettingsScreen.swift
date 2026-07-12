@@ -32,6 +32,7 @@ struct SettingsScreen: View {
         UserDefaults.standard.bool(forKey: AmbientPrefs.enabledKey)
     @State private var agentName =
         UserDefaults.standard.string(forKey: AmbientPrefs.agentNameKey) ?? ""
+    @State private var showingTour = false
 
     var body: some View {
         List {
@@ -81,7 +82,7 @@ struct SettingsScreen: View {
                     HStack {
                         Text("Agent name").grainTextStyle(.body)
                         Spacer()
-                        TextField("e.g. Forge", text: $agentName)
+                        TextField("Foundry", text: $agentName)
                             .multilineTextAlignment(.trailing)
                             .autocorrectionDisabled()
                             .onChange(of: agentName) { name in
@@ -115,6 +116,11 @@ struct SettingsScreen: View {
                 }
             }
 
+            Section("FoundryX") {
+                Button("Show the welcome tour") { showingTour = true }
+                NavigationLink("Privacy & your data") { PrivacyView() }
+            }
+
             Section("Account") {
                 Text(remote.email ?? "Signed in")
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
@@ -123,6 +129,9 @@ struct SettingsScreen: View {
             }
         }
         .grainBackground()
+        .fullScreenCover(isPresented: $showingTour) {
+            OnboardingFlowView(baseDir: CaptureWAL.documentsCaptures()) { showingTour = false }
+        }
     }
 
     private func brainRow(_ c: BrainChoice, subtitle: String) -> some View {

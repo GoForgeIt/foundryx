@@ -57,22 +57,55 @@ struct OnboardingFlowView: View {
     }
 
     private func finish() {
-        guard !OnboardingPrefs.completed else { return }
-        OnboardingPrefs.completed = true
+        // Set the once-flag on first completion; ALWAYS call onDone so a re-run
+        // from Settings ("Show the welcome tour") can still dismiss itself.
+        if !OnboardingPrefs.completed { OnboardingPrefs.completed = true }
         onDone()
     }
 
     @ViewBuilder private var welcome: some View {
         Spacer()
+        BreathingMark()
         Text("Welcome to FoundryX").grainTextStyle(.title).foregroundStyle(GrainColor.ink)
-        Text("Your conversations, captured and remembered — on your devices. Two quick things make it yours.")
+            .padding(.top, GrainSpacing.x4)
+        Text("Your conversations, remembered — on your devices, working for you.")
             .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
             .multilineTextAlignment(.center)
             .padding(.top, GrainSpacing.x2)
+        Text("Nothing you record leaves your devices unless you say so.")
+            .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            .padding(.top, GrainSpacing.x1)
         Spacer()
         GrainButton("Get started", variant: .filled, size: .regular) { step = .voice }
         GrainButton("Skip for now", variant: .text, size: .regular) { finish() }
             .padding(.bottom, GrainSpacing.x4)
+    }
+}
+
+/// The calm "breath" — the brand mark slowly breathing (≈4s in/out, the pace of a
+/// resting breath). Used on the welcome step; cheap, no assets, reads as alive
+/// rather than loading.
+struct BreathingMark: View {
+    @State private var inhale = false
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(GrainColor.forgeBlueBg)
+                .frame(width: 120, height: 120)
+                .scaleEffect(inhale ? 1.12 : 0.96)
+                .opacity(inhale ? 0.9 : 0.6)
+            Image(systemName: "waveform")
+                .font(.system(size: 44, weight: .light))
+                .foregroundStyle(GrainColor.forgeBlue)
+                .scaleEffect(inhale ? 1.05 : 0.98)
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 4.0).repeatForever(autoreverses: true)) {
+                inhale = true
+            }
+        }
+        .accessibilityHidden(true)
     }
 }
 
@@ -95,10 +128,17 @@ struct OnboardingVoiceStep: View {
     @State private var mic: MicFrameSource?
     @State private var frames: [Data] = []
 
+    /// The read-aloud doubles as the product introduction: in the ~20 seconds it
+    /// takes to speak, it teaches what FoundryX does, where the data lives, the
+    /// agent's name, and the "look that up" ritual — so enrolling the voice IS the
+    /// walkthrough. Keep any edits speakable (no abbreviations, no URLs).
     private let passage = """
-    “I’m teaching FoundryX my voice so it knows when it’s really me. \
-    When I ask for something in a conversation — look something up, remember a task, \
-    or reach my agent — it should listen to me, and only me. \
+    “This is my FoundryX. It remembers my conversations for me, \
+    and everything it hears stays on my own devices. \
+    When I say something like ‘I’ll have to look that up,’ \
+    it can find the answer in my own memory. \
+    And when I call my agent — Foundry — it acts for me, \
+    and answers to my voice alone. \
     A voice is a kind of key, and this one is mine.”
     """
 
@@ -123,9 +163,9 @@ struct OnboardingVoiceStep: View {
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                 GrainButton("Stop", variant: .text, size: .regular) { stop() }
             case .saved:
-                Label("Voice captured", systemImage: "checkmark.circle.fill")
+                Label("Your voice is now your key", systemImage: "key.fill")
                     .grainTextStyle(.body).foregroundStyle(GrainColor.sage)
-                Text("It will enroll as your voiceprint next time your computer brain is connected.")
+                Text("From here on, your agent answers to you — and only you. The key stays on your devices.")
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             case .tooShort(let n):
                 Text("That was only ~\(n / 50) seconds — a stable voice key needs about 15. Give it another read?")
@@ -193,6 +233,7 @@ struct OnboardingVoiceStandalone: View {
 
 struct OnboardingAmbientStep: View {
     let onDone: () -> Void
+    @State private var enabled = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x4) {
@@ -202,13 +243,33 @@ struct OnboardingAmbientStep: View {
             Text("Off by default. You can change this any time in Settings.")
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
 
-            Spacer()
-            GrainButton("Turn it on", variant: .filled, size: .regular) {
-                UserDefaults.standard.set(true, forKey: AmbientPrefs.enabledKey)
-                onDone()
+            if enabled {
+                Label("On — check your lock screen", systemImage: "bell.badge.fill")
+                    .grainTextStyle(.body).foregroundStyle(GrainColor.sage)
+                Text("We just sent a sample nudge so the first real one is never a surprise. Your agent answers to “Foundry” — rename it in Settings.")
+                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             }
-            GrainButton("Not now", variant: .outlined, size: .regular) { onDone() }
-                .padding(.bottom, GrainSpacing.x4)
+
+            Spacer()
+            if enabled {
+                GrainButton("Done", variant: .filled, size: .regular) { onDone() }
+                    .padding(.bottom, GrainSpacing.x4)
+            } else {
+                GrainButton("Turn it on", variant: .filled, size: .regular) {
+                    UserDefaults.standard.set(true, forKey: AmbientPrefs.enabledKey)
+                    // The agent answers to "Foundry" out of the box (renameable in
+                    // Settings) — a named agent is the invocation ritual.
+                    if UserDefaults.standard.string(forKey: AmbientPrefs.agentNameKey) == nil {
+                        UserDefaults.standard.set("Foundry", forKey: AmbientPrefs.agentNameKey)
+                    }
+                    // Deterministic first-feel: fire the sample nudge NOW, while
+                    // they're looking, so the first real one is familiar.
+                    AmbientNotifier.postPreview()
+                    enabled = true
+                }
+                GrainButton("Not now", variant: .outlined, size: .regular) { onDone() }
+                    .padding(.bottom, GrainSpacing.x4)
+            }
         }
     }
 }
