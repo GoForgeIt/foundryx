@@ -111,4 +111,43 @@ public struct StartRecordingControlIntent: AppIntent {
         return .result()
     }
 }
+
+/// "Open Chat" for the Controls picker — same broker path as the App Shortcut.
+@available(iOS 16.0, *)
+public struct OpenChatControlIntent: AppIntent {
+    public static let title: LocalizedStringResource = "Open FoundryX Chat"
+    public static let description = IntentDescription("Jump straight into chat.")
+    public static let openAppWhenRun: Bool = true
+
+    public init() {}
+
+    @MainActor
+    public func perform() async throws -> some IntentResult {
+        _ = CaptureIntentBroker.shared.perform(.openChat)
+        return .result()
+    }
+}
+
+/// The configurable "FoundryX Action" (Record | Chat | Ask me — Settings picks) for
+/// the Controls picker. Reads the same UserDefaults key the App-Shortcut variant uses
+/// (duplicated literal: the widget target can't see ActionButtonChoice in the App target).
+@available(iOS 16.0, *)
+public struct FoundryXActionControlIntent: AppIntent {
+    public static let title: LocalizedStringResource = "FoundryX Action"
+    public static let description = IntentDescription(
+        "Runs your chosen FoundryX action — start recording, open chat, or ask each time.")
+    public static let openAppWhenRun: Bool = true
+
+    public init() {}
+
+    @MainActor
+    public func perform() async throws -> some IntentResult {
+        switch UserDefaults.standard.string(forKey: "foundryx.action-button.choice") ?? "record" {
+        case "chat": _ = CaptureIntentBroker.shared.perform(.openChat)
+        case "ask": _ = CaptureIntentBroker.shared.perform(.askChooser)
+        default: _ = CaptureIntentBroker.shared.perform(.startRecording)
+        }
+        return .result()
+    }
+}
 #endif

@@ -26,6 +26,8 @@ struct FoundryXWidgetBundle: WidgetBundle {
     private var controlWidgets: some Widget {
         if #available(iOS 18.0, *) {
             FoundryXRecordControl()
+            FoundryXChatControl()
+            FoundryXActionControl()
         }
     }
 }

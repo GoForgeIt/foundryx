@@ -24,3 +24,29 @@ struct FoundryXRecordControl: ControlWidget {
         .description("Start a FoundryX recording.")
     }
 }
+
+@available(iOS 18.0, *)
+struct FoundryXChatControl: ControlWidget {
+    var body: some ControlWidgetConfiguration {
+        StaticControlConfiguration(kind: "com.goforgeit.foundryx.control.chat") {
+            ControlWidgetButton(action: OpenChatControlIntent()) {
+                Label("Chat", systemImage: "message")
+            }
+        }
+        .displayName("FoundryX Chat")
+        .description("Jump straight into FoundryX chat.")
+    }
+}
+
+@available(iOS 18.0, *)
+struct FoundryXActionControl: ControlWidget {
+    var body: some ControlWidgetConfiguration {
+        StaticControlConfiguration(kind: "com.goforgeit.foundryx.control.action") {
+            ControlWidgetButton(action: FoundryXActionControlIntent()) {
+                Label("FoundryX", systemImage: "bolt")
+            }
+        }
+        .displayName("FoundryX Action")
+        .description("Your chosen action — record, chat, or ask each time.")
+    }
+}

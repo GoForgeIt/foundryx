@@ -391,13 +391,48 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     /// prunes a capture's segment files, so the card reflects the pruned state.
     public func refreshStatus() { publish() }
 
+    /// Per-seq segment sizes + ACK knowledge, filled INCREMENTALLY — segment files are
+    /// immutable once written and an ACK never un-happens, so each needs at most one
+    /// stat ever. The old full rescan (attributesOfItem + fileExists on EVERY segment,
+    /// every status pass) is what Apple's bug_type-328 hang reports caught freezing the
+    /// main thread 2-9s on 4000-segment backlogged captures (2026-07-12).
+    private var seqBytes: [UInt64: Int] = [:]
+    private var seqAcked: Set<UInt64> = []
+    private let statusCacheLock = NSLock()
+
     private func computeStatus() -> CaptureStatus {
         let all = allSegmentURLs()
-        let syncedCount = all.filter { FileManager.default.fileExists(atPath: ackURL($0.1).path) }.count
+        let wm = uploadWatermark()
+        statusCacheLock.lock()
+        defer { statusCacheLock.unlock() }
+        var syncedCount = 0
         var byteCount = 0
-        for (_, u) in all {
-            if let attrs = try? FileManager.default.attributesOfItem(atPath: u.path),
-               let n = attrs[.size] as? Int { byteCount += n }
+        var current = Set<UInt64>()
+        current.reserveCapacity(all.count)
+        for (seq, u) in all {
+            current.insert(seq)
+            // ACK: at/below the durable watermark counts as synced by definition;
+            // otherwise stat the .ack marker once and remember it forever.
+            if Int64(seq) <= wm || seqAcked.contains(seq) {
+                syncedCount += 1
+            } else if FileManager.default.fileExists(atPath: ackURL(u).path) {
+                seqAcked.insert(seq)
+                syncedCount += 1
+            }
+            // Bytes: stat each immutable segment file exactly once.
+            if let known = seqBytes[seq] {
+                byteCount += known
+            } else if let attrs = try? FileManager.default.attributesOfItem(atPath: u.path),
+                      let n = attrs[.size] as? Int {
+                seqBytes[seq] = n
+                byteCount += n
+            }
+        }
+        // Retention pruning deletes segment files — drop their cache entries so the
+        // byte total stays exact (cheap set math, no syscalls).
+        if seqBytes.count > current.count {
+            seqBytes = seqBytes.filter { current.contains($0.key) }
+            seqAcked = seqAcked.intersection(current)
         }
         // NOTE: do NOT wrap this in `io.sync` — `publish()` is sometimes called from
         // INSIDE the io queue (e.g. `beginStreaming`), so a reentrant `io.sync` traps.
