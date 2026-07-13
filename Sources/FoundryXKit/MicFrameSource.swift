@@ -314,9 +314,21 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
         }
     }
 
+    /// Last config-change-driven engine restart (monotonic seconds). Restarting the
+    /// engine ITSELF fires AVAudioEngineConfigurationChange, so an unconditional
+    /// restart here becomes a self-sustaining ~2 Hz restart loop (the 2026-07-12
+    /// "engine live" diag storm that gap-mangled mic recordings). Debounce hard.
+    private var lastConfigRestart: TimeInterval = 0
+
     @objc private func handleEngineConfigChange(_ note: Notification) {
         queue.async { [weak self] in
             guard let self, self.running, !self.interrupted, self.engineLive else { return }
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now - self.lastConfigRestart > 2.0 else {
+                self.log?.info("phone mic: config-change within debounce — ignoring (engine stays up)")
+                return
+            }
+            self.lastConfigRestart = now
             self.deactivateEngine(releaseSession: false)
             _ = self.activateEngine()
         }
