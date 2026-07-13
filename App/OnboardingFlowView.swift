@@ -64,21 +64,126 @@ struct OnboardingFlowView: View {
     }
 
     @ViewBuilder private var welcome: some View {
-        Spacer()
-        BreathingMark()
-        Text("Welcome to FoundryX").grainTextStyle(.title).foregroundStyle(GrainColor.ink)
-            .padding(.top, GrainSpacing.x4)
-        Text("Your conversations, remembered — on your devices, working for you.")
-            .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
-            .multilineTextAlignment(.center)
-            .padding(.top, GrainSpacing.x2)
-        Text("Nothing you record leaves your devices unless you say so.")
-            .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-            .padding(.top, GrainSpacing.x1)
-        Spacer()
-        GrainButton("Get started", variant: .filled, size: .regular) { step = .voice }
-        GrainButton("Skip for now", variant: .text, size: .regular) { finish() }
-            .padding(.bottom, GrainSpacing.x4)
+        PersonaWelcomeStep(onStart: { step = .voice }, onSkip: { finish() })
+    }
+}
+
+// MARK: - The persona-routed welcome (track 20260713T0901)
+
+/// The Night Shift welcome: one skeleton, words + artwork routed by persona
+/// (features/persona-welcome.feature). Copy comes from PersonaCopy — THE tweak
+/// point once the design locks. The quiet "What brings you here?" rows re-render
+/// the screen in place; the choice persists and is editable in Settings.
+struct PersonaWelcomeStep: View {
+    let onStart: () -> Void
+    let onSkip: () -> Void
+
+    @State private var persona: OnboardingPersona = PersonaPrefs.persona()
+
+    private var copy: PersonaWelcomeCopy { PersonaCopy.welcome(for: persona) }
+
+    var body: some View {
+        ZStack {
+            GrainDotField(density: 0.5)
+            VStack(spacing: 0) {
+                Text("F O U N D R Y X")
+                    .font(.system(size: 11, design: .monospaced))
+                    .kerning(3)
+                    .foregroundStyle(GrainColor.textFaint)
+                    .padding(.top, GrainSpacing.x6)
+
+                Spacer()
+                art
+                    .frame(width: 190, height: 190)
+                    .padding(.bottom, GrainSpacing.x6)
+
+                headline
+                    .font(.system(size: 30, weight: .bold))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(copy.sub)
+                    .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, GrainSpacing.x2)
+                    .frame(maxWidth: 300)
+
+                chooser.padding(.top, GrainSpacing.x4)
+
+                Spacer()
+                GrainButton("Get started", variant: .filled, size: .regular) { onStart() }
+                GrainButton("Skip for now", variant: .text, size: .regular) { onSkip() }
+                HStack(spacing: 5) {
+                    Image(grain: .key).font(.system(size: 10, weight: .light))
+                    Text(copy.lockLine)
+                }
+                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                .multilineTextAlignment(.center)
+                .padding(.top, GrainSpacing.x2)
+                .padding(.bottom, GrainSpacing.x4)
+            }
+        }
+        .preferredColorScheme(.dark)   // the welcome is a night ceremony
+        .animation(.easeOut(duration: 0.35), value: persona)
+    }
+
+    /// Headline with the persona's emphasis span in forge blue.
+    private var headline: Text {
+        let h = copy.headline
+        guard !copy.emphasis.isEmpty, let range = h.range(of: copy.emphasis) else {
+            return Text(h).foregroundColor(GrainColor.ink)
+        }
+        let before = String(h[h.startIndex..<range.lowerBound])
+        let em = String(h[range])
+        let after = String(h[range.upperBound...])
+        return Text(before).foregroundColor(GrainColor.ink)
+            + Text(em).foregroundColor(GrainColor.forgeBlue)
+            + Text(after).foregroundColor(GrainColor.ink)
+    }
+
+    /// "What brings you here?" — three quiet rows; choosing re-renders in place.
+    private var chooser: some View {
+        VStack(spacing: GrainSpacing.x2) {
+            Text("What brings you here?")
+                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            HStack(spacing: GrainSpacing.x2) {
+                ForEach(OnboardingPersona.allCases, id: \.self) { p in
+                    Button {
+                        persona = p
+                        PersonaPrefs.set(p)
+                    } label: {
+                        Text(p.chooserLabel)
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(persona == p ? GrainColor.ink : GrainColor.textMuted)
+                            .padding(.horizontal, GrainSpacing.x3)
+                            .padding(.vertical, 6)
+                            .background(
+                                Capsule().fill(persona == p ? GrainColor.forgeBlueBg : .clear)
+                            )
+                            .overlay(
+                                Capsule().strokeBorder(
+                                    persona == p ? GrainColor.forgeBlueBorder : GrainColor.borderFaint,
+                                    lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var art: some View {
+        switch persona {
+        case .expert:
+            GrainStrikeList(
+                lines: ["The drafting.", "The filing.", "The chasing.", "The scheduling."],
+                survivor: "The judgment stays."
+            )
+        case .individual:
+            GrainCatchRing()
+        case .firm:
+            GrainPerimeter()
+                .frame(width: 170, height: 150)
+        }
     }
 }
 

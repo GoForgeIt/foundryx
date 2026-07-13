@@ -33,6 +33,7 @@ struct SettingsScreen: View {
     @State private var agentName =
         UserDefaults.standard.string(forKey: AmbientPrefs.agentNameKey) ?? ""
     @State private var showingTour = false
+    @State private var persona = PersonaPrefs.persona()
 
     var body: some View {
         List {
@@ -118,6 +119,15 @@ struct SettingsScreen: View {
 
             Section("FoundryX") {
                 Button("Show the welcome tour") { showingTour = true }
+                // Who the welcome (and future persona-routed surfaces) speak to —
+                // the same "What brings you here?" choice, editable forever
+                // (features/persona-welcome.feature).
+                Picker("Who it speaks to", selection: $persona) {
+                    ForEach(OnboardingPersona.allCases, id: \.self) { p in
+                        Text(p.chooserLabel).tag(p)
+                    }
+                }
+                .onChange(of: persona) { newValue in PersonaPrefs.set(newValue) }
                 NavigationLink("Privacy & your data") { PrivacyView() }
             }
 
