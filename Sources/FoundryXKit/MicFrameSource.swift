@@ -295,9 +295,7 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
                 // the interruption cleanly ended; we resume regardless (best-effort) so
                 // the user's recording keeps going.
                 self.interrupted = false
-                if !self.activateEngine() {
-                    self.log?.error("phone mic: resume after interruption FAILED")
-                }
+                self.restartEngine(reason: "interruption ended")
             @unknown default:
                 break
             }
@@ -308,39 +306,68 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
         // A route change (BT (dis)connect, unplug) can silence the input node. Rebuild
         // the tap so capture continues on the new route rather than going quiet.
         queue.async { [weak self] in
-            guard let self, self.running, !self.interrupted else { return }
-            self.deactivateEngine(releaseSession: false)
-            _ = self.activateEngine()
+            self?.restartEngine(reason: "route change")
         }
     }
 
-    /// Last config-change-driven engine restart (monotonic seconds). Restarting the
-    /// engine ITSELF fires AVAudioEngineConfigurationChange, so an unconditional
-    /// restart here becomes a self-sustaining ~2 Hz restart loop (the 2026-07-12
-    /// "engine live" diag storm that gap-mangled mic recordings). Debounce hard.
-    private var lastConfigRestart: TimeInterval = 0
-
     @objc private func handleEngineConfigChange(_ note: Notification) {
         queue.async { [weak self] in
-            guard let self, self.running, !self.interrupted, self.engineLive else { return }
-            let now = ProcessInfo.processInfo.systemUptime
-            guard now - self.lastConfigRestart > 2.0 else {
-                self.log?.info("phone mic: config-change within debounce — ignoring (engine stays up)")
-                return
-            }
-            self.lastConfigRestart = now
-            self.deactivateEngine(releaseSession: false)
-            _ = self.activateEngine()
+            self?.restartEngine(reason: "config change")
         }
     }
 
     @objc private func handleMediaReset(_ note: Notification) {
         // mediaservicesd reset invalidates the whole audio stack — rebuild from scratch.
+        // Bypasses the debounce: after a REAL media-services reset the old engine is
+        // dead; keeping it "up" would just record silence.
         queue.async { [weak self] in
             guard let self, self.running else { return }
-            self.deactivateEngine(releaseSession: false)
             self.interrupted = false
-            _ = self.activateEngine()
+            self.restartEngine(reason: "media-services reset", bypassDebounce: true)
+        }
+    }
+
+    /// Last engine restart (monotonic seconds). Restarting the engine ITSELF fires
+    /// AVAudioEngineConfigurationChange (and can fire route-change), so an
+    /// unconditional restart from ANY observer becomes a self-sustaining ~2 Hz
+    /// restart loop (the 2026-07-12 "engine live" diag storm that gap-mangled mic
+    /// recordings — build 142 debounced only the config-change path and the storm
+    /// survived through the route-change/media-reset paths). Debounce hard, in ONE
+    /// place, for every restart trigger.
+    private var lastEngineRestart: TimeInterval = 0
+
+    /// The ONE funnel through which every "audio stack changed — rebuild the engine"
+    /// event goes (config change, route change, media-services reset, interruption
+    /// ended). Serial-queue only. Behaviour:
+    ///   • not running / interrupted → no-op (the interruption .began path already
+    ///     tore the engine down on purpose).
+    ///   • engine NOT live (e.g. resuming after an interruption) → straight
+    ///     (re)activate; there is nothing to keep "up", so no debounce applies.
+    ///   • engine live → tear down + rebuild, DEBOUNCED to one restart per 2 s
+    ///     (`bypassDebounce` for media-services resets, where the live engine is a
+    ///     zombie). The reason is logged either way so the next diag read names
+    ///     exactly which notification is driving any storm.
+    private func restartEngine(reason: String, bypassDebounce: Bool = false) {
+        guard running, !interrupted else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard engineLive else {
+            // Engine already down — this is a resume/recovery, not churn.
+            lastEngineRestart = now
+            log?.info("phone mic: engine restart (\(reason))")
+            if !activateEngine() {
+                log?.error("phone mic: engine restart (\(reason)) FAILED")
+            }
+            return
+        }
+        guard bypassDebounce || now - lastEngineRestart > 2.0 else {
+            log?.info("phone mic: \(reason) within debounce — engine stays up")
+            return
+        }
+        lastEngineRestart = now
+        log?.info("phone mic: engine restart (\(reason))")
+        deactivateEngine(releaseSession: false)
+        if !activateEngine() {
+            log?.error("phone mic: engine restart (\(reason)) FAILED")
         }
     }
 

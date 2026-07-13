@@ -5,6 +5,38 @@ import Grain
 import UIKit
 #endif
 
+/// Clip-playback use of the SHARED AVAudioSession. The phone-mic record engine
+/// (MicFrameSource) holds the session as `.playAndRecord` while recording — flipping
+/// it to `.playback` mid-record (build 138 did this unconditionally) yanks the input
+/// route out from under the live engine and churns route-change notifications against
+/// it (a driver of the engine-restart storm). So: only take `.playback` when no record
+/// engine owns the session, and release the session again when playback ends.
+enum PlaybackSession {
+    /// True when the shared session is configured for recording — playback must not
+    /// steal it. (An AVAudioPlayer still plays fine through `.playAndRecord`.)
+    static var recordOwnsSession: Bool {
+        AVAudioSession.sharedInstance().category == .playAndRecord
+    }
+
+    /// Prepare the session for clip playback. Returns whether the category was
+    /// changed — the caller must pass that to `end(changed:)` when playback stops.
+    @discardableResult
+    static func begin() -> Bool {
+        guard !recordOwnsSession else { return false }
+        try? AVAudioSession.sharedInstance().setCategory(.playback, options: [])
+        try? AVAudioSession.sharedInstance().setActive(true)
+        return true
+    }
+
+    /// Release the session after playback IF `begin()` took it — and only when a
+    /// record engine hasn't claimed the session in the meantime (never deactivate
+    /// underneath a live recording).
+    static func end(changed: Bool) {
+        guard changed, !recordOwnsSession else { return }
+        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+    }
+}
+
 private extension ConversationProgress {
     /// The Grain status dot energy for this chip: live capture pulses warm, the
     /// working states pulse (thinking), Ready breathes at rest (idle), failure smolders.
@@ -581,6 +613,9 @@ struct ConversationDetailView: View {
     // Listen affordance state.
     @State private var audioState: AudioState = .idle
     @State private var player: AVAudioPlayer?
+    /// Whether playAudio() flipped the shared session to .playback (and so must
+    /// release it when playback stops). False when a recording owned the session.
+    @State private var playbackOwnsSession = false
 
     private enum AudioState: Equatable { case idle, loading, playing, unavailable, failed(String) }
 
@@ -767,7 +802,7 @@ struct ConversationDetailView: View {
         }
         .refreshable { await fetchFromDoor() }   // pull-to-refresh loads on demand
         .task { await initialLoad() }
-        .onDisappear { player?.stop() }
+        .onDisappear { stopPlayback() }
     }
 
     /// "Listen" affordance — replays the conversation audio via the door's `/audio`
@@ -780,7 +815,7 @@ struct ConversationDetailView: View {
         case .loading:
             Text("Loading audio…").grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
         case .playing:
-            GrainButton("Stop", variant: .text, size: .sm) { player?.stop(); audioState = .idle }
+            GrainButton("Stop", variant: .text, size: .sm) { stopPlayback() }
         case .unavailable:
             Text("Audio not available").grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
         case .failed(let why):
@@ -956,17 +991,34 @@ struct ConversationDetailView: View {
                 await AudioReplayCache.shared.put(cacheKey, wav: converted)
                 wav = converted
             }
-            // Playback must own the audio session — without this, iOS keeps the
-            // record/ambient category and the clip plays SILENTLY.
-            try? AVAudioSession.sharedInstance().setCategory(.playback, options: [])
-            try? AVAudioSession.sharedInstance().setActive(true)
+            // Playback needs the audio session (else the clip plays SILENTLY through
+            // the ambient category) — but must never STEAL it from a live phone-mic
+            // recording (that churns routes against the record engine).
+            playbackOwnsSession = PlaybackSession.begin()
             let p = try AVAudioPlayer(data: wav!)
             player = p
             p.play()
             audioState = .playing
+            // When the clip finishes on its own, flip the button back and release
+            // the session (no delegate plumbing needed for a replay clip).
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64((p.duration + 0.3) * 1_000_000_000))
+                if player === p, !p.isPlaying { stopPlayback() }
+            }
         } catch {
+            PlaybackSession.end(changed: playbackOwnsSession)
+            playbackOwnsSession = false
             audioState = .failed((error as NSError).localizedDescription)
         }
+    }
+
+    /// Stop replay + release the shared audio session if playback took it.
+    private func stopPlayback() {
+        player?.stop()
+        player = nil
+        if case .playing = audioState { audioState = .idle }
+        PlaybackSession.end(changed: playbackOwnsSession)
+        playbackOwnsSession = false
     }
 }
 

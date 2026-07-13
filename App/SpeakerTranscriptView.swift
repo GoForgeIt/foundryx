@@ -238,6 +238,9 @@ struct SpeakerTagSheet: View {
     private enum SampleState: Equatable { case idle, loading, playing, unavailable, failed }
     @State private var sampleState: SampleState = .idle
     @State private var samplePlayer: AVAudioPlayer?
+    /// Whether playVoiceSample() flipped the shared session to .playback (and so must
+    /// release it when the sample stops). False when a recording owned the session.
+    @State private var sampleOwnsSession = false
 
     var body: some View {
         GrainSheetContainer(title: "Tag speaker", onClose: { dismiss() }) {
@@ -259,6 +262,8 @@ struct SpeakerTagSheet: View {
         .onDisappear {
             samplePlayer?.stop()
             samplePlayer = nil
+            PlaybackSession.end(changed: sampleOwnsSession)
+            sampleOwnsSession = false
         }
     }
 
@@ -315,6 +320,8 @@ struct SpeakerTagSheet: View {
                     samplePlayer?.stop()
                     samplePlayer = nil
                     sampleState = .idle
+                    PlaybackSession.end(changed: sampleOwnsSession)
+                    sampleOwnsSession = false
                 } else {
                     Task { await playVoiceSample() }
                 }
@@ -360,9 +367,10 @@ struct SpeakerTagSheet: View {
                 await AudioReplayCache.shared.put(cacheKey, wav: converted)
                 wav = converted
             }
-            // Own the audio session for playback (else iOS plays silently).
-            try? AVAudioSession.sharedInstance().setCategory(.playback, options: [])
-            try? AVAudioSession.sharedInstance().setActive(true)
+            // Playback needs the audio session (else iOS plays silently) — but must
+            // never STEAL it from a live phone-mic recording (that churns routes
+            // against the record engine).
+            sampleOwnsSession = PlaybackSession.begin()
             let player = try AVAudioPlayer(data: wav!)
             let windowSeconds = Double(window.endMs - window.startMs) / 1000.0
             // LEGACY-DOOR fallback: a door predating range support ignores the
@@ -383,9 +391,13 @@ struct SpeakerTagSheet: View {
                     player.stop()
                     sampleState = .idle
                     samplePlayer = nil
+                    PlaybackSession.end(changed: sampleOwnsSession)
+                    sampleOwnsSession = false
                 }
             }
         } catch {
+            PlaybackSession.end(changed: sampleOwnsSession)
+            sampleOwnsSession = false
             sampleState = .failed
         }
     }
