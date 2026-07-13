@@ -52,6 +52,12 @@ struct SpeakerTranscriptSection: View {
     let transcript: SpeakerTranscript
     /// Called after a successful confirm/correct so the detail view re-fetches content.
     let onChanged: () async -> Void
+    /// Transcript-search highlights (track 20260713T0904): matches whose `row`
+    /// indexes `transcript.turns`. Empty = no search active — the defaults keep
+    /// every existing call site (and its behavior) unchanged.
+    var searchMatches: [TranscriptMatch] = []
+    /// The match the search cursor is on — emphasized stronger than the rest.
+    var currentMatch: TranscriptMatch? = nil
 
     @State private var tagging: CaptureSpeaker?
 
@@ -65,13 +71,18 @@ struct SpeakerTranscriptSection: View {
                     }
                 }
             }
-            ForEach(transcript.turns) { turn in
+            ForEach(Array(transcript.turns.enumerated()), id: \.element.id) { index, turn in
                 SpeakerTurnRow(
                     turn: turn,
                     transcript: transcript,
                     onTapSpeaker: { tagging = transcript.speaker(for: turn.slot) },
-                    onConfirmInferred: { await confirmInferred(slot: turn.slot) }
+                    onConfirmInferred: { await confirmInferred(slot: turn.slot) },
+                    highlightRanges: searchMatches.filter { $0.row == index }.map(\.range),
+                    currentRange: currentMatch.flatMap { $0.row == index ? $0.range : nil }
                 )
+                // Explicit id so the detail's search can scroll next/previous
+                // straight to a turn (matches the ForEach identity).
+                .id(turn.id)
             }
         }
         .sheet(item: $tagging) { speaker in
@@ -101,6 +112,10 @@ struct SpeakerTurnRow: View {
     let transcript: SpeakerTranscript
     let onTapSpeaker: () -> Void
     let onConfirmInferred: () async -> Void
+    /// Search-match character ranges within `turn.text` (empty = no search).
+    var highlightRanges: [Range<Int>] = []
+    /// The current match's range, when it lives in this turn.
+    var currentRange: Range<Int>? = nil
 
     private var speaker: CaptureSpeaker { transcript.speaker(for: turn.slot) }
     private var accent: Color { SpeakerPalette.accent(transcript.colorIndex(for: turn.slot)) }
@@ -131,8 +146,10 @@ struct SpeakerTurnRow: View {
             }
             .buttonStyle(.plain)
 
-            // Turn text — ghosted while the speaker is only a tentative (inferred) match.
-            Text(turn.text)
+            // Turn text — ghosted while the speaker is only a tentative (inferred)
+            // match; search matches render highlighted (current match strongest).
+            Text(TranscriptHighlighter.attributed(
+                turn.text, ranges: highlightRanges, current: currentRange))
                 .grainTextStyle(.body)
                 .foregroundStyle(GrainColor.ink)
                 .opacity(speaker.isInferred ? 0.6 : 1.0)
