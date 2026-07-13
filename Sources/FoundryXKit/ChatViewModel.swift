@@ -105,10 +105,21 @@ public final class ChatViewModel: ObservableObject {
         public let routeMs: Int, ttftMs: Int, genMs: Int, totalMs: Int, tokens: Int
     }
 
+    /// A file the agent wrote this turn, announced by the door before `done`
+    /// (track 20260713T1500). Offered in the conversation; fetched on tap.
+    public struct RunArtifact: Identifiable, Equatable, Sendable {
+        public let name: String
+        public let mime: String
+        public var id: String { name }
+    }
+
     @Published public private(set) var messages: [Message] = []
     /// The current turn's inline tool-activity trace, in the order the agent took each
     /// action. Cleared at the start of each user turn; folded from `toolCall`/`toolResult`.
     @Published public private(set) var activities: [ToolActivity] = []
+    /// Files the agent wrote THIS turn (an artifact offer belongs to its turn —
+    /// cleared with the next user turn, deduped by name).
+    @Published public private(set) var artifacts: [RunArtifact] = []
     @Published public private(set) var turnState: TurnState = .idle
     @Published public private(set) var lastBoundary: String?
     @Published public private(set) var connection: ConnectionState = .idle
@@ -142,6 +153,7 @@ public final class ChatViewModel: ObservableObject {
         messages.append(Message(role: "assistant", text: ""))
         turnState = .streaming
         activities = []
+        artifacts = []
         thinkingMs = 0
         lastTiming = nil
         lastErrorReason = nil
@@ -202,6 +214,12 @@ public final class ChatViewModel: ObservableObject {
             // are not runs (features/ambient-answer-loop.feature).
             if case .completed = turnState, !activities.isEmpty {
                 onRunCompleted?(activities)
+            }
+        case .artifact(let name, let mime):
+            // The door announces only files that actually exist in the agent's
+            // sandbox; dedupe on retransmit.
+            if !artifacts.contains(where: { $0.name == name }) {
+                artifacts.append(RunArtifact(name: name, mime: mime))
             }
         case .other:
             break

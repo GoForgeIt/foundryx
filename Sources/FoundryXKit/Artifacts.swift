@@ -63,6 +63,15 @@ public struct LoadedArtifact: Equatable, Sendable {
 
 // MARK: - Fetch seam
 
+/// The door's run-artifact route contract, one place (the desktop serves
+/// GET /foundryx/run-artifact/<name>, bearer-gated; names are single safe
+/// segments by construction — the door refuses anything else at routing time).
+public enum RunArtifactRoute {
+    public static func path(name: String) -> String {
+        "/foundryx/run-artifact/\(name)"
+    }
+}
+
 /// The seam over the door file route. Production: DoorArtifactSource (below).
 /// Tests: a double. `nil` = the door answered 404 — the file isn't available
 /// (pruned, or never produced) — distinct from a transport failure (throw).

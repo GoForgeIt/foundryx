@@ -20,6 +20,8 @@ struct ChatScreen: View {
     @State private var sessionId = ""
     @State private var streaming = false
     @State private var showingChats = false
+    /// A run artifact the user tapped to view (sheet with the in-app viewers).
+    @State private var viewingArtifact: ChatViewModel.RunArtifact?
     @State private var models: [ModelOption] = []
     /// The conversation currently hydrated into `model` — guards against reloading the
     /// live view mid-stream when nothing actually switched.
@@ -36,7 +38,10 @@ struct ChatScreen: View {
             ScrollView {
                 ChatView(model: model,
                          onApprove: { answer($0, "always") },
-                         onReject: { answer($0, "reject") })
+                         onReject: { answer($0, "reject") },
+                         // A file the agent wrote this turn — view it in place
+                         // (fetched from the desktop over the door, track 20260713T1500).
+                         onOpenArtifact: { viewingArtifact = $0 })
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .scrollDismissesKeyboard(.interactively)
@@ -77,6 +82,21 @@ struct ChatScreen: View {
         .onReceive(AmbientCardBroker.shared.$pendingSeed) { _ in consumeAmbientSeed() }
         .sheet(isPresented: $showingChats) {
             ChatListSheet(store: store) { showingChats = false }
+        }
+        .sheet(item: $viewingArtifact) { artifact in
+            NavigationStack {
+                ArtifactPane(
+                    path: RunArtifactRoute.path(name: artifact.name),
+                    filename: artifact.name,
+                    mime: artifact.mime,
+                    source: DoorArtifactSource(target: target, log: log)
+                )
+                .navigationTitle(artifact.name)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    Button("Done") { viewingArtifact = nil }
+                }
+            }
         }
     }
 

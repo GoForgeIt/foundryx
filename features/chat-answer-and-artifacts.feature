@@ -94,3 +94,19 @@ Feature: Answers, agent runs, and their artifacts are legible
     Given a run references a file the desktop no longer has
     When I open it
     Then I'm told the file isn't available rather than shown an error page
+
+  # ── The stream announces what the agent wrote (track 20260713T1500) ──
+
+  Scenario: a file the agent wrote arrives as an artifact in the chat
+    Given a chat turn during which the agent wrote "report.md"
+    Then the conversation offers "report.md" to view
+    And opening it fetches the file from my desktop
+
+  Scenario: artifacts belong to their turn
+    Given a chat turn that produced an artifact
+    When the next turn starts
+    Then the previous turn's artifact offer is gone
+
+  Scenario: the same artifact announced twice is offered once
+    Given a chat turn during which the agent wrote "report.md" twice
+    Then the conversation offers "report.md" to view once

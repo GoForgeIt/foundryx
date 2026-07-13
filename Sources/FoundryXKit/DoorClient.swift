@@ -84,6 +84,9 @@ public enum DoorEvent: Equatable, Sendable {
     /// (e.g. confidential content kept local, auth expired). `code` is the raw router
     /// reason for branching; `reason` is the user-facing message.
     case error(code: String, reason: String)
+    /// A file the agent wrote into its sandbox this turn (track 20260713T1500).
+    /// The door announces it before `done`; fetch via RunArtifactRoute.
+    case artifact(name: String, mime: String)
     case other(type: String, raw: String)
 
     /// Parse one SSE `data:` payload (a runtime event JSON) into a typed event.
@@ -118,6 +121,7 @@ public enum DoorEvent: Equatable, Sendable {
                                       genMs: int("gen_ms"), totalMs: int("total_ms"), tokens: int("tokens"))
         case "done": return .done(reason: str("reason"))
         case "error": return .error(code: str("code"), reason: str("reason"))
+        case "artifact": return .artifact(name: str("name"), mime: str("mime"))
         default: return .other(type: type, raw: payload)
         }
     }
@@ -366,6 +370,7 @@ public final class DoorClient: @unchecked Sendable {
             return "timing route=\(r) ttft=\(t) gen=\(g) total=\(total)ms tokens=\(n)"
         case .done(let reason): return "done: \(reason)"
         case .error(let code, _): return "error: \(code)"
+        case .artifact(let name, _): return "artifact: \(name)"
         case .other(let type, _): return "other: \(type)"
         }
     }

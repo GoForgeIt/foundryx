@@ -19,13 +19,18 @@ public struct ChatView: View {
     /// The user opened the trace fold this turn (resets with the next turn's
     /// activities clear — the array becomes short again and the fold disappears).
     @State private var traceUnfolded = false
+    /// Opens a file the agent wrote this turn (the host screen presents the
+    /// viewer; nil = artifact rows still render, tap does nothing).
+    public var onOpenArtifact: ((ChatViewModel.RunArtifact) -> Void)?
 
     public init(model: ChatViewModel,
                 onApprove: @escaping (String) -> Void = { _ in },
-                onReject: @escaping (String) -> Void = { _ in }) {
+                onReject: @escaping (String) -> Void = { _ in },
+                onOpenArtifact: ((ChatViewModel.RunArtifact) -> Void)? = nil) {
         self.model = model
         self.onApprove = onApprove
         self.onReject = onReject
+        self.onOpenArtifact = onOpenArtifact
     }
 
     public var body: some View {
@@ -82,6 +87,37 @@ public struct ChatView: View {
                 .onChange(of: model.activities.isEmpty) { cleared in
                     if cleared { traceUnfolded = false }   // next turn folds afresh
                 }
+            }
+
+            // Files the agent wrote this turn (announced by the door only for
+            // files that actually exist in its sandbox) — tap to view.
+            if !model.artifacts.isEmpty {
+                VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                    ForEach(model.artifacts) { artifact in
+                        Button {
+                            onOpenArtifact?(artifact)
+                        } label: {
+                            HStack(spacing: GrainSpacing.x2) {
+                                Image(grain: .doc)
+                                    .font(.system(size: 13, weight: .light))
+                                    .foregroundStyle(GrainColor.forgeBlue)
+                                Text("View \(artifact.name)")
+                                    .grainTextStyle(.caption)
+                                    .foregroundStyle(GrainColor.ink)
+                                Spacer()
+                            }
+                            .padding(.horizontal, GrainSpacing.x3)
+                            .padding(.vertical, GrainSpacing.x2)
+                            .background(RoundedRectangle(cornerRadius: GrainRadius.md, style: .continuous)
+                                .fill(GrainColor.forgeBlueBg))
+                            .overlay(RoundedRectangle(cornerRadius: GrainRadius.md, style: .continuous)
+                                .strokeBorder(GrainColor.forgeBlueBorder, lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("run-artifacts")
             }
 
             switch model.turnState {
