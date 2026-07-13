@@ -21,6 +21,9 @@ final class AmbientCardBroker: ObservableObject {
     /// The seed text an accepted card wants sent as a new chat turn. ChatScreen
     /// consumes (and clears) it.
     @Published var pendingSeed: String?
+    /// A delivered answer the user tapped — MainTabs presents the answer
+    /// surface while this is set (features/ambient-answer-loop.feature).
+    @Published var pendingAnswer: AmbientAnswer?
     /// Installed by RootView: navigate to the chat tab.
     var onNavigate: (() -> Void)?
 
@@ -28,6 +31,11 @@ final class AmbientCardBroker: ObservableObject {
         pendingSeed = seed
         onNavigate?()
         Self.logOutcome("run", seed: seed)
+    }
+
+    /// Tapping an answer notification opens the full answer surface.
+    func showAnswer(_ answer: AmbientAnswer) {
+        pendingAnswer = answer
     }
 
     nonisolated static func dismissed(seed: String) {

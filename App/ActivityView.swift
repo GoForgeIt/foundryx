@@ -279,7 +279,8 @@ struct ActivityView: View {
     private func reload() {
         let entries = ActivityStore.entries(
             decisionLogURL: decisionLogURL,
-            cardsLogURL: ActivityStore.cardsLogURL(besides: decisionLogURL))
+            cardsLogURL: ActivityStore.cardsLogURL(besides: decisionLogURL),
+            answersLogURL: ActivityStore.answersLogURL(besides: decisionLogURL))
         allEntries = entries
         days = ActivityStore.days(entries: entries)
         measures = ActivityStore.measures(entries: entries)

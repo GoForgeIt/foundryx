@@ -132,6 +132,8 @@ private struct MainTabs: View {
     // tab switches and app foregrounding (its own Application Support JSON file).
     @StateObject private var chats = ChatConversationStore(storageURL: ChatConversationStore.defaultStorageURL())
     @StateObject private var router = TabRouter()
+    /// The ambient broker: pendingSeed (chat) + pendingAnswer (answer surface).
+    @ObservedObject private var broker = AmbientCardBroker.shared
     // Phone-tier only: on-device brain readiness for the "setting up your private
     // on-device brain" banner (the model download UX). Held so the STT engine can
     // report into it. Unused (`.idle`) in computer mode.
@@ -236,7 +238,8 @@ private struct MainTabs: View {
                             window: window,
                             windowAudioB64: audioB64)
                     }
-                    AmbientNotifier.post(candidate: candidate, outcome: outcome)
+                    AmbientNotifier.post(candidate: candidate, outcome: outcome,
+                                         captureId: captureId.isEmpty ? nil : captureId)
                 }
             }
             AmbientNotifier.requestAuthorizationIfNeeded()
@@ -371,6 +374,15 @@ private struct MainTabs: View {
                 recordingActive: manager.active != nil,
                 onCaptureTab: router.selected == .capture) {
                 RecordingPill(manager: manager) { router.selected = .capture }
+            }
+        }
+        // A tapped answer notification opens the full answer surface
+        // (features/ambient-answer-loop.feature).
+        .sheet(isPresented: Binding(
+            get: { broker.pendingAnswer != nil },
+            set: { if !$0 { broker.pendingAnswer = nil } })) {
+            if let answer = broker.pendingAnswer {
+                AnswerSurfaceView(answer: answer, onDone: { broker.pendingAnswer = nil })
             }
         }
     }

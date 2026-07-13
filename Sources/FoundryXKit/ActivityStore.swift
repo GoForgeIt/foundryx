@@ -147,6 +147,14 @@ public enum ActivityStore {
             .appendingPathComponent("ambient-cards.jsonl")
     }
 
+    /// The app-event log (answers delivered, ratings given, agent runs) lives
+    /// beside the other two. Written by AmbientNotifier (answers), the answer
+    /// surface (ratings), and the chat run hook (agent runs).
+    public static func answersLogURL(besides decisionLogURL: URL) -> URL {
+        decisionLogURL.deletingLastPathComponent()
+            .appendingPathComponent("ambient-answers.jsonl")
+    }
+
     /// The full ledger, newest first. Both files are read-only and optional —
     /// a missing file simply contributes nothing.
     public static func entries(decisionLogURL: URL, cardsLogURL: URL) -> [ActivityEntry] {
@@ -157,6 +165,38 @@ public enum ActivityStore {
             classify($1, id: "card#\($0)")
         }
         return (decisions + cards).sorted {
+            $0.ts == $1.ts ? $0.id > $1.id : $0.ts > $1.ts
+        }
+    }
+
+    /// The three-log ledger (features/ambient-answer-loop.feature): the two
+    /// ambient logs plus the app-event log. Rating lines ANNOTATE the most
+    /// recent answer at-or-before their time — they never become entries of
+    /// their own, and a rating with no answer to land on is dropped (nothing
+    /// is invented).
+    public static func entries(decisionLogURL: URL, cardsLogURL: URL,
+                               answersLogURL: URL) -> [ActivityEntry] {
+        let base = entries(decisionLogURL: decisionLogURL, cardsLogURL: cardsLogURL)
+
+        var events: [ActivityEntry] = []
+        var ratings: [(ts: UInt64, word: String)] = []
+        for (i, raw) in readLines(at: answersLogURL).enumerated() {
+            if raw.kind == nil, raw.answer == nil, let r = raw.rating {
+                // A feedback line from the answer surface: rating and/or note.
+                let word = r == "not-useful" ? "not useful" : r
+                if !word.isEmpty, word != "none" { ratings.append((raw.ts ?? 0, word)) }
+            } else if let entry = classify(raw, id: "event#\(i)") {
+                events.append(entry)
+            }
+        }
+        for r in ratings {
+            guard let idx = events.lastIndex(where: { $0.kind == .answer && $0.ts <= r.ts })
+            else { continue }   // nowhere to land — dropped, not invented
+            let e = events[idx]
+            events[idx] = ActivityEntry(id: e.id, ts: e.ts, kind: e.kind,
+                                        detail: e.detail, rating: r.word, source: e.source)
+        }
+        return (base + events).sorted {
             $0.ts == $1.ts ? $0.id > $1.id : $0.ts > $1.ts
         }
     }

@@ -126,6 +126,11 @@ public final class ChatViewModel: ObservableObject {
     /// refusal message instead of a bare "refused". Cleared at the start of each turn.
     @Published public private(set) var lastErrorReason: String?
 
+    /// Fired when a turn COMPLETES having used tools — an agent run, handed to
+    /// the activity-ledger writer (features/ambient-answer-loop.feature).
+    /// Refused turns and plain text turns never fire it.
+    public var onRunCompleted: (([ToolActivity]) -> Void)?
+
     public init() {}
 
     /// Drive the connection indicator from the app's stream loop.
@@ -192,6 +197,12 @@ public final class ChatViewModel: ObservableObject {
             thinkingMs = 0; turnStartedAt = nil
             turnState = (reason == "refused") ? .refused(reason: lastErrorReason)
                                               : .completed(reason: reason)
+            // A COMPLETED turn that used tools is an agent run — hand its
+            // activities to the ledger writer. Refused and plain text turns
+            // are not runs (features/ambient-answer-loop.feature).
+            if case .completed = turnState, !activities.isEmpty {
+                onRunCompleted?(activities)
+            }
         case .other:
             break
         }

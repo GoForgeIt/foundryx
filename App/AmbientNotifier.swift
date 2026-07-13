@@ -40,7 +40,14 @@ final class AmbientNotificationPresenter: NSObject, UNUserNotificationCenterDele
         let seed = info["seed"] as? String
         switch response.actionIdentifier {
         case AmbientNotifier.runAction, UNNotificationDefaultActionIdentifier:
-            if let seed {
+            if let answerText = info["answerText"] as? String {
+                // A delivered ANSWER: tapping opens the full answer surface
+                // (features/ambient-answer-loop.feature), not a chat seed.
+                let answer = AmbientAnswer(
+                    title: info["answerTitle"] as? String ?? "From your memory",
+                    text: answerText)
+                Task { @MainActor in AmbientCardBroker.shared.showAnswer(answer) }
+            } else if let seed {
                 Task { @MainActor in AmbientCardBroker.shared.run(seed: seed) }
             }
         case AmbientNotifier.dismissAction, UNNotificationDismissActionIdentifier:
@@ -84,15 +91,22 @@ enum AmbientNotifier {
     /// actual answer from the user's memory (informational). todo/workflow/agent
     /// become CONFIRM CARDS — "Want me to X?" with Run/Dismiss; Run seeds a kiln
     /// chat with the moment (nothing executes without it).
-    static func post(candidate: AmbientCandidate, outcome: AmbientRouteOutcome?) {
+    static func post(candidate: AmbientCandidate, outcome: AmbientRouteOutcome?,
+                     captureId: String? = nil) {
         let title: String
         let body: String
         var seed: String?
+        var answerPayload: String?
         let ask = candidate.summary.isEmpty ? candidate.utterance : candidate.summary
         switch (outcome?.route, outcome?.answer) {
         case ("lookup", .some(let answer)):
             title = "From your memory"
             body = answer
+            answerPayload = answer
+            // The delivery is a real event: remember it in the activity ledger
+            // (features/ambient-answer-loop.feature).
+            logAnswerDelivered(answer: answer, utterance: candidate.utterance,
+                               captureId: captureId)
         case ("lookup", nil):
             title = "FoundryX"
             body = "You wanted to look something up — I checked your memory but didn't find it: “\(candidate.utterance)”"
@@ -118,7 +132,32 @@ enum AmbientNotifier {
             body = "\(candidate.summary.isEmpty ? "Something I can help with" : candidate.summary) — “\(candidate.utterance)”"
             seed = chatSeed(candidate)
         }
-        deliver(title: title, body: body, preview: false, seed: seed)
+        deliver(title: title, body: body, preview: false, seed: seed,
+                answerText: answerPayload)
+    }
+
+    /// One JSONL line per delivered answer — what the activity ledger reads
+    /// (ActivityStore.answersLogURL; same append pattern as the other logs).
+    private static func logAnswerDelivered(answer: String, utterance: String,
+                                           captureId: String?) {
+        let url = CaptureWAL.documentsCaptures().appendingPathComponent("ambient-answers.jsonl")
+        var obj: [String: Any] = [
+            "ts": Int(Date().timeIntervalSince1970),
+            "kind": "answer",
+            "answer": String(answer.prefix(500)),
+            "utterance": String(utterance.prefix(300)),
+        ]
+        if let captureId, !captureId.isEmpty { obj["captureId"] = captureId }
+        guard let line = try? JSONSerialization.data(withJSONObject: obj) else { return }
+        var out = line
+        out.append(UInt8(ascii: "\n"))
+        if let h = try? FileHandle(forWritingTo: url) {
+            defer { try? h.close() }
+            _ = try? h.seekToEnd()
+            try? h.write(contentsOf: out)
+        } else {
+            try? out.write(to: url)
+        }
     }
 
     /// The first chat turn an accepted card sends — the moment + the ask, so the
@@ -136,7 +175,8 @@ enum AmbientNotifier {
             preview: true)
     }
 
-    private static func deliver(title: String, body: String, preview: Bool, seed: String? = nil) {
+    private static func deliver(title: String, body: String, preview: Bool,
+                                seed: String? = nil, answerText: String? = nil) {
         let center = UNUserNotificationCenter.current()
         let fire: () -> Void = {
             let content = UNMutableNotificationContent()
@@ -147,6 +187,11 @@ enum AmbientNotifier {
             if let seed {
                 content.categoryIdentifier = cardCategory   // Run/Dismiss actions
                 content.userInfo["seed"] = seed
+            }
+            if let answerText {
+                // Tap opens the full answer surface (not a chat seed).
+                content.userInfo["answerText"] = answerText
+                content.userInfo["answerTitle"] = title
             }
             let req = UNNotificationRequest(
                 identifier: "ambient-\(UUID().uuidString)",

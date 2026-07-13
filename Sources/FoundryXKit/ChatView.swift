@@ -16,6 +16,9 @@ public struct ChatView: View {
     @ObservedObject public var model: ChatViewModel
     public var onApprove: (String) -> Void
     public var onReject: (String) -> Void
+    /// The user opened the trace fold this turn (resets with the next turn's
+    /// activities clear — the array becomes short again and the fold disappears).
+    @State private var traceUnfolded = false
 
     public init(model: ChatViewModel,
                 onApprove: @escaping (String) -> Void = { _ in },
@@ -53,12 +56,32 @@ public struct ChatView: View {
 
             // Inline tool-activity trace — one compact, expandable row per tool action the
             // agent took this turn (Claude-Code-style visibility into read/edit/bash/…).
+            // Long runs stay readable: older steps fold behind "N more steps"; the
+            // most recent window stays visible (track 20260713T0906 AC2).
             if !model.activities.isEmpty {
+                let fold = RunStepFold.layout(stepCount: model.activities.count)
                 VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-                    ForEach(model.activities) { ToolActivityRow(activity: $0) }
+                    if let label = fold.foldLabel, !traceUnfolded {
+                        Button {
+                            traceUnfolded = true
+                        } label: {
+                            Text(label)
+                                .grainTextStyle(.caption)
+                                .foregroundStyle(GrainColor.textMuted)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("tool-activity-fold")
+                    }
+                    let shown = traceUnfolded
+                        ? model.activities
+                        : Array(model.activities[fold.visible])
+                    ForEach(shown) { ToolActivityRow(activity: $0) }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityIdentifier("tool-activity-trace")
+                .onChange(of: model.activities.isEmpty) { cleared in
+                    if cleared { traceUnfolded = false }   // next turn folds afresh
+                }
             }
 
             switch model.turnState {

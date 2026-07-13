@@ -45,7 +45,33 @@ struct ChatScreen: View {
             GrainComposer("Message the local brain…", text: $input, isSending: streaming, onSend: send)
         }
         .grainBackground()
-        .onAppear { hydrateActive(); Task { await loadModels() }; consumeAmbientSeed() }
+        .onAppear {
+            hydrateActive(); Task { await loadModels() }; consumeAmbientSeed()
+            // A completed tool-using turn is an agent run — remember it in the
+            // activity ledger (features/ambient-answer-loop.feature).
+            model.onRunCompleted = { activities in
+                let steps = activities.count
+                let first = activities.first?.name ?? "tools"
+                let detail = "Ran \(steps) step\(steps == 1 ? "" : "s") · \(first)"
+                let url = CaptureWAL.documentsCaptures()
+                    .appendingPathComponent("ambient-answers.jsonl")
+                let line = (try? JSONSerialization.data(withJSONObject: [
+                    "ts": Int(Date().timeIntervalSince1970),
+                    "kind": "agent_run",
+                    "answer": detail,
+                ])) ?? Data()
+                guard !line.isEmpty else { return }
+                var out = line
+                out.append(UInt8(ascii: "\n"))
+                if let h = try? FileHandle(forWritingTo: url) {
+                    defer { try? h.close() }
+                    _ = try? h.seekToEnd()
+                    try? h.write(contentsOf: out)
+                } else {
+                    try? out.write(to: url)
+                }
+            }
+        }
         .onChange(of: store.activeId) { _ in hydrateActive() }
         // An accepted ambient card ([Run]) — also fires when already on the chat tab.
         .onReceive(AmbientCardBroker.shared.$pendingSeed) { _ in consumeAmbientSeed() }
