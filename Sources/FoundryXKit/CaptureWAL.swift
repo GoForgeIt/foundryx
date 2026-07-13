@@ -280,6 +280,52 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         guard http.statusCode == 200 else { throw DoorError.http(http.statusCode) }
     }
 
+    // MARK: bulk-ACK (the resync handshake, capture-sync AC1)
+
+    /// Bulk-mark segments ACK'd from the door's resync handshake: the door reported
+    /// it ALREADY durably stores `seqs` (its manifest's `segment_seqs`), so write the
+    /// same `.ack` markers a 200 upload ACK would — recovering ACKs lost to a tunnel
+    /// drop mid-drain, so those segments are never re-uploaded. Only segments present
+    /// on disk are marked (a door seq we don't hold is ignored); already-ACK'd
+    /// segments are untouched. Advances + persists the upload watermark over the new
+    /// contiguous ACK'd run, exactly as live ACKs do. Returns the number of NEWLY
+    /// marked segments so the owner can log the resync savings.
+    @discardableResult
+    public func bulkMarkSynced(_ seqs: [UInt64]) -> Int {
+        let doorSeqs = Set(seqs)
+        guard !doorSeqs.isEmpty else { return 0 }
+        var newlyMarked = 0
+        for (seq, segURL) in allSegmentURLs() where doorSeqs.contains(seq) {
+            let ack = ackURL(segURL)
+            guard !FileManager.default.fileExists(atPath: ack.path) else { continue }
+            do {
+                try Data().write(to: ack, options: [.atomic])
+                newlyMarked += 1
+            } catch {
+                log?.warn("capture \(captureId): bulk-ACK seq \(seq) marker write failed: \(error.localizedDescription)")
+            }
+        }
+        guard newlyMarked > 0 else { return 0 }
+        advanceWatermarkOverContiguousAcks()
+        publish()
+        return newlyMarked
+    }
+
+    /// Advance the watermark over whatever contiguous `.ack` run now starts at
+    /// `watermark + 1` (bulk-ACK can fill holes anywhere, not just the next seq),
+    /// persisting it. Monotonic — never moves backward.
+    private func advanceWatermarkOverContiguousAcks() {
+        wmLock.lock()
+        var next = UInt64(watermark + 1)
+        while FileManager.default.fileExists(
+            atPath: ackURL(dir.appendingPathComponent(CaptureWAL.segName(next))).path) {
+            watermark = Int64(next); next += 1
+        }
+        let w = watermark
+        wmLock.unlock()
+        persistWatermark(w)
+    }
+
     // MARK: upload watermark (durable resume point — never re-send an ACK'd segment)
 
     private func watermarkURL() -> URL { dir.appendingPathComponent(".upload-watermark") }

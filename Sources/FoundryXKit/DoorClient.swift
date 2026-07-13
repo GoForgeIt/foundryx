@@ -820,6 +820,47 @@ public final class DoorClient: @unchecked Sendable {
         return data
     }
 
+    /// The resync handshake (capture-sync AC1): ask the door which segment seqs it
+    /// ALREADY stores durably for a capture (`GET /foundryx/capture/{id}/segments` →
+    /// `{"seqs":[..]}`), so the drain can bulk-mark those ACK'd locally instead of
+    /// re-uploading audio the desktop holds (lost ACKs after a tunnel drop). Returns
+    /// `nil` on a 404 — an OLD door without the endpoint (or a capture the door has
+    /// never seen): the caller behaves exactly as today (full drain, no error).
+    /// Relay-aware dual-path like captureAudio; rides the BULK capture channel
+    /// (`target.relay`, same as segment uploads/finalize) so the handshake reflects
+    /// the same tunnel health as the drain it gates.
+    public func captureSegments(captureId: String) async throws -> [UInt64]? {
+        struct SegmentsResponse: Decodable { let seqs: [UInt64] }
+        let path = "/foundryx/capture/\(captureId)/segments"
+        if let relay = target.relay {
+            let resp = try await RelayHTTP.roundTrip(
+                relay: relay, bearer: target.bearer, method: "GET",
+                path: path,
+                session: session, log: log, useMux: target.useMux)
+            if resp.status == 401 { throw DoorError.unauthorized }
+            if resp.status == 404 { return nil }
+            guard resp.status == 200 else { throw DoorError.http(resp.status) }
+            return try JSONDecoder().decode(SegmentsResponse.self, from: resp.body).seqs
+        }
+        let s = target.baseURL.absoluteString
+        let base = s.hasSuffix("/") ? String(s.dropLast()) : s
+        guard let url = URL(string: "\(base)\(path)") else {
+            throw DoorError.transport("bad segments url")
+        }
+        var r = URLRequest(url: url)
+        r.httpMethod = "GET"
+        r.setValue("Bearer \(target.bearer)", forHTTPHeaderField: "Authorization")
+        r.timeoutInterval = 30
+        let (data, response) = try await session.data(for: r)
+        guard let http = response as? HTTPURLResponse else {
+            throw DoorError.transport("non-HTTP response")
+        }
+        if http.statusCode == 401 { throw DoorError.unauthorized }
+        if http.statusCode == 404 { return nil }
+        guard http.statusCode == 200 else { throw DoorError.http(http.statusCode) }
+        return try JSONDecoder().decode(SegmentsResponse.self, from: data).seqs
+    }
+
     /// Route an ambient-gate candidate through the door's Tier-2 router
     /// (`POST /foundryx/ambient/candidate`): the door classifies it
     /// (lookup/todo/workflow/agent) and, for lookups, answers from the user's OWN

@@ -462,6 +462,11 @@ public final class CaptureManager: ObservableObject {
     /// tests). Drives the proactive 14-day transcript cache ("fetch on sight"). Returns
     /// nil on any transport error (the cache just stays empty until next sight).
     private let fetchContent: @Sendable (String) async -> CaptureContent?
+    /// Resync-handshake seam (capture-sync AC1, injectable for door-free tests): ask
+    /// the door which segment seqs it ALREADY durably stores for a capture. `nil` ⇒
+    /// an old door without the endpoint (404) — no resync, drain exactly as today.
+    /// Throws on transport failure so the drain retries the handshake next pass.
+    private let fetchDoorSegments: @Sendable (String) async throws -> [UInt64]?
     /// One-shot location at conversation boundaries (When-In-Use, opportunistic —
     /// F5). Degrades to no-location off the main app / when denied.
     private let locationProvider: ConversationLocationProviding
@@ -502,6 +507,13 @@ public final class CaptureManager: ObservableObject {
     /// Per-capture upload retry state (consecutive failures + earliest next attempt).
     private struct RetryState { var failures = 0; var nextEligible: TimeInterval = 0 }
     private var retryStates: [String: RetryState] = [:]
+
+    /// Captures whose resync handshake (AC1) already ran this tunnel-session — so the
+    /// door's seq set is fetched ONCE per capture, not on every 5s drain tick. An
+    /// entry is cleared when the capture's uploads FAIL (a dropped socket / tunnel
+    /// flap — the moment ACKs can be lost), so the next pass after a reconnect
+    /// re-fetches cheaply instead of re-uploading blind (AC4).
+    private var resyncedCaptures: Set<String> = []
 
     /// Fired when an upload is rejected as auth-expired (401). The app wires this to the
     /// remote session so it refreshes the id_token ONCE and, failing that, surfaces the
@@ -630,6 +642,9 @@ public final class CaptureManager: ObservableObject {
         authExpired = false
         authExpiredFired = false
         retryStates.removeAll()
+        // A re-auth / rebuilt pipeline is a new tunnel-session: re-run the resync
+        // handshake per capture instead of trusting a pre-flap seq snapshot.
+        resyncedCaptures.removeAll()
     }
 
     // MARK: live on-device transcription (Feature 1) — additive, ephemeral, off-path
@@ -659,6 +674,7 @@ public final class CaptureManager: ObservableObject {
                 finalize: (@Sendable (String, ConversationMeta?) async throws -> Void)? = nil,
                 deleteCapture: (@Sendable (String) async throws -> Void)? = nil,
                 fetchContent: (@Sendable (String) async -> CaptureContent?)? = nil,
+                fetchSegments: (@Sendable (String) async throws -> [UInt64]?)? = nil,
                 locationProvider: ConversationLocationProviding? = nil,
                 liveTranscriber: LiveTranscriberFactory? = nil,
                 uploadSegment: (@Sendable (String, UInt64, Data) async throws -> Void)? = nil) {
@@ -695,6 +711,14 @@ public final class CaptureManager: ObservableObject {
         } else {
             let client = DoorClient(target: target, log: log)
             self.fetchContent = { captureId in try? await client.captureContent(captureId: captureId) }
+        }
+        // Default resync handshake = the real door /segments call (nil on 404 = old
+        // door → no resync). Tests inject a stub to drive the bulk-ACK path.
+        if let fetchSegments {
+            self.fetchDoorSegments = fetchSegments
+        } else {
+            let client = DoorClient(target: target, log: log)
+            self.fetchDoorSegments = { captureId in try await client.captureSegments(captureId: captureId) }
         }
         // Default location = the real When-In-Use one-shot on iOS; the no-location
         // degradation provider elsewhere (and the injected stub in door-free tests).
@@ -1784,17 +1808,24 @@ public final class CaptureManager: ObservableObject {
             // Concurrency / backlog valve: bound how many captures one tick attempts.
             if attempted >= Self.maxCapturesPerDrain { break }
             attempted += 1
+            // Resync handshake (AC1): before re-uploading, ask the door what it
+            // ALREADY has and bulk-ACK it — lost ACKs must never cause re-uploads.
+            await resyncIfNeeded(wal)
             switch await wal.sync() {
             case .idle, .progressed:
                 retryStates[id] = nil                 // healthy → reset backoff
             case .failed:
                 recordUploadFailure(id, now: now)     // transient — back off; retry FOREVER
+                // A dropped socket / flap may have lost in-flight ACKs — re-run the
+                // resync handshake on the next pass instead of re-uploading blind (AC4).
+                resyncedCaptures.remove(id)
             case .poisoned(let seq, let reason):
                 // Permanent poison on a specific segment — retire so it can't wedge the
                 // drain. The audio is KEPT (durable marker, no delete).
                 abandon(id, reason: "segment \(seq): \(reason)")
             case .authExpired:
                 recordUploadFailure(id, now: now)
+                resyncedCaptures.remove(id)
                 handleUploadAuthExpired()             // stop everything + request re-auth
                 return
             }
@@ -1805,6 +1836,33 @@ public final class CaptureManager: ObservableObject {
         await retryPendingFinalizes()
         await retryPendingDeletes()
         maybePrune()   // retention sweeps — throttled OFF the every-5s main path
+    }
+
+    /// The resync handshake (capture-sync AC1), ONCE per capture per tunnel-session:
+    /// before draining a capture with pending segments, ask the door which seqs it
+    /// ALREADY stores durably and bulk-mark those ACK'd locally — so ACKs lost to a
+    /// tunnel drop mid-drain (the desktop-restart case: 1310 segs on disk, phone still
+    /// counting 594+ "pending") never cause re-uploading audio the desktop holds.
+    /// Old-door tolerance: a 404 (`nil`) means no endpoint → memoise + behave exactly
+    /// as today (full drain, no resync, no error spam). A transport failure skips the
+    /// memo so the handshake is retried on the next drain pass.
+    private func resyncIfNeeded(_ wal: CaptureWAL) async {
+        let id = wal.captureId
+        guard !resyncedCaptures.contains(id) else { return }
+        let doorSeqs: [UInt64]?
+        do {
+            doorSeqs = try await fetchDoorSegments(id)
+        } catch {
+            // Transport failure (tunnel down / door unreachable): drain as before —
+            // the upload itself will fail + back off; re-try the handshake next pass.
+            return
+        }
+        resyncedCaptures.insert(id)
+        guard let doorSeqs, !doorSeqs.isEmpty else { return }   // old door (404) / nothing stored yet
+        let skipped = wal.bulkMarkSynced(doorSeqs)
+        if skipped > 0 {
+            log?.info("capture \(id): resync — \(skipped) segments already on desktop, skipped")
+        }
     }
 
     /// Record an upload failure: bump the consecutive-failure count and schedule the
