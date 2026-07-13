@@ -127,6 +127,20 @@ struct OnboardingVoiceStep: View {
     @State private var phase: Phase = .intro
     @State private var mic: MicFrameSource?
     @State private var frames: [Data] = []
+    /// Live voice energy for the ring, from recent Opus frame sizes (silence
+    /// frames are a few bytes; speech frames are tens — the door's VAD uses the
+    /// same property). Smoothed on append.
+    @State private var ringEnergy: Double = 0.08
+
+    /// Ring organization: how much of the read is done. Settles to 1 on save.
+    private var ringOrder: Double {
+        switch phase {
+        case .intro: return 0.5
+        case .recording(let n): return 0.15 + 0.85 * min(1, Double(n) / Double(Self.targetFrames))
+        case .saved: return 1
+        case .tooShort: return 0.2
+        }
+    }
 
     /// The read-aloud doubles as the product introduction: in the ~20 seconds it
     /// takes to speak, it teaches what FoundryX does, where the data lives, the
@@ -144,6 +158,18 @@ struct OnboardingVoiceStep: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x4) {
+            // The instrument: the SAME ring that later pulses around every recording.
+            // Here its order follows the read (chaos → settled band as they finish);
+            // its energy follows the live voice (Opus frame size ≈ voice energy).
+            ZStack {
+                GrainVoiceRing(energy: ringEnergy, order: ringOrder)
+                    .frame(width: 132, height: 132)
+                Image(grain: .mic)
+                    .font(.system(size: 26, weight: .light))
+                    .foregroundStyle(GrainColor.forgeBlue)
+            }
+            .frame(maxWidth: .infinity)
+
             Text("Teach it your voice").grainTextStyle(.title).foregroundStyle(GrainColor.ink)
             Text("Read this aloud (~20 seconds). Your voice becomes the key that lets only YOU command your agent. It never leaves your devices.")
                 .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
@@ -193,6 +219,9 @@ struct OnboardingVoiceStep: View {
                 guard case .recording = phase else { return }
                 frames.append(data)
                 phase = .recording(frames.count)
+                // Frame size → voice energy (smoothed): ~3 bytes silence, ~60+ speech.
+                let level = min(1.0, Double(data.count) / 70.0)
+                ringEnergy += (level - ringEnergy) * 0.25
                 if frames.count >= Self.targetFrames { stop() }
             }
         }
