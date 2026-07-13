@@ -394,7 +394,9 @@ public final class CaptureManager: ObservableObject {
     public static let meterBarCount = 48
 
     private let target: DoorTarget
-    private let baseDir: URL
+    /// Internal (not private) so organizer helpers in the module can reach the
+    /// same capture tree (search text, segment sizes, category store).
+    let baseDir: URL
     private let log: DoorLog?
     private let source: AudioFrameSource
     /// Optional SECOND frame source: the phone's own microphone (a `MicFrameSource`).
