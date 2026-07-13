@@ -30,10 +30,12 @@ struct SignInView: View {
                     Spacer()
 
                     brandMark
-                    Text("FoundryX")
-                        .grainTextStyle(.title)
-                        .foregroundStyle(GrainColor.ink)
-                    Text("Record, transcribe, and chat — all on your phone. Sign in once; your recordings never leave this device.")
+                    // The small-caps wordmark, same register as the welcome.
+                    Text("F O U N D R Y X")
+                        .font(.system(size: 13, design: .monospaced))
+                        .kerning(3)
+                        .foregroundStyle(GrainColor.textMuted)
+                    Text("Record, transcribe, and chat, all on your phone. Sign in once; your recordings never leave this device.")
                         .grainTextStyle(.body)
                         .foregroundStyle(GrainColor.textMuted)
                         .multilineTextAlignment(.center)
@@ -67,23 +69,13 @@ struct SignInView: View {
         }
     }
 
-    /// Placeholder brand mark — a forge-blue rounded tile with an anvil/spark
-    /// glyph. Swap for the real logo imageset once it's in the asset catalog.
+    /// The brand mark is the INSTRUMENT, not an icon tile (design law from the
+    /// welcome bakeoff: no app-icon tiles on ceremony surfaces). The same ring
+    /// the user meets at the welcome, voice enrollment, and recording — at
+    /// rest here, breathing.
     private var brandMark: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [GrainColor.forgeBlue, GrainColor.forgeBlue.opacity(0.7)],
-                        startPoint: .topLeading, endPoint: .bottomTrailing
-                    )
-                )
-                .frame(width: 84, height: 84)
-                .shadow(color: GrainColor.forgeBlue.opacity(0.35), radius: 16, y: 6)
-            Image(systemName: "hammer.fill")
-                .font(.system(size: 36, weight: .semibold))
-                .foregroundStyle(.white)
-        }
+        GrainVoiceRing(energy: 0.14, order: 0.55)
+            .frame(width: 108, height: 108)
     }
 
     @ViewBuilder private var content: some View {
