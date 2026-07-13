@@ -363,6 +363,16 @@ private struct MainTabs: View {
                 Task { await stt.prewarm() }
             }
         }
+        // The recording pill (track 20260713T0903): leaving the capture tab never
+        // stops a recording — a quiet pill shows the ticking elapsed time, taps back
+        // to the instrument, and can end the conversation right here.
+        .overlay(alignment: .top) {
+            if RecordingPillState.visible(
+                recordingActive: manager.active != nil,
+                onCaptureTab: router.selected == .capture) {
+                RecordingPill(manager: manager) { router.selected = .capture }
+            }
+        }
     }
 
     /// The "setting up your private on-device brain" banner (model download UX).
@@ -382,5 +392,36 @@ private struct MainTabs: View {
     private func syncOmiConnection() {
         if case .connected = device.connectionState { sources.setOmiConnected(true) }
         else { sources.setOmiConnected(false) }
+    }
+}
+
+/// The quiet recording pill: mini ring + ticking elapsed + End. Visible only
+/// while recording away from the capture tab (RecordingPillState); tapping the
+/// body returns to the instrument, End finalizes through the normal path.
+private struct RecordingPill: View {
+    @ObservedObject var manager: CaptureManager
+    let onOpen: () -> Void
+
+    var body: some View {
+        if let wal = manager.active {
+            HStack(spacing: GrainSpacing.x2) {
+                RecordingRingView(meter: manager.meter, paused: manager.isPaused)
+                    .frame(width: 22, height: 22)
+                ElapsedLabel(since: wal.status.startedAt)
+                Button("End") { _ = manager.endCurrentConversation() }
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.dangerRed)
+                    .buttonStyle(.plain)
+            }
+            .padding(.horizontal, GrainSpacing.x3)
+            .padding(.vertical, GrainSpacing.x1)
+            .background(Capsule().fill(GrainColor.surfaceElevated))
+            .overlay(Capsule().strokeBorder(GrainColor.border, lineWidth: 1))
+            .onTapGesture { onOpen() }
+            .padding(.top, GrainSpacing.x1)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Recording in progress")
+        }
     }
 }

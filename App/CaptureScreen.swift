@@ -56,29 +56,52 @@ private extension ConversationProgress {
 /// device + a Pause/Resume control. Below: the Omi-style timeline (each capture
 /// Recording → Saved on phone → Saved to computer) + a global "your data is safe"
 /// sync indicator so nothing ever feels lost into the phone.
-/// The live audio meter strip — isolated so the 12 Hz level tick re-renders ONLY
-/// this small view, never the conversation list above it (deep-review perf fix).
-private struct MeterStrip: View {
+/// The instrument's ring at 12 Hz: observes ONLY the meter model, so its tick
+/// invalidates just this small view (the law the old MeterStrip obeyed). The
+/// caption keeps the honest listening/paused line + the frames diagnostic
+/// ("are frames arriving?" — framesReceived stuck at 0 ⇒ the source isn't
+/// notifying, not a ring bug).
+struct RecordingRingView: View {
     @ObservedObject var meter: CaptureManager.AudioMeterModel
-    let isPaused: Bool
+    let paused: Bool
+
+    var body: some View {
+        GrainVoiceRing(
+            energy: RecordingRingModel.energy(
+                meterLevel: Double(meter.levels.last ?? 0), paused: paused),
+            order: RecordingRingModel.order
+        )
+        .accessibilityLabel(paused ? "Paused" : "Listening")
+    }
+}
+
+/// The honest listening line + frames diagnostic, in its own meter-observing
+/// subview (12 Hz tick stays contained, exactly like the ring).
+struct MeterCaption: View {
+    @ObservedObject var meter: CaptureManager.AudioMeterModel
+    let paused: Bool
     let isRecordingMic: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-            LevelMeterView(levels: meter.levels, active: !isPaused)
-            Text(isPaused ? "Paused — not listening"
-                 : (isRecordingMic ? "Recording from phone mic — bars rise as it hears you"
-                                   : "Listening — bars rise as it hears you"))
-                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-            // Diagnostic: definitive "are frames arriving?" signal. framesReceived
-            // stuck at 0 ⇒ the Omi isn't notifying (not a meter bug).
-            Text("frames \(meter.framesReceived) · last \(meter.lastFrameBytes)B")
-                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+        Text(paused ? "Paused — not listening"
+             : (isRecordingMic ? "Recording from phone mic" : "Listening")
+             + " · frames \(meter.framesReceived) · last \(meter.lastFrameBytes)B")
+            .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            .monospacedDigit()
+    }
+}
+
+/// The ticking elapsed readout (1 Hz), monospaced so it never wobbles.
+struct ElapsedLabel: View {
+    let since: Date
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { timeline in
+            let s = max(0, Int(timeline.date.timeIntervalSince(since)))
+            Text(String(format: "%d:%02d", s / 60, s % 60))
+                .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                 .monospacedDigit()
         }
-        .padding(.horizontal, GrainSpacing.x4)
-        .padding(.vertical, GrainSpacing.x2)
-        .overlay(alignment: .bottom) { Rectangle().fill(GrainColor.borderHairline).frame(height: 1) }
     }
 }
 
@@ -96,6 +119,31 @@ struct CaptureScreen: View {
     var local: Bool = false
     @State private var pendingDeleteId: String?
 
+    // MARK: find + organize (track 20260713T0902, features/capture-home.feature)
+    /// The user's categories, stored beside the captures they organize.
+    @StateObject private var categories: ConversationCategoryStore
+    /// Search over what the phone holds (titles + cached transcripts).
+    @State private var searchOpen = false
+    @State private var query = ""
+    /// nil = no search active; else the ids that matched (computed off-main).
+    @State private var searchMatches: Set<String>?
+    /// Selected category filter chip id (nil = All).
+    @State private var categoryFilter: String?
+    @State private var newCategoryName = ""
+    @State private var showingNewCategory = false
+    /// The on-device model behind auto-filing (nil where unavailable — honest).
+    private let tagger = makeSystemCategoryTagger()
+
+    init(device: DeviceManager, manager: CaptureManager, sources: CaptureSourceRegistry,
+         target: DoorTarget, local: Bool = false) {
+        self.device = device
+        self.manager = manager
+        self.sources = sources
+        self.target = target
+        self.local = local
+        _categories = StateObject(wrappedValue: manager.makeCategoryStore())
+    }
+
     /// Whether the Omi is still an enabled capture source (device-page toggle). When off,
     /// the capture page neither auto-starts nor shows the Omi scan affordance.
     private var omiEnabled: Bool { sources.isEnabled(CaptureSourceDescriptor.omiId) }
@@ -107,21 +155,55 @@ struct CaptureScreen: View {
             // 1-clear + 1-fading window that slides up and dissolves under the header.
             // Ephemeral, on-device preview; Kiln's transcript remains authoritative.
             if isShowingCapture {
+                // The instrument (track 20260713T0903): the SAME ring from welcome +
+                // enrollment, now recording — pause left, ring + ticking elapsed right,
+                // provisional title from what has actually been said.
+                recordingInstrument
                 if !manager.liveTranscript.isEmpty {
                     LiveTranscriptTicker(transcript: manager.liveTranscript)
                         .padding(.horizontal, GrainSpacing.x4)
                         .padding(.top, GrainSpacing.x2)
                 }
-                meterBar
             }
             syncBar
             if manager.visibleCaptures.isEmpty {
                 emptyState
             } else {
+                findBar
                 conversationList
             }
         }
         .grainBackground()
+        // Search sweeps disk (cached transcripts) — off-main, newest state wins.
+        .task(id: query) {
+            let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !q.isEmpty else { searchMatches = nil; return }
+            let ids = manager.visibleCaptures.map(\.captureId)
+            let titles = Dictionary(uniqueKeysWithValues: ids.map {
+                ($0, manager.cardMeta(for: $0)?.title)
+            })
+            let mgr = manager
+            let matched = await Task.detached(priority: .userInitiated) {
+                Set(ConversationSearch.filter(
+                    ids: ids, query: q,
+                    title: { titles[$0] ?? nil },
+                    transcript: { mgr.searchText(for: $0) }))
+            }.value
+            if query.trimmingCharacters(in: .whitespacesAndNewlines) == q {
+                searchMatches = matched
+            }
+        }
+        .alert("New category", isPresented: $showingNewCategory) {
+            TextField("Name", text: $newCategoryName)
+            Button("Create") {
+                let name = newCategoryName.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !name.isEmpty { categoryFilter = categories.create(name: name).id }
+                newCategoryName = ""
+            }
+            Button("Cancel", role: .cancel) { newCategoryName = "" }
+        } message: {
+            Text("Categories are yours: rename or delete them any time. Deleting one never deletes its conversations.")
+        }
         // Power on the Omi only when it's still an enabled source; always drive the meter.
         .onAppear { if omiEnabled { manager.startSource() }; manager.startMeter() }
         .onDisappear { manager.stopMeter() }
@@ -140,6 +222,98 @@ struct CaptureScreen: View {
         }
     }
 
+    // MARK: find + organize bar (search + category chips)
+
+    private var findBar: some View {
+        VStack(spacing: GrainSpacing.x2) {
+            HStack(spacing: GrainSpacing.x2) {
+                Button {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        searchOpen.toggle()
+                        if !searchOpen { query = "" }
+                    }
+                } label: {
+                    Image(grain: .search)
+                        .font(.system(size: 15, weight: .light))
+                        .foregroundStyle(searchOpen ? GrainColor.forgeBlue : GrainColor.textMuted)
+                }
+                .buttonStyle(.plain)
+                if searchOpen {
+                    TextField("Search conversations on this phone", text: $query)
+                        .textFieldStyle(.plain)
+                        .grainTextStyle(.body)
+                        .autocorrectionDisabled()
+                }
+                if !searchOpen { chips }
+            }
+            if searchOpen { chips }
+        }
+        .padding(.horizontal, GrainSpacing.x4)
+        .padding(.vertical, GrainSpacing.x2)
+    }
+
+    /// All + the user's categories + "+" (create). Deleting is on the chip's
+    /// context menu; conversations are never deleted with a category.
+    private var chips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: GrainSpacing.x2) {
+                chip(label: "All", selected: categoryFilter == nil) { categoryFilter = nil }
+                ForEach(categories.categories) { cat in
+                    chip(label: cat.name, selected: categoryFilter == cat.id) {
+                        categoryFilter = categoryFilter == cat.id ? nil : cat.id
+                    }
+                    .contextMenu {
+                        Button("Delete \"\(cat.name)\"", role: .destructive) {
+                            if categoryFilter == cat.id { categoryFilter = nil }
+                            categories.delete(categoryId: cat.id)
+                        }
+                    }
+                }
+                chip(label: "+", selected: false) { showingNewCategory = true }
+                    .accessibilityLabel("New category")
+            }
+        }
+    }
+
+    private func chip(label: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .grainTextStyle(.caption)
+                .foregroundStyle(selected ? GrainColor.ink : GrainColor.textMuted)
+                .padding(.horizontal, GrainSpacing.x3)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(selected ? GrainColor.forgeBlueBg : .clear))
+                .overlay(Capsule().strokeBorder(
+                    selected ? GrainColor.forgeBlueBorder : GrainColor.borderFaint, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Search + category filters applied over the manager's visible list.
+    private var filteredCaptures: [CaptureWAL] {
+        var items = manager.visibleCaptures
+        if let matches = searchMatches {
+            items = items.filter { matches.contains($0.captureId) }
+        }
+        if let filterId = categoryFilter {
+            let ids = Set(categories.captureIds(in: filterId, from: items.map(\.captureId)))
+            items = items.filter { ids.contains($0.captureId) }
+        }
+        return items
+    }
+
+    /// Activity (track 20260713T0905): the ledger + recaps + plain-word measures,
+    /// with the old Stats readout one tap deeper (subsumed, not lost).
+    private var activityDestination: some View {
+        ActivityView(
+            decisionLogURL: AmbientPrefs.decisionLogURL(),
+            onOpenChat: { seed in AmbientCardBroker.shared.run(seed: seed) }
+        )
+        .toolbar {
+            NavigationLink("Stats") { StatsView(summary: manager.statsSummary) }
+        }
+    }
+
     // MARK: conversation list — grouped into dated sections (Feature 5)
 
     /// The timeline, grouped newest-first into Today / Yesterday / weekday / "Last week"
@@ -147,7 +321,7 @@ struct CaptureScreen: View {
     /// `ConversationGrouping`; `visibleCaptures` is already date-desc, so sections stay
     /// in order. LazyVStack keeps off-screen cards (and their pollers) inert.
     private var conversationList: some View {
-        let sections = ConversationGrouping.group(manager.visibleCaptures, now: Date()) {
+        let sections = ConversationGrouping.group(filteredCaptures, now: Date()) {
             manager.conversationStartDate($0)
         }
         return ScrollView {
@@ -174,7 +348,9 @@ struct CaptureScreen: View {
     /// One tappable conversation card → its transcript detail.
     private func conversationRow(_ wal: CaptureWAL) -> some View {
         NavigationLink {
-            ConversationDetailView(
+            // The three-face detail (track 20260713T0904): Summary / Actions /
+            // Transcript + text search; same parameters, same stores underneath.
+            ConversationFacesView(
                 target: target,
                 manager: manager,
                 captureId: wal.captureId,
@@ -196,11 +372,33 @@ struct CaptureScreen: View {
                     hasCachedTranscript: manager.hasCachedTranscript(wal.captureId),
                     // Cache RECENT (~14d) transcripts on sight (no-op for older / already-cached).
                     onSight: { manager.ensureRecentTranscriptCached(wal.captureId) },
-                    local: local
+                    local: local,
+                    categoryName: categories.category(for: wal.captureId)?.name,
+                    loadWaveform: { [weak manager] in
+                        WaveformThumb.profile(sizes: manager?.segmentSizes(for: wal.captureId) ?? [],
+                                              buckets: 24)
+                    }
                 )
             }
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            // File under… — the user's filing always wins and is remembered.
+            Menu("File under") {
+                ForEach(categories.categories) { cat in
+                    Button(cat.name) {
+                        categories.assign(captureId: wal.captureId, to: cat.id, byUser: true)
+                    }
+                }
+                if categories.category(for: wal.captureId) != nil {
+                    Button("Remove from category", role: .destructive) {
+                        categories.unassign(captureId: wal.captureId)
+                    }
+                }
+            }
+        }
+        // Auto-file where the on-device model can — only while the user hasn't.
+        .task { await autoTagIfNeeded(wal.captureId) }
         .swipeActions {
             Button(role: .destructive) { pendingDeleteId = wal.captureId } label: {
                 Label("Delete", systemImage: "trash")
@@ -208,16 +406,56 @@ struct CaptureScreen: View {
         }
     }
 
-    // MARK: live audio meter (req 8) — shows the Omi is actually hearing sound
+    /// One shot per on-screen row: if unfiled and never user-filed, ask the
+    /// on-device model to file it. No model → nothing happens (honest).
+    private func autoTagIfNeeded(_ captureId: String) async {
+        guard let tagger,
+              categories.category(for: captureId) == nil,
+              categories.acceptsAutoSuggestion(for: captureId) else { return }
+        let title = manager.cardMeta(for: captureId)?.title
+        let mgr = manager
+        let transcript = await Task.detached(priority: .utility) {
+            mgr.searchText(for: captureId)
+        }.value
+        guard let name = await tagger.suggest(title: title, transcript: transcript,
+                                              from: categories.categories),
+              let cat = categories.categories.first(where: { $0.name == name }) else { return }
+        categories.assign(captureId: captureId, to: cat.id, byUser: false)
+    }
 
-    private var meterBar: some View {
-        // The 12 Hz meter lives in its own subview observing ONLY manager.meter — its
-        // tick must never invalidate this screen's body (which re-groups the whole
-        // list and re-reads per-row metadata). isPaused/isRecordingMic change rarely
-        // and are passed as plain values.
-        MeterStrip(meter: manager.meter,
-                   isPaused: manager.isPaused,
-                   isRecordingMic: manager.isRecordingMic)
+    // MARK: the recording instrument (track 20260713T0903)
+
+    /// Pause left · provisional title center · ring + ticking elapsed right.
+    /// The ring subview observes ONLY manager.meter (12 Hz) — its tick never
+    /// invalidates this screen's body (same law the old MeterStrip obeyed).
+    private var recordingInstrument: some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+            HStack(spacing: GrainSpacing.x3) {
+                if manager.active != nil || manager.isRecordingMic {
+                    GrainButton(manager.isPaused ? "Resume" : "Pause",
+                                variant: manager.isPaused ? .filled : .tonal, size: .sm) {
+                        manager.togglePause()
+                    }
+                }
+                Spacer()
+                if let wal = manager.active {
+                    ElapsedLabel(since: wal.status.startedAt)
+                }
+                RecordingRingView(meter: manager.meter, paused: manager.isPaused)
+                    .frame(width: 34, height: 34)
+            }
+            // The provisional name, from what has actually been said — appears
+            // only once enough was said, and never rewrites itself (no layout jump).
+            if let title = ProvisionalLiveTitle.title(from: manager.liveTranscript.finalizedText) {
+                Text(title)
+                    .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                    .lineLimit(1)
+            }
+            MeterCaption(meter: manager.meter, paused: manager.isPaused,
+                         isRecordingMic: manager.isRecordingMic)
+        }
+        .padding(.horizontal, GrainSpacing.x4)
+        .padding(.top, GrainSpacing.x2)
     }
 
     // MARK: header — ambient control when connected, else the auto-connect status + the
@@ -272,13 +510,13 @@ struct CaptureScreen: View {
                     GrainButton("Connect your Omi", variant: .filled, size: .sm) { device.start() }
                 }
                 NavigationLink {
-                    StatsView(summary: manager.statsSummary)
+                    activityDestination
                 } label: {
-                    Image(systemName: "chart.bar.xaxis")
+                    Image(grain: .spark)
                         .foregroundStyle(GrainColor.textMuted)
                         .frame(width: 32, height: 32)
                 }
-                .accessibilityLabel("Stats")
+                .accessibilityLabel("Activity")
                 // The phone-mic record sphere — a manual capture source, always available.
                 if manager.phoneMicAvailable {
                     MicSphereButton(recording: manager.isRecordingMic) { manager.toggleMicRecording() }
@@ -332,18 +570,15 @@ struct CaptureScreen: View {
                 GrainButton("New", variant: .tonal, size: .sm) { manager.splitConversation() }
             }
             NavigationLink {
-                StatsView(summary: manager.statsSummary)
+                activityDestination
             } label: {
-                Image(systemName: "chart.bar.xaxis")
+                Image(grain: .spark)
                     .foregroundStyle(GrainColor.textMuted)
                     .frame(width: 32, height: 32)
             }
-            .accessibilityLabel("Stats")
-            // The single record/pause control.
-            GrainButton(manager.isPaused ? "Resume" : "Pause",
-                        variant: manager.isPaused ? .filled : .tonal, size: .sm) {
-                manager.togglePause()
-            }
+            .accessibilityLabel("Activity")
+            // (The record/pause control moved onto the recording instrument strip —
+            // one control, beside the ring it commands.)
         }
         .padding(.horizontal, GrainSpacing.x4)
         .padding(.vertical, GrainSpacing.x3)
@@ -430,6 +665,12 @@ private struct CaptureCard: View {
     let onSight: () -> Void
     /// Phone-only tier: on-device labels (no "computer").
     var local: Bool = false
+    /// The category it's filed under (chip on the card; nil = unfiled).
+    var categoryName: String?
+    /// Real segment sizes → the row's waveform thumbnail (loaded lazily; empty =
+    /// audio pruned or not yet loaded — no waveform is drawn, never a fake one).
+    var loadWaveform: (@Sendable () -> [Double])? = nil
+    @State private var waveform: [Double] = []
 
     /// The conversation's NAME — the live poll's title, falling back to the durable card.
     private var name: String? {
@@ -499,7 +740,17 @@ private struct CaptureCard: View {
             if let place {
                 Text(place).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
             }
-            Text(detail).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            HStack(spacing: GrainSpacing.x2) {
+                Text(detail).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                if let categoryName {
+                    Text(categoryName)
+                        .grainTextStyle(.caption).foregroundStyle(GrainColor.forgeBlue)
+                        .padding(.horizontal, GrainSpacing.x2).padding(.vertical, 2)
+                        .background(Capsule().fill(GrainColor.forgeBlueBg))
+                }
+                Spacer()
+                if !waveform.isEmpty { WaveformThumbView(profile: waveform) }
+            }
         }
         .padding(GrainSpacing.x3)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -510,6 +761,12 @@ private struct CaptureCard: View {
         // cache a recent conversation's transcript on sight (offline/instant later).
         .onAppear { poller.start(); onSight() }
         .onDisappear { poller.stop() }
+        // The waveform derives from real segment sizes on disk — one lazy read.
+        .task {
+            guard waveform.isEmpty, let loadWaveform else { return }
+            let profile = await Task.detached(priority: .utility) { loadWaveform() }.value
+            waveform = profile
+        }
     }
 
     /// The calm, folded processing chip (local WAL stage + door pipeline stage).
@@ -574,457 +831,34 @@ private struct CaptureCard: View {
     }()
 }
 
-/// Phase B: a conversation's TRANSCRIPT. Fetched from the door (which reads it from
-/// the local Lore engine, keyed by the phone's capture id). Shows time + place +
-/// the transcript; a friendly "still processing" state until Lore has transcribed
-/// it. The nav title is derived from the first few words of the transcript (real
-/// subject/summary generation is a later slice).
-struct ConversationDetailView: View {
-    let target: DoorTarget
-    @ObservedObject var manager: CaptureManager
-    let captureId: String
-    let timeRange: String
-    let place: String?
-    /// When the conversation happened — used to decide whether its transcript is
-    /// recent (auto-loaded/cached) or older (loaded on demand from the door).
-    let conversationDate: Date?
-    /// Phone-only tier → on-device stepper labels ("Saved on phone", etc.).
-    var local: Bool = false
-
-    @State private var content: CaptureContent?
-    @State private var cached: CachedTranscript?   // local fallback (pruned audio / offline)
-    @State private var provisional: ConversationCardMeta?  // on-device provisional (instant, pre-Kiln)
-    @State private var loadError: String?
-    @State private var loading = true
-    @State private var didAttemptFetch = false
-    @State private var confirmDelete = false
-    @State private var didCopy = false
-    @State private var receiptExpanded = false
-    @Environment(\.dismiss) private var dismiss
-
-    /// True when the conversation is OLDER than the ~14-day transcript-cache window:
-    /// its transcript text isn't kept locally, so it loads on demand (a button /
-    /// pull-to-refresh) rather than auto-fetching on open.
-    private var isOlder: Bool {
-        guard let d = conversationDate else { return false }
-        return Date().timeIntervalSince(d) > CaptureRetention.transcriptRetention
-    }
-
-    // Listen affordance state.
-    @State private var audioState: AudioState = .idle
-    @State private var player: AVAudioPlayer?
-    /// Whether playAudio() flipped the shared session to .playback (and so must
-    /// release it when playback stops). False when a recording owned the session.
-    @State private var playbackOwnsSession = false
-
-    private enum AudioState: Equatable { case idle, loading, playing, unavailable, failed(String) }
-
-    /// The transcript to render: prefer the live door content, fall back to the
-    /// locally cached transcript (so it survives audio pruning + offline).
-    private var transcriptText: String? {
-        if let c = content, c.found, !c.transcript.isEmpty { return c.transcript }
-        if let cached, !cached.transcript.isEmpty { return cached.transcript }
-        // On-device provisional body — shown instantly until Kiln's lands.
-        if let p = provisional, p.isProvisional, let body = p.provisionalTranscript, !body.isEmpty { return body }
-        return nil
-    }
-    /// True when the transcript currently shown is the on-device provisional (no door /
-    /// cached Kiln transcript yet) — drives a "still finishing" note.
-    private var showingProvisional: Bool {
-        let hasAuthoritative = (content?.found == true && !(content?.transcript.isEmpty ?? true))
-            || (cached.map { !$0.transcript.isEmpty } ?? false)
-        return !hasAuthoritative && (provisional?.isProvisional == true)
-            && !((provisional?.provisionalTranscript ?? "").isEmpty)
-    }
-    private var summaryText: String? { content?.summary ?? cached?.summary }
-    /// The whole conversation as paste-ready text for the Copy action: speaker-labelled
-    /// turns when diarized, else the flat transcript. nil when there's nothing to copy
-    /// yet (drives whether the Copy affordance is offered at all).
-    private var copyableTranscript: String? {
-        if let diarized = diarizedTranscript, diarized.hasSegments {
-            let text = diarized.plainText
-            if !text.isEmpty { return text }
-        }
-        if let t = transcriptText, !t.isEmpty { return t }
-        return nil
-    }
-    private func copyTranscript() {
-        guard let text = copyableTranscript else { return }
-        #if canImport(UIKit)
-        UIPasteboard.general.string = text
-        #endif
-        didCopy = true
-        Task { try? await Task.sleep(nanoseconds: 1_600_000_000); await MainActor.run { didCopy = false } }
-    }
-    /// One speaker-rendering source for both live door content and cached content, so
-    /// a second open does not flash flat text while waiting for `/content` again.
-    private var diarizedTranscript: SpeakerTranscript? {
-        if let diarized = content?.diarized, diarized.hasSegments { return diarized }
-        if let cached, !cached.segments.isEmpty {
-            return SpeakerTranscript(speakers: cached.speakers, segments: cached.segments)
-        }
-        return nil
-    }
-
-    /// The pipeline position to show in the stepper — only while we're genuinely
-    /// WAITING on processing (fetching, or the door has no transcript yet). Once a
-    /// transcript exists the transcript itself is the answer, so the stepper hides.
-    private var stepperProgress: ConversationProgress? {
-        if copyableTranscript != nil { return nil }                 // ready → shown below
-        let waiting = loading || (didAttemptFetch && content?.found == false)
-        guard waiting else { return nil }                            // older/on-demand: no stepper
-        if manager.statusPoller(for: captureId)?.stage == .failed { return .failed }
-        return .transcribing
-    }
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: GrainSpacing.x3) {
-                Text(timeRange).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-                if let place {
-                    Text(place).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-                }
-                listenRow
-                receiptSection
-                Divider().background(GrainColor.borderHairline)
-
-                // Visible pipeline progress while the conversation is still being
-                // processed — so the user sees WHERE it is instead of a bare spinner.
-                if let sp = stepperProgress {
-                    ConversationStepper(progress: sp, local: local)
-                        .padding(.vertical, GrainSpacing.x1)
-                    Divider().background(GrainColor.borderHairline)
-                }
-
-                if let transcript = transcriptText {
-                    // Kiln-generated summary when ready; a subtle "Summarizing…" hint
-                    // while the door generates it (the .task re-fetches once).
-                    if let summary = summaryText, !summary.isEmpty {
-                        Text("Summary").grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-                        Text(summary)
-                            .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-                            .textSelection(.enabled)
-                        Divider().background(GrainColor.borderHairline)
-                    } else if content?.summarizing == true {
-                        Text("Summarizing…").grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-                    }
-                    if showingProvisional {
-                        Text("On-device transcript · finishing on your computer…")
-                            .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-                    }
-                    HStack {
-                        Text("Transcript").grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-                        Spacer()
-                        // One-tap copy of the whole transcript (speaker-labelled when
-                        // diarized). Shows a brief "Copied" confirmation.
-                        Button {
-                            copyTranscript()
-                        } label: {
-                            Label(didCopy ? "Copied" : "Copy",
-                                  systemImage: didCopy ? "checkmark" : "doc.on.doc")
-                                .grainTextStyle(.caption)
-                                .foregroundStyle(didCopy ? GrainColor.sage : GrainColor.textMuted)
-                        }
-                        .accessibilityIdentifier("copy-transcript")
-                    }
-                    // Speaker-diarized transcript (Lore 0.5.53): when the door forwards
-                    // segments, render colour-coded speaker turns with tag/confirm/correct.
-                    // Falls back to the flat transcript for non-diarized / legacy captures.
-                    if let diarized = diarizedTranscript {
-                        SpeakerTranscriptSection(
-                            target: target,
-                            captureId: captureId,
-                            transcript: diarized,
-                            onChanged: { await fetchFromDoor() }
-                        )
-                    } else {
-                        Text(transcript)
-                            .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-                            .textSelection(.enabled)
-                    }
-                } else if loading {
-                    Text("Loading transcript…")
-                        .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
-                } else if didAttemptFetch, content?.found == false, loadError == nil {
-                    // We asked the door and it doesn't have the transcript yet.
-                    Text("Transcript still processing…")
-                        .grainTextStyle(.title).foregroundStyle(GrainColor.ink)
-                    Text("Your conversation is saved. The transcript shows up here once it's been processed on your computer.")
-                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-                    GrainButton("Check again", variant: .tonal, size: .sm) { Task { await fetchFromDoor() } }
-                } else {
-                    // Older / not-yet-fetched conversation: load the transcript on demand
-                    // (this transcript isn't cached locally; pull-to-refresh also works).
-                    Text("Transcript not loaded")
-                        .grainTextStyle(.title).foregroundStyle(GrainColor.ink)
-                    Text(isOlder
-                         ? "This is an older conversation, so its transcript isn't stored on your phone. Load it from your computer."
-                         : "Load this conversation's transcript from your computer.")
-                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-                    GrainButton("Load transcript", variant: .filled, size: .sm) { Task { await fetchFromDoor() } }
-                    if let loadError {
-                        Text("Couldn't load transcript: \(loadError)")
-                            .grainTextStyle(.caption).foregroundStyle(GrainColor.amber)
-                    }
-                }
-            }
-            .padding(GrainSpacing.x4)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .grainBackground()
-        .navigationTitle(navTitle)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    if copyableTranscript != nil {
-                        Button {
-                            copyTranscript()
-                        } label: {
-                            Label("Copy transcript", systemImage: "doc.on.doc")
-                        }
-                    }
-                    Button("Delete", role: .destructive) { confirmDelete = true }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-            }
-        }
-        .confirmationDialog("Delete conversation?", isPresented: $confirmDelete,
-                            titleVisibility: .visible) {
-            Button("Delete", role: .destructive) {
-                manager.deleteConversation(captureId)
-                dismiss()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Removes it from your phone, your computer, and your library.")
-        }
-        .refreshable { await fetchFromDoor() }   // pull-to-refresh loads on demand
-        .task { await initialLoad() }
-        .onDisappear { stopPlayback() }
-    }
-
-    /// "Listen" affordance — replays the conversation audio via the door's `/audio`
-    /// endpoint. Gated so a 404 (endpoint not ready / audio pruned on desktop) reads
-    /// as a calm "Audio not available" rather than an error.
-    @ViewBuilder private var listenRow: some View {
-        switch audioState {
-        case .idle:
-            GrainButton("Listen", variant: .tonal, size: .sm) { Task { await playAudio() } }
-        case .loading:
-            Text("Loading audio…").grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-        case .playing:
-            GrainButton("Stop", variant: .text, size: .sm) { stopPlayback() }
-        case .unavailable:
-            Text("Audio not available").grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-        case .failed(let why):
-            Text("Couldn't play audio: \(why)").grainTextStyle(.caption).foregroundStyle(GrainColor.amber)
-        }
-    }
-
-    private var receiptSection: some View {
-        DisclosureGroup(isExpanded: $receiptExpanded) {
-            VStack(alignment: .leading, spacing: GrainSpacing.x2) {
-                receiptRow("Recording", receiptDuration)
-                receiptRow("Transcription", "Transcribed in the cloud (Deepgram)")
-                receiptRow("Speakers", "Speakers found on-device (WeSpeaker)")
-                receiptRow("Device cost", "$0 on your device")
-            }
-            .padding(.top, GrainSpacing.x2)
-        } label: {
-            HStack(spacing: GrainSpacing.x2) {
-                Image(systemName: "receipt")
-                    .foregroundStyle(GrainColor.textMuted)
-                Text("Processing receipt")
-                    .grainTextStyle(.caption)
-                    .foregroundStyle(GrainColor.textMuted)
-            }
-        }
-        .grainTextStyle(.caption)
-        .foregroundStyle(GrainColor.textMuted)
-        .padding(.vertical, GrainSpacing.x1)
-    }
-
-    private func receiptRow(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: GrainSpacing.x2) {
-            Text(label)
-                .grainTextStyle(.caption)
-                .foregroundStyle(GrainColor.textFaint)
-                .frame(width: 92, alignment: .leading)
-            Text(value)
-                .grainTextStyle(.caption)
-                .foregroundStyle(GrainColor.ink)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private var receiptDuration: String {
-        guard let seconds = manager.conversationMeta(for: captureId)?.durationSeconds else {
-            return "Recording duration unavailable"
-        }
-        let minutes = Int(seconds) / 60
-        let remainder = Int(seconds) % 60
-        if minutes >= 60 {
-            let hours = minutes / 60
-            let mins = minutes % 60
-            return mins == 0 ? "\(hours)h" : "\(hours)h \(mins)m"
-        }
-        return remainder == 0 ? "\(minutes)m" : "\(minutes)m \(remainder)s"
-    }
-
-    /// Prefer the Kiln-generated title; fall back to the cached title, then the first
-    /// ~6 words of the transcript, then "Conversation".
-    private var navTitle: String {
-        if let t = content?.title, !t.isEmpty { return t }
-        if let t = cached?.title, !t.isEmpty { return t }
-        if let t = provisional?.title, !t.isEmpty { return t }
-        guard let t = transcriptText, !t.isEmpty else { return "Conversation" }
-        let words = t.split(whereSeparator: { $0 == " " || $0 == "\n" }).prefix(6).joined(separator: " ")
-        return words.isEmpty ? "Conversation" : words
-    }
-
-    /// On open: show the locally cached transcript instantly if we have one. Otherwise
-    /// auto-fetch for a RECENT conversation; for an OLDER one, wait for an explicit
-    /// "Load transcript" (or pull-to-refresh) so we don't always hit the network for
-    /// the long tail of old conversations.
-    private func initialLoad() async {
-        loadError = nil
-        // Seed from the local cache first so a recent / pruned-audio / offline
-        // conversation shows its transcript instantly. Also load the on-device
-        // provisional card so a just-stopped conversation shows its text before Kiln.
-        let base = CaptureWAL.documentsCaptures()
-        cached = TranscriptCacheStore.load(captureId: captureId, baseDir: base)
-        provisional = ConversationCardStore.load(captureId: captureId, baseDir: base)
-        if cached != nil {
-            loading = false
-            // The cache renders instantly but holds NO speaker segments (transcript/
-            // title/summary only) — and Lore may have diarized the capture since it
-            // was written. Refresh from the door in the background so speaker turns
-            // (and fresher titles) appear; without this, any once-opened conversation
-            // was frozen as a flat transcript forever.
-            await fetchFromDoor()
-            return
-        }
-        if isOlder {
-            loading = false   // older + uncached → load on demand (button / pull-to-refresh)
-            return
-        }
-        await fetchFromDoor() // recent + uncached → auto-fetch
-    }
-
-    /// Fetch the transcript from the door (`GET /content`) on demand, cache it if
-    /// ready, and surface a summarizing re-fetch. Drives the "Load transcript" button
-    /// and pull-to-refresh.
-    private func fetchFromDoor() async {
-        // Only show the spinner when there's nothing on screen yet — a background
-        // refresh over an already-rendered cached transcript must not flash loading.
-        if cached == nil { loading = true }
-        loadError = nil
-        didAttemptFetch = true
-        do {
-            let fetched = try await DoorClient(target: target).captureContent(captureId: captureId)
-            if cached == nil || contentDiffersFromCache(fetched) {
-                content = fetched
-                cacheIfReady(fetched)
-            }
-        } catch {
-            // Door unreachable — keep the cached transcript if we have one; only show
-            // an error when there's nothing cached to fall back to.
-            if cached == nil { loadError = (error as NSError).localizedDescription }
-        }
-        loading = false
-        // The door generates the title/summary in the background on first fetch; if
-        // it's still summarizing, re-fetch once after a short delay so they appear
-        // without the user having to leave + reopen the conversation.
-        if content?.summarizing == true, (content?.title ?? "").isEmpty {
-            try? await Task.sleep(nanoseconds: 4_000_000_000)
-            if let refreshed = try? await DoorClient(target: target).captureContent(captureId: captureId) {
-                if cached == nil || contentDiffersFromCache(refreshed) {
-                    content = refreshed
-                    cacheIfReady(refreshed)
-                }
-            }
-        }
-    }
-
-    private func contentDiffersFromCache(_ c: CaptureContent) -> Bool {
-        guard let cached else { return true }
-        return c.transcript != cached.transcript || c.segments.count != cached.segments.count
-    }
-
-    /// Persist the transcript locally once the door returns it, so it survives audio
-    /// pruning + offline. Also stamps the in-Lore confirmation marker (a transcript
-    /// can only exist because Lore transcribed the audio).
-    private func cacheIfReady(_ c: CaptureContent?) {
-        guard let c, c.found, !c.transcript.isEmpty else { return }
-        let baseDir = CaptureWAL.documentsCaptures()
-        let entry = CachedTranscript(transcript: c.transcript, title: c.title,
-                                     summary: c.summary, segments: c.segments, speakers: c.speakers,
-                                     fetchedAt: UInt64(max(0, Date().timeIntervalSince1970)))
-        TranscriptCacheStore.save(entry, captureId: captureId, baseDir: baseDir)
-        // Seed the durable all-time name/description tombstone too.
-        ConversationCardStore.merge(captureId: captureId, baseDir: baseDir,
-                                    title: c.title, summary: c.summary, stage: nil)
-        cached = entry
-    }
-
-    private func playAudio() async {
-        audioState = .loading
-        do {
-            // Cache first (app-session, ≤1 day): re-listening never re-downloads.
-            let cacheKey = await AudioReplayCache.shared.key(
-                captureId: captureId, startMs: nil, endMs: nil)
-            var wav = await AudioReplayCache.shared.get(cacheKey)
-            if wav == nil {
-                guard let bytes = try await DoorClient(target: target).captureAudio(captureId: captureId) else {
-                    audioState = .unavailable   // 404 — endpoint not ready / audio pruned on desktop
-                    return
-                }
-                // The door assembles Ogg-Opus, which AVAudioPlayer can't decode —
-                // demux + decode to WAV on-device (OggOpusReplay), then cache the
-                // CONVERTED result so replays are instant.
-                guard let converted = OggOpusReplay.wav(fromOggOpus: bytes) else {
-                    audioState = .failed("undecodable audio")
-                    return
-                }
-                await AudioReplayCache.shared.put(cacheKey, wav: converted)
-                wav = converted
-            }
-            // Playback needs the audio session (else the clip plays SILENTLY through
-            // the ambient category) — but must never STEAL it from a live phone-mic
-            // recording (that churns routes against the record engine).
-            playbackOwnsSession = PlaybackSession.begin()
-            let p = try AVAudioPlayer(data: wav!)
-            player = p
-            p.play()
-            audioState = .playing
-            // When the clip finishes on its own, flip the button back and release
-            // the session (no delegate plumbing needed for a replay clip).
-            Task {
-                try? await Task.sleep(nanoseconds: UInt64((p.duration + 0.3) * 1_000_000_000))
-                if player === p, !p.isPlaying { stopPlayback() }
-            }
-        } catch {
-            PlaybackSession.end(changed: playbackOwnsSession)
-            playbackOwnsSession = false
-            audioState = .failed((error as NSError).localizedDescription)
-        }
-    }
-
-    /// Stop replay + release the shared audio session if playback took it.
-    private func stopPlayback() {
-        player?.stop()
-        player = nil
-        if case .playing = audioState { audioState = .idle }
-        PlaybackSession.end(changed: playbackOwnsSession)
-        playbackOwnsSession = false
-    }
-}
-
 /// The phone-mic record control as a compact sphere (Feature 3). Idle: a subtle mic
 /// glyph in a quiet circle. Recording: a RED record sphere with an animated pulse ring
 /// radiating outward, so "you're recording" reads at a glance. Tapping toggles.
+/// The row's small waveform: real segment-size energy, normalized. Purely
+/// decorative summary of the recording's shape — hidden entirely when audio has
+/// been pruned (no fake waveforms).
+private struct WaveformThumbView: View {
+    let profile: [Double]
+
+    var body: some View {
+        Canvas { ctx, size in
+            let n = profile.count
+            guard n > 0 else { return }
+            let step = size.width / CGFloat(n)
+            for (i, v) in profile.enumerated() {
+                let h = max(1.5, size.height * v)
+                let x = CGFloat(i) * step
+                let rect = CGRect(x: x, y: (size.height - h) / 2,
+                                  width: max(1, step * 0.6), height: h)
+                ctx.fill(Path(roundedRect: rect, cornerRadius: 0.75),
+                         with: .color(GrainColor.forgeBlue.opacity(0.45)))
+            }
+        }
+        .frame(width: 64, height: 16)
+        .accessibilityHidden(true)
+    }
+}
+
 private struct MicSphereButton: View {
     let recording: Bool
     let action: () -> Void
