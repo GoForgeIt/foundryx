@@ -120,10 +120,11 @@ targets:
       path: Widget/Info.plist
       properties:
         CFBundleDisplayName: FoundryX
-        # Track the app's build number (ship-ios.sh overrides
+        # Track the app's build number AND version string (ship-ios.sh overrides
         # CURRENT_PROJECT_VERSION on the command line for BOTH targets) — a
         # mismatch draws an App Store Connect 90473 warning on every upload.
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleShortVersionString: $(MARKETING_VERSION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     settings:
