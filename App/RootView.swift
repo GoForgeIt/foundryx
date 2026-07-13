@@ -23,6 +23,7 @@ struct RootView: View {
     @State private var enteredApp = false
 
     @StateObject private var brains = BrainStore()
+    @StateObject private var cells = CellStore()
 
     /// The Vault activation funnel (track T-IOS-FUNNEL): paid-intent trigger → browser
     /// hand-off → server reconciliation → live Vault. Presented over the app whenever its
@@ -132,7 +133,8 @@ struct RootView: View {
                                         splashElapsed: enteredApp,
                                         brain: brains.choice,
                                         hostResolved: remote.makeDoorTarget() != nil,
-                                        letStraightIn: WelcomePrefs.letStraightIn())
+                                        letStraightIn: WelcomePrefs.letStraightIn(),
+                                        cellPaired: cells.isPaired)
         return AnyView(bodyContent(dest))
     }
 
@@ -172,6 +174,21 @@ struct RootView: View {
                         // The `.id` above re-mounts on a bearer refresh, so this re-fires with
                         // the fresh target.
                         .onAppear { PerfTelemetry.shared.setUsageTarget(target) }
+                        .sheet(isPresented: $showingAccount) {
+                            SignInView(remote: remote) { showingAccount = false }
+                        }
+                }
+            case .cellBrain:
+                // Rung 3: a hosted Foundry CELL over its direct public HTTPS door.
+                // Same MainTabs as the computer brain, but the target is the cell's
+                // URL + resolved grant (id_token or pasted bearer) — no relay.
+                if let cfg = cells.config,
+                   let target = try? CellBackend.resolveTarget(config: cfg, idToken: remote.idToken) {
+                    MainTabs(target: target, remote: remote, brains: brains, local: false,
+                             showingAccount: $showingAccount)
+                        // A re-pair (new URL/grant) or a refreshed id_token rebuilds
+                        // the tabs so every door request uses the fresh bearer.
+                        .id("cell#" + cfg.url + "#" + target.bearer.suffix(12))
                         .sheet(isPresented: $showingAccount) {
                             SignInView(remote: remote) { showingAccount = false }
                         }

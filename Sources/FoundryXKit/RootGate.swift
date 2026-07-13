@@ -12,27 +12,35 @@ public enum RootDestination: Equatable {
     case signInGate
     /// Today's flow: all tabs on the resolved remote door.
     case computerBrain
+    /// Rung 3: all tabs on a hosted CELL over its direct public HTTPS door.
+    case cellBrain
     /// The phone-only tier: LocalBackend capture + local chat, zero egress.
     case phoneBrain
 }
 
 public enum RootGate {
+    /// `cellPaired` is `CellStore.isPaired` — a Foundry-Cloud choice only resolves to
+    /// the cell brain once a cell is actually paired; a chosen-but-unpaired cloud
+    /// brain degrades to the phone brain (additive, never destructive — spec §4).
     public static func destination(signedIn: Bool,
                                    splashElapsed: Bool,
                                    brain: BrainChoice,
                                    hostResolved: Bool,
-                                   letStraightIn: Bool = false) -> RootDestination {
+                                   letStraightIn: Bool = false,
+                                   cellPaired: Bool = false) -> RootDestination {
         // "Take me straight in" (Nick 2026-07-16, track 20260715T1502): NO gate of any
         // kind — not the splash, not the welcome, never the old connection page. The app
         // opens immediately; a chosen computer brain is used the moment it resolves, and
         // connection status shows IN the app (Settings → Brain), not as an interstitial.
         if letStraightIn {
             if signedIn, brain == .myComputer, hostResolved { return .computerBrain }
+            if signedIn, brain == .foundryCloud, cellPaired { return .cellBrain }
             return .phoneBrain
         }
         guard splashElapsed else { return .signInGate }   // the welcome front door leads
         if !signedIn { return .signInGate }
         if brain == .myComputer, hostResolved { return .computerBrain }
+        if brain == .foundryCloud, cellPaired { return .cellBrain }
         return .phoneBrain
     }
 }
