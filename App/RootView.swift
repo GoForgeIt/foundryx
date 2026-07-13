@@ -81,12 +81,10 @@ struct RootView: View {
                 showingOnboarding = false
             }
         }
-        // The Night Shift register IS the app's identity (track 20260713T2100):
-        // FoundryX renders dark everywhere — the same night the welcome, the
-        // prototypes, and the brand wear. Grain's dynamic tokens resolve to
-        // their night values under this scheme; light/cream stays available to
-        // other Grain consumers.
-        .preferredColorScheme(.dark)
+        // One design, two renditions (Nick 2026-07-13): the app FOLLOWS the
+        // device — Grain's light rendition by day, the Night Shift register
+        // when the device goes dark. No forced scheme anywhere; the dynamic
+        // tokens carry both.
         // Pre-picker installs that already pair with a desktop stay on the computer
         // brain (migration safety) — adopted exactly once, never overriding an
         // explicit later choice.

@@ -122,7 +122,6 @@ struct PersonaWelcomeStep: View {
                 .padding(.bottom, GrainSpacing.x4)
             }
         }
-        .preferredColorScheme(.dark)   // the welcome is a night ceremony
         .animation(.easeOut(duration: 0.35), value: persona)
     }
 

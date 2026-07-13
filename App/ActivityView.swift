@@ -59,7 +59,6 @@ struct ActivityView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .grainBackground()
-        .preferredColorScheme(.dark)   // the Night Shift register
         .navigationTitle("Activity")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { reload() }
