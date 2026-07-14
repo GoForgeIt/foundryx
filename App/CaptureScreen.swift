@@ -345,6 +345,7 @@ struct CaptureScreen: View {
     private var activityDestination: some View {
         ActivityView(
             decisionLogURL: AmbientPrefs.decisionLogURL(),
+            recapPool: manager.recapConversationPool(),
             onOpenChat: { seed in AmbientCardBroker.shared.run(seed: seed) }
         )
         .toolbar {

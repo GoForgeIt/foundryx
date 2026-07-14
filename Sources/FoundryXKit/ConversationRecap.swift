@@ -74,6 +74,24 @@ public protocol RecapComposer: Sendable {
     func compose(_ conversations: [RecapConversation], span: RecapSpan) async -> (narrative: String, insights: [String])?
 }
 
+extension CaptureManager {
+    /// The conversations the recaps draw on: every browsable capture that has a
+    /// title or summary (its content), with its start time. Conversations still
+    /// processing (no title/summary yet) don't contribute until they finish —
+    /// which is exactly the "rebuilt after each conversation is processed"
+    /// behavior (a new finished conversation appears in the pool).
+    public func recapConversationPool() -> [RecapConversation] {
+        visibleCaptures.compactMap { wal in
+            let card = cardMeta(for: wal.captureId)
+            let title = (card?.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let summary = (card?.summary ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !title.isEmpty || !summary.isEmpty else { return nil }
+            return RecapConversation(captureId: wal.captureId, title: title,
+                                     summary: summary, at: conversationStartDate(wal))
+        }
+    }
+}
+
 public enum ConversationRecapEngine {
 
     /// The conversations that belong to a span, from a pool. Pure bucketing.
@@ -136,6 +154,15 @@ public enum ConversationRecapEngine {
             return subject
         }
         return (narrative, Array(insights.prefix(6)))
+    }
+
+    /// Start-of-today and start-of-this-week spans for "now" — the two recaps the
+    /// Activity view shows. Week starts on the calendar's firstWeekday.
+    public static func currentSpans(now: Date = Date(), calendar: Calendar = .current)
+        -> (day: RecapSpan, week: RecapSpan) {
+        let dayStart = calendar.startOfDay(for: now)
+        let weekStart = calendar.dateInterval(of: .weekOfYear, for: now)?.start ?? dayStart
+        return (.day(dayStart), .week(weekStart))
     }
 
     /// The date interval a span covers.

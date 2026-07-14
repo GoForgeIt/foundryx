@@ -24,6 +24,9 @@ import Grain
 struct ActivityView: View {
     let decisionLogURL: URL
     var synthesizer: RecapSynthesizer? = makeSystemRecapSynthesizer()
+    /// The day's/week's conversations, for the living recaps (Nick's spec).
+    var recapPool: [RecapConversation] = []
+    var recapComposer: RecapComposer? = makeSystemRecapComposer()
     /// Source links: installed by the mounting screen (conversation detail / chat).
     /// Absent handlers render the entry without a link — honestly, not broken.
     var onOpenConversation: ((String) -> Void)? = nil
@@ -38,17 +41,30 @@ struct ActivityView: View {
     /// (and unless) the on-device model replaces it.
     @State private var recapTexts: [String: String] = [:]
 
+    /// The living conversation recaps (narrative + insights). Daily is rebuilt as
+    /// conversations finish; weekly rolls up + refreshes to week-to-date on tap.
+    @State private var dailyRecap: ConversationRecap?
+    @State private var weeklyRecap: ConversationRecap?
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GrainSpacing.x4) {
                 header
+                // The living conversation recaps sit at the top — the day's, then
+                // the week's. They exist only when there were conversations.
+                if let dailyRecap {
+                    conversationRecapCard(dailyRecap, title: "Today")
+                }
+                if let weeklyRecap {
+                    conversationRecapCard(weeklyRecap, title: "This week", showsWeekToDate: true)
+                }
                 if days.isEmpty {
-                    emptyState
+                    if dailyRecap == nil && weeklyRecap == nil { emptyState }
                 } else {
                     measuresRow
                     notificationsRow
                     if let weekCard {
-                        recapCard(weekCard, entries: weekEntries, label: "This week")
+                        recapCard(weekCard, entries: weekEntries, label: "This week · activity")
                     }
                     ForEach(days) { day in
                         daySection(day)
@@ -62,6 +78,7 @@ struct ActivityView: View {
         .navigationTitle("Activity")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { reload() }
+        .task { await buildConversationRecaps() }
     }
 
     // MARK: - Sections
@@ -271,6 +288,87 @@ struct ActivityView: View {
                                                       period: card.period),
               !text.isEmpty else { return }
         recapTexts[card.id] = text
+    }
+
+    // MARK: - Living conversation recaps
+
+    /// The rich recap card: title, freshness, narrative, insights, and (for the
+    /// week) a "week to date" refresh. Wears the GrainMemoryRings watermark —
+    /// this is synthesized from your conversations.
+    private func conversationRecapCard(_ recap: ConversationRecap, title: String,
+                                       showsWeekToDate: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x3) {
+            HStack {
+                Text(title).grainTextStyle(.title).foregroundStyle(GrainColor.ink)
+                Spacer()
+                Text(recap.freshnessLine)
+                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            }
+            Text(recap.narrative)
+                .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if !recap.insights.isEmpty {
+                VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+                    Text("INSIGHTS")
+                        .font(.system(size: 11, weight: .semibold)).kerning(1.2)
+                        .foregroundStyle(GrainColor.textFaint)
+                    ForEach(Array(recap.insights.enumerated()), id: \.offset) { _, insight in
+                        HStack(alignment: .top, spacing: GrainSpacing.x2) {
+                            Circle().fill(GrainColor.sage).frame(width: 5, height: 5)
+                                .padding(.top, 6)
+                            Text(insight)
+                                .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .padding(.top, GrainSpacing.x1)
+            }
+
+            if showsWeekToDate {
+                Button {
+                    Task { await buildConversationRecaps(weekToDateNow: true) }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(grain: .spark).font(.system(size: 11, weight: .light))
+                        Text("Update week to date").grainTextStyle(.caption)
+                    }
+                    .foregroundStyle(GrainColor.forgeBlue)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(GrainSpacing.x4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
+                .fill(GrainColor.surfaceElevated)
+                .overlay(alignment: .topTrailing) {
+                    GrainMemoryRings(color: GrainColor.forgeBlue)
+                        .frame(width: 64, height: 64).opacity(0.10)
+                        .padding(GrainSpacing.x2)
+                })
+        .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
+            .strokeBorder(GrainColor.border, lineWidth: 1))
+    }
+
+    /// Build today's + this week's conversation recaps from the pool. `weekToDateNow`
+    /// swaps the weekly span for a week-to-date view (Nick's ad-hoc refresh).
+    private func buildConversationRecaps(weekToDateNow: Bool = false) async {
+        guard !recapPool.isEmpty else { dailyRecap = nil; weeklyRecap = nil; return }
+        let spans = ConversationRecapEngine.currentSpans()
+        let daily = await ConversationRecapEngine.build(span: spans.day, from: recapPool,
+                                                        composer: recapComposer)
+        let weekSpan: RecapSpan
+        if weekToDateNow, case .week(let start) = spans.week {
+            weekSpan = .weekToDate(start: start, asOf: Date())
+        } else {
+            weekSpan = spans.week
+        }
+        let weekly = await ConversationRecapEngine.build(span: weekSpan, from: recapPool,
+                                                         composer: recapComposer)
+        await MainActor.run { self.dailyRecap = daily; self.weeklyRecap = weekly }
     }
 
     // MARK: - Loading
