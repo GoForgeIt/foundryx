@@ -1,13 +1,8 @@
 import SwiftUI
 import Grain
 
-/// Dedicated device / capture-source page. Two halves:
-///   1. CAPTURE SOURCES (track 20260628T1702) — an extensible list of sources, each with
-///      an independent on/off Toggle (no more mutually-exclusive segmented pick), plus a
-///      "+ Add source" affordance that discovers Bluetooth mics and offers an Apple Watch
-///      scaffold. The registry owns the model; this screen just renders it.
-///   2. The remembered Omi device (name / id / last-connected), live connection state,
-///      Reconnect / Scan / Forget, and the conversation-segmentation (silence-gap) setting.
+/// Device and connection controls presented in the flat, separator-led DEVICE layout.
+/// The existing models continue to own connection, discovery, source, and capture state.
 struct DeviceScreen: View {
     @ObservedObject var device: DeviceManager
     @ObservedObject var battery: BatteryMonitor
@@ -18,158 +13,383 @@ struct DeviceScreen: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: GrainSpacing.x4) {
-                captureSourcesCard
-                savedCard
-                bluetoothBatteryCard
-                actions
-                settingsCard
+            VStack(alignment: .leading, spacing: 0) {
+                omiHero
+                deviceMetrics
+                captureSourcesSection
+                computerMemorySection
+                bluetoothBatterySection
+                conversationSplittingSection
             }
-            .padding(GrainSpacing.x4)
+            .padding(.horizontal, GrainSpacing.x4)
+            .padding(.bottom, GrainSpacing.x8)
         }
         .grainBackground()
-        // Power the central + reconnect ONLY when the Omi is still an enabled source;
-        // a toggled-off Omi must stay off (don't silently re-arm it on appear).
-        .onAppear { if sources.isEnabled(CaptureSourceDescriptor.omiId) { device.start() } }
-        .onChange(of: device.connectionState) { _ in syncOmiConnection() }
+        .navigationBarTitleDisplayMode(.inline)
+        // Power the central and reconnect only while Omi remains an enabled source.
+        .onAppear {
+            if sources.isEnabled(CaptureSourceDescriptor.omiId) {
+                device.start()
+            }
+        }
+        .onChange(of: device.connectionState) { _ in
+            syncOmiConnection()
+        }
         .sheet(isPresented: $showingAddSource) {
             AddSourceSheet(sources: sources)
         }
     }
 
-    /// Keep the registry's Omi row liveness in step with the BLE connection state, so
-    /// the active-source policy (Omi only active when connected) is correct.
     private func syncOmiConnection() {
-        if case .connected = device.connectionState { sources.setOmiConnected(true) }
-        else { sources.setOmiConnected(false) }
-    }
-
-    // MARK: capture sources (per-source toggles + add-source)
-
-    private var captureSourcesCard: some View {
-        VStack(alignment: .leading, spacing: GrainSpacing.x2) {
-            Text("Capture sources").grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-            Text("Turn each source on or off independently. Audio from the active source flows through the same private pipeline. One source records at a time — the connected one with the highest priority.")
-                .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-            VStack(spacing: 0) {
-                ForEach(sources.sources) { src in
-                    sourceRow(src)
-                    if src.id != sources.sources.last?.id {
-                        Divider().overlay(GrainColor.border)
-                    }
-                }
-            }
-            .padding(.top, GrainSpacing.x1)
-            Button { sources.discoverBluetoothMics(); showingAddSource = true } label: {
-                HStack(spacing: GrainSpacing.x1) {
-                    Image(systemName: "plus.circle.fill").foregroundStyle(GrainColor.forgeBlue)
-                    Text("Add source").grainTextStyle(.body).foregroundStyle(GrainColor.forgeBlue)
-                }
-                .padding(.top, GrainSpacing.x2)
-            }
-            .buttonStyle(.plain)
+        if case .connected = device.connectionState {
+            sources.setOmiConnected(true)
+        } else {
+            sources.setOmiConnected(false)
         }
-        .padding(GrainSpacing.x3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).fill(GrainColor.surfaceElevated))
-        .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).strokeBorder(GrainColor.border, lineWidth: 1))
     }
 
-    private func sourceRow(_ src: CaptureSourceDescriptor) -> some View {
-        HStack(spacing: GrainSpacing.x2) {
-            Image(systemName: src.category.symbolName)
-                .foregroundStyle(src.id == sources.activeSourceId ? GrainColor.sage : GrainColor.inkTertiary)
-                .frame(width: 24)
-            VStack(alignment: .leading, spacing: 2) {
+    // MARK: - Recording device
+
+    private var omiHero: some View {
+        HStack(alignment: .center, spacing: GrainSpacing.x3) {
+            wearablePortrait
+
+            VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                Text("RECORDING DEVICE")
+                    .grainTextStyle(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(GrainColor.forgeBlue)
+
+                Text(omiDisplayName)
+                    .grainTextStyle(.title)
+                    .foregroundStyle(GrainColor.ink)
+
                 HStack(spacing: GrainSpacing.x1) {
-                    Text(src.displayName).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-                    if src.id == sources.activeSourceId {
-                        Text("ACTIVE").grainTextStyle(.caption).foregroundStyle(GrainColor.sage)
+                    GrainStatusDot(stateStatus, size: .sm)
+                    Text(compactStateLabel)
+                        .grainTextStyle(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(stateColor)
+                }
+                .accessibilityElement(children: .combine)
+
+                omiActions
+            }
+
+            Spacer(minLength: GrainSpacing.x2)
+        }
+        .padding(.top, GrainSpacing.x2)
+        .padding(.bottom, GrainSpacing.x3)
+        .overlay(alignment: .bottom) {
+            hairline
+        }
+    }
+
+    private var wearablePortrait: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
+                .fill(GrainColor.forgeBlueBg)
+                .overlay {
+                    RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
+                        .strokeBorder(GrainColor.forgeBlueBorder, lineWidth: 1)
+                }
+                .frame(width: 38, height: 76)
+
+            Image(grain: .mic)
+                .grainTextStyle(.title)
+                .foregroundStyle(GrainColor.forgeBlue)
+        }
+        .frame(width: 64, height: 86)
+        .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private var omiActions: some View {
+        if device.saved != nil {
+            HStack(spacing: GrainSpacing.x3) {
+                GrainButton(isOmiConnected ? "Disconnect Omi" : "Connect Omi",
+                            variant: .text,
+                            size: .sm) {
+                    toggleOmiConnection()
+                }
+
+                Button {
+                    device.forget()
+                } label: {
+                    Text("Forget")
+                        .grainTextStyle(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(GrainColor.dangerRed)
+                        .frame(height: 28)
+                }
+                .buttonStyle(.plain)
+            }
+        } else {
+            Text("Pair your Omi from Capture")
+                .grainTextStyle(.caption)
+                .foregroundStyle(GrainColor.textMuted)
+        }
+    }
+
+    private func toggleOmiConnection() {
+        if isOmiConnected {
+            sources.setEnabled(CaptureSourceDescriptor.omiId, false)
+        } else if sources.isEnabled(CaptureSourceDescriptor.omiId) {
+            device.reconnect()
+        } else {
+            sources.setEnabled(CaptureSourceDescriptor.omiId, true)
+        }
+    }
+
+    private var deviceMetrics: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 0) {
+                DeviceMetric(value: batteryValue, label: "Battery")
+                metricDivider
+                DeviceMetric(value: signalValue, label: "Signal")
+                metricDivider
+                DeviceMetric(value: pairingValue, label: "Device ID")
+            }
+            .padding(.vertical, GrainSpacing.x2)
+
+            if let saved = device.saved {
+                Text(lastConnected(saved.lastConnected))
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textFaint)
+                    .padding(.bottom, GrainSpacing.x2)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            hairline
+        }
+    }
+
+    private var metricDivider: some View {
+        Rectangle()
+            .fill(GrainColor.borderFaint)
+            .frame(width: 1, height: 40)
+    }
+
+    // MARK: - Capture sources
+
+    private var captureSourcesSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: GrainSpacing.x2) {
+                DeviceSectionLabel("Capture sources")
+                Spacer()
+                GrainButton("Add source", variant: .text, size: .sm) {
+                    sources.discoverBluetoothMics()
+                    showingAddSource = true
+                }
+            }
+            .padding(.top, GrainSpacing.x2)
+
+            ForEach(sources.sources) { source in
+                sourceRow(source)
+            }
+        }
+    }
+
+    private func sourceRow(_ source: CaptureSourceDescriptor) -> some View {
+        HStack(spacing: GrainSpacing.x3) {
+            DeviceIconTile(icon: sourceIcon(source.category),
+                           foreground: source.id == sources.activeSourceId
+                               ? GrainColor.sage
+                               : GrainColor.forgeBlue)
+
+            VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                HStack(spacing: GrainSpacing.x1) {
+                    Text(sourceTitle(source))
+                        .grainTextStyle(.body)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(GrainColor.ink)
+
+                    if source.id == sources.activeSourceId {
+                        Text("ACTIVE")
+                            .grainTextStyle(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(GrainColor.sage)
                     }
                 }
-                Text(connectionLabel(src)).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+
+                Text(sourceDescription(source))
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer()
+
+            Spacer(minLength: GrainSpacing.x2)
+
             Toggle("", isOn: Binding(
-                get: { src.enabled },
-                set: { sources.setEnabled(src.id, $0) }))
-                .labelsHidden()
-                .disabled(!src.canToggle)
-                .tint(GrainColor.forgeBlue)
+                get: { source.enabled },
+                set: { sources.setEnabled(source.id, $0) }
+            ))
+            .labelsHidden()
+            .disabled(!source.canToggle)
+            .tint(GrainColor.forgeBlue)
         }
         .padding(.vertical, GrainSpacing.x2)
+        .frame(minHeight: 54)
+        .overlay(alignment: .bottom) {
+            hairline
+        }
     }
 
-    private func connectionLabel(_ src: CaptureSourceDescriptor) -> String {
-        if let detail = src.detail, !detail.isEmpty { return "\(src.connection.label) · \(detail)" }
-        return src.connection.label
+    private func sourceTitle(_ source: CaptureSourceDescriptor) -> String {
+        source.category == .omi ? "Omi microphone" : source.displayName
     }
 
-    // MARK: generic BLE battery monitor
+    private func sourceDescription(_ source: CaptureSourceDescriptor) -> String {
+        switch source.category {
+        case .omi:
+            return isOmiConnected
+                ? "Use the wearable for capture"
+                : "Reconnect Omi to use this source"
+        case .phoneMic:
+            return "Use this iPhone as another capture source"
+        case .appleWatch, .bluetoothMic:
+            return connectionLabel(source)
+        }
+    }
 
-    private var bluetoothBatteryCard: some View {
+    private func sourceIcon(_ category: CaptureSourceCategory) -> GrainIcon {
+        switch category {
+        case .omi, .bluetoothMic:
+            return .mic
+        case .phoneMic, .appleWatch:
+            return .device
+        }
+    }
+
+    private func connectionLabel(_ source: CaptureSourceDescriptor) -> String {
+        if let detail = source.detail, !detail.isEmpty {
+            return "\(source.connection.label) · \(detail)"
+        }
+        return source.connection.label
+    }
+
+    // MARK: - Computer memory
+
+    private var computerMemorySection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            DeviceSectionLabel("Computer memory")
+                .padding(.top, GrainSpacing.x3)
+                .padding(.bottom, GrainSpacing.x1)
+
+            HStack(alignment: .top, spacing: GrainSpacing.x3) {
+                DeviceIconTile(icon: .device)
+
+                VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                    Text("Connect your computer")
+                        .grainTextStyle(.body)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(GrainColor.ink)
+                    Text("Pair in Settings for full-history search and local Brain runs")
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.textFaint)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: GrainSpacing.x1)
+
+                HStack(spacing: GrainSpacing.x1) {
+                    GrainStatusDot(.thinking, size: .sm)
+                    Text("Not connected")
+                        .grainTextStyle(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(GrainColor.amber)
+                }
+                .fixedSize(horizontal: true, vertical: false)
+                .accessibilityElement(children: .combine)
+            }
+            .padding(.vertical, GrainSpacing.x2)
+            .frame(minHeight: 54)
+            .overlay(alignment: .top) {
+                hairline
+            }
+            .overlay(alignment: .bottom) {
+                hairline
+            }
+
+            HStack(alignment: .top, spacing: GrainSpacing.x2) {
+                Image(grain: .key)
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textFaint)
+                Text("Pairing is end-to-end encrypted to your own machine. Computer pairing is managed in Settings.")
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.vertical, GrainSpacing.x2)
+        }
+    }
+
+    // MARK: - Generic Bluetooth battery monitor
+
+    private var bluetoothBatterySection: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x2) {
             HStack(spacing: GrainSpacing.x2) {
-                Text("Bluetooth device battery").grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                DeviceSectionLabel("Bluetooth battery")
                 Spacer()
                 if battery.isScanning {
                     ProgressView()
+                        .tint(GrainColor.forgeBlue)
                 }
             }
 
             if let name = battery.monitoredName {
-                HStack(spacing: GrainSpacing.x2) {
-                    Image(systemName: "battery.100percent")
-                        .foregroundStyle(GrainColor.forgeBlue)
-                        .frame(width: 24)
-                    Text(name).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                HStack(spacing: GrainSpacing.x3) {
+                    DeviceIconTile(icon: .device)
+                    Text(name)
+                        .grainTextStyle(.body)
+                        .foregroundStyle(GrainColor.ink)
                     Spacer()
                     if let level = battery.level {
                         BatteryBadge(level: level, low: battery.isLow)
                     }
-                    GrainButton("Stop", variant: .text, size: .sm) { battery.stopMonitoring() }
+                    GrainButton("Stop", variant: .text, size: .sm) {
+                        battery.stopMonitoring()
+                    }
                 }
-                .padding(.vertical, GrainSpacing.x1)
+                .padding(.vertical, GrainSpacing.x2)
+                .overlay(alignment: .bottom) {
+                    hairline
+                }
             } else {
                 GrainButton("Find Bluetooth devices", variant: .tonal, size: .sm) {
                     battery.startScan()
                 }
 
-                if !battery.discovered.isEmpty {
-                    VStack(spacing: 0) {
-                        ForEach(battery.discovered) { device in
-                            Button { battery.monitor(device) } label: {
-                                HStack(spacing: GrainSpacing.x2) {
-                                    Image(systemName: "dot.radiowaves.left.and.right")
-                                        .foregroundStyle(GrainColor.forgeBlue)
-                                        .frame(width: 24)
-                                    Text(device.name).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-                                    Spacer()
-                                    Text(signalHint(device.rssi))
-                                        .grainTextStyle(.caption)
-                                        .foregroundStyle(GrainColor.textFaint)
-                                }
-                                .padding(.vertical, GrainSpacing.x2)
-                            }
-                            .buttonStyle(.plain)
-
-                            if device.id != battery.discovered.last?.id {
-                                Divider().overlay(GrainColor.border)
-                            }
+                ForEach(battery.discovered) { discoveredDevice in
+                    Button {
+                        battery.monitor(discoveredDevice)
+                    } label: {
+                        HStack(spacing: GrainSpacing.x3) {
+                            DeviceIconTile(icon: .device)
+                            Text(discoveredDevice.name)
+                                .grainTextStyle(.body)
+                                .foregroundStyle(GrainColor.ink)
+                            Spacer()
+                            Text(signalHint(discoveredDevice.rssi))
+                                .grainTextStyle(.caption)
+                                .foregroundStyle(GrainColor.textFaint)
                         }
+                        .padding(.vertical, GrainSpacing.x2)
+                        .contentShape(Rectangle())
                     }
-                    .padding(.top, GrainSpacing.x1)
+                    .buttonStyle(.plain)
+                    .overlay(alignment: .bottom) {
+                        hairline
+                    }
                 }
             }
 
-            Text("Shows battery for Bluetooth devices that publish it over Bluetooth LE. AirPods and most headphones keep their battery private to iOS and won't appear here.")
+            Text("Shows battery for Bluetooth devices that publish it over Bluetooth LE. AirPods and most headphones keep their battery private to iOS and will not appear here.")
                 .grainTextStyle(.caption)
                 .foregroundStyle(GrainColor.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(GrainSpacing.x3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).fill(GrainColor.surfaceElevated))
-        .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).strokeBorder(GrainColor.border, lineWidth: 1))
+        .padding(.top, GrainSpacing.x4)
     }
 
     private func signalHint(_ rssi: Int) -> String {
@@ -178,107 +398,127 @@ struct DeviceScreen: View {
         return "Weak"
     }
 
-    // MARK: remembered device
+    // MARK: - Conversation splitting
 
-    private var savedCard: some View {
+    private var conversationSplittingSection: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x2) {
-            HStack(spacing: GrainSpacing.x2) {
-                Circle().fill(stateColor).frame(width: 10, height: 10)
-                Text(device.saved?.name ?? "No Omi paired yet")
-                    .grainTextStyle(.title).foregroundStyle(GrainColor.ink)
-                Spacer()
-                // Battery — only when the connected device actually reports one.
-                if let level = device.batteryLevel {
-                    BatteryBadge(level: level, low: device.isBatteryLow)
-                }
-            }
-            Text(stateLabel).grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
-            if let s = device.saved {
-                Text("ID \(String(s.id.uuidString.prefix(8)))…")
-                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-                Text(lastConnected(s.lastConnected))
-                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-            } else {
-                Text("Tap “Connect your Omi” on the Capture page to pair. Once paired, it reconnects automatically.")
-                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-            }
-        }
-        .padding(GrainSpacing.x3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).fill(GrainColor.surfaceElevated))
-        .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).strokeBorder(GrainColor.border, lineWidth: 1))
-    }
+            DeviceSectionLabel("Conversation splitting")
+            Text("Capture starts a new conversation after a silence gap. Choose how long a pause ends the current conversation.")
+                .grainTextStyle(.caption)
+                .foregroundStyle(GrainColor.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
 
-    /// Connection-health actions for the remembered Omi. Reconnect is a manual SELF-HEAL
-    /// nudge (the link already auto-reconnects); Forget re-pairs. There is no raw "Scan"
-    /// here — first-time pairing + routine reconnect happen automatically from the Capture
-    /// page, so the Device page manages WHICH sources exist, not hand-driven scanning.
-    private var actions: some View {
-        HStack(spacing: GrainSpacing.x2) {
-            if device.saved != nil {
-                GrainButton("Reconnect", variant: .tonal, size: .sm) { device.reconnect() }
-            }
-            Spacer()
-            if device.saved != nil {
-                GrainButton("Forget", variant: .text, size: .sm) { device.forget() }
-            }
-        }
-    }
-
-    // MARK: conversation segmentation setting
-
-    private var settingsCard: some View {
-        VStack(alignment: .leading, spacing: GrainSpacing.x2) {
-            Text("Conversation splitting").grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-            Text("Capture is split into separate conversations after a silence gap — no need to press stop. Choose how long a pause ends a conversation.")
-                .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
             Picker("Silence gap", selection: Binding(
                 get: { manager.silenceGapSeconds },
-                set: { manager.setSilenceGap($0) })) {
+                set: { manager.setSilenceGap($0) }
+            )) {
                 Text("30s").tag(TimeInterval(30))
                 Text("1 min").tag(TimeInterval(60))
                 Text("2 min").tag(TimeInterval(120))
                 Text("5 min").tag(TimeInterval(300))
             }
             .pickerStyle(.segmented)
+            .tint(GrainColor.forgeBlue)
         }
-        .padding(GrainSpacing.x3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).fill(GrainColor.surfaceElevated))
-        .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).strokeBorder(GrainColor.border, lineWidth: 1))
+        .padding(.top, GrainSpacing.x4)
     }
 
-    // MARK: derived labels
+    // MARK: - Derived presentation
+
+    private var isOmiConnected: Bool {
+        if case .connected = device.connectionState { return true }
+        return false
+    }
+
+    private var omiDisplayName: String {
+        switch device.connectionState {
+        case .connected(let name), .connecting(let name):
+            return name
+        case .poweredOff, .idle, .scanning, .disconnected:
+            return device.saved?.name ?? "Omi"
+        }
+    }
+
+    private var compactStateLabel: String {
+        switch device.connectionState {
+        case .connected:
+            return manager.isPaused ? "Connected, paused" : "Connected"
+        case .connecting:
+            return "Connecting"
+        case .scanning:
+            return "Scanning"
+        case .disconnected:
+            return "Not connected"
+        case .idle:
+            return device.saved == nil ? "Not paired" : "Ready to connect"
+        case .poweredOff:
+            return "Bluetooth is off"
+        }
+    }
+
+    private var stateStatus: GrainStatus {
+        switch device.connectionState {
+        case .connected:
+            return manager.isPaused ? .thinking : .running
+        case .connecting, .scanning, .disconnected:
+            return .thinking
+        case .idle, .poweredOff:
+            return .stopped
+        }
+    }
 
     private var stateColor: Color {
         switch device.connectionState {
-        case .connected: return manager.isPaused ? GrainColor.amber : GrainColor.sage
-        case .connecting, .scanning, .disconnected: return GrainColor.amber
-        case .idle, .poweredOff: return GrainColor.inkTertiary
+        case .connected:
+            return manager.isPaused ? GrainColor.amber : GrainColor.sage
+        case .connecting, .scanning, .disconnected:
+            return GrainColor.amber
+        case .idle, .poweredOff:
+            return GrainColor.textFaint
         }
     }
 
-    private var stateLabel: String {
-        switch device.connectionState {
-        case .connected(let n): return manager.isPaused ? "Connected to \(n) · paused" : "Connected to \(n) · capturing"
-        case .connecting(let n): return "Connecting to \(n)…"
-        case .scanning: return "Scanning…"
-        case .disconnected: return "Disconnected — reconnecting when in range"
-        case .idle: return "Ready — not connected"
-        case .poweredOff: return "Bluetooth is off"
+    private var batteryValue: String {
+        device.batteryLevel.map { "\($0)%" } ?? "N/A"
+    }
+
+    private var signalValue: String {
+        if let saved = device.saved,
+           let discovered = device.discovered.first(where: { $0.id == saved.id }) {
+            return signalHint(discovered.rssi)
         }
+        switch device.connectionState {
+        case .connected:
+            return "Ready"
+        case .connecting, .scanning:
+            return "Searching"
+        case .disconnected, .idle, .poweredOff:
+            return "N/A"
+        }
+    }
+
+    private var pairingValue: String {
+        guard let saved = device.saved else { return "N/A" }
+        return String(saved.id.uuidString.prefix(8))
     }
 
     private func lastConnected(_ date: Date?) -> String {
         guard let date else { return "Last connected: never" }
-        let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short
-        return "Last connected: \(f.string(from: date))"
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return "Last connected: \(formatter.string(from: date))"
+    }
+
+    private var hairline: some View {
+        Rectangle()
+            .fill(GrainColor.borderFaint)
+            .frame(height: 1)
     }
 }
 
-/// "+ Add source" sheet: lists discovered Bluetooth mics (real, via AVAudioSession) to
-/// add, plus an Apple Watch scaffold entry. Adding registers the source in the registry
-/// (with its own toggle, enabled by default) and dismisses.
+// MARK: - Add source sheet
+
 private struct AddSourceSheet: View {
     @ObservedObject var sources: CaptureSourceRegistry
     @Environment(\.dismiss) private var dismiss
@@ -290,99 +530,185 @@ private struct AddSourceSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: GrainSpacing.x4) {
+                VStack(alignment: .leading, spacing: GrainSpacing.x6) {
                     bluetoothSection
                     watchSection
                 }
-                .padding(GrainSpacing.x4)
+                .padding(.horizontal, GrainSpacing.x4)
+                .padding(.vertical, GrainSpacing.x3)
             }
             .grainBackground()
             .navigationTitle("Add source")
-            .toolbar { Button("Done") { dismiss() } }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                Button("Done") {
+                    dismiss()
+                }
+            }
+            .tint(GrainColor.forgeBlue)
         }
     }
 
     private var bluetoothSection: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x2) {
-            HStack {
-                Text("Bluetooth microphones").grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+            HStack(spacing: GrainSpacing.x2) {
+                DeviceSectionLabel("Bluetooth microphones")
                 Spacer()
-                Button { sources.discoverBluetoothMics() } label: {
-                    Image(systemName: "arrow.clockwise").foregroundStyle(GrainColor.forgeBlue)
+                GrainButton("Refresh", variant: .text, size: .sm) {
+                    sources.discoverBluetoothMics()
                 }
-                .buttonStyle(.plain)
             }
+
             if sources.discoveredBluetoothInputs.isEmpty {
-                Text("No new Bluetooth microphones found. Connect a Bluetooth headset or mic in iOS Settings, then refresh.")
-                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                Text("No new Bluetooth microphones found. Connect a Bluetooth headset or microphone in iOS Settings, then refresh.")
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 ForEach(sources.discoveredBluetoothInputs, id: \.uid) { input in
-                    Button { sources.addBluetoothMic(input); dismiss() } label: {
-                        HStack(spacing: GrainSpacing.x2) {
-                            Image(systemName: "headphones").foregroundStyle(GrainColor.forgeBlue)
+                    Button {
+                        sources.addBluetoothMic(input)
+                        dismiss()
+                    } label: {
+                        HStack(spacing: GrainSpacing.x3) {
+                            DeviceIconTile(icon: .mic)
                             Text(input.name.isEmpty ? "Bluetooth microphone" : input.name)
-                                .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                                .grainTextStyle(.body)
+                                .foregroundStyle(GrainColor.ink)
                             Spacer()
-                            Image(systemName: "plus.circle").foregroundStyle(GrainColor.forgeBlue)
+                            Image(grain: .check)
+                                .foregroundStyle(GrainColor.forgeBlue)
                         }
                         .padding(.vertical, GrainSpacing.x2)
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .overlay(alignment: .bottom) {
+                        sheetHairline
+                    }
                 }
             }
         }
-        .padding(GrainSpacing.x3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).fill(GrainColor.surfaceElevated))
-        .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).strokeBorder(GrainColor.border, lineWidth: 1))
     }
 
     private var watchSection: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x2) {
-            Text("Apple Watch").grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-            Text("Record with your Apple Watch's microphone. Coming soon — adds the source to your list so it's ready when the watch app ships.")
-                .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-            Button { sources.addAppleWatchScaffold(); dismiss() } label: {
-                HStack(spacing: GrainSpacing.x2) {
-                    Image(systemName: "applewatch").foregroundStyle(watchAlreadyAdded ? GrainColor.inkTertiary : GrainColor.forgeBlue)
+            DeviceSectionLabel("Apple Watch")
+            Text("Record with your Apple Watch microphone. Coming soon. Add the source now so it is ready when the watch app ships.")
+                .grainTextStyle(.caption)
+                .foregroundStyle(GrainColor.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button {
+                sources.addAppleWatchScaffold()
+                dismiss()
+            } label: {
+                HStack(spacing: GrainSpacing.x3) {
+                    DeviceIconTile(icon: .device,
+                                   foreground: watchAlreadyAdded
+                                       ? GrainColor.textFaint
+                                       : GrainColor.forgeBlue)
                     Text(watchAlreadyAdded ? "Apple Watch added" : "Add Apple Watch")
-                        .grainTextStyle(.body).foregroundStyle(watchAlreadyAdded ? GrainColor.textMuted : GrainColor.forgeBlue)
+                        .grainTextStyle(.body)
+                        .foregroundStyle(watchAlreadyAdded
+                            ? GrainColor.textMuted
+                            : GrainColor.forgeBlue)
                     Spacer()
-                    if !watchAlreadyAdded { Image(systemName: "plus.circle").foregroundStyle(GrainColor.forgeBlue) }
+                    if !watchAlreadyAdded {
+                        Image(grain: .check)
+                            .foregroundStyle(GrainColor.forgeBlue)
+                    }
                 }
                 .padding(.vertical, GrainSpacing.x2)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(watchAlreadyAdded)
+            .overlay(alignment: .bottom) {
+                sheetHairline
+            }
         }
-        .padding(GrainSpacing.x3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).fill(GrainColor.surfaceElevated))
-        .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous).strokeBorder(GrainColor.border, lineWidth: 1))
+    }
+
+    private var sheetHairline: some View {
+        Rectangle()
+            .fill(GrainColor.borderFaint)
+            .frame(height: 1)
     }
 }
 
-/// A compact battery indicator (SF Symbol + %) for a connected audio device. Only
-/// rendered when a level is actually known — a device that doesn't publish the BLE
-/// Battery Service never shows one. Low battery (<20%) tints amber.
-struct BatteryBadge: View {
-    let level: Int          // 0…100
-    let low: Bool
+// MARK: - Shared device presentation
 
-    private var symbol: String {
-        switch level {
-        case ..<13: return "battery.0percent"
-        case ..<38: return "battery.25percent"
-        case ..<63: return "battery.50percent"
-        case ..<88: return "battery.75percent"
-        default: return "battery.100percent"
-        }
+private struct DeviceSectionLabel: View {
+    let title: String
+
+    init(_ title: String) {
+        self.title = title
     }
 
     var body: some View {
+        Text(title.uppercased())
+            .grainTextStyle(.caption)
+            .fontWeight(.semibold)
+            .foregroundStyle(GrainColor.textFaint)
+    }
+}
+
+private struct DeviceIconTile: View {
+    let icon: GrainIcon
+    var foreground: Color = GrainColor.forgeBlue
+
+    var body: some View {
+        Image(grain: icon)
+            .grainTextStyle(.body)
+            .foregroundStyle(foreground)
+            .frame(width: GrainSpacing.x8, height: GrainSpacing.x8)
+            .background {
+                RoundedRectangle(cornerRadius: GrainRadius.md, style: .continuous)
+                    .fill(GrainColor.forgeBlueBg)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: GrainRadius.md, style: .continuous)
+                    .strokeBorder(GrainColor.forgeBlueBorder, lineWidth: 1)
+            }
+            .accessibilityHidden(true)
+    }
+}
+
+private struct DeviceMetric: View {
+    let value: String
+    let label: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+            Text(value)
+                .grainTextStyle(.body)
+                .fontWeight(.semibold)
+                .monospacedDigit()
+                .foregroundStyle(GrainColor.ink)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+            Text(label)
+                .grainTextStyle(.caption)
+                .foregroundStyle(GrainColor.textFaint)
+        }
+        .padding(.horizontal, GrainSpacing.x2)
+        .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Compact battery presentation for devices that publish a real battery level.
+struct BatteryBadge: View {
+    let level: Int
+    let low: Bool
+
+    var body: some View {
         HStack(spacing: GrainSpacing.x1) {
-            Image(systemName: symbol)
-            Text("\(level)%").grainTextStyle(.caption).monospacedDigit()
+            GrainStatusDot(low ? .thinking : .running, size: .sm)
+            Text("\(level)%")
+                .grainTextStyle(.caption)
+                .monospacedDigit()
         }
         .foregroundStyle(low ? GrainColor.amber : GrainColor.textMuted)
         .accessibilityElement(children: .combine)
