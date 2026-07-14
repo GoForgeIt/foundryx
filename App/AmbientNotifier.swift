@@ -121,7 +121,11 @@ enum AmbientNotifier {
             title = "You called your agent"
             body = "Want me to: \(ask)?"
             seed = chatSeed(candidate)
-        case ("todo", _), ("workflow", _):
+        // The door routes a repeatable moment as `playbook` (renamed from the
+        // retired `workflow` term). Match `workflow` too as a transitional alias
+        // so a new phone still handles an older door build during rollout — drop
+        // it once every door in the field emits `playbook`.
+        case ("todo", _), ("playbook", _), ("workflow", _):
             title = "Noticed a to-do"
             body = "Want me to: \(ask)?"
             seed = chatSeed(candidate)
