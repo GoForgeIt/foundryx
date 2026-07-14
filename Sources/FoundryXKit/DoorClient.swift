@@ -347,6 +347,28 @@ public struct ConfirmOutcome: Decodable, Sendable, Equatable {
     }
 }
 
+/// One full-history search hit from the door (`GET /foundryx/conversations`). The door
+/// derives it from the computer's Lore library; `captureId` is the PHONE's id so a tap
+/// opens the existing three-face detail (which fetches `/content` by that id).
+public struct ConversationHit: Decodable, Sendable, Identifiable, Equatable {
+    public let captureId: String
+    public let title: String
+    public let dateLabel: String
+    public let snippet: String
+    public var id: String { captureId }
+    public init(captureId: String, title: String, dateLabel: String, snippet: String) {
+        self.captureId = captureId
+        self.title = title
+        self.dateLabel = dateLabel
+        self.snippet = snippet
+    }
+}
+
+/// The door's `/foundryx/conversations` response envelope.
+struct ConversationSearchResponse: Decodable {
+    let conversations: [ConversationHit]
+}
+
 /// The authenticated door client. `events(for:)` streams the turn; `collect(_:)` is a
 /// convenience that drains to completion (used by tests + simple callers).
 public final class DoorClient: @unchecked Sendable {
@@ -780,6 +802,47 @@ public final class DoorClient: @unchecked Sendable {
         if http.statusCode == 404 { return notReady }
         guard http.statusCode == 200 else { throw DoorError.http(http.statusCode) }
         return try JSONDecoder().decode(CaptureContent.self, from: data)
+    }
+
+    /// Full-history search (`GET /foundryx/conversations?q=&limit=`): ask the door for
+    /// conversations from the computer's Lore library matching `query`. `captureId` on
+    /// each hit is the PHONE's id, so tapping opens the existing three-face detail. An
+    /// interactive read (rides the chat tunnel like the transcript fetch). A 404 — an
+    /// old door without the endpoint — returns `[]` so the phone degrades to local-only
+    /// search; a transport failure / non-2xx throws (the caller says "couldn't reach
+    /// your computer"). An empty `query` asks the door for the recent list.
+    public func searchConversations(query: String, limit: Int = 50) async throws -> [ConversationHit] {
+        // Encode the term as a query VALUE (alphanumerics-only allow-set → spaces and
+        // separators become %XX, which the door percent-decodes) so `&`/`=`/spaces in
+        // the search never break the query string.
+        let q = query.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+        let path = "/foundryx/conversations?q=\(q)&limit=\(limit)"
+        if let relay = target.relay?.interactive() {
+            let resp = try await RelayHTTP.roundTrip(
+                relay: relay, bearer: target.bearer, method: "GET",
+                path: path, session: session, log: log, useMux: target.useMux)
+            if resp.status == 401 { throw DoorError.unauthorized }
+            if resp.status == 404 { return [] }
+            guard resp.status == 200 else { throw DoorError.http(resp.status) }
+            return try JSONDecoder().decode(ConversationSearchResponse.self, from: resp.body).conversations
+        }
+        let s = target.baseURL.absoluteString
+        let base = s.hasSuffix("/") ? String(s.dropLast()) : s
+        guard let url = URL(string: "\(base)\(path)") else {
+            throw DoorError.transport("bad conversations url")
+        }
+        var r = URLRequest(url: url)
+        r.httpMethod = "GET"
+        r.setValue("Bearer \(target.bearer)", forHTTPHeaderField: "Authorization")
+        r.timeoutInterval = 30
+        let (data, response) = try await session.data(for: r)
+        guard let http = response as? HTTPURLResponse else {
+            throw DoorError.transport("non-HTTP response")
+        }
+        if http.statusCode == 401 { throw DoorError.unauthorized }
+        if http.statusCode == 404 { return [] }
+        guard http.statusCode == 200 else { throw DoorError.http(http.statusCode) }
+        return try JSONDecoder().decode(ConversationSearchResponse.self, from: data).conversations
     }
 
     /// Fetch a capture's assembled AUDIO for replay (`GET /foundryx/capture/{id}/audio`),
