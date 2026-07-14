@@ -62,7 +62,7 @@ struct SpeakerTranscriptSection: View {
     @State private var tagging: CaptureSpeaker?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: GrainSpacing.x4) {
+        VStack(alignment: .leading, spacing: 0) {
             if transcript.hasUnconfirmedInferred {
                 ReviewSpeakersBanner(count: transcript.inferredSlots.count) {
                     // Jump straight into the first tentative speaker to review it.
@@ -70,7 +70,9 @@ struct SpeakerTranscriptSection: View {
                         tagging = transcript.speaker(for: slot)
                     }
                 }
+                .padding(.bottom, GrainSpacing.x3)
             }
+            Rectangle().fill(GrainColor.borderFaint).frame(height: 1)
             ForEach(Array(transcript.turns.enumerated()), id: \.element.id) { index, turn in
                 SpeakerTurnRow(
                     turn: turn,
@@ -119,7 +121,6 @@ struct SpeakerTurnRow: View {
 
     private var speaker: CaptureSpeaker { transcript.speaker(for: turn.slot) }
     private var accent: Color { SpeakerPalette.accent(transcript.colorIndex(for: turn.slot)) }
-    private var tint: Color { SpeakerPalette.tint(transcript.colorIndex(for: turn.slot)) }
     private var label: String { transcript.displayLabel(for: turn.slot) }
 
     var body: some View {
@@ -127,7 +128,8 @@ struct SpeakerTurnRow: View {
             // Speaker label — tappable to open the tag/confirm sheet.
             Button(action: onTapSpeaker) {
                 HStack(spacing: GrainSpacing.x2) {
-                    Circle().fill(accent).frame(width: 10, height: 10)
+                    Circle().fill(accent)
+                        .frame(width: GrainSpacing.x2, height: GrainSpacing.x2)
                     Text(label)
                         .grainTextStyle(.caption)
                         .foregroundStyle(speaker.isAnonymous ? GrainColor.textMuted : accent)
@@ -138,8 +140,8 @@ struct SpeakerTurnRow: View {
                             .foregroundStyle(GrainColor.textFaint)
                             .italic()
                     } else if speaker.isAnonymous {
-                        Image(systemName: "pencil.circle")
-                            .font(.caption)
+                        Image(grain: .pencil)
+                            .grainTextStyle(.caption)
                             .foregroundStyle(GrainColor.textFaint)
                     }
                 }
@@ -155,11 +157,6 @@ struct SpeakerTurnRow: View {
                 .opacity(speaker.isInferred ? 0.6 : 1.0)
                 .textSelection(.enabled)
                 .padding(.leading, GrainSpacing.x4)
-                .overlay(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: GrainRadius.pill)
-                        .fill(accent.opacity(speaker.isConfirmed ? 0.9 : 0.4))
-                        .frame(width: 3)
-                }
 
             // Inline confirm affordance for an inferred match — confirm or "not them".
             if speaker.isInferred, let name = speaker.name {
@@ -172,11 +169,10 @@ struct SpeakerTurnRow: View {
                 .padding(.leading, GrainSpacing.x4)
             }
         }
-        .padding(GrainSpacing.x3)
-        .background(
-            RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
-                .fill(tint.opacity(0.5))
-        )
+        .padding(.vertical, GrainSpacing.x3)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(GrainColor.borderFaint).frame(height: 1)
+        }
     }
 
     /// "tentative · 82%" — the inferred-match confidence hint.

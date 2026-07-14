@@ -53,6 +53,7 @@ struct ConversationFacesView: View {
     @State private var didCopy = false
     @State private var receiptExpanded = false
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
 
     // MARK: actions face
     @State private var actionCards: [ConversationActionCard] = []
@@ -138,7 +139,7 @@ struct ConversationFacesView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: GrainSpacing.x3) {
+                VStack(alignment: .leading, spacing: GrainSpacing.x4) {
                     metadataHeader
                     facePicker
                     switch face {
@@ -164,7 +165,11 @@ struct ConversationFacesView: View {
                         Button {
                             copyTranscript()
                         } label: {
-                            Label("Copy transcript", systemImage: "doc.on.doc")
+                            Label {
+                                Text("Copy transcript")
+                            } icon: {
+                                Image(grain: .doc)
+                            }
                         }
                     }
                     Button("Delete", role: .destructive) { confirmDelete = true }
@@ -199,16 +204,46 @@ struct ConversationFacesView: View {
 
     // MARK: - header + face picker
 
-    @ViewBuilder private var metadataHeader: some View {
-        Text(timeRange).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-        if let place {
-            Text(place).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+    private var metadataHeader: some View {
+        HStack(spacing: GrainSpacing.x2) {
+            metadataTag(
+                timeRange,
+                foreground: GrainColor.forgeBlue,
+                background: GrainColor.forgeBlueBg,
+                border: GrainColor.forgeBlueBorder
+            )
+            if let place {
+                metadataTag(
+                    place,
+                    foreground: GrainColor.textMuted,
+                    background: GrainColor.surface,
+                    border: GrainColor.borderFaint
+                )
+            }
+            Spacer(minLength: 0)
         }
     }
 
-    /// The three-face switcher, Night Shift register: a quiet segmented capsule.
+    private func metadataTag(
+        _ text: String, foreground: Color, background: Color, border: Color
+    ) -> some View {
+        Text(text)
+            .grainTextStyle(.caption)
+            .foregroundStyle(foreground)
+            .lineLimit(1)
+            .padding(.horizontal, GrainSpacing.x2)
+            .padding(.vertical, GrainSpacing.x1)
+            .background(Capsule().fill(background))
+            .overlay(Capsule().strokeBorder(border, lineWidth: 1))
+    }
+
+    private var selectedPillForeground: Color {
+        colorScheme == .dark ? GrainColor.ink : GrainColor.surface
+    }
+
+    /// Three equal face choices, matching the approved standalone-pill control.
     private var facePicker: some View {
-        HStack(spacing: GrainSpacing.x1) {
+        HStack(spacing: GrainSpacing.x2) {
             ForEach(DetailFace.allCases) { f in
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) { face = f }
@@ -216,36 +251,52 @@ struct ConversationFacesView: View {
                     Text(f.title)
                         .grainTextStyle(.caption)
                         .fontWeight(.semibold)
-                        .foregroundStyle(face == f ? GrainColor.ink : GrainColor.textMuted)
+                        .foregroundStyle(face == f ? selectedPillForeground : GrainColor.textMuted)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, GrainSpacing.x2)
-                        .background(
-                            RoundedRectangle(cornerRadius: GrainRadius.md, style: .continuous)
-                                .fill(face == f ? GrainColor.surface : .clear)
-                        )
+                        .frame(minHeight: GrainSpacing.x8)
+                        .background(Capsule().fill(face == f ? GrainColor.forgeBlue : .clear))
+                        .overlay(Capsule().strokeBorder(
+                            face == f ? GrainColor.forgeBlue : GrainColor.border, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("face-\(f.rawValue)")
+                .accessibilityAddTraits(face == f ? .isSelected : [])
             }
         }
-        .padding(GrainSpacing.x1)
-        .background(
-            RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
-                .fill(GrainColor.backgroundSunken)
-        )
     }
 
     // MARK: - Summary face
 
-    @ViewBuilder private var summaryFace: some View {
-        listenRow
-        if let sp = stepperProgress {
-            ConversationStepper(progress: sp, local: local)
-                .padding(.vertical, GrainSpacing.x1)
+    private var summaryFace: some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x4) {
+            HStack {
+                listenRow
+                Spacer(minLength: 0)
+            }
+            if let sp = stepperProgress {
+                ConversationStepper(progress: sp, local: local)
+                    .padding(.vertical, GrainSpacing.x1)
+            }
+            VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+                summaryNarrative
+            }
+            .padding(.vertical, GrainSpacing.x3)
+            .overlay(alignment: .top) {
+                Rectangle().fill(GrainColor.borderFaint).frame(height: 1)
+            }
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(GrainColor.borderFaint).frame(height: 1)
+            }
+            receiptSection
         }
+    }
+
+    @ViewBuilder private var summaryNarrative: some View {
         if let summary = summaryText, !summary.isEmpty {
             Text(summary)
-                .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                .grainTextStyle(.body)
+                .fontWeight(.medium)
+                .foregroundStyle(GrainColor.ink)
                 .textSelection(.enabled)
         } else if content?.summarizing == true {
             Text("Summarizing on your computer, check back shortly.")
@@ -257,59 +308,90 @@ struct ConversationFacesView: View {
             Text("Nothing to summarize yet. The summary appears once the conversation is processed.")
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
         }
-        Divider().background(GrainColor.borderHairline)
-        receiptSection
     }
 
     // MARK: - Actions face
 
     @ViewBuilder private var actionsFace: some View {
         if actionCards.isEmpty {
-            Text("Nothing actionable came up")
-                .grainTextStyle(.title).foregroundStyle(GrainColor.ink)
-            Text("When something worth doing surfaces during a conversation, its card lands here with what came of it.")
-                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+                Text("Nothing actionable came up")
+                    .grainTextStyle(.title).foregroundStyle(GrainColor.ink)
+                Text("When something worth doing surfaces during a conversation, its card lands here with what came of it.")
+                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            }
+            .padding(.vertical, GrainSpacing.x4)
         } else {
-            ForEach(actionCards) { card in
-                actionCardRow(card)
+            VStack(spacing: 0) {
+                Rectangle().fill(GrainColor.borderFaint).frame(height: 1)
+                ForEach(actionCards) { card in
+                    actionCardRow(card)
+                }
             }
         }
     }
 
     private func actionCardRow(_ card: ConversationActionCard) -> some View {
-        VStack(alignment: .leading, spacing: GrainSpacing.x2) {
-            HStack(alignment: .top) {
-                Image(grain: .bolt)
-                    .font(.system(size: 14, weight: .light))
-                    .foregroundStyle(GrainColor.forgeBlue)
+        HStack(alignment: .top, spacing: GrainSpacing.x3) {
+            ZStack {
+                RoundedRectangle(cornerRadius: GrainRadius.md, style: .continuous)
+                    .fill(actionTileBackground(card.outcome))
+                Image(grain: actionIcon(card.outcome))
+                    .grainTextStyle(.body)
+                    .foregroundStyle(actionOutcomeForeground(card.outcome))
+            }
+            .frame(width: GrainSpacing.x8, height: GrainSpacing.x8)
+
+            VStack(alignment: .leading, spacing: GrainSpacing.x1) {
                 Text(card.summary.isEmpty ? card.utterance : card.summary)
-                    .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-                Spacer(minLength: GrainSpacing.x2)
-                GrainChip(card.outcome.label, variant: chipVariant(card.outcome))
+                    .grainTextStyle(.body)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(GrainColor.ink)
+                if !card.summary.isEmpty, card.utterance != card.summary {
+                    Text("\u{201C}\(card.utterance)\u{201D}")
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.textMuted)
+                }
             }
-            if !card.summary.isEmpty, card.utterance != card.summary {
-                Text("\u{201C}\(card.utterance)\u{201D}")
-                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-                    .italic()
-            }
+            Spacer(minLength: GrainSpacing.x2)
+            Text(card.outcome.label)
+                .grainTextStyle(.caption)
+                .fontWeight(.bold)
+                .textCase(.uppercase)
+                .foregroundStyle(actionOutcomeForeground(card.outcome))
+                .multilineTextAlignment(.trailing)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(GrainSpacing.x3)
-        .background(
-            RoundedRectangle(cornerRadius: GrainRadius.card, style: .continuous)
-                .fill(GrainColor.surfaceSunken)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: GrainRadius.card, style: .continuous)
-                .strokeBorder(GrainColor.borderHairline, lineWidth: 1)
-        )
+        .padding(.vertical, GrainSpacing.x3)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(GrainColor.borderFaint).frame(height: 1)
+        }
     }
 
-    private func chipVariant(_ outcome: ActionOutcome) -> GrainChipVariant {
+    private func actionIcon(_ outcome: ActionOutcome) -> GrainIcon {
         switch outcome {
-        case .sentToChat: return .blue
-        case .answered: return .sage
-        case .dismissed: return .default
-        case .pending: return .amber
+        case .sentToChat: return .chat
+        case .answered: return .check
+        case .dismissed: return .check
+        case .pending: return .bolt
+        }
+    }
+
+    private func actionOutcomeForeground(_ outcome: ActionOutcome) -> Color {
+        switch outcome {
+        case .sentToChat: return GrainColor.forgeBlue
+        case .answered: return GrainColor.sage
+        case .dismissed: return GrainColor.textFaint
+        case .pending: return GrainColor.amber
+        }
+    }
+
+    private func actionTileBackground(_ outcome: ActionOutcome) -> Color {
+        switch outcome {
+        case .sentToChat: return GrainColor.forgeBlueBg
+        case .answered: return GrainColor.sage.opacity(0.12)
+        case .dismissed: return GrainColor.borderFaint
+        case .pending: return GrainColor.amber.opacity(0.12)
         }
     }
 
@@ -329,40 +411,55 @@ struct ConversationFacesView: View {
 
     @ViewBuilder private var transcriptFace: some View {
         if let transcript = transcriptText {
-            searchBar
-            if showingProvisional {
-                Text("On-device transcript, finishing on your computer.")
-                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-            }
-            HStack {
-                Spacer()
-                Button {
-                    copyTranscript()
-                } label: {
-                    Label(didCopy ? "Copied" : "Copy",
-                          systemImage: didCopy ? "checkmark" : "doc.on.doc")
+            VStack(alignment: .leading, spacing: GrainSpacing.x3) {
+                searchBar
+                if showingProvisional {
+                    Text("On-device transcript, finishing on your computer.")
                         .grainTextStyle(.caption)
-                        .foregroundStyle(didCopy ? GrainColor.sage : GrainColor.textMuted)
+                        .foregroundStyle(GrainColor.textFaint)
                 }
-                .accessibilityIdentifier("copy-transcript")
-            }
-            if let diarized = diarizedTranscript {
-                SpeakerTranscriptSection(
-                    target: target,
-                    captureId: captureId,
-                    transcript: diarized,
-                    onChanged: { await fetchFromDoor() },
-                    searchMatches: search.matches,
-                    currentMatch: search.current
-                )
-            } else {
-                Text(TranscriptHighlighter.attributed(
-                    transcript,
-                    ranges: search.matches.filter { $0.row == 0 }.map(\.range),
-                    current: search.current.flatMap { $0.row == 0 ? $0.range : nil }))
-                    .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-                    .textSelection(.enabled)
-                    .id("flat-transcript")
+                HStack {
+                    Spacer(minLength: 0)
+                    Button {
+                        copyTranscript()
+                    } label: {
+                        HStack(spacing: GrainSpacing.x1) {
+                            Image(grain: didCopy ? .check : .doc)
+                            Text(didCopy ? "Copied" : "Copy")
+                        }
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(didCopy ? GrainColor.sage : GrainColor.forgeBlue)
+                        .padding(.horizontal, GrainSpacing.x2)
+                        .frame(minHeight: GrainSpacing.x8)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("copy-transcript")
+                }
+                if let diarized = diarizedTranscript {
+                    SpeakerTranscriptSection(
+                        target: target,
+                        captureId: captureId,
+                        transcript: diarized,
+                        onChanged: { await fetchFromDoor() },
+                        searchMatches: search.matches,
+                        currentMatch: search.current
+                    )
+                } else {
+                    Text(TranscriptHighlighter.attributed(
+                        transcript,
+                        ranges: search.matches.filter { $0.row == 0 }.map(\.range),
+                        current: search.current.flatMap { $0.row == 0 ? $0.range : nil }))
+                        .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                        .textSelection(.enabled)
+                        .padding(.vertical, GrainSpacing.x3)
+                        .overlay(alignment: .top) {
+                            Rectangle().fill(GrainColor.borderFaint).frame(height: 1)
+                        }
+                        .overlay(alignment: .bottom) {
+                            Rectangle().fill(GrainColor.borderFaint).frame(height: 1)
+                        }
+                        .id("flat-transcript")
+                }
             }
         } else if loading {
             Text("Loading transcript…")
@@ -396,64 +493,74 @@ struct ConversationFacesView: View {
     /// rendered ONLY when a real meaning index is available (AC3 honesty).
     @ViewBuilder private var searchBar: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x2) {
-            HStack(spacing: GrainSpacing.x2) {
-                Image(grain: .search)
-                    .font(.system(size: 14, weight: .light))
-                    .foregroundStyle(GrainColor.textMuted)
-                TextField("Search the transcript", text: $query)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .grainTextStyle(.body)
-                    .foregroundStyle(GrainColor.ink)
-                    .accessibilityIdentifier("transcript-search")
-                if !query.isEmpty {
-                    Button {
-                        query = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(GrainColor.textFaint)
+            VStack(spacing: 0) {
+                HStack(spacing: GrainSpacing.x2) {
+                    Image(grain: .search)
+                        .grainTextStyle(.body)
+                        .foregroundStyle(GrainColor.textMuted)
+                    TextField("Search the transcript", text: $query)
+                        .textFieldStyle(.plain)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .grainTextStyle(.body)
+                        .foregroundStyle(GrainColor.ink)
+                        .accessibilityIdentifier("transcript-search")
+                    if !query.isEmpty {
+                        Button {
+                            query = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(GrainColor.textFaint)
+                                .frame(width: GrainSpacing.x8, height: GrainSpacing.x8)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Clear search")
                     }
-                    .accessibilityLabel("Clear search")
+                }
+                .padding(.leading, GrainSpacing.x3)
+                .padding(.trailing, GrainSpacing.x1)
+                .frame(minHeight: GrainSpacing.x8 + GrainSpacing.x2)
+
+                if !query.trimmingCharacters(in: .whitespaces).isEmpty {
+                    HStack(spacing: GrainSpacing.x2) {
+                        if meaningBusy {
+                            ProgressView().controlSize(.small)
+                            Text("Searching by meaning…")
+                                .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                        } else {
+                            Text(search.positionLabel)
+                                .grainTextStyle(.caption)
+                                .foregroundStyle(search.count > 0 ? GrainColor.ink : GrainColor.textMuted)
+                                .accessibilityIdentifier("match-count")
+                        }
+                        Spacer(minLength: GrainSpacing.x2)
+                        searchNavigationButton(
+                            systemName: "chevron.up",
+                            accessibilityLabel: "Previous match",
+                            enabled: search.count > 0
+                        ) { search.previous() }
+                        searchNavigationButton(
+                            systemName: "chevron.down",
+                            accessibilityLabel: "Next match",
+                            enabled: search.count > 0
+                        ) { search.next() }
+                    }
+                    .padding(.leading, GrainSpacing.x3)
+                    .padding(.trailing, GrainSpacing.x1)
+                    .padding(.vertical, GrainSpacing.x1)
+                    .overlay(alignment: .top) {
+                        Rectangle().fill(GrainColor.borderFaint).frame(height: 1)
+                    }
                 }
             }
-            .padding(.horizontal, GrainSpacing.x3)
-            .padding(.vertical, GrainSpacing.x2)
             .background(
-                RoundedRectangle(cornerRadius: GrainRadius.input, style: .continuous)
-                    .fill(GrainColor.backgroundSunken)
+                RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
+                    .fill(GrainColor.surface)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: GrainRadius.input, style: .continuous)
-                    .strokeBorder(GrainColor.borderHairline, lineWidth: 1)
+                RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
+                    .strokeBorder(GrainColor.border, lineWidth: 1)
             )
-
-            if !query.trimmingCharacters(in: .whitespaces).isEmpty {
-                HStack(spacing: GrainSpacing.x3) {
-                    if meaningBusy {
-                        ProgressView().controlSize(.small)
-                        Text("Searching by meaning…")
-                            .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-                    } else {
-                        Text(search.positionLabel)
-                            .grainTextStyle(.caption)
-                            .foregroundStyle(search.count > 0 ? GrainColor.ink : GrainColor.textMuted)
-                            .accessibilityIdentifier("match-count")
-                    }
-                    Spacer()
-                    Button { search.previous() } label: {
-                        Image(systemName: "chevron.up")
-                            .foregroundStyle(search.count > 0 ? GrainColor.ink : GrainColor.textFaint)
-                    }
-                    .disabled(search.count == 0)
-                    .accessibilityLabel("Previous match")
-                    Button { search.next() } label: {
-                        Image(systemName: "chevron.down")
-                            .foregroundStyle(search.count > 0 ? GrainColor.ink : GrainColor.textFaint)
-                    }
-                    .disabled(search.count == 0)
-                    .accessibilityLabel("Next match")
-                }
-            }
 
             // AC3 — the meaning toggle EXISTS only when a real index is available.
             if meaningOffered {
@@ -465,16 +572,33 @@ struct ConversationFacesView: View {
         }
     }
 
+    private func searchNavigationButton(
+        systemName: String,
+        accessibilityLabel: String,
+        enabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .grainTextStyle(.body)
+                .foregroundStyle(enabled ? GrainColor.ink : GrainColor.textFaint)
+                .frame(width: GrainSpacing.x8, height: GrainSpacing.x8)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
     private func modeChip(_ title: String, active: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
                 .grainTextStyle(.caption)
-                .foregroundStyle(active ? GrainColor.forgeBlue : GrainColor.textMuted)
+                .foregroundStyle(active ? selectedPillForeground : GrainColor.textMuted)
                 .padding(.horizontal, GrainSpacing.x3)
-                .padding(.vertical, GrainSpacing.x1)
-                .background(Capsule().fill(active ? GrainColor.forgeBlueBg : .clear))
+                .frame(minHeight: GrainSpacing.x8)
+                .background(Capsule().fill(active ? GrainColor.forgeBlue : .clear))
                 .overlay(Capsule().strokeBorder(
-                    active ? GrainColor.forgeBlueBorder : GrainColor.borderHairline, lineWidth: 1))
+                    active ? GrainColor.forgeBlue : GrainColor.border, lineWidth: 1))
         }
         .buttonStyle(.plain)
     }
@@ -553,7 +677,7 @@ struct ConversationFacesView: View {
             .padding(.top, GrainSpacing.x2)
         } label: {
             HStack(spacing: GrainSpacing.x2) {
-                Image(systemName: "receipt")
+                Image(grain: .doc)
                     .foregroundStyle(GrainColor.textMuted)
                 Text("Processing receipt")
                     .grainTextStyle(.caption)
@@ -570,7 +694,10 @@ struct ConversationFacesView: View {
             Text(label)
                 .grainTextStyle(.caption)
                 .foregroundStyle(GrainColor.textFaint)
-                .frame(width: 92, alignment: .leading)
+                .frame(
+                    width: GrainSpacing.x8 + GrainSpacing.x8 + GrainSpacing.x8,
+                    alignment: .leading
+                )
             Text(value)
                 .grainTextStyle(.caption)
                 .foregroundStyle(GrainColor.ink)
@@ -745,12 +872,12 @@ enum TranscriptHighlighter {
         var attr = AttributedString(text)
         for r in ranges {
             guard let ar = attributedRange(r, in: attr, textCount: text.count) else { continue }
-            attr[ar].backgroundColor = GrainColor.amberBg
+            attr[ar].backgroundColor = GrainColor.amber.opacity(0.16)
             attr[ar].foregroundColor = GrainColor.amber
         }
         if let current, let ar = attributedRange(current, in: attr, textCount: text.count) {
             attr[ar].backgroundColor = GrainColor.amber
-            attr[ar].foregroundColor = GrainColor.background
+            attr[ar].foregroundColor = GrainColor.surface
         }
         return attr
     }
