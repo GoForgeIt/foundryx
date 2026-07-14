@@ -65,6 +65,17 @@ struct SettingsScreen: View {
                 }
             }
 
+            Section {
+                HStack {
+                    Text("Appearance").grainTextStyle(.body)
+                    Spacer()
+                    Text("Follows your device")
+                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                }
+            } footer: {
+                Text("Light by day, Night Shift when your device switches to dark. One design, two renditions.")
+            }
+
             Section("Action Button") {
                 Picker("When pressed", selection: $actionChoice) {
                     ForEach(ActionButtonChoice.allCases, id: \.self) { c in
