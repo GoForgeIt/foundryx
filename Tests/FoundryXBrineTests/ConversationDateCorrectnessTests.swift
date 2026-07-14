@@ -55,7 +55,7 @@ final class ConversationDateCorrectnessTests: XCTestCase {
     // MARK: AC2 — the date is the real start; re-ingest must NOT move it to Today
 
     @MainActor
-    func testReingestedOldCaptureKeepsItsOriginalDate() throws {
+    func testReingestedOldCaptureKeepsItsOriginalDate() async throws {
         let dir = try tempDir("reingest")
         defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -68,6 +68,7 @@ final class ConversationDateCorrectnessTests: XCTestCase {
 
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
         let mgr = CaptureManager(target: target, baseDir: dir, source: ReplaySource(frames: []))
+        await mgr.hydration?.value
         let wal = try XCTUnwrap(mgr.visibleCaptures.first { $0.captureId == id })
 
         let before = mgr.conversationStartDate(wal).timeIntervalSince1970
@@ -88,6 +89,7 @@ final class ConversationDateCorrectnessTests: XCTestCase {
         XCTAssertGreaterThan(card.updatedAt, expected, "updated_at bumped to ~now (a processing time)")
 
         let mgr2 = CaptureManager(target: target, baseDir: dir, source: ReplaySource(frames: []))
+        await mgr2.hydration?.value
         let wal2 = try XCTUnwrap(mgr2.visibleCaptures.first { $0.captureId == id })
         XCTAssertEqual(mgr2.conversationStartDate(wal2).timeIntervalSince1970,
                        TimeInterval(expected), accuracy: 1,

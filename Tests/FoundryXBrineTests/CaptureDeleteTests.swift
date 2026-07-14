@@ -34,10 +34,12 @@ final class CaptureDeleteTests: XCTestCase {
     }
 
     private func manager(_ dir: URL,
-                         deletes: DeleteRecorder = DeleteRecorder()) -> CaptureManager {
-        CaptureManager(target: target, baseDir: dir, source: ReplaySource(frames: []),
-                       deleteCapture: { try deletes.record($0) },
-                       fetchContent: { _ in nil })
+                         deletes: DeleteRecorder = DeleteRecorder()) async -> CaptureManager {
+        let m = CaptureManager(target: target, baseDir: dir, source: ReplaySource(frames: []),
+                               deleteCapture: { try deletes.record($0) },
+                               fetchContent: { _ in nil })
+        await m.hydration?.value   // hydration is async now (startup-hang fix)
+        return m
     }
 
     final class DeleteRecorder: @unchecked Sendable {
@@ -54,12 +56,12 @@ final class CaptureDeleteTests: XCTestCase {
         }
     }
 
-    func testDeleteRemovesFromCapturesWritesMarkersAndDeletesFiles() throws {
+    func testDeleteRemovesFromCapturesWritesMarkersAndDeletesFiles() async throws {
         let dir = try tempDir("delete-local")
         defer { try? FileManager.default.removeItem(at: dir) }
         let id = "omi-20260707-120000-delete01"
         try seedConversation(id, baseDir: dir)
-        let mgr = manager(dir)
+        let mgr = await manager(dir)
         XCTAssertTrue(mgr.captures.contains { $0.captureId == id })
 
         mgr.deleteConversation(id)
@@ -75,25 +77,25 @@ final class CaptureDeleteTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: cdir.appendingPathComponent(".lore-confirmed").path))
     }
 
-    func testDeletedIdNeverRehydratesViaLoadExisting() throws {
+    func testDeletedIdNeverRehydratesViaLoadExisting() async throws {
         let dir = try tempDir("delete-relaunch")
         defer { try? FileManager.default.removeItem(at: dir) }
         let id = "omi-20260707-120100-delete02"
         try seedConversation(id, baseDir: dir)
-        manager(dir).deleteConversation(id)
+        await manager(dir).deleteConversation(id)
 
-        let relaunched = manager(dir)
+        let relaunched = await manager(dir)
 
         XCTAssertFalse(relaunched.captures.contains { $0.captureId == id })
         XCTAssertFalse(relaunched.visibleCaptures.contains { $0.captureId == id })
     }
 
-    func testSecondDeleteIsNoOp() throws {
+    func testSecondDeleteIsNoOp() async throws {
         let dir = try tempDir("delete-idempotent")
         defer { try? FileManager.default.removeItem(at: dir) }
         let id = "omi-20260707-120200-delete03"
         try seedConversation(id, baseDir: dir)
-        let mgr = manager(dir)
+        let mgr = await manager(dir)
 
         mgr.deleteConversation(id)
         mgr.deleteConversation(id)
@@ -111,14 +113,14 @@ final class CaptureDeleteTests: XCTestCase {
         try seedConversation(id, baseDir: dir)
         let failing = DeleteRecorder()
         failing.shouldFail = true
-        let first = manager(dir, deletes: failing)
+        let first = await manager(dir, deletes: failing)
         first.deleteConversation(id)
         await first.retryPendingDeletes()
         let cdir = dir.appendingPathComponent(id, isDirectory: true)
         XCTAssertTrue(FileManager.default.fileExists(atPath: cdir.appendingPathComponent(".needs-delete").path))
 
         let succeeding = DeleteRecorder()
-        let relaunched = manager(dir, deletes: succeeding)
+        let relaunched = await manager(dir, deletes: succeeding)
         await relaunched.retryPendingDeletes()
 
         XCTAssertEqual(succeeding.calls, [id])

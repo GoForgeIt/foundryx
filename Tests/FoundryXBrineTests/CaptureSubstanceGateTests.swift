@@ -48,11 +48,13 @@ final class CaptureSubstanceGateTests: XCTestCase {
         return dir
     }
 
-    private func makeManager(_ dir: URL, _ src: TestSource, _ rec: Recorder) -> CaptureManager {
+    private func makeManager(_ dir: URL, _ src: TestSource, _ rec: Recorder) async -> CaptureManager {
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
-        return CaptureManager(target: target, baseDir: dir, source: src,
+        let m = CaptureManager(target: target, baseDir: dir, source: src,
                               finalize: { id, _ in rec.finalize(id) },
                               uploadSegment: { _, _, _ in rec.upload() })
+        await m.hydration?.value
+        return m
     }
 
     private func discardMarkerExists(_ dir: URL, _ captureId: String) -> Bool {
@@ -63,7 +65,7 @@ final class CaptureSubstanceGateTests: XCTestCase {
 
     // MARK: pure decisions
 
-    func testHasUploadSubstanceFrameBar() {
+    func testHasUploadSubstanceFrameBar() async {
         let bar = CaptureManager.minVoicedFramesToUpload
         // With NO on-device transcript, the raised voiced-frame bar is the only gate.
         XCTAssertTrue(CaptureManager.hasUploadSubstance(voicedFrames: bar, onDeviceTranscript: nil, durationSeconds: 3))
@@ -77,7 +79,7 @@ final class CaptureSubstanceGateTests: XCTestCase {
     /// THE FIX: when a transcript exists, content — not amplitude — decides. Ambient noise
     /// that cleared the level threshold for a long time but transcribes to nothing/filler is
     /// DROPPED, where the old amplitude-only gate uploaded it as a junk conversation.
-    func testAmplitudeAloneNoLongerUploadsNoise() {
+    func testAmplitudeAloneNoLongerUploadsNoise() async {
         let bar = CaptureManager.minVoicedFramesToUpload
         // Long voiced audio + a FILLER transcript (near-silent ambient) → dropped now.
         XCTAssertFalse(CaptureManager.hasUploadSubstance(
@@ -90,7 +92,7 @@ final class CaptureSubstanceGateTests: XCTestCase {
             voicedFrames: bar, onDeviceTranscript: nil, durationSeconds: 200))
     }
 
-    func testHasUploadSubstanceTranscriptSafetyValve() {
+    func testHasUploadSubstanceTranscriptSafetyValve() async {
         // A genuine brief exchange that under-voiced is KEPT when its on-device transcript
         // is already meaningful (passes the empty/filler filter).
         XCTAssertTrue(CaptureManager.hasUploadSubstance(
@@ -99,7 +101,7 @@ final class CaptureSubstanceGateTests: XCTestCase {
 
     /// Launch hydration skips discarded junk fragments — the accumulation that overran the
     /// launch watchdog (SIGKILL) on a long-lived install. A real capture is still hydrated.
-    func testLoadExistingSkipsDiscardedFragments() throws {
+    func testLoadExistingSkipsDiscardedFragments() async throws {
         let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let fm = FileManager.default
         let real = "omi-20260701-120000-realconv"
@@ -111,12 +113,12 @@ final class CaptureSubstanceGateTests: XCTestCase {
         try fm.createDirectory(at: junkDir, withIntermediateDirectories: true)
         try Data().write(to: junkDir.appendingPathComponent(".discarded"))
 
-        let mgr = makeManager(dir, TestSource(), Recorder())   // init → loadExisting
+        let mgr = await makeManager(dir, TestSource(), Recorder())   // init → loadExisting
         XCTAssertTrue(mgr.captures.contains { $0.captureId == real }, "a real capture is hydrated at launch")
         XCTAssertFalse(mgr.captures.contains { $0.captureId == junk }, "a discarded fragment is NOT hydrated")
     }
 
-    func testShouldEndSuspendedSession() {
+    func testShouldEndSuspendedSession() async {
         let w = CaptureManager.reconnectGraceWindow
         XCTAssertFalse(CaptureManager.shouldEndSuspendedSession(suspendedAt: 100, now: 100 + w - 0.5, window: w))
         XCTAssertTrue(CaptureManager.shouldEndSuspendedSession(suspendedAt: 100, now: 100 + w, window: w))
@@ -131,7 +133,7 @@ final class CaptureSubstanceGateTests: XCTestCase {
         let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let src = TestSource()
         let rec = Recorder()
-        let mgr = makeManager(dir, src, rec)
+        let mgr = await makeManager(dir, src, rec)
         mgr.setSilenceGap(0)   // a silent frame right after voice closes the conversation
 
         src.onState?(.streaming)
@@ -168,7 +170,7 @@ final class CaptureSubstanceGateTests: XCTestCase {
         let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let src = TestSource()
         let rec = Recorder()
-        let mgr = makeManager(dir, src, rec)
+        let mgr = await makeManager(dir, src, rec)
         mgr.setSilenceGap(0)
 
         src.onState?(.streaming)
@@ -195,7 +197,7 @@ final class CaptureSubstanceGateTests: XCTestCase {
         let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let src = TestSource()
         let rec = Recorder()
-        let mgr = makeManager(dir, src, rec)
+        let mgr = await makeManager(dir, src, rec)
 
         src.onState?(.streaming)
         try await waitUntil { mgr.active != nil }
@@ -227,7 +229,7 @@ final class CaptureSubstanceGateTests: XCTestCase {
         let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let src = TestSource()
         let rec = Recorder()
-        let mgr = makeManager(dir, src, rec)
+        let mgr = await makeManager(dir, src, rec)
 
         src.onState?(.streaming)
         try await waitUntil { mgr.active != nil }

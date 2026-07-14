@@ -23,7 +23,7 @@ final class CaptureOrderingTests: XCTestCase {
     }
 
     @MainActor
-    func testVisibleCapturesAreNewestFirst() throws {
+    func testVisibleCapturesAreNewestFirst() async throws {
         let dir = try tempDir("order")
         defer { try? FileManager.default.removeItem(at: dir) }
         // Note: the dir-name (capture id) sort and the start-time sort disagree here —
@@ -34,6 +34,7 @@ final class CaptureOrderingTests: XCTestCase {
 
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
         let mgr = CaptureManager(target: target, baseDir: dir, source: ReplaySource(frames: []))
+        await mgr.hydration?.value
 
         let order = mgr.visibleCaptures.map(\.captureId)
         XCTAssertEqual(order, ["aaa-newer", "zzz-older"], "newest conversation start first")

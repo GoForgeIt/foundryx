@@ -146,6 +146,7 @@ final class CaptureFinalizeTests: XCTestCase {
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
         let mgr = CaptureManager(target: target, baseDir: dir, source: src,
                                  finalize: { id, _ in try rec.record(id) })
+        await mgr.hydration?.value
 
         await mgr.retryPendingFinalizes()
         XCTAssertEqual(rec.calls, [bigId],

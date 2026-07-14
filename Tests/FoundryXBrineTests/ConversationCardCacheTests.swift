@@ -76,6 +76,7 @@ final class ConversationCardCacheTests: XCTestCase {
         // init runs loadExisting + pruneOldTranscripts (>14d) + pruneOldAudio (>30d).
         let mgr = CaptureManager(target: target, baseDir: dir, source: ReplaySource(frames: []),
                                  fetchContent: { _ in nil })
+        await mgr.hydration?.value
 
         // The transcript TEXT is pruned, the audio is pruned…
         XCTAssertFalse(TranscriptCacheStore.hasCachedTranscript(captureId: "old-1", baseDir: dir),

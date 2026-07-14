@@ -158,8 +158,9 @@ final class CaptureRetentionTests: XCTestCase {
         try seedCapture("old-confirmed", baseDir: dir, ageSeconds: thirtyOneDays, confirmedAndCached: true)
 
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
-        // init runs loadExisting + the retention sweep.
-        _ = CaptureManager(target: target, baseDir: dir, source: ReplaySource(frames: []))
+        // init runs loadExisting + the retention sweep (async now).
+        let mgr = CaptureManager(target: target, baseDir: dir, source: ReplaySource(frames: []))
+        await mgr.hydration?.value
 
         XCTAssertFalse(segExists("old-confirmed", baseDir: dir), "old confirmed+cached audio is pruned")
         XCTAssertTrue(TranscriptCacheStore.hasCachedTranscript(captureId: "old-confirmed", baseDir: dir),
@@ -177,7 +178,8 @@ final class CaptureRetentionTests: XCTestCase {
         try seedCapture("old-unconfirmed", baseDir: dir, ageSeconds: thirtyOneDays, confirmedAndCached: false)
 
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
-        _ = CaptureManager(target: target, baseDir: dir, source: ReplaySource(frames: []))
+        let mgr = CaptureManager(target: target, baseDir: dir, source: ReplaySource(frames: []))
+        await mgr.hydration?.value
 
         XCTAssertTrue(segExists("old-unconfirmed", baseDir: dir),
                       "audio not safely in Lore is never deleted, however old")

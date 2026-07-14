@@ -165,11 +165,13 @@ final class CaptureResyncDrainTests: XCTestCase {
         }
     }
 
-    private func makeManager(dir: URL, stub: SegmentsStub, rec: SeqRecorder) -> CaptureManager {
+    private func makeManager(dir: URL, stub: SegmentsStub, rec: SeqRecorder) async -> CaptureManager {
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
-        return CaptureManager(target: target, baseDir: dir, source: TestSource(),
-                              fetchSegments: { _ in try stub.fetch() },
-                              uploadSegment: { _, seq, _ in try rec.send(seq) })
+        let m = CaptureManager(target: target, baseDir: dir, source: TestSource(),
+                               fetchSegments: { _ in try stub.fetch() },
+                               uploadSegment: { _, seq, _ in try rec.send(seq) })
+        await m.hydration?.value   // hydration is async now (startup-hang fix)
+        return m
     }
 
     // The spec's Gherkin: Given the desktop already stores most of a capture's
@@ -181,7 +183,7 @@ final class CaptureResyncDrainTests: XCTestCase {
 
         let stub = SegmentsStub(); stub.answer = (0...7).map(UInt64.init)   // desktop already holds 0…7
         let rec = SeqRecorder()
-        let mgr = makeManager(dir: dir, stub: stub, rec: rec)
+        let mgr = await makeManager(dir: dir, stub: stub, rec: rec)
 
         await mgr.drainPending()
         XCTAssertEqual(rec.sent, [8, 9], "only the genuinely-missing segments upload")
@@ -200,7 +202,7 @@ final class CaptureResyncDrainTests: XCTestCase {
 
         let stub = SegmentsStub(); stub.answer = nil            // old door: 404 → nil
         let rec = SeqRecorder()
-        let mgr = makeManager(dir: dir, stub: stub, rec: rec)
+        let mgr = await makeManager(dir: dir, stub: stub, rec: rec)
 
         await mgr.drainPending()   // one sync pass ships maxSegmentsPerSync (8)
         await mgr.drainPending()   // the remainder
@@ -216,7 +218,7 @@ final class CaptureResyncDrainTests: XCTestCase {
 
         let stub = SegmentsStub(); stub.error = DoorError.http(503)
         let rec = SeqRecorder()
-        let mgr = makeManager(dir: dir, stub: stub, rec: rec)
+        let mgr = await makeManager(dir: dir, stub: stub, rec: rec)
 
         await mgr.drainPending()
         XCTAssertEqual(stub.calls, 1)
@@ -238,7 +240,7 @@ final class CaptureResyncDrainTests: XCTestCase {
 
         let stub = SegmentsStub(); stub.answer = []             // desktop has nothing yet
         let rec = SeqRecorder(); rec.error = DoorError.http(503) // socket flap: uploads fail
-        let mgr = makeManager(dir: dir, stub: stub, rec: rec)
+        let mgr = await makeManager(dir: dir, stub: stub, rec: rec)
 
         await mgr.drainPending()
         XCTAssertEqual(stub.calls, 1)

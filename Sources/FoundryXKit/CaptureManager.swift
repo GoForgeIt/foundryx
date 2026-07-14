@@ -776,12 +776,17 @@ public final class CaptureManager: ObservableObject {
             (micSource as? MicFrameSource)?.onPCM = { [liveBox] buf in liveBox.append(buf) }
         }
         #endif
-        loadExisting()
+        loadExisting()         // OFF-MAIN hydration; finishes via finishStartupAfterHydration
+        startDrainTimer()
+        startSegmentTimer()    // wall-clock silence + runaway force-split watchdog
+    }
+
+    /// Startup work that NEEDS the hydrated timeline (orphan reconcile, retention
+    /// sweeps, the widget seed) — runs once hydration lands on the main actor.
+    private func finishStartupAfterHydration() {
         reconcileOrphanedCaptures()  // give crash-orphaned captures real bounds + finalize them
         pruneOldTranscripts()  // ~14d transcript-text sweep (keeps name/description metadata)
         pruneOldAudio()        // ~30d audio sweep (keeps transcripts, prunes safe-in-Lore audio)
-        startDrainTimer()
-        startSegmentTimer()    // wall-clock silence + runaway force-split watchdog
         // Seed the home-screen widget with current (idle / last-conversation) state so it
         // renders correctly before the first capture transition fires.
         CaptureWidgetSnapshotStore.write(makeWidgetSnapshot())
@@ -1478,7 +1483,7 @@ public final class CaptureManager: ObservableObject {
 
     /// Build a WAL, threading the (test-only) per-segment upload override so every
     /// capture this manager owns uploads through the same (real or injected) path.
-    private func makeWAL(captureId id: String) -> CaptureWAL {
+    private nonisolated func makeWAL(captureId id: String) -> CaptureWAL {
         let upload: (@Sendable (UInt64, Data) async throws -> Void)?
         if let uploadSegment { upload = { seq, body in try await uploadSegment(id, seq, body) } }
         else { upload = nil }
@@ -2133,31 +2138,49 @@ public final class CaptureManager: ObservableObject {
     /// on the main thread and SIGKILL'd the app (FRONTBOARD watchdog). Old discarded folders
     /// are reclaimed separately, off the launch path (`pruneDiscardedFragments`).
     private func loadExisting() {
-        let fm = FileManager.default
-        guard let entries = try? fm.contentsOfDirectory(at: baseDir, includingPropertiesForKeys: nil) else { return }
-        let names = entries.map { $0.lastPathComponent }
-            .filter { !$0.hasPrefix(".") }
-            .sorted(by: >)   // ids are timestamp-prefixed → newest first
-        // Hydrate into a LOCAL array and publish ONCE. Appending to `captures`
-        // per-capture fired the didSet → rebuildVisibleCaptures (dedup + isBrowsable
-        // + sort over everything so far) after EVERY append — O(N²): ~45,000
-        // isBrowsable evaluations at the 300-capture cap, each reading transcript
-        // metadata off disk, all on the main thread at launch (deep-review finding).
-        var hydrated: [CaptureWAL] = []
-        hydrated.reserveCapacity(Self.maxCapturesToLoad)
-        for name in names {
-            if hydrated.count >= Self.maxCapturesToLoad { break }
-            let dir = baseDir.appendingPathComponent(name, isDirectory: true)
-            var isDir: ObjCBool = false
-            guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { continue }
-            // Discarded junk fragments are never shown or finalized — don't hydrate them.
-            if fm.fileExists(atPath: dir.appendingPathComponent(".discarded").path) { continue }
-            if fm.fileExists(atPath: dir.appendingPathComponent(".deleted").path) { continue }
-            hydrated.append(makeWAL(captureId: name))
+        // The WHOLE hydrate runs off the main actor: constructing a CaptureWAL
+        // scans its segment dir and stats every segment file (bytes/acks) — 300
+        // captures of that inside CaptureManager.init hung launches for seconds
+        // (7.5s hang report, 2026-07-13: RootView.body -> MainTabs.init ->
+        // loadExisting -> CaptureWAL.scanExisting -> attributesOfItem, main
+        // thread). Enumerate + build in the background, publish ONCE on main
+        // (one didSet -> one rebuild, preserving the earlier O(N^2) fix), then
+        // run the startup work that needs the timeline.
+        let base = baseDir
+        hydration = Task.detached(priority: .userInitiated) { [weak self] in
+            let fm = FileManager.default
+            guard let entries = try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: nil)
+            else { return }
+            let names = entries.map { $0.lastPathComponent }
+                .filter { !$0.hasPrefix(".") }
+                .sorted(by: >)   // ids are timestamp-prefixed -> newest first
+            var picked: [String] = []
+            picked.reserveCapacity(Self.maxCapturesToLoad)
+            for name in names {
+                if picked.count >= Self.maxCapturesToLoad { break }
+                let dir = base.appendingPathComponent(name, isDirectory: true)
+                var isDir: ObjCBool = false
+                guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { continue }
+                // Discarded junk fragments are never shown or finalized — don't hydrate them.
+                if fm.fileExists(atPath: dir.appendingPathComponent(".discarded").path) { continue }
+                if fm.fileExists(atPath: dir.appendingPathComponent(".deleted").path) { continue }
+                picked.append(name)
+            }
+            guard let self else { return }
+            let hydrated = picked.map { self.makeWAL(captureId: $0) }   // the stat storm, off-main
+            await MainActor.run {
+                // A capture STARTED before hydration finished sits at index 0
+                // (newest); the hydrated backlog appends behind it — order holds.
+                self.captures.append(contentsOf: hydrated)   // one didSet -> one rebuild
+                self.pruneDiscardedFragments()
+                self.finishStartupAfterHydration()
+            }
         }
-        captures.append(contentsOf: hydrated)   // one didSet → one rebuild
-        pruneDiscardedFragments()
     }
+
+    /// The startup hydration task — awaitable so tests (and callers that need the
+    /// resumed timeline) can join it instead of assuming a synchronous load.
+    public private(set) var hydration: Task<Void, Never>?
 
     /// Reclaim discarded junk-fragment folders older than `discardedRetention`, OFF the main
     /// thread so it never touches launch latency. The audio was never uploaded and is not

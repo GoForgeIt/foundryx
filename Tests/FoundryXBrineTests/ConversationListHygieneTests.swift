@@ -22,15 +22,17 @@ final class ConversationListHygieneTests: XCTestCase {
         return dir
     }
 
-    private func makeManager(baseDir: URL, source: AudioFrameSource) -> CaptureManager {
+    private func makeManager(baseDir: URL, source: AudioFrameSource) async -> CaptureManager {
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
-        return CaptureManager(target: target, baseDir: baseDir, source: source,
+        let m = CaptureManager(target: target, baseDir: baseDir, source: source,
                               finalize: { _, _ in }, fetchContent: { _ in nil })
+        await m.hydration?.value
+        return m
     }
 
     /// Two finalized captures on disk — one with a real provisional transcript, one with
     /// pure filler ("Thank you."). Only the real one renders.
-    func testFillerCapturesAreHiddenFromList() throws {
+    func testFillerCapturesAreHiddenFromList() async throws {
         let dir = try tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -40,7 +42,7 @@ final class ConversationListHygieneTests: XCTestCase {
         ConversationCardStore.seedProvisional(captureId: "omi-FILLER", baseDir: dir,
                                               transcript: "Thank you.", title: "Thank you")
 
-        let mgr = makeManager(baseDir: dir, source: TestSource())
+        let mgr = await makeManager(baseDir: dir, source: TestSource())
         let ids = Set(mgr.visibleCaptures.map { $0.captureId })
         XCTAssertTrue(ids.contains("omi-REAL"), "a real conversation is shown")
         XCTAssertFalse(ids.contains("omi-FILLER"), "a near-silent filler capture is hidden")
@@ -52,7 +54,7 @@ final class ConversationListHygieneTests: XCTestCase {
         let dir = try tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let src = TestSource()
-        let mgr = makeManager(baseDir: dir, source: src)
+        let mgr = await makeManager(baseDir: dir, source: src)
         mgr.setSilenceGap(9_999)   // auto-segmenter quiet — the split is ours
 
         src.onState?(.streaming)
