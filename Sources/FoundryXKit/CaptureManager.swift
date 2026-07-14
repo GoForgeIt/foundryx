@@ -1178,19 +1178,25 @@ public final class CaptureManager: ObservableObject {
             // non-active, still has no segments, and has been open past the stuck threshold,
             // discard it (durable `.discarded` marker — nothing real is lost, it's empty).
             if wal.status.totalSegments == 0 {
-                // Discard ANY stale zero-segment capture. The old rule required a meta
-                // with `endedAt == nil`, which let two flavors linger forever as
-                // "Processing · 0/0" cards: ended-but-empty captures (endedAt set) and
-                // meta-less ones. Age comes from the durable start-time resolution
-                // (meta → card tombstone → the capture-id's baked timestamp), so a
-                // meta-less empty still ages out. Never discard anything Lore confirmed
-                // or that has a cached transcript (nothing real is ever lost — the
-                // marker hides an EMPTY card, it doesn't delete audio).
+                // Discard a stale zero-segment capture that is GENUINELY empty (an
+                // Omi-drop card that never received audio). "Empty" means: no cached
+                // transcript, not confirmed in Lore, AND no durable card tombstone.
+                //
+                // DATA-LOSS FIX (2026-07-13): a REAL conversation whose audio (30d)
+                // and transcript text (14d) were pruned by RETENTION still holds its
+                // card tombstone (title + summary) and reads as 0-segment. The old
+                // condition (only isConfirmedInLore + hasCachedTranscript) discarded
+                // those — then pruneDiscardedFragments deleted the whole folder 2 days
+                // later, silently destroying every phone-only conversation past the
+                // retention window (nothing is "confirmed in Lore" without a computer).
+                // A card tombstone IS real content: never discard it — it stays
+                // browsable as title + summary, it just can't replay/show full text.
                 let started = startTime(of: wal)
                 if !wal.status.streaming,
                    Date().timeIntervalSince1970 - started > Self.stuckEmptyRecordingSecs,
                    !TranscriptCacheStore.isConfirmedInLore(captureId: id, baseDir: baseDir),
-                   !hasCachedTranscript(id) {
+                   !hasCachedTranscript(id),
+                   !ConversationCardStore.exists(captureId: id, baseDir: baseDir) {
                     let dir = baseDir.appendingPathComponent(id, isDirectory: true)
                     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                     try? Data("stuck empty recording — 0 segments, never received audio".utf8)

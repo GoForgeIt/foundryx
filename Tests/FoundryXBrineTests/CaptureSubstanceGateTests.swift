@@ -118,6 +118,42 @@ final class CaptureSubstanceGateTests: XCTestCase {
         XCTAssertFalse(mgr.captures.contains { $0.captureId == junk }, "a discarded fragment is NOT hydrated")
     }
 
+    /// DATA-LOSS REGRESSION (2026-07-13): a conversation whose audio (30d) and
+    /// transcript text (14d) were pruned by RETENTION still holds its card
+    /// tombstone (title + summary) and reads as 0-segment. Reconcile must NEVER
+    /// discard it — the old rule (only isConfirmedInLore + hasCachedTranscript)
+    /// deleted every phone-only conversation past the retention window (nothing
+    /// is confirmed in Lore without a connected computer). A genuinely empty
+    /// Omi-drop card (no tombstone at all) is still discarded.
+    func testRetentionTombstoneSurvivesReconcileButEmptyCardIsDiscarded() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let fm = FileManager.default
+
+        // A real conversation, pruned to a tombstone: card kept, no audio, no
+        // transcript, not in Lore, old start (aged past the stuck bar).
+        let pruned = "omi-20250601-120000-boardmtg"
+        try fm.createDirectory(at: dir.appendingPathComponent(pruned), withIntermediateDirectories: true)
+        ConversationMetaStore.save(ConversationMeta(startedAt: 100, endedAt: 160),
+                                   captureId: pruned, baseDir: dir)
+        ConversationCardStore.merge(captureId: pruned, baseDir: dir,
+                                    title: "Board meeting", summary: "Q3 review", stage: "ready")
+
+        // A genuinely empty Omi-drop card: no card tombstone, no segments.
+        let empty = "omi-20250601-110000-emptydrop"
+        try fm.createDirectory(at: dir.appendingPathComponent(empty), withIntermediateDirectories: true)
+        ConversationMetaStore.save(ConversationMeta(startedAt: 100, endedAt: nil),
+                                   captureId: empty, baseDir: dir)
+
+        let mgr = await makeManager(dir, TestSource(), Recorder())   // hydration → reconcile
+
+        XCTAssertFalse(discardMarkerExists(dir, pruned),
+                       "a retention tombstone (card kept) is NEVER discarded — the conversation survives")
+        XCTAssertTrue(mgr.visibleCaptures.contains { $0.captureId == pruned },
+                      "the pruned conversation stays browsable as title + summary")
+        XCTAssertTrue(discardMarkerExists(dir, empty),
+                      "a genuinely empty 0-segment card (no tombstone) is still discarded")
+    }
+
     func testShouldEndSuspendedSession() async {
         let w = CaptureManager.reconnectGraceWindow
         XCTAssertFalse(CaptureManager.shouldEndSuspendedSession(suspendedAt: 100, now: 100 + w - 0.5, window: w))
