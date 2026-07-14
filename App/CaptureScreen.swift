@@ -129,6 +129,9 @@ struct CaptureScreen: View {
     @State private var query = ""
     /// nil = no search active; else the ids that matched (computed off-main).
     @State private var searchMatches: Set<String>?
+    /// The computer/Lore half of search (track 20260714T1200): resolved from the door
+    /// when connected, deduped against the local matches above.
+    @State private var remoteState: RemoteSearchState = .idle
     /// Selected category filter chip id (nil = All).
     @State private var categoryFilter: String?
     @State private var newCategoryName = ""
@@ -182,12 +185,12 @@ struct CaptureScreen: View {
             }
         }
         .grainBackground()
-        // Search sweeps disk (cached transcripts) — off-main, newest state wins.
-        // TODO(full-history): Extend these local matches with computer/Lore results
-        // once the full-history search capability is available.
+        // Search sweeps local disk (cached transcripts) AND, when the computer is
+        // connected, the FULL history in Lore (track 20260714T1200) — off-main, newest
+        // state wins. The computer results are deduped against the local matches.
         .task(id: query) {
             let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !q.isEmpty else { searchMatches = nil; return }
+            guard !q.isEmpty else { searchMatches = nil; remoteState = .idle; return }
             let ids = manager.visibleCaptures.map(\.captureId)
             let titles = Dictionary(uniqueKeysWithValues: ids.map {
                 ($0, manager.cardMeta(for: $0)?.title)
@@ -199,9 +202,16 @@ struct CaptureScreen: View {
                     title: { titles[$0] ?? nil },
                     transcript: { mgr.searchText(for: $0) }))
             }.value
-            if query.trimmingCharacters(in: .whitespacesAndNewlines) == q {
-                searchMatches = matched
-            }
+            guard query.trimmingCharacters(in: .whitespacesAndNewlines) == q else { return }
+            searchMatches = matched
+            // Reach the computer's whole library (phone-only tier → notConnected note).
+            remoteState = .searching
+            let localTarget = target
+            let connected = !local
+            let rs = await FullHistorySearch.remoteState(
+                query: q, localIds: Set(ids), computerConnected: connected,
+                search: { try await DoorClient(target: localTarget).searchConversations(query: $0) })
+            if query.trimmingCharacters(in: .whitespacesAndNewlines) == q { remoteState = rs }
         }
         .alert("Rename category", isPresented: Binding(
             get: { renamingCategory != nil },
@@ -372,20 +382,98 @@ struct CaptureScreen: View {
                                 .padding(.bottom, GrainSpacing.x2)
                         }
                     } header: {
-                        Text(section.title)
-                            .grainTextStyle(.caption)
-                            .foregroundStyle(GrainColor.textFaint)
-                            .textCase(.uppercase)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.top, GrainSpacing.x3)
-                            .padding(.bottom, GrainSpacing.x2)
-                            .background(GrainColor.surface)
+                        searchSectionHeader(section.title)
                     }
                 }
+                remoteResultsSection
             }
             .padding(.horizontal, GrainSpacing.x4)
             .padding(.bottom, GrainSpacing.x6)
         }
+    }
+
+    private func searchSectionHeader(_ title: String) -> some View {
+        Text(title)
+            .grainTextStyle(.caption)
+            .foregroundStyle(GrainColor.textFaint)
+            .textCase(.uppercase)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, GrainSpacing.x3)
+            .padding(.bottom, GrainSpacing.x2)
+            .background(GrainColor.surface)
+    }
+
+    /// The computer/Lore half of search (track 20260714T1200 AC3): shown only while a
+    /// query is active. Computer-only hits render as their own "From your computer"
+    /// section (each opens the same three-face detail, fetched by id — AC4); the
+    /// connection states are said honestly.
+    @ViewBuilder private var remoteResultsSection: some View {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if searchOpen, !q.isEmpty {
+            switch remoteState {
+            case .idle, .searching:
+                EmptyView()
+            case .results(let hits) where !hits.isEmpty:
+                Section {
+                    ForEach(hits) { hit in
+                        remoteHitRow(hit).padding(.bottom, GrainSpacing.x2)
+                    }
+                } header: {
+                    searchSectionHeader("From your computer")
+                }
+            case .results:
+                EmptyView()   // the computer had nothing more to add
+            case .notConnected:
+                searchNote("Connect your computer to search your full history.")
+            case .unreachable:
+                searchNote("Couldn't reach your computer.")
+            }
+        }
+    }
+
+    /// A conversation that lives only on the computer — tapping fetches its detail from
+    /// the door by id (the three-face detail already handles a Lore-resident capture).
+    private func remoteHitRow(_ hit: ConversationHit) -> some View {
+        NavigationLink {
+            ConversationFacesView(
+                target: target,
+                manager: manager,
+                captureId: hit.captureId,
+                timeRange: hit.dateLabel,
+                place: nil,
+                conversationDate: nil,
+                local: false)
+        } label: {
+            VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                Text(hit.title.isEmpty ? "Untitled conversation" : hit.title)
+                    .grainTextStyle(.body)
+                    .foregroundStyle(GrainColor.ink)
+                    .lineLimit(1)
+                if !hit.snippet.isEmpty {
+                    Text(hit.snippet)
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.textMuted)
+                        .lineLimit(2)
+                }
+                if !hit.dateLabel.isEmpty {
+                    Text(hit.dateLabel)
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.textFaint)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(GrainSpacing.x3)
+            .background(RoundedRectangle(cornerRadius: 14).fill(GrainColor.surface))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func searchNote(_ text: String) -> some View {
+        Text(text)
+            .grainTextStyle(.caption)
+            .foregroundStyle(GrainColor.textMuted)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, GrainSpacing.x3)
     }
 
     /// One tappable conversation card → its transcript detail.

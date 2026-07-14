@@ -76,7 +76,9 @@ final class CaptureResyncTests: XCTestCase {
         var out = await wal.sync()
         var guardLoops = 0
         while out == .progressed, guardLoops < 100 { out = await wal.sync(); guardLoops += 1 }
-        XCTAssertEqual(rec.sent, [6, 9], "only genuinely-missing segments transfer")
+        // Order-free: segments upload concurrently (bounded), so 6 and 9 may land in
+        // either order — the invariant is that ONLY the two missing seqs transfer.
+        XCTAssertEqual(rec.sent.sorted(), [6, 9], "only genuinely-missing segments transfer")
         XCTAssertEqual(wal.snapshot().pendingSegments, 0)
         XCTAssertEqual(wal.uploadWatermark(), 9, "bulk-ACK'd 7,8 fold into the contiguous run")
     }
