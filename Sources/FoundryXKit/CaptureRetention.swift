@@ -29,21 +29,26 @@ public struct CachedTranscript: Codable, Sendable, Equatable {
     /// Per-capture speaker slots paired with `segments`; empty for legacy / flat
     /// captures. Defaults during decode keep old transcript.json files readable.
     public let speakers: [CaptureSpeaker]
+    /// Deepgram paragraphs for flat transcripts, persisted so reopen can render the
+    /// structured transcript immediately instead of flashing a single wall of text.
+    public let paragraphs: [TranscriptParagraph]
     /// When the phone fetched this from the door (unix seconds).
     public let fetchedAt: UInt64
 
     enum CodingKeys: String, CodingKey {
-        case transcript, title, summary, segments, speakers, fetchedAt
+        case transcript, title, summary, segments, speakers, paragraphs, fetchedAt
     }
 
     public init(transcript: String, title: String?, summary: String?,
                 segments: [TranscriptSegment] = [], speakers: [CaptureSpeaker] = [],
+                paragraphs: [TranscriptParagraph] = [],
                 fetchedAt: UInt64) {
         self.transcript = transcript
         self.title = title
         self.summary = summary
         self.segments = segments
         self.speakers = speakers
+        self.paragraphs = paragraphs
         self.fetchedAt = fetchedAt
     }
 
@@ -54,7 +59,22 @@ public struct CachedTranscript: Codable, Sendable, Equatable {
         summary = try c.decodeIfPresent(String.self, forKey: .summary)
         segments = try c.decodeIfPresent([TranscriptSegment].self, forKey: .segments) ?? []
         speakers = try c.decodeIfPresent([CaptureSpeaker].self, forKey: .speakers) ?? []
+        paragraphs = try c.decodeIfPresent([TranscriptParagraph].self, forKey: .paragraphs) ?? []
         fetchedAt = try c.decodeIfPresent(UInt64.self, forKey: .fetchedAt) ?? 0
+    }
+}
+
+/// Shared cache freshness predicate for `/content` responses. A speaker rename can
+/// change only `speakers`, so comparing segment count alone would discard fresh names.
+public enum CaptureContentCachePolicy {
+    public static func contentDiffers(_ c: CaptureContent, from cached: CachedTranscript?) -> Bool {
+        guard let cached else { return true }
+        return c.transcript != cached.transcript
+            || c.segments != cached.segments
+            || c.speakers != cached.speakers
+            || c.paragraphs != cached.paragraphs
+            || c.title != cached.title
+            || c.summary != cached.summary
     }
 }
 

@@ -869,6 +869,7 @@ public final class CaptureManager: ObservableObject {
             guard let c = await fetch(captureId), c.found, !c.transcript.isEmpty else { return }
             let entry = CachedTranscript(transcript: c.transcript, title: c.title,
                                          summary: c.summary, segments: c.segments, speakers: c.speakers,
+                                         paragraphs: c.paragraphs,
                                          fetchedAt: UInt64(max(0, Date().timeIntervalSince1970)))
             TranscriptCacheStore.save(entry, captureId: captureId, baseDir: baseDir)
             // Also seed the durable card tombstone with the name/description.
@@ -1519,6 +1520,60 @@ public final class CaptureManager: ObservableObject {
         return CaptureWAL(captureId: id, target: target, baseDir: baseDir, log: log, upload: upload)
     }
 
+    private func hasLocalAudio(_ captureId: String) -> Bool {
+        let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        return files.contains { $0.pathExtension == "opus" }
+    }
+
+    /// A conversation can be resumed only when its original local audio is still present,
+    /// it has not been deleted/discarded, and no other source is currently recording.
+    /// This is intentionally local-first: the WAL on this phone is the append target.
+    public func canResumeRecording(captureId: String) -> Bool {
+        guard active == nil, suspendedSession == nil else { return false }
+        guard !isDeleted(captureId), !isDiscarded(captureId), !isAbandoned(captureId) else { return false }
+        return hasLocalAudio(captureId)
+    }
+
+    /// Re-open an existing capture as the active conversation, appending new frames to
+    /// the same WAL/capture id. Ending it later follows the normal finalize path, which
+    /// re-ingests the fuller audio under the same external id.
+    @discardableResult
+    public func resumeRecording(captureId: String) -> Bool {
+        guard canResumeRecording(captureId: captureId) else { return false }
+        let wal = captures.first(where: { $0.captureId == captureId }) ?? makeWAL(captureId: captureId)
+        active = wal
+        captures.removeAll { $0.captureId == captureId }
+        captures.insert(wal, at: 0)
+        clearNeedsFinalize(captureId)
+        retryStates[captureId] = nil
+        finalizing.remove(captureId)
+        if captureSource == .phoneMic, micSource != nil { isRecordingMic = true }
+        ConversationMetaStore.recordOpen(captureId: captureId, baseDir: baseDir, at: nowUnixSecs())
+        invalidateMeta(captureId)
+        ConversationCardStore.recordStart(captureId: captureId, baseDir: baseDir, startedAt: nowUnixSecs())
+        CaptureEventLog.append(.captureStarted, captureId: captureId,
+                               payload: ["source": captureSource.rawValue, "resume": "true"],
+                               baseDir: baseDir)
+        wal.beginStreaming()
+        router.resetLevelMeter()
+        #if canImport(AVFoundation)
+        router.resetPCMDecoder()
+        #endif
+        router.resetSegmenter()
+        router.setExternalPCM(isRecordingMic)
+        router.setPaused(isPaused)
+        router.setWAL(wal)
+        startLiveTranscription()
+        lastHeartbeatAt = 0; lastHeartbeatFrames = router.stats().count
+        pushLiveState(.start)
+        rebuildVisibleCaptures()
+        if isRecordingMic { micSource?.start() }
+        else { source.start() }
+        log?.info("capture \(captureId): resumed existing conversation (source=\(captureSource.rawValue))")
+        return true
+    }
+
     private func beginSession() {
         let id = Self.newCaptureId()
         let wal = makeWAL(captureId: id)
@@ -1832,44 +1887,50 @@ public final class CaptureManager: ObservableObject {
         // (or `clearAuthExpired`) re-arms the drain.
         guard !authExpired else { return }
 
-        let now = Date().timeIntervalSince1970
-        var attempted = 0
-        for wal in captures where wal.status.pendingSegments > 0 {
-            let id = wal.captureId
-            if isAbandoned(id) { continue }
-            if isDiscarded(id) { continue }   // a sub-substance junk fragment never uploads
-            if isDeleted(id) { continue }     // user-deleted captures never resurrect/re-upload
-            if let held = suspendedSession, held.wal === wal { continue }   // hold uploads until the grace resolves
-            // NEVER LOSE AUDIO: there is NO size / age / failure-count abandon here. A
-            // large, old, or briefly-offline capture keeps draining (resuming from its
-            // watermark) until fully uploaded. The only retire is permanent poison,
-            // surfaced by `wal.sync()` returning `.poisoned` below.
-            // Backoff gate: skip a failing capture until its next-eligible instant.
-            if let st = retryStates[id], now < st.nextEligible { continue }
-            // Concurrency / backlog valve: bound how many captures one tick attempts.
-            if attempted >= Self.maxCapturesPerDrain { break }
-            attempted += 1
-            // Resync handshake (AC1): before re-uploading, ask the door what it
-            // ALREADY has and bulk-ACK it — lost ACKs must never cause re-uploads.
-            await resyncIfNeeded(wal)
-            switch await wal.sync() {
-            case .idle, .progressed:
-                retryStates[id] = nil                 // healthy → reset backoff
-            case .failed:
-                recordUploadFailure(id, now: now)     // transient — back off; retry FOREVER
-                // A dropped socket / flap may have lost in-flight ACKs — re-run the
-                // resync handshake on the next pass instead of re-uploading blind (AC4).
-                resyncedCaptures.remove(id)
-            case .poisoned(let seq, let reason):
-                // Permanent poison on a specific segment — retire so it can't wedge the
-                // drain. The audio is KEPT (durable marker, no delete).
-                abandon(id, reason: "segment \(seq): \(reason)")
-            case .authExpired:
-                recordUploadFailure(id, now: now)
-                resyncedCaptures.remove(id)
-                handleUploadAuthExpired()             // stop everything + request re-auth
-                return
+        while !authExpired {
+            let now = Date().timeIntervalSince1970
+            let batch = drainBatch(now: now)
+            guard !batch.isEmpty else { break }
+
+            // Resync handshake (AC1): before re-uploading anything, ask the door which
+            // seqs it ALREADY stores durably and bulk-ACK them locally — lost ACKs must
+            // never cause re-uploads. Runs sequentially on the main actor (memoised once
+            // per capture per tunnel-session); the actual uploads below still run
+            // concurrently in the task group.
+            for wal in batch { await resyncIfNeeded(wal) }
+
+            var madeProgress = false
+            var shouldStop = false
+            await withTaskGroup(of: (CaptureWAL, SyncOutcome).self) { group in
+                for wal in batch {
+                    group.addTask { (wal, await wal.sync()) }
+                }
+                while let (wal, outcome) = await group.next() {
+                    let id = wal.captureId
+                    switch outcome {
+                    case .idle:
+                        retryStates[id] = nil
+                    case .progressed:
+                        retryStates[id] = nil                 // healthy → reset backoff
+                        madeProgress = true
+                    case .failed:
+                        recordUploadFailure(id, now: now)     // transient — back off; retry FOREVER
+                        // A dropped socket / flap may have lost in-flight ACKs — re-run the
+                        // resync handshake on the next pass instead of re-uploading blind (AC4).
+                        resyncedCaptures.remove(id)
+                    case .poisoned(let seq, let reason):
+                        // Permanent poison on a specific segment — retire so it can't wedge the
+                        // drain. The audio is KEPT (durable marker, no delete).
+                        abandon(id, reason: "segment \(seq): \(reason)")
+                    case .authExpired:
+                        recordUploadFailure(id, now: now)
+                        resyncedCaptures.remove(id)
+                        handleUploadAuthExpired()             // stop everything + request re-auth
+                        shouldStop = true
+                    }
+                }
             }
+            if shouldStop || !madeProgress { break }
         }
         // After syncing, retry any pending-finalize captures whose segments are now
         // all ACK'd — this is the retry path for a finalize that didn't complete at
@@ -1878,6 +1939,30 @@ public final class CaptureManager: ObservableObject {
         await retryPendingDeletes()
         shipAmbientSignalIfDue()   // redacted gate/card signal → desktop door (v3.3)
         maybePrune()   // retention sweeps — throttled OFF the every-5s main path
+    }
+
+    private func drainBatch(now: TimeInterval) -> [CaptureWAL] {
+        var batch: [CaptureWAL] = []
+        batch.reserveCapacity(Self.maxCapturesPerDrain)
+        for wal in captures {
+            guard wal.snapshot().pendingSegments > 0 else { continue }
+            let id = wal.captureId
+            if isAbandoned(id) { continue }
+            if isDiscarded(id) { continue }   // a sub-substance junk fragment never uploads
+            if isDeleted(id) { continue }     // user-deleted captures never resurrect/re-upload
+            if let held = suspendedSession, held.wal === wal { continue }   // hold uploads until the grace resolves
+            // NEVER LOSE AUDIO: there is NO size / age / failure-count abandon here. A
+            // large, old, or briefly-offline capture keeps draining (resuming from its
+            // watermark) until fully uploaded. The only retire is permanent poison,
+            // surfaced by `wal.sync()` returning `.poisoned`.
+            // Backoff gate: skip a failing capture until its next-eligible instant.
+            if let st = retryStates[id], now < st.nextEligible { continue }
+            batch.append(wal)
+            if batch.count >= Self.maxCapturesPerDrain {
+                break
+            }
+        }
+        return batch
     }
 
     /// The resync handshake (capture-sync AC1), ONCE per capture per tunnel-session:

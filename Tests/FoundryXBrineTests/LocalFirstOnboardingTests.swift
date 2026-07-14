@@ -244,7 +244,8 @@ enum OnboardingSteps {
                         world.fakeSTT = stt
                         world.localBackend = backend
                         mgr = CaptureManager(target: target, backend: backend,
-                                             baseDir: dir, source: src)
+                                             baseDir: dir, source: src,
+                                             localMode: true)
                     } else {
                         // Real CaptureManager; the brain round-trips are stubbed at
                         // the SAME seams the app wires (finalize + per-segment upload).
@@ -616,4 +617,3 @@ enum OnboardingSteps {
         ]
     }
 }
-

@@ -1025,6 +1025,71 @@ private struct MicSphereButton: View {
     }
 }
 
+/// Deepgram paragraph rendering for flat transcripts. Diarized captures use
+/// `SpeakerTranscriptSection`; this keeps non-diarized transcripts readable without
+/// inventing speaker turns.
+private struct ParagraphTranscriptSection: View {
+    let paragraphs: [TranscriptParagraph]
+
+    private var chapters: [Chapter] { Chapter.group(paragraphs) }
+
+    var body: some View {
+        if chapters.count > 1 {
+            VStack(alignment: .leading, spacing: GrainSpacing.x3) {
+                ForEach(Array(chapters.enumerated()), id: \.offset) { index, chapter in
+                    DisclosureGroup {
+                        ParagraphBlock(paragraphs: chapter.paragraphs)
+                            .padding(.top, GrainSpacing.x2)
+                    } label: {
+                        HStack(spacing: GrainSpacing.x2) {
+                            Text("Chapter \(index + 1)")
+                                .grainTextStyle(.caption)
+                                .foregroundStyle(GrainColor.ink)
+                            Text(Self.timestamp(chapter.startMs))
+                                .grainTextStyle(.caption)
+                                .foregroundStyle(GrainColor.textFaint)
+                        }
+                    }
+                    .padding(GrainSpacing.x3)
+                    .background(
+                        RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
+                            .fill(GrainColor.surfaceElevated)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
+                            .strokeBorder(GrainColor.borderHairline, lineWidth: 1)
+                    )
+                }
+            }
+        } else {
+            ParagraphBlock(paragraphs: paragraphs)
+        }
+    }
+
+    private static func timestamp(_ ms: Int) -> String {
+        let totalSeconds = max(0, ms / 1000)
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
+private struct ParagraphBlock: View {
+    let paragraphs: [TranscriptParagraph]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x3) {
+            ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, paragraph in
+                Text(paragraph.text.trimmingCharacters(in: .whitespacesAndNewlines))
+                    .grainTextStyle(.body)
+                    .foregroundStyle(GrainColor.ink)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+}
+
 /// The live, on-device transcription window (Feature 4). A TIGHT 1-clear + 1-fading
 /// glimpse positioned ABOVE the recording meter: the newest words sit sharp at the
 /// bottom, the line above starts to fade, and as new text streams in it animates up and

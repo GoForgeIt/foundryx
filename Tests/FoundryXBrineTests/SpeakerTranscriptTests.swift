@@ -110,6 +110,35 @@ final class SpeakerTranscriptTests: XCTestCase {
         XCTAssertTrue(SpeakerTurn.group([]).isEmpty)
     }
 
+    // MARK: - Deepgram paragraph → chapter grouping
+
+    func testParagraphChaptersSplitOnSpeakerChangeOrLongGap() {
+        let paragraphs = [
+            TranscriptParagraph(start: 0, end: 3, speaker: "0", text: "First."),
+            TranscriptParagraph(start: 4, end: 6, speaker: "0", text: "Same chapter."),
+            TranscriptParagraph(start: 7, end: 9, speaker: "1", text: "New speaker."),
+            TranscriptParagraph(start: 25, end: 27, speaker: "1", text: "Long pause."),
+        ]
+
+        let chapters = Chapter.group(paragraphs, gapThresholdSeconds: 12)
+
+        XCTAssertEqual(chapters.count, 3)
+        XCTAssertEqual(chapters[0].paragraphs.map(\.text), ["First.", "Same chapter."])
+        XCTAssertEqual(chapters[0].startMs, 0)
+        XCTAssertEqual(chapters[0].endMs, 6000)
+        XCTAssertEqual(chapters[1].paragraphs.map(\.text), ["New speaker."])
+        XCTAssertEqual(chapters[2].paragraphs.map(\.text), ["Long pause."])
+    }
+
+    func testParagraphChaptersSortByStartTime() {
+        let paragraphs = [
+            TranscriptParagraph(start: 10, end: 11, speaker: nil, text: "second"),
+            TranscriptParagraph(start: 0, end: 1, speaker: nil, text: "first"),
+        ]
+
+        XCTAssertEqual(Chapter.group(paragraphs).first?.paragraphs.map(\.text), ["first", "second"])
+    }
+
     // MARK: - identity state rendering inputs
 
     func testConfirmedSpeakerShowsName() {

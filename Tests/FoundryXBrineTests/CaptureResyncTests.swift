@@ -185,8 +185,8 @@ final class CaptureResyncDrainTests: XCTestCase {
         let rec = SeqRecorder()
         let mgr = await makeManager(dir: dir, stub: stub, rec: rec)
 
-        await mgr.drainPending()
-        XCTAssertEqual(rec.sent, [8, 9], "only the genuinely-missing segments upload")
+        await mgr.drainPending()   // continuous drain empties the whole backlog in one call
+        XCTAssertEqual(Set(rec.sent), [8, 9], "only the genuinely-missing segments upload (order-free: they transfer concurrently)")
         XCTAssertEqual(stub.calls, 1, "the door's seq set is fetched once for the capture")
         XCTAssertEqual(mgr.pendingSegments, 0, "the capture is fully on the desktop")
 
@@ -204,31 +204,36 @@ final class CaptureResyncDrainTests: XCTestCase {
         let rec = SeqRecorder()
         let mgr = await makeManager(dir: dir, stub: stub, rec: rec)
 
-        await mgr.drainPending()   // one sync pass ships maxSegmentsPerSync (8)
-        await mgr.drainPending()   // the remainder
-        XCTAssertEqual(rec.sent, Array(0...9).map(UInt64.init), "every segment uploads, as today")
+        await mgr.drainPending()   // continuous drain ships the whole backlog in one call
+        XCTAssertEqual(Set(rec.sent), Set(Array(0...9).map(UInt64.init)), "every segment uploads, as today")
+        XCTAssertEqual(mgr.pendingSegments, 0, "nothing is left pending")
         XCTAssertEqual(stub.calls, 1, "the 404 answer is memoised — no per-tick probe spam")
     }
 
     // A transport failure on the handshake itself is NOT memoised — the next drain
-    // pass retries it (the fetch is cheap), while this pass drains as before.
+    // pass retries it (the fetch is cheap). Under continuous drain a "next pass" only
+    // exists while work remains, so pass 1 flaps fully (handshake AND uploads 503 →
+    // backoff, nothing memoised); once the door is back, pass 2 re-runs the handshake.
     func testHandshakeTransportFailureRetriesNextPass() async throws {
         let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         try seedPendingCapture(dir: dir, captureId: "omi-handshake-flap", n: 10)
 
-        let stub = SegmentsStub(); stub.error = DoorError.http(503)
-        let rec = SeqRecorder()
+        let stub = SegmentsStub(); stub.error = DoorError.http(503)   // handshake unreachable
+        let rec = SeqRecorder(); rec.error = DoorError.http(503)      // and uploads fail → backoff
         let mgr = await makeManager(dir: dir, stub: stub, rec: rec)
 
         await mgr.drainPending()
-        XCTAssertEqual(stub.calls, 1)
-        XCTAssertEqual(rec.sent.count, 8, "the drain itself proceeds (uploads succeed)")
+        XCTAssertEqual(stub.calls, 1, "the handshake was attempted")
+        XCTAssertGreaterThan(mgr.pendingSegments, 0, "the flap left segments pending — there IS a next pass")
 
-        stub.error = nil; stub.answer = (0...9).map(UInt64.init)   // door reachable again
+        // Door back: the un-memoised handshake must be retried, and this time it reports
+        // the desktop already holds everything → the backlog bulk-ACKs with no re-upload.
+        stub.error = nil; stub.answer = (0...9).map(UInt64.init)
+        rec.error = nil
+        try await Task.sleep(nanoseconds: 2_600_000_000)   // wait out the one-failure backoff
         await mgr.drainPending()
         XCTAssertEqual(stub.calls, 2, "an un-memoised handshake is retried next pass")
-        XCTAssertEqual(rec.sent.count, 8, "the door already had 8+9 — resync skips them")
-        XCTAssertEqual(mgr.pendingSegments, 0)
+        XCTAssertEqual(mgr.pendingSegments, 0, "the re-fetched seq set bulk-ACKs the whole backlog")
     }
 
     // AC4: a dropped socket fails in-flight segments back to pending AND clears the
@@ -244,6 +249,7 @@ final class CaptureResyncDrainTests: XCTestCase {
 
         await mgr.drainPending()
         XCTAssertEqual(stub.calls, 1)
+        let sentDuringFlap = rec.sent.count   // however many raced onto the wire before the 503
 
         // Reconnected: uploads work again. Wait out the failure backoff (≤ 2.5s for
         // one failure), then drain — the flap must have cleared the memo → re-fetch.
@@ -253,6 +259,6 @@ final class CaptureResyncDrainTests: XCTestCase {
         await mgr.drainPending()
         XCTAssertEqual(stub.calls, 2, "a flap clears the memo — the seq set is re-fetched on reconnect")
         XCTAssertEqual(mgr.pendingSegments, 0, "the re-fetched seq set bulk-ACKs everything (no re-upload)")
-        XCTAssertEqual(rec.sent.count, 1, "only the pre-flap failed attempt ever hit the wire")
+        XCTAssertEqual(rec.sent.count, sentDuringFlap, "reconnect uploads nothing new — resync bulk-ACKs the whole backlog")
     }
 }

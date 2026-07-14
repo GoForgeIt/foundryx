@@ -91,7 +91,10 @@ public final class LocalBackend: CaptureBackend, @unchecked Sendable {
                               capturedAt: Int(capturedAt),
                               found: cached != nil,
                               title: card?.title ?? cached?.title,
-                              summary: card?.summary ?? cached?.summary)
+                              summary: card?.summary ?? cached?.summary,
+                              segments: cached?.segments ?? [],
+                              speakers: cached?.speakers ?? [],
+                              paragraphs: cached?.paragraphs ?? [])
     }
 
     /// All of a capture's Opus frames, in segment order, split back out of the

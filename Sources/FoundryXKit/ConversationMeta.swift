@@ -89,6 +89,16 @@ public enum ConversationMetaStore {
         save(ConversationMeta(startedAt: startedAt), captureId: captureId, baseDir: baseDir)
     }
 
+    /// Re-open an existing conversation for additional recording. Preserves the original
+    /// start/location and clears only the end bound; if older metadata is missing, seeds
+    /// an open record so the resumed capture has a durable sidecar.
+    public static func recordOpen(captureId: String, baseDir: URL, at fallbackStartedAt: UInt64) {
+        var meta = load(captureId: captureId, baseDir: baseDir)
+            ?? ConversationMeta(startedAt: fallbackStartedAt)
+        meta.endedAt = nil
+        save(meta, captureId: captureId, baseDir: baseDir)
+    }
+
     /// Stamp the conversation END (+ an optional location fix), preserving the
     /// existing start. If no record exists (shouldn't happen), seeds one.
     public static func recordEnd(captureId: String,

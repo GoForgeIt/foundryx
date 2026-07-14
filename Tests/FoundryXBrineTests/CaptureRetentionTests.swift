@@ -107,6 +107,26 @@ final class CaptureRetentionTests: XCTestCase {
         XCTAssertEqual(loaded.speakers.first?.name, "Alice")
     }
 
+    func testTranscriptCacheRoundTripsParagraphs() throws {
+        let dir = try tempDir("retention-cache-paragraphs")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let entry = CachedTranscript(
+            transcript: "First paragraph.\n\nSecond paragraph.",
+            title: "Paragraph chat",
+            summary: nil,
+            paragraphs: [
+                TranscriptParagraph(start: 0, end: 2.0, speaker: "0", text: "First paragraph."),
+                TranscriptParagraph(start: 20.5, end: 23.0, speaker: "0", text: "Second paragraph."),
+            ],
+            fetchedAt: 789)
+
+        TranscriptCacheStore.save(entry, captureId: "c-paragraphs", baseDir: dir)
+
+        let loaded = try XCTUnwrap(TranscriptCacheStore.load(captureId: "c-paragraphs", baseDir: dir))
+        XCTAssertEqual(loaded, entry)
+        XCTAssertEqual(loaded.paragraphs.count, 2)
+    }
+
     func testOldTranscriptCacheWithoutSpeakersStillDecodes() throws {
         let json = """
         {
@@ -123,6 +143,7 @@ final class CaptureRetentionTests: XCTestCase {
         XCTAssertEqual(decoded.title, "Legacy")
         XCTAssertEqual(decoded.segments, [])
         XCTAssertEqual(decoded.speakers, [])
+        XCTAssertEqual(decoded.paragraphs, [])
     }
 
     // MARK: end-to-end prune pass (seeded from disk)
