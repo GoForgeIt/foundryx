@@ -2148,6 +2148,10 @@ public final class CaptureManager: ObservableObject {
         // run the startup work that needs the timeline.
         let base = baseDir
         hydration = Task.detached(priority: .userInitiated) { [weak self] in
+            // Measure hydration so a launch-cost regression is visible in the
+            // fleet telemetry (perf span "capture-hydrate"), not only when a
+            // user forwards a hang report.
+            let span = PerfSpan(name: "capture-hydrate")
             let fm = FileManager.default
             guard let entries = try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: nil)
             else { return }
@@ -2168,6 +2172,7 @@ public final class CaptureManager: ObservableObject {
             }
             guard let self else { return }
             let hydrated = picked.map { self.makeWAL(captureId: $0) }   // the stat storm, off-main
+            let ms = span.elapsedMs()
             await MainActor.run {
                 // A capture STARTED before hydration finished sits at index 0
                 // (newest); the hydrated backlog appends behind it — order holds.
@@ -2175,6 +2180,8 @@ public final class CaptureManager: ObservableObject {
                 self.pruneDiscardedFragments()
                 self.finishStartupAfterHydration()
             }
+            // Ship the hydration cost (count + ms) — a slow one greps out as SLOW.
+            PerfHook.span("capture-hydrate-n\(hydrated.count)", ms: ms)
         }
     }
 
