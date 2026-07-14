@@ -131,6 +131,9 @@ struct CaptureScreen: View {
     @State private var categoryFilter: String?
     @State private var newCategoryName = ""
     @State private var showingNewCategory = false
+    /// The category being renamed (nil = not renaming) + its edited name.
+    @State private var renamingCategory: ConversationCategory?
+    @State private var renameText = ""
     /// The on-device model behind auto-filing (nil where unavailable — honest).
     private let tagger = makeSystemCategoryTagger()
 
@@ -192,6 +195,19 @@ struct CaptureScreen: View {
             if query.trimmingCharacters(in: .whitespacesAndNewlines) == q {
                 searchMatches = matched
             }
+        }
+        .alert("Rename category", isPresented: Binding(
+            get: { renamingCategory != nil },
+            set: { if !$0 { renamingCategory = nil } })) {
+            TextField("Name", text: $renameText)
+            Button("Rename") {
+                let name = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let cat = renamingCategory, !name.isEmpty {
+                    categories.rename(categoryId: cat.id, to: name)
+                }
+                renamingCategory = nil
+            }
+            Button("Cancel", role: .cancel) { renamingCategory = nil }
         }
         .alert("New category", isPresented: $showingNewCategory) {
             TextField("Name", text: $newCategoryName)
@@ -263,6 +279,10 @@ struct CaptureScreen: View {
                         categoryFilter = categoryFilter == cat.id ? nil : cat.id
                     }
                     .contextMenu {
+                        Button("Rename") {
+                            renamingCategory = cat
+                            renameText = cat.name
+                        }
                         Button("Delete \"\(cat.name)\"", role: .destructive) {
                             if categoryFilter == cat.id { categoryFilter = nil }
                             categories.delete(categoryId: cat.id)
