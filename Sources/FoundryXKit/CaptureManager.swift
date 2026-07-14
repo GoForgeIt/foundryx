@@ -1086,7 +1086,8 @@ public final class CaptureManager: ObservableObject {
     /// past the hard duration/segment backstop. Runs regardless of which screen is
     /// visible (unlike the meter), so ambient capture is always bounded.
     private func startSegmentTimer() {
-        segmentTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+        segmentTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] timer in
+            guard self != nil else { timer.invalidate(); return }   // stop after teardown
             Task { @MainActor in self?.tickSegmentation() }
         }
     }
@@ -1263,7 +1264,8 @@ public final class CaptureManager: ObservableObject {
     /// onAppear). Idempotent.
     public func startMeter() {
         guard meterTimer == nil else { return }
-        meterTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 12.0, repeats: true) { [weak self] _ in
+        meterTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 12.0, repeats: true) { [weak self] timer in
+            guard self != nil else { timer.invalidate(); return }   // 12Hz — stop hard after teardown
             Task { @MainActor in self?.tickMeter() }
         }
     }
@@ -1803,7 +1805,12 @@ public final class CaptureManager: ObservableObject {
     // MARK: drain (retry until every segment is ACK'd)
 
     private func startDrainTimer() {
-        drainTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+        drainTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] timer in
+            // When the manager is gone (a torn-down test case), stop the timer so
+            // it doesn't keep firing on the main run loop — leaked repeating timers
+            // across a 400+ test suite starved the timing-sensitive drain/resync
+            // tests into flaky timeouts. Idempotent in production (self never nil).
+            guard self != nil else { timer.invalidate(); return }
             Task { @MainActor in await self?.drainPending() }
         }
     }
