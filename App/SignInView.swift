@@ -35,7 +35,11 @@ struct SignInView: View {
                         .font(.system(size: 13, design: .monospaced))
                         .kerning(3)
                         .foregroundStyle(GrainColor.textMuted)
-                    Text("Record, transcribe, and chat, all on your phone. Sign in once; your recordings never leave this device.")
+                    // Honest by the egress inventory (design law #2): recordings
+                    // live on your devices under your keys — NOT "never leave this
+                    // device" (they can sync to your computer / cloud brain if you
+                    // choose one). Sign-in is pre-persona, so the copy stays neutral.
+                    Text("Record, transcribe, and remember. Your memory stays on your devices, under your keys.")
                         .grainTextStyle(.body)
                         .foregroundStyle(GrainColor.textMuted)
                         .multilineTextAlignment(.center)

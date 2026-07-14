@@ -18,10 +18,21 @@ struct RootView: View {
     @StateObject private var brains = BrainStore()
 
     var body: some View {
+        // DEV-only visual harness: `-WelcomePreview` launch arg shows the persona
+        // welcome directly (chooser flips expert/individual/firm), bypassing auth
+        // so the design can be screenshot-verified in the simulator. No effect in
+        // normal launches.
+        if ProcessInfo.processInfo.arguments.contains("-WelcomePreview") {
+            return AnyView(PersonaWelcomeStep(onStart: {}, onSkip: {}))
+        }
         let dest = RootGate.destination(signedIn: remote.email != nil,
                                         splashElapsed: splashElapsed,
                                         brain: brains.choice,
                                         hostResolved: remote.makeDoorTarget() != nil)
+        return AnyView(bodyContent(dest))
+    }
+
+    @ViewBuilder private func bodyContent(_ dest: RootDestination) -> some View {
         Group {
             switch dest {
             case .signInGate:

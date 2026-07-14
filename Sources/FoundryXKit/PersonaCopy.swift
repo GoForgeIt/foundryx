@@ -48,7 +48,10 @@ public enum PersonaCopy {
             return PersonaWelcomeCopy(
                 headline: "It adapts to you.",
                 emphasis: "It adapts",
-                sub: "It learns how you work, and works the way you do.",
+                // Individual = a person organizing their LIFE, not their job.
+                // The Catch: it catches what you'd have forgotten and brings it
+                // back at the moment it matters. Never "how you work".
+                sub: "It catches what you'd have forgotten, and brings it back right when it matters.",
                 lockLine: "Private by design. Your memory stays on your devices, under your keys."
             )
         case .firm:

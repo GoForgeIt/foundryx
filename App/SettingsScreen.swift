@@ -117,18 +117,26 @@ struct SettingsScreen: View {
                 }
             }
 
-            Section("FoundryX") {
-                Button("Show the welcome tour") { showingTour = true }
-                // Who the welcome (and future persona-routed surfaces) speak to —
-                // the same "What brings you here?" choice, editable forever
-                // (features/persona-welcome.feature).
-                Picker("Who it speaks to", selection: $persona) {
-                    ForEach(OnboardingPersona.allCases, id: \.self) { p in
-                        Text(p.chooserLabel).tag(p)
+            Section {
+                // Explore the welcome for ANY persona: flip "What brings you
+                // here?" live to see expert / individual / firm, and the choice
+                // sticks (features/persona-welcome.feature). This is where you
+                // "see the pages for the other user types."
+                NavigationLink {
+                    PersonaWelcomeExplorer()
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Welcome & who it's for").grainTextStyle(.body)
+                        Text(personaSubtitle)
+                            .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                     }
                 }
-                .onChange(of: persona) { newValue in PersonaPrefs.set(newValue) }
+                Button("Replay the full first-run tour") { showingTour = true }
                 NavigationLink("Privacy & your data") { PrivacyView() }
+            } header: {
+                Text("FoundryX")
+            } footer: {
+                Text("The welcome speaks differently to an expert, a person organizing their life, or a firm. Open it to explore each and pick yours.")
             }
 
             Section("Account") {
@@ -179,5 +187,28 @@ struct SettingsScreen: View {
                 UserDefaults.standard.set(true, forKey: "foundryx.waitlist.joined")
             }
         }
+    }
+
+    /// The current persona, shown on the row so it reads at a glance.
+    private var personaSubtitle: String {
+        switch persona {
+        case .expert: return "Speaking to: an independent expert"
+        case .individual: return "Speaking to: a person organizing their life"
+        case .firm: return "Speaking to: a firm"
+        }
+    }
+}
+
+/// Explore the persona welcome from Settings: the real welcome screen, its
+/// "What brings you here?" chooser flipping expert / individual / firm live
+/// (each choice persists). Both actions just dismiss — this is exploration, not
+/// the first-run flow, so it never advances into voice/ambient.
+private struct PersonaWelcomeExplorer: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        PersonaWelcomeStep(onStart: { dismiss() }, onSkip: { dismiss() })
+            .navigationTitle("Welcome")
+            .navigationBarTitleDisplayMode(.inline)
     }
 }

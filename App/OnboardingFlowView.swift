@@ -122,6 +122,11 @@ struct PersonaWelcomeStep: View {
                 .padding(.bottom, GrainSpacing.x4)
             }
         }
+        // Self-contained night surface, so the welcome looks right wherever it's
+        // shown (first-run flow, the Settings explorer, the dev preview) — the
+        // dot field floats over the Grain night gradient, not bare black.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .grainBackground()
         .animation(.easeOut(duration: 0.35), value: persona)
     }
 
