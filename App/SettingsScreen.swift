@@ -20,6 +20,12 @@ enum AmbientPrefs {
     static func decisionLogURL() -> URL {
         CaptureWAL.documentsCaptures().appendingPathComponent("ambient-decisions.jsonl")
     }
+
+    /// The redacted-signal shipper's persisted byte-offset watermark (track v3.3) —
+    /// beside the logs so it moves with them.
+    static func signalWatermarkURL() -> URL {
+        CaptureWAL.documentsCaptures().appendingPathComponent(".ambient-signal-shipped")
+    }
 }
 
 struct SettingsScreen: View {

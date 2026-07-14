@@ -1032,12 +1032,33 @@ public final class CaptureManager: ObservableObject {
     /// Called with a surfaced candidate (App wires the local notification). Runs on
     /// the main actor.
     public var onAmbientCandidate: (@MainActor (AmbientCandidate) -> Void)?
+    /// Ships the on-device ambient GATE/CARD signal (redacted — no raw text) to the
+    /// desktop door on the drain cadence (track v3.3). Wired ONLY in computer mode
+    /// (local-only tier has no door → nil → never ships). The shipper self-gates on
+    /// the ambient opt-in and is best-effort — it never blocks or fails the drain.
+    public var ambientSignalShipper: AmbientSignalShipper?
+    /// Throttle the piggybacked signal ship well below the 5s drain tick — the logs
+    /// grow slowly and shipping is pure visibility, never latency-sensitive.
+    private var lastAmbientShip = Date.distantPast
+    private static let ambientShipInterval: TimeInterval = 30
     /// Segmentation ticks (5s each) between gate evaluations. 2 ⇒ the gate runs on
     /// the rolling LIVE transcript about every 10s — responsive without hammering the
     /// on-device model (running an LLM every second is 60× the battery for no gain;
     /// a conversation's meaning barely moves in a second). Tunable from AC0 data.
     public static let ambientGateEveryNTicks = 2
     private var ambientTickDivider = 0
+
+    /// Best-effort: on the drain cadence (throttled to ~30s), ship any NEW redacted
+    /// ambient signal to the desktop door. Detached so it never blocks the drain; the
+    /// shipper self-gates on the opt-in and swallows all errors. No-op when no shipper
+    /// is wired (local-only tier).
+    private func shipAmbientSignalIfDue() {
+        guard let shipper = ambientSignalShipper else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastAmbientShip) >= Self.ambientShipInterval else { return }
+        lastAmbientShip = now
+        Task.detached(priority: .utility) { await shipper.shipIfEnabled() }
+    }
 
     /// About every 10s while a capture is actively recording, gate the current rolling
     /// LIVE transcript window (the SpeechAnalyzer preview already streaming — no
@@ -1848,6 +1869,7 @@ public final class CaptureManager: ObservableObject {
         // conversation-close (door/Lore was down, or segments weren't ACK'd yet).
         await retryPendingFinalizes()
         await retryPendingDeletes()
+        shipAmbientSignalIfDue()   // redacted gate/card signal → desktop door (v3.3)
         maybePrune()   // retention sweeps — throttled OFF the every-5s main path
     }
 

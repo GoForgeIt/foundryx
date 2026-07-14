@@ -259,6 +259,19 @@ private struct MainTabs: View {
             }
             AmbientNotifier.requestAuthorizationIfNeeded()
         }
+        // Ship the on-device ambient GATE/CARD signal (redacted — DERIVED action +
+        // outcome only, NEVER the utterance/window/seed) to the desktop door on the
+        // drain cadence (track v3.3). Computer mode ONLY: the local-only tier has no
+        // door, so the shipper is left nil and nothing ever ships. The shipper
+        // self-gates on the ambient opt-in and is best-effort (never blocks capture).
+        if !local {
+            mgr.ambientSignalShipper = AmbientSignalShipper(
+                decisionsURL: AmbientPrefs.decisionLogURL(),
+                cardsURL: ActivityStore.cardsLogURL(besides: AmbientPrefs.decisionLogURL()),
+                watermarkURL: AmbientPrefs.signalWatermarkURL(),
+                isEnabled: { UserDefaults.standard.bool(forKey: AmbientPrefs.enabledKey) },
+                send: { records in try await DoorClient(target: target).ambientLog(records: records) })
+        }
         // When a capture upload is rejected as token-expired (401), refresh the id_token
         // once / surface login — instead of the phone retry-looping with a dead token.
         mgr.onAuthExpired = { [weak remote] in Task { @MainActor in await remote?.handleAuthExpired() } }

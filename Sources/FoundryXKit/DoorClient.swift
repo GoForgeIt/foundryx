@@ -915,6 +915,49 @@ public final class DoorClient: @unchecked Sendable {
         return try JSONDecoder().decode(AmbientRouteOutcome.self, from: data)
     }
 
+    /// Ship a batch of REDACTED ambient-signal records to the door's visibility sink
+    /// (`POST /foundryx/ambient/log`, bearer-gated): the door appends them to a
+    /// Mac-local `ambient-signal.jsonl` the Temper scorer reads (track v3.3). The
+    /// records carry ONLY derived data (action/outcome/route/latency/window-SIZE) —
+    /// NEVER raw conversation text. Relay-aware dual-path + bearer like ambientCandidate.
+    /// Returns `true` on 200 (caller advances its shipped-watermark), `false` on 404
+    /// (an OLD door without the endpoint — caller HOLDS the watermark and retries once
+    /// the desktop updates). Throws on transport/other failure (also held + retried).
+    public func ambientLog(records: [AmbientSignalRecord]) async throws -> Bool {
+        guard !records.isEmpty else { return true }
+        let payload = try JSONEncoder().encode(records)   // a JSON array of records
+        if let relay = target.relay?.interactive() {
+            let resp = try await RelayHTTP.roundTrip(
+                relay: relay, bearer: target.bearer, method: "POST",
+                path: "/foundryx/ambient/log",
+                contentType: "application/json", body: payload,
+                session: session, log: log, useMux: target.useMux)
+            if resp.status == 401 { throw DoorError.unauthorized }
+            if resp.status == 404 { return false }   // old door — no-op, hold watermark
+            guard resp.status == 200 else { throw DoorError.http(resp.status) }
+            return true
+        }
+        let s = target.baseURL.absoluteString
+        let base = s.hasSuffix("/") ? String(s.dropLast()) : s
+        guard let url = URL(string: "\(base)/foundryx/ambient/log") else {
+            throw DoorError.transport("bad ambient log url")
+        }
+        var r = URLRequest(url: url)
+        r.httpMethod = "POST"
+        r.httpBody = payload
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.setValue("Bearer \(target.bearer)", forHTTPHeaderField: "Authorization")
+        r.timeoutInterval = 30
+        let (_, response) = try await session.data(for: r)
+        guard let http = response as? HTTPURLResponse else {
+            throw DoorError.transport("non-HTTP response")
+        }
+        if http.statusCode == 401 { throw DoorError.unauthorized }
+        if http.statusCode == 404 { return false }   // old door — no-op, hold watermark
+        guard http.statusCode == 200 else { throw DoorError.http(http.statusCode) }
+        return true
+    }
+
     /// Confirm or correct a capture's speaker SLOT (door forwards Lore's
     /// `POST /api/admin/captures/:id/speakers/:slot/confirm`). The state machine:
     ///   * `speakerId`  → confirm the slot for that EXISTING speaker (assign).
