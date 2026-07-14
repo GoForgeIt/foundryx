@@ -170,15 +170,16 @@ extension CaptureManager {
 
     /// Real per-segment byte sizes (seq order) for the row's waveform thumbnail.
     /// Empty when audio has been pruned — the row then simply shows no waveform.
+    /// Sizes come from the bulk enumeration's prefetched `.fileSizeKey` (a plain
+    /// getattrlist), NEVER attributesOfItem (which does getxattr/listxattr — the
+    /// extended-attribute fetch behind the bug_type-328 hangs).
     public nonisolated func segmentSizes(for captureId: String) -> [Int] {
         let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return [] }
-        return names.filter { $0.hasPrefix("seg-") && $0.hasSuffix(".opus") }
-            .sorted()
-            .compactMap { name in
-                (try? FileManager.default.attributesOfItem(
-                    atPath: dir.appendingPathComponent(name).path)[.size] as? Int)
-            }
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.fileSizeKey]) else { return [] }
+        return urls.filter { $0.lastPathComponent.hasPrefix("seg-") && $0.pathExtension == "opus" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .compactMap { (try? $0.resourceValues(forKeys: [.fileSizeKey]))?.fileSize }
     }
 
     /// The category store lives beside the captures it organizes.

@@ -419,11 +419,15 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
                 seqAcked.insert(seq)
                 syncedCount += 1
             }
-            // Bytes: stat each immutable segment file exactly once.
+            // Bytes: read each immutable segment's size exactly once, from the
+            // SIZE-ONLY resource value (prefetched by allSegmentURLs' bulk
+            // enumeration). NEVER attributesOfItem — that fetches EXTENDED
+            // ATTRIBUTES (getxattr/listxattr), the leaf of every bug_type-328
+            // hang report (2-9s main-thread freezes on backlogged captures,
+            // builds 135/142/143/164). fileSizeKey is a plain getattrlist.
             if let known = seqBytes[seq] {
                 byteCount += known
-            } else if let attrs = try? FileManager.default.attributesOfItem(atPath: u.path),
-                      let n = attrs[.size] as? Int {
+            } else if let n = (try? u.resourceValues(forKeys: [.fileSizeKey]))?.fileSize {
                 seqBytes[seq] = n
                 byteCount += n
             }
@@ -475,7 +479,12 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     }
 
     private func allSegmentURLs() -> [(UInt64, URL)] {
-        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        // Prefetch the file SIZE in the single bulk enumeration (getattrlist under
+        // the hood) so `computeStatus` reads it from the URL's cached resource
+        // values instead of stat'ing each segment separately. Combined with the
+        // per-seq size memo, this means no per-file syscall on the hot path.
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.fileSizeKey])) ?? []
         return files
             .filter { $0.pathExtension == "opus" }
             .compactMap { url -> (UInt64, URL)? in
