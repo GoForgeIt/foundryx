@@ -65,6 +65,33 @@ public enum PersonaCopy {
     }
 }
 
+/// A sample "want me to…?" nudge the user can feel before anything real fires —
+/// aimed at their demographic so it lands (Nick: individual = family/plans,
+/// expert = client prep, firm = team/standard). Confirm-only by construction.
+public struct PersonaNotificationExample: Equatable, Sendable {
+    public let title: String
+    public let body: String
+}
+
+public extension PersonaCopy {
+    static func notificationExample(for persona: OnboardingPersona) -> PersonaNotificationExample {
+        switch persona {
+        case .individual:
+            return PersonaNotificationExample(
+                title: "A gentle reminder",
+                body: "You mentioned taking Mom to her appointment Thursday. Want me to add it to your calendar?")
+        case .expert:
+            return PersonaNotificationExample(
+                title: "Before your client call",
+                body: "You have the Henderson call tomorrow. Want me to pull your notes and prep a brief?")
+        case .firm:
+            return PersonaNotificationExample(
+                title: "A pattern this week",
+                body: "Three people asked about the refund policy this week. Want me to draft the standard answer for the team?")
+        }
+    }
+}
+
 /// Persistence: one UserDefaults key beside the onboarding completed flag.
 /// Defaults injectable so tests never touch the app domain.
 public enum PersonaPrefs {

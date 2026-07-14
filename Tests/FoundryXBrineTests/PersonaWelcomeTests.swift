@@ -67,6 +67,25 @@ final class PersonaWelcomeTests: XCTestCase {
         XCTAssertEqual(PersonaPrefs.persona(defaults: d), .firm)
     }
 
+    // Persona-relatable sample notifications (Nick): each persona gets a demographic
+    // example, all confirm-only ("Want me to…?"), distinct per persona.
+    func testNotificationExamplesArePersonaRelatableAndConfirmOnly() {
+        let ind = PersonaCopy.notificationExample(for: .individual)
+        let exp = PersonaCopy.notificationExample(for: .expert)
+        let firm = PersonaCopy.notificationExample(for: .firm)
+        XCTAssertTrue(ind.body.contains("Mom"), "individual = family/life")
+        XCTAssertTrue(exp.body.localizedCaseInsensitiveContains("client")
+                      || exp.body.contains("Henderson"), "expert = a client")
+        XCTAssertTrue(firm.body.localizedCaseInsensitiveContains("team")
+                      || firm.body.contains("policy"), "firm = team/standard")
+        for ex in [ind, exp, firm] {
+            XCTAssertTrue(ex.body.contains("Want me to"), "confirm-only nudge")
+            XCTAssertFalse(ex.body.contains("—"), "no em dashes")
+        }
+        XCTAssertNotEqual(ind.body, exp.body)
+        XCTAssertNotEqual(exp.body, firm.body)
+    }
+
     // Corrupt/unknown stored value falls back to the default, never crashes.
     func testUnknownStoredValueFallsBackToIndividual() {
         let d = freshDefaults()

@@ -169,10 +169,11 @@ enum AmbientNotifier {
     /// Fire a sample notification so the user can experience the surface before any
     /// real trigger (Settings → "Preview a notification"). Clearly marked PREVIEW.
     static func postPreview() {
-        deliver(
-            title: "FoundryX (preview)",
-            body: "This is how I'll nudge you — e.g. when you say “I'll have to look that up,” I'll offer to find it from your memory.",
-            preview: true)
+        // A persona-relatable sample (family for individual, a client for the
+        // expert, a team pattern for the firm) so the nudge lands for whoever
+        // is here — not a generic placeholder.
+        let ex = PersonaCopy.notificationExample(for: PersonaPrefs.persona())
+        deliver(title: ex.title, body: ex.body, preview: true)
     }
 
     private static func deliver(title: String, body: String, preview: Bool,
