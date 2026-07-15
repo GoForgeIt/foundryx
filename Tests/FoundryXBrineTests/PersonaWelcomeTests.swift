@@ -196,23 +196,26 @@ final class WelcomeGateTests: XCTestCase {
     }
 }
 
-/// The app shell (features/app-shell.feature, spec §1/§9 + Nick 2026-07-14): three
-/// CONTENT tabs in order, Capture first; no Settings tab AND no Device tab — Device
-/// management lives inside Settings, which presents as a sheet with an X close.
+/// The app shell (features/app-shell.feature, spec §1 + T1 20260715T1457, Nick
+/// 2026-07-15): four tabs in order — Capture, Activity, Chat, Settings — Capture
+/// first. Settings is a first-class bottom-nav tab now (superseding the 2026-07-14
+/// "Settings as a sheet / 3 content tabs" decision); Device management still lives
+/// inside Settings (no Device tab).
 final class AppShellPresentationTests: XCTestCase {
 
-    // Scenario: the app shows Capture, Activity, Chat tabs in order (Device moved to Settings)
-    func testTabBarIsCaptureActivityChatInOrder() {
-        XCTAssertEqual(AppTab.allCases, [.capture, .activity, .chat])
+    // Scenario: the app shows Capture, Activity, Chat, Settings tabs in order
+    func testTabBarIsCaptureActivityChatSettingsInOrder() {
+        XCTAssertEqual(AppTab.allCases, [.capture, .activity, .chat, .settings])
         XCTAssertEqual(AppTab.allCases.map(\.label),
-                       ["Capture", "Activity", "Chat"])
+                       ["Capture", "Activity", "Chat", "Settings"])
         XCTAssertEqual(AppTab.launch, .capture, "Capture is the launch/home tab")
     }
 
-    // Scenario: neither Settings NOR Device is a bottom tab
-    func testNoSettingsOrDeviceTab() {
+    // Scenario: Settings IS a tab now; Device still is NOT (it lives inside Settings)
+    func testSettingsIsATabButDeviceIsNot() {
         let labels = AppTab.allCases.map(\.label)
-        XCTAssertFalse(labels.contains("Settings"))
+        XCTAssertTrue(labels.contains("Settings"),
+                      "Settings is the 4th bottom-nav tab (Nick 2026-07-15)")
         XCTAssertFalse(labels.contains("Device"), "Device lives inside Settings, not a tab")
     }
 
@@ -221,13 +224,12 @@ final class AppShellPresentationTests: XCTestCase {
         for tab in AppTab.allCases {
             XCTAssertFalse(tab.systemImage.isEmpty, "\(tab) needs an icon")
         }
+        XCTAssertEqual(AppTab.settings.systemImage, "gearshape")
     }
 
-    // Scenario: Settings opens as a dismissable sheet with an X close
-    func testSettingsSheetPresentation() {
+    // The Settings tab carries its title (was the sheet title before the supersession).
+    func testSettingsTabTitle() {
         XCTAssertEqual(SettingsSheetPresentation.title, "Settings")
-        XCTAssertEqual(SettingsSheetPresentation.closeAccessibilityLabel, "Close Settings")
-        XCTAssertEqual(SettingsSheetPresentation.gearAccessibilityLabel, "Settings")
     }
 }
 

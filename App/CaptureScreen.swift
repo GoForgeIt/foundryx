@@ -196,12 +196,20 @@ struct CaptureScreen: View {
                 recordCTA
             }
             if manager.visibleCaptures.isEmpty {
-                // Keep the header search affordance honest even before the first
-                // capture: opening it still reveals the same local search field.
-                if find.searchOpen { findBar }
-                emptyState
+                if manager.listRows.isEmpty {
+                    // Keep the header search affordance honest even before the first
+                    // capture: opening it still reveals the same local search field.
+                    if find.searchOpen { findBar }
+                    emptyState
+                } else {
+                    // Scan-free warm seed (T1 AC5): the list paints populated on the first
+                    // frame from card.json (no segment scan) while the off-main WAL
+                    // hydration runs; it swaps to the real cards the instant it lands.
+                    recentHeadline(count: manager.listRows.count)
+                    seededList
+                }
             } else {
-                recentHeadline
+                recentHeadline(count: manager.visibleCaptures.count)
                 findBar
                 conversationList
             }
@@ -343,11 +351,11 @@ struct CaptureScreen: View {
 
     // MARK: "Recent on this phone" headline + Search all (prototype :2203)
 
-    private var recentHeadline: some View {
+    private func recentHeadline(count: Int) -> some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
                 GrainSectionEyebrow(CaptureHomeCopy.recentHeadline)
-                Text(CaptureHomeCopy.conversationCount(manager.visibleCaptures.count))
+                Text(CaptureHomeCopy.conversationCount(count))
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             }
             Spacer()
@@ -500,8 +508,11 @@ struct CaptureScreen: View {
         let sections = ConversationGrouping.group(filteredCaptures, now: Date()) {
             manager.conversationStartDate($0)
         }
+        // NOT pinned (T1 AC3): a pinned header needs an opaque band to hide the rows
+        // scrolling under it — that band was the white/elevated stripe the design never
+        // had. Non-sticky eyebrows sit on the page background instead.
         return ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+            LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
                     Section {
                         ForEach(section.items, id: \.captureId) { wal in
@@ -519,15 +530,37 @@ struct CaptureScreen: View {
         }
     }
 
+    /// The scan-free first-paint list (T1 AC5): the warm-seeded rows (title + date from
+    /// card.json, no segment scan) rendered as the same conversation card, so the Capture
+    /// home is POPULATED on the first frame. Replaced by `conversationList` the instant the
+    /// off-main WAL hydration publishes `visibleCaptures`.
+    private var seededList: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(manager.listRows) { row in
+                    GrainConversationCard(
+                        title: row.title,
+                        summaryLine: nil,
+                        meta: row.dateLabel,
+                        statusWord: "",
+                        status: .neutral,
+                        waveform: [],
+                        onTap: nil
+                    )
+                    .padding(.bottom, GrainSpacing.x2)
+                }
+            }
+            .padding(.horizontal, GrainSpacing.x4)
+            .padding(.bottom, GrainSpacing.x6)
+        }
+    }
+
+    /// A plain small-caps eyebrow on the page background — no filled band (T1 AC3).
     private func searchSectionHeader(_ title: String) -> some View {
-        Text(title)
-            .grainTextStyle(.caption)
-            .foregroundStyle(GrainColor.textFaint)
-            .textCase(.uppercase)
+        GrainSectionEyebrow(title, tint: .muted)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, GrainSpacing.x3)
             .padding(.bottom, GrainSpacing.x2)
-            .background(GrainColor.surface)
     }
 
     /// The computer/Lore half of search (track 20260714T1200 AC3): shown only while a
@@ -635,7 +668,7 @@ struct CaptureScreen: View {
                     categoryAutoFiled: categories.acceptsAutoSuggestion(for: wal.captureId),
                     loadWaveform: { [weak manager] in
                         WaveformThumb.profile(sizes: manager?.segmentSizes(for: wal.captureId) ?? [],
-                                              buckets: 24)
+                                              buckets: 24, seed: wal.captureId)
                     }
                 )
             }
@@ -977,6 +1010,9 @@ private struct CaptureCard: View {
             statusWord: p.statusWord,
             status: statusTone(for: p),
             waveform: p.waveform,
+            // Animate only in-progress cards (recording / transcribing); a finished card
+            // is static-but-varied (T1 AC4).
+            waveformAnimated: isInProgress(p),
             onTap: nil
         )
         // Drive the door→Lore status poll while the card is on screen; stop when it
@@ -989,6 +1025,15 @@ private struct CaptureCard: View {
             guard waveform.isEmpty, let loadWaveform else { return }
             let profile = await Task.detached(priority: .utility) { loadWaveform() }.value
             waveform = profile
+        }
+    }
+
+    /// An in-progress conversation still being captured or transcribed — its waveform
+    /// animates (a live shimmer); every settled state is static.
+    private func isInProgress(_ presentation: CaptureCardPresentation) -> Bool {
+        switch presentation.progress {
+        case .recording, .transcribing: return true
+        default: return false
         }
     }
 
