@@ -71,7 +71,7 @@ enum AmbientNotifier {
         #if DEBUG
         // Screen-proof harness: never raise the OS permission prompt (it would cover a
         // screenshot). No effect on a normal launch.
-        if ProcessInfo.processInfo.arguments.contains("-MainPreview") { return }
+        if ProcessInfo.processInfo.arguments.contains(where: { $0.hasSuffix("Preview") }) { return }
         #endif
         let center = UNUserNotificationCenter.current()
         center.delegate = AmbientNotificationPresenter.shared
@@ -203,7 +203,7 @@ enum AmbientNotifier {
     private static func deliver(title: String, body: String, preview: Bool,
                                 seed: String? = nil, answerText: String? = nil) {
         #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("-MainPreview") { return }   // screen-proof: no OS prompts
+        if ProcessInfo.processInfo.arguments.contains(where: { $0.hasSuffix("Preview") }) { return }   // screen-proof: no OS prompts
         #endif
         let center = UNUserNotificationCenter.current()
         let fire: () -> Void = {
