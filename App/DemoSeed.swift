@@ -78,6 +78,56 @@ enum DemoSeed {
                     fetchedAt: UInt64(max(0, now))),
                 captureId: id, baseDir: base)
         }
+
+        // T2 AC1 repro (the headline bug): a card that DOES show a summary, whose cached
+        // content carries NO summary. Before the card fallback, opening this showed the
+        // dead "No summary yet." — now the detail reads the summary the card already has.
+        do {
+            let id = "omi-demo-5"
+            let dir = base.appendingPathComponent(id, isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let start = UInt64(max(0, now - 1_900_000))   // older (>14d) terminal card
+            ConversationMetaStore.save(
+                ConversationMeta(startedAt: start, endedAt: start + 900),
+                captureId: id, baseDir: base)
+            // Card HAS the summary (this is what the home list shows).
+            ConversationCardStore.save(
+                ConversationCardMeta(
+                    title: "Budget review with Priya",
+                    summary: "Agreed to shift 10% of Q3 spend into growth; Priya sends the revised plan Monday.",
+                    stage: "in_lore"),
+                captureId: id, baseDir: base)
+            // Cached content has a transcript but an EMPTY summary → the detail must fall
+            // back to the card's summary (AC1) instead of "No summary yet."
+            TranscriptCacheStore.save(
+                CachedTranscript(
+                    transcript: "We walked through the Q3 budget and decided to move ten percent of spend into growth. Priya will send the revised plan on Monday.",
+                    title: "Budget review with Priya", summary: "",
+                    segments: [], speakers: [], fetchedAt: UInt64(max(0, now))),
+                captureId: id, baseDir: base)
+        }
+
+        // T2 AC2 repro: a transcript but NO summary anywhere (card + cache both empty).
+        // Opening it synthesizes a summary on-device (or, where Foundation Models is
+        // unavailable, honestly points at the transcript) — never a blank dead tab.
+        do {
+            let id = "omi-demo-6"
+            let dir = base.appendingPathComponent(id, isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let start = UInt64(max(0, now - 5_400))
+            ConversationMetaStore.save(
+                ConversationMeta(startedAt: start, endedAt: start + 600),
+                captureId: id, baseDir: base)
+            ConversationCardStore.save(
+                ConversationCardMeta(title: "Coffee with Marcus", summary: nil, stage: "in_lore"),
+                captureId: id, baseDir: base)
+            TranscriptCacheStore.save(
+                CachedTranscript(
+                    transcript: "Marcus is thinking about leaving the agency to start something on his own. We talked through runway, the first two hires, and whether to raise or bootstrap the idea.",
+                    title: "Coffee with Marcus", summary: "",
+                    segments: [], speakers: [], fetchedAt: UInt64(max(0, now))),
+                captureId: id, baseDir: base)
+        }
     }
 }
 #endif

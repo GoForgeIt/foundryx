@@ -282,6 +282,20 @@ struct CaptureScreen: View {
         } message: {
             Text("Categories are yours: rename or delete them any time. Deleting one never deletes its conversations.")
         }
+        // AC3 — bounded, one-time on-device summary backfill for the visible list so
+        // older terminal cards show a summary line instead of title-only. Keyed on the
+        // visible count so it fires once the list has actually loaded (not on the empty
+        // first paint); the marker inside makes it a true one-shot. Never blocks paint.
+        .task(id: manager.visibleCaptures.count) {
+            let ids = manager.visibleCaptures.map(\.captureId)
+            let mgr = manager
+            await SummaryBackfill.run(
+                captureIds: ids,
+                baseDir: CaptureWAL.documentsCaptures(),
+                titler: makeSystemTitler(),
+                transcript: { mgr.searchText(for: $0) },
+                cardSummary: { mgr.cardMeta(for: $0)?.summary })
+        }
         // Power on the Omi only when it's still an enabled source; always drive the meter.
         .onAppear { if omiEnabled { manager.startSource() }; manager.startMeter() }
         .onDisappear { manager.stopMeter() }
