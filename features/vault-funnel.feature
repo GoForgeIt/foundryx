@@ -53,3 +53,15 @@ Feature: A free user activates a Vault and lands in it — the funnel spine
     Given a returning free on-device user with no checkout attempt
     When the app reconciles on foreground
     Then the funnel stays idle
+
+  @funnel
+  Scenario: the Settings entry launches the funnel when the Vault is off
+    Given a free on-device user with no Vault
+    When they turn on their Vault from Settings
+    Then the funnel begins Vault setup
+
+  @funnel
+  Scenario: the Settings entry reflects a live Vault instead of re-launching setup
+    Given a user with a live Vault
+    When they turn on their Vault from Settings
+    Then the Settings entry does not launch the funnel

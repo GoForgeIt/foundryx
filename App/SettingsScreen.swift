@@ -16,6 +16,10 @@ struct SettingsScreen: View {
     @ObservedObject var device: DeviceManager
     @ObservedObject var manager: CaptureManager
     @ObservedObject var sources: CaptureSourceRegistry
+    /// The Vault activation funnel (track T-IOS-VAULT-ENTRY): the "Your Vault" row below is
+    /// the low-collision entry point that launches it. Observed so the row flips to the
+    /// connected state the moment the Vault goes live.
+    @ObservedObject var vaultFunnel: VaultFunnelModel
     @State private var actionChoice = ActionButtonChoice.current
     @State private var waitlistJoined =
         UserDefaults.standard.bool(forKey: "foundryx.waitlist.joined")
@@ -87,6 +91,15 @@ struct SettingsScreen: View {
                 }
             } header: {
                 GrainSectionEyebrow("BRAIN")
+            }
+
+            // The Vault activation entry (track T-IOS-VAULT-ENTRY): the low-collision launch
+            // point for the funnel. Off ⇒ "Turn on your Vault" taps into the funnel intro;
+            // live ⇒ the row reflects the connected Vault.
+            Section {
+                vaultEntryRow
+            } header: {
+                GrainSectionEyebrow("YOUR VAULT")
             }
 
             Section {
@@ -236,6 +249,38 @@ struct SettingsScreen: View {
             }
         }) {
             SignInView(remote: remote) { showingWaitlistSignIn = false }
+        }
+    }
+
+    /// The "Your Vault" row. Copy + actionability come from the pure, tested
+    /// VaultEntry.presentation(entitlement:); tapping (when off) drives the funnel via
+    /// vaultFunnel.activateFromSettings() → RootView's fullScreenCover presents it.
+    @ViewBuilder private var vaultEntryRow: some View {
+        let p = VaultEntry.presentation(entitlement: vaultFunnel.entitlement)
+        if p.actionable {
+            Button { vaultFunnel.activateFromSettings() } label: {
+                HStack(spacing: GrainSpacing.x2) {
+                    Image(systemName: "key.fill").foregroundStyle(GrainColor.forgeBlue)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(p.title).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                        Text(p.subtitle).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12)).foregroundStyle(GrainColor.textFaint)
+                }
+            }
+            .buttonStyle(.plain)
+        } else {
+            HStack(spacing: GrainSpacing.x2) {
+                Image(systemName: "checkmark.seal.fill").foregroundStyle(GrainColor.sage)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(p.title).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                    Text(p.subtitle).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                }
+                Spacer()
+                Text("On").grainTextStyle(.caption).foregroundStyle(GrainColor.sage)
+            }
         }
     }
 

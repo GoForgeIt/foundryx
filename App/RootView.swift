@@ -86,7 +86,7 @@ struct RootView: View {
             return AnyView(MainTabs(
                 target: DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "local"),
                 remote: remote, brains: brains, local: true,
-                showingAccount: .constant(false)))
+                vaultFunnel: vaultFunnel, showingAccount: .constant(false)))
         }
         // DEV-only: `-Screen answer` mounts the answer/decision-brief with demo data
         // (no manager needed) for screenshot-verification.
@@ -137,7 +137,7 @@ struct RootView: View {
             case .computerBrain:
                 if let target = remote.makeDoorTarget() {
                     MainTabs(target: target, remote: remote, brains: brains, local: false,
-                             showingAccount: $showingAccount)
+                             vaultFunnel: vaultFunnel, showingAccount: $showingAccount)
                         // A resolved-host change OR a refreshed bearer (after a token-expiry
                         // re-auth) rebuilds the tabs (+ their clients) so every door request
                         // uses the fresh id_token — never a stale, expired one.
@@ -151,7 +151,7 @@ struct RootView: View {
                 MainTabs(target: DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!,
                                             bearer: "local"),
                          remote: remote, brains: brains, local: true,
-                         showingAccount: $showingAccount)
+                         vaultFunnel: vaultFunnel, showingAccount: $showingAccount)
                     .id("local-brain")
                     .sheet(isPresented: $showingAccount) {
                         SignInView(remote: remote) { showingAccount = false }
@@ -279,6 +279,9 @@ private struct MainTabs: View {
     /// Foundation Models), chat is the local whole-library surface, and nothing
     /// ever dials a door.
     let local: Bool
+    /// The Vault activation funnel, threaded down to Settings' "Your Vault" entry row
+    /// (track T-IOS-VAULT-ENTRY). Owned by RootView; MainTabs only passes it through.
+    let vaultFunnel: VaultFunnelModel
     @Binding var showingAccount: Bool
 
     @StateObject private var device: DeviceManager
@@ -301,11 +304,12 @@ private struct MainTabs: View {
     private let localSTT: WhisperKitSTT?
 
     init(target: DoorTarget, remote: RemoteSession, brains: BrainStore, local: Bool,
-         showingAccount: Binding<Bool>) {
+         vaultFunnel: VaultFunnelModel, showingAccount: Binding<Bool>) {
         self.target = target
         self.remote = remote
         self.brains = brains
         self.local = local
+        self.vaultFunnel = vaultFunnel
         _showingAccount = showingAccount
         let log = DoorLog()
         // Ship the phone's BLE/audio/capture/chat log to the relay diag sink so
@@ -540,7 +544,8 @@ private struct MainTabs: View {
             // the Capture home.
             NavigationStack {
                 SettingsScreen(brains: brains, remote: remote,
-                               device: device, manager: manager, sources: sources)
+                               device: device, manager: manager, sources: sources,
+                               vaultFunnel: vaultFunnel)
                     .navigationTitle(SettingsSheetPresentation.title)
                     .navigationBarTitleDisplayMode(.inline)
             }

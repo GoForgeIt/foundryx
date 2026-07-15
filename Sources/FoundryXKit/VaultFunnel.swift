@@ -63,6 +63,46 @@ public enum VaultRouter {
     }
 }
 
+// MARK: - Settings entry affordance (pure presentation)
+
+/// The Settings "Your Vault" row — the low-collision entry point that launches the funnel
+/// (track T-IOS-VAULT-ENTRY). Off ⇒ invite setup (tapping drives the funnel intro); live ⇒
+/// reflect the connected Vault (nothing to turn on). Pure so the row's copy + actionability
+/// are entitlement-aware and Brine-testable without SwiftUI — the same seam pattern as
+/// VaultRouter.
+public enum VaultEntry {
+    /// What the Settings row shows for a given entitlement.
+    public struct Presentation: Equatable, Sendable {
+        /// The row title ("Turn on your Vault" off · "Your Vault" live).
+        public let title: String
+        /// The supporting line under the title.
+        public let subtitle: String
+        /// True when tapping should launch setup (off); false once the Vault is live.
+        public let actionable: Bool
+
+        public init(title: String, subtitle: String, actionable: Bool) {
+            self.title = title
+            self.subtitle = subtitle
+            self.actionable = actionable
+        }
+    }
+
+    public static func presentation(entitlement: VaultEntitlement) -> Presentation {
+        switch entitlement {
+        case .off:
+            return Presentation(
+                title: "Turn on your Vault",
+                subtitle: "Search everything, chat with your memory, and let Foundry act — on your private, isolated Vault.",
+                actionable: true)
+        case .live:
+            return Presentation(
+                title: "Your Vault",
+                subtitle: "On. Encrypted, isolated, and yours — only your voice and login open it.",
+                actionable: false)
+        }
+    }
+}
+
 // MARK: - Plans (native pricing rows)
 
 /// A Vault plan. Copy locked from the design (rewritten differentiator copy).
@@ -269,6 +309,15 @@ public final class VaultFunnelModel: ObservableObject {
 
     /// Trigger → intro ("Set up your Vault").
     public func beginSetup() { state = .intro }
+
+    /// The Settings entry affordance (track T-IOS-VAULT-ENTRY): launch the activation funnel
+    /// from the low-collision "Your Vault" row. Off ⇒ begin setup (→ intro); live ⇒ a no-op
+    /// (the row reflects the connected Vault — there is nothing to turn on). Entitlement-aware
+    /// so the same row never dead-ends nor re-triggers a paid user.
+    public func activateFromSettings() {
+        guard entitlement == .off else { return }
+        beginSetup()
+    }
 
     /// Intro → native pricing (Pro pre-selected).
     public func seePlans() { state = .plans(selected: .recommendedDefault) }

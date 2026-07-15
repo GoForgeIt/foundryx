@@ -33,6 +33,18 @@ final class VaultFunnelTests: XCTestCase {
         XCTAssertEqual(VaultPlan.recommendedDefault, .pro)
     }
 
+    // MARK: unit — settings entry affordance
+
+    func testVaultEntryPresentationIsEntitlementAware() {
+        let off = VaultEntry.presentation(entitlement: .off)
+        XCTAssertEqual(off.title, "Turn on your Vault")
+        XCTAssertTrue(off.actionable, "an off Vault must offer a tap that launches setup")
+
+        let live = VaultEntry.presentation(entitlement: .live)
+        XCTAssertEqual(live.title, "Your Vault")
+        XCTAssertFalse(live.actionable, "a live Vault has nothing to turn on")
+    }
+
     // MARK: unit — durable checkout-attempt store
 
     func testCheckoutAttemptStoreRoundTripsAndClears() {
@@ -240,6 +252,11 @@ enum VaultSteps {
                 return ctx
             },
 
+            defineStep("they turn on their Vault from Settings") { ctx, _, _ in
+                await MainActor.run { world.model.activateFromSettings() }
+                return ctx
+            },
+
             defineStep("they continue with a plan") { ctx, _, _ in
                 await world.model.continueToCheckout(plan: .pro)
                 return ctx
@@ -352,6 +369,31 @@ enum VaultSteps {
             defineCheck("the funnel stays idle") { _, _, _ in
                 let s = await MainActor.run { world.state }
                 guard s == .idle else { throw StepError("a returning free user was dragged into the funnel: \(s)") }
+            },
+
+            defineCheck("the funnel begins Vault setup") { _, _, _ in
+                let (s, p) = await MainActor.run {
+                    (world.model.state, VaultEntry.presentation(entitlement: world.model.entitlement))
+                }
+                guard s == .intro else {
+                    throw StepError("the Settings entry did not launch the funnel intro: \(s)")
+                }
+                guard p.actionable, p.title == "Turn on your Vault" else {
+                    throw StepError("the off-state entry row copy is wrong: \(p)")
+                }
+            },
+
+            defineCheck("the Settings entry does not launch the funnel") { _, _, _ in
+                let (s, ent, p) = await MainActor.run {
+                    (world.model.state, world.model.entitlement,
+                     VaultEntry.presentation(entitlement: world.model.entitlement))
+                }
+                guard ent == .live else { throw StepError("a live Vault was expected, entitlement is \(ent)") }
+                if case .intro = s { throw StepError("a live Vault re-launched the funnel intro from Settings") }
+                if case .plans = s { throw StepError("a live Vault re-launched the funnel plans from Settings") }
+                guard !p.actionable, p.title == "Your Vault" else {
+                    throw StepError("the live-state entry row should reflect the connected Vault, got: \(p)")
+                }
             },
         ]
     }
