@@ -457,10 +457,10 @@ struct ConversationFacesView: View {
         HStack(alignment: .top, spacing: GrainSpacing.x3) {
             ZStack {
                 RoundedRectangle(cornerRadius: GrainRadius.md, style: .continuous)
-                    .fill(actionTileBackground(row.state))
+                    .fill(actionKindTint(row.kind).opacity(0.12))
                 Image(grain: actionIcon(row))
                     .grainTextStyle(.body)
-                    .foregroundStyle(actionStateForeground(row.state))
+                    .foregroundStyle(actionKindTint(row.kind))
             }
             .frame(width: GrainSpacing.x8, height: GrainSpacing.x8)
 
@@ -528,19 +528,25 @@ struct ConversationFacesView: View {
         loadFaceData()
     }
 
+    /// The Actions-face icon keys on the action's TYPE (`row.kind`), not its state:
+    /// a surfaced nudge reads as a bolt, an answer from memory as a spark, a
+    /// hand-added action as a pencil — so the row's ORIGIN is legible at a glance
+    /// (AC1/AC2). The state still shows in the trailing status word.
     private func actionIcon(_ row: ConversationActionsPresentation.Row) -> GrainIcon {
-        if row.kind == .answer { return .spark }
-        switch row.state {
-        case .completed, .dismissed, .ready: return .check
-        case .open: return .bolt
+        switch row.kind {
+        case .surfaced: return .bolt
+        case .answer: return .spark
+        case .user: return .pencil
         }
     }
 
-    private func actionStateForeground(_ state: ConversationActionsPresentation.Row.State) -> Color {
-        switch state {
-        case .completed, .ready: return GrainColor.sage
-        case .open: return GrainColor.amber
-        case .dismissed: return GrainColor.textFaint
+    /// The per-type tint that colors both the icon glyph and its tile (AC1): a
+    /// surfaced item forge, an answer amber, a user-added action a neutral muted.
+    private func actionKindTint(_ kind: ConversationActionsPresentation.Row.Kind) -> Color {
+        switch kind {
+        case .surfaced: return GrainColor.forgeBlue
+        case .answer: return GrainColor.amber
+        case .user: return GrainColor.textMuted
         }
     }
 
@@ -551,14 +557,6 @@ struct ConversationFacesView: View {
         case .completed, .ready: return .ready
         case .open: return .attention
         case .dismissed: return .neutral
-        }
-    }
-
-    private func actionTileBackground(_ state: ConversationActionsPresentation.Row.State) -> Color {
-        switch state {
-        case .completed, .ready: return GrainColor.sage.opacity(0.12)
-        case .open: return GrainColor.amber.opacity(0.12)
-        case .dismissed: return GrainColor.borderFaint
         }
     }
 

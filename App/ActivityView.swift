@@ -54,7 +54,8 @@ struct ActivityView: View {
         self.onOpenConversation = onOpenConversation
         self.onOpenChat = onOpenChat
         _recap = StateObject(wrappedValue:
-            ActivityRecapModel(poolProvider: { recapPool }, composer: recapComposer))
+            ActivityRecapModel(poolProvider: { recapPool }, composer: recapComposer,
+                               cacheBaseDir: CaptureWAL.documentsCaptures()))
     }
 
     var body: some View {
@@ -184,10 +185,14 @@ struct ActivityView: View {
             linkAction(for: entry)?()
         } label: {
             HStack(alignment: .top, spacing: GrainSpacing.x3) {
-                Circle()
-                    .fill(tint(for: entry.kind))
-                    .frame(width: 8, height: 8)
-                    .padding(.top, 5)
+                ZStack {
+                    RoundedRectangle(cornerRadius: GrainRadius.md, style: .continuous)
+                        .fill(tint(for: entry.kind).opacity(0.12))
+                    Image(grain: glyph(for: entry.kind))
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(tint(for: entry.kind))
+                }
+                .frame(width: GrainSpacing.x6, height: GrainSpacing.x6)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: GrainSpacing.x2) {
                         Text(label(for: entry.kind))
@@ -255,7 +260,20 @@ struct ActivityView: View {
         case .nudgeShown: return GrainColor.amber
         case .nudgeAccepted, .agentRun: return GrainColor.forgeBlue
         case .nudgeDismissed: return GrainColor.textFaint
-        case .answer: return GrainColor.sage
+        // Amber for answer/memory, matching the Actions face (spark/amber) so the same
+        // conceptual type reads the same colour across surfaces (spec AC1).
+        case .answer: return GrainColor.amber
+        }
+    }
+
+    /// The per-kind glyph shown in each ledger row's icon tile (AC1/AC2) — so a
+    /// row reads by TYPE at a glance instead of a bare colored dot: an answer is a
+    /// spark, an agent run or accepted nudge a bolt, a nudge a bell.
+    private func glyph(for kind: ActivityEntry.Kind) -> GrainIcon {
+        switch kind {
+        case .answer: return .spark
+        case .nudgeAccepted, .agentRun: return .bolt
+        case .nudgeShown, .nudgeDismissed: return .bell
         }
     }
 

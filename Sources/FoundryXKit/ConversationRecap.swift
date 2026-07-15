@@ -27,8 +27,8 @@ public extension Notification.Name {
 /// deterministic label from a fixed set (testable, pure heuristic); the TEXT is
 /// composer-generated prose (model or deterministic double); the SOURCE is the
 /// conversation it was drawn from, so every insight is attributed.
-public struct RecapInsight: Equatable, Sendable {
-    public enum Kind: String, CaseIterable, Sendable {
+public struct RecapInsight: Equatable, Codable, Sendable {
+    public enum Kind: String, CaseIterable, Codable, Sendable {
         case connection = "Connection"
         case decision   = "Decision"
         case people     = "People"
@@ -295,6 +295,39 @@ public enum ConversationRecapEngine {
         return (.day(dayStart), .week(weekStart))
     }
 
+    /// A stable id for a span (mirrors `ConversationRecap.id`) — the cache key that
+    /// pins a persisted recap to the exact day/week it was built for, so a stale
+    /// day's recap is never shown as today's.
+    public static func spanId(_ span: RecapSpan) -> String {
+        switch span {
+        case .day(let d): return "day-\(UInt64(max(0, d.timeIntervalSince1970)))"
+        case .week(let d): return "week-\(UInt64(max(0, d.timeIntervalSince1970)))"
+        case .weekToDate(let s, _): return "wtd-\(UInt64(max(0, s.timeIntervalSince1970)))"
+        }
+    }
+
+    /// A stable signature of the conversation set feeding a span — the captureId +
+    /// time + content of every conversation in the span. Two runs over the SAME set
+    /// hash identically (AC4: unchanged set ⇒ no re-run); any add / finalize / edit
+    /// changes it (⇒ refresh). Deterministic across launches (FNV-1a, not the
+    /// per-process-seeded `Hasher`).
+    public static func poolSignature(for span: RecapSpan, from pool: [RecapConversation],
+                                     calendar: Calendar = .current) -> String {
+        let convos = conversations(in: span, from: pool, calendar: calendar)
+        let joined = convos.map {
+            "\($0.captureId)|\(Int($0.at.timeIntervalSince1970))|\($0.title)|\($0.summary)"
+        }.joined(separator: "\u{1f}")
+        return "\(convos.count):\(fnv1a(joined))"
+    }
+
+    /// Deterministic 64-bit FNV-1a over UTF-8, hex-encoded. Stable across launches
+    /// (unlike Swift's randomized `Hasher`), which the recap cache signature needs.
+    static func fnv1a(_ s: String) -> String {
+        var h: UInt64 = 0xcbf29ce484222325
+        for b in s.utf8 { h = (h ^ UInt64(b)) &* 0x100000001b3 }
+        return String(h, radix: 16)
+    }
+
     /// The date interval a span covers.
     static func dateRange(for span: RecapSpan, calendar: Calendar) -> Range<Date> {
         switch span {
@@ -317,7 +350,7 @@ public enum ConversationRecapEngine {
 /// SwiftUI view is a thin renderer of this; the brine tests assert on THIS (App
 /// views aren't in the SPM package). Mirrors the prototype "13 Activity" card:
 /// eyebrow micro-label → serif heading → narrative → typed insights → freshness.
-public struct ActivityRecapPresentation: Equatable, Sendable {
+public struct ActivityRecapPresentation: Equatable, Codable, Sendable {
     /// The forge micro-label eyebrow: "Daily recap" / "Weekly recap".
     public let eyebrow: String
     /// The serif heading: "Today" / "This week".
@@ -358,6 +391,54 @@ public struct ActivityRecapPresentation: Equatable, Sendable {
     }
 }
 
+// MARK: - Recap cache (T3 AC3/AC4: instant render + inference only on change)
+
+/// The persisted daily/weekly recap presentations. Re-entering Activity renders
+/// the last-built recap synchronously from this cache (AC3 — no visible
+/// repopulate), and on-device inference re-runs only when the underlying
+/// conversation set changed (AC4). Each entry pins the span it was built for +
+/// the pool signature that produced it.
+public struct RecapCache: Codable, Equatable, Sendable {
+    public struct Entry: Codable, Equatable, Sendable {
+        public var spanId: String
+        public var signature: String
+        public var presentation: ActivityRecapPresentation
+        public init(spanId: String, signature: String, presentation: ActivityRecapPresentation) {
+            self.spanId = spanId
+            self.signature = signature
+            self.presentation = presentation
+        }
+    }
+    public var daily: Entry?
+    public var weekly: Entry?
+    public init(daily: Entry? = nil, weekly: Entry? = nil) {
+        self.daily = daily
+        self.weekly = weekly
+    }
+}
+
+/// Reads/writes `recap-cache.json` in the captures/documents dir. Best-effort:
+/// a missing/corrupt file just yields an empty cache (the recap rebuilds).
+public enum RecapCacheStore {
+    public static func fileURL(baseDir: URL) -> URL {
+        baseDir.appendingPathComponent("recap-cache.json")
+    }
+
+    public static func load(baseDir: URL) -> RecapCache {
+        guard let data = try? Data(contentsOf: fileURL(baseDir: baseDir)),
+              let cache = try? JSONDecoder().decode(RecapCache.self, from: data) else {
+            return RecapCache()
+        }
+        return cache
+    }
+
+    public static func save(_ cache: RecapCache, baseDir: URL) {
+        try? FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
+        guard let data = try? JSONEncoder().encode(cache) else { return }
+        try? data.write(to: fileURL(baseDir: baseDir), options: .atomic)
+    }
+}
+
 // MARK: - Live recap model (B3: rebuilds the daily recap on the finished event)
 
 /// The Activity view's recap driver. It owns the daily + weekly presentations and
@@ -380,6 +461,16 @@ public final class ActivityRecapModel: ObservableObject {
     private let composer: RecapComposer?
     private let calendar: Calendar
     private var weekUpdated = false
+    /// When set, daily/weekly recaps persist to `recap-cache.json` here and are
+    /// loaded synchronously on init (AC3), and rebuilds skip inference when the
+    /// pool signature is unchanged (AC4). `nil` ⇒ pure in-memory (tests default).
+    private let cacheBaseDir: URL?
+    /// The span + pool signature the currently-shown daily/weekly recap was built
+    /// for — the AC4 gate: an unchanged signature skips the (expensive) rebuild.
+    private var dailySpanId: String?
+    private var dailySignature: String?
+    private var weeklySpanId: String?
+    private var weeklySignature: String?
     // Set once on init (main), read once in the nonisolated deinit — unsafe-marked so
     // Swift 6 permits the deinit read of this non-Sendable token.
     private nonisolated(unsafe) var observer: NSObjectProtocol?
@@ -387,13 +478,35 @@ public final class ActivityRecapModel: ObservableObject {
 
     /// - Parameter observesFinalized: subscribe to the finished event (production).
     ///   Tests can drive `rebuildDaily()` directly, or post the notification.
+    /// - Parameter cacheBaseDir: where `recap-cache.json` lives (the app's captures
+    ///   dir). `nil` disables persistence entirely (the pre-cache behavior).
     public init(poolProvider: @escaping () -> [RecapConversation],
                 composer: RecapComposer? = nil,
                 calendar: Calendar = .current,
+                cacheBaseDir: URL? = nil,
                 observesFinalized: Bool = true) {
         self.poolProvider = poolProvider
         self.composer = composer
         self.calendar = calendar
+        self.cacheBaseDir = cacheBaseDir
+        // AC3: render the last-built recap instantly from disk. Only a cache entry
+        // pinned to TODAY's day / THIS week is adopted (a stale day never shows).
+        if let cacheBaseDir {
+            let cache = RecapCacheStore.load(baseDir: cacheBaseDir)
+            let spans = ConversationRecapEngine.currentSpans(calendar: calendar)
+            let dayId = ConversationRecapEngine.spanId(spans.day)
+            let weekId = ConversationRecapEngine.spanId(spans.week)
+            if let d = cache.daily, d.spanId == dayId {
+                daily = d.presentation
+                dailySpanId = d.spanId
+                dailySignature = d.signature
+            }
+            if let w = cache.weekly, w.spanId == weekId {
+                weekly = w.presentation
+                weeklySpanId = w.spanId
+                weeklySignature = w.signature
+            }
+        }
         if observesFinalized {
             observer = NotificationCenter.default.addObserver(
                 forName: .foundryxConversationFinalized, object: nil, queue: .main) { [weak self] _ in
@@ -414,28 +527,65 @@ public final class ActivityRecapModel: ObservableObject {
     }
 
     /// Rebuild TODAY's recap from the current pool — the live, per-conversation path.
+    /// AC4: when caching is on and the pool signature is unchanged from what the
+    /// shown recap was built for, this returns without re-running inference.
     public func rebuildDaily() async {
         let pool = poolProvider()
         let spans = ConversationRecapEngine.currentSpans(calendar: calendar)
+        let spanId = ConversationRecapEngine.spanId(spans.day)
+        let signature = ConversationRecapEngine.poolSignature(for: spans.day, from: pool,
+                                                              calendar: calendar)
+        if cacheBaseDir != nil, daily != nil,
+           dailySpanId == spanId, dailySignature == signature {
+            return   // unchanged set already rendered — no re-run
+        }
         if let recap = await ConversationRecapEngine.build(span: spans.day, from: pool,
                                                            composer: composer, calendar: calendar) {
             daily = .make(from: recap)
         } else {
             daily = nil
         }
+        dailySpanId = spanId
+        dailySignature = signature
+        persist()
     }
 
     /// Rebuild the WEEK's recap (closed-week view: "Final weekly recap closes Sunday").
+    /// Same AC4 signature gate as the daily path.
     public func rebuildWeekly() async {
         weekUpdated = false
         let pool = poolProvider()
         let spans = ConversationRecapEngine.currentSpans(calendar: calendar)
+        let spanId = ConversationRecapEngine.spanId(spans.week)
+        let signature = ConversationRecapEngine.poolSignature(for: spans.week, from: pool,
+                                                              calendar: calendar)
+        if cacheBaseDir != nil, weekly != nil,
+           weeklySpanId == spanId, weeklySignature == signature {
+            return
+        }
         if let recap = await ConversationRecapEngine.build(span: spans.week, from: pool,
                                                           composer: composer, calendar: calendar) {
             weekly = .make(from: recap, weekUpdated: false)
         } else {
             weekly = nil
         }
+        weeklySpanId = spanId
+        weeklySignature = signature
+        persist()
+    }
+
+    /// Write the current daily/weekly presentations (with their span + signature)
+    /// to `recap-cache.json`. No-op when caching is disabled.
+    private func persist() {
+        guard let cacheBaseDir else { return }
+        var cache = RecapCache()
+        if let daily, let id = dailySpanId, let sig = dailySignature {
+            cache.daily = .init(spanId: id, signature: sig, presentation: daily)
+        }
+        if let weekly, let id = weeklySpanId, let sig = weeklySignature {
+            cache.weekly = .init(spanId: id, signature: sig, presentation: weekly)
+        }
+        RecapCacheStore.save(cache, baseDir: cacheBaseDir)
     }
 
     /// Ad-hoc "Update week to date": rebuild the weekly card over week-start→now and
@@ -449,6 +599,10 @@ public final class ActivityRecapModel: ObservableObject {
                                                           composer: composer, calendar: calendar) {
             weekUpdated = true
             weekly = .make(from: recap, weekUpdated: true)
+            weeklySpanId = ConversationRecapEngine.spanId(span)
+            weeklySignature = ConversationRecapEngine.poolSignature(for: span, from: pool,
+                                                                    calendar: calendar)
+            persist()
         }
     }
 
