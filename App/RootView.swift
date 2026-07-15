@@ -25,6 +25,14 @@ struct RootView: View {
 
     @StateObject private var brains = BrainStore()
 
+    /// The Vault activation funnel (track T-IOS-FUNNEL): paid-intent trigger → browser
+    /// hand-off → server reconciliation → live Vault. Presented over the app whenever its
+    /// state leaves `.idle`; reconciled on every foreground so a dismissed browser still
+    /// completes. The entitlement router (`vaultFunnel.intent`) is what Vault-only actions
+    /// call to route to the trigger (Vault off) or straight through (Vault live).
+    @StateObject private var vaultFunnel = VaultFunnelModel.live()
+    @Environment(\.scenePhase) private var scenePhase
+
     /// T5: an established, signed-in, non-opted-out user sees the persona welcome AS
     /// the post-sign-in connect gate (with live status) until they enter the app.
     /// False for a signed-out user, a fresh install (not yet onboarded), an opted-out
@@ -78,7 +86,7 @@ struct RootView: View {
             return AnyView(MainTabs(
                 target: DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "local"),
                 remote: remote, brains: brains, local: true,
-                showingAccount: .constant(false)))
+                vaultFunnel: vaultFunnel, showingAccount: .constant(false)))
         }
         // DEV-only: `-Screen answer` mounts the answer/decision-brief with demo data
         // (no manager needed) for screenshot-verification.
@@ -129,7 +137,7 @@ struct RootView: View {
             case .computerBrain:
                 if let target = remote.makeDoorTarget() {
                     MainTabs(target: target, remote: remote, brains: brains, local: false,
-                             showingAccount: $showingAccount)
+                             vaultFunnel: vaultFunnel, showingAccount: $showingAccount)
                         // A resolved-host change OR a refreshed bearer (after a token-expiry
                         // re-auth) rebuilds the tabs (+ their clients) so every door request
                         // uses the fresh id_token — never a stale, expired one.
@@ -143,11 +151,34 @@ struct RootView: View {
                 MainTabs(target: DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!,
                                             bearer: "local"),
                          remote: remote, brains: brains, local: true,
-                         showingAccount: $showingAccount)
+                         vaultFunnel: vaultFunnel, showingAccount: $showingAccount)
                     .id("local-brain")
                     .sheet(isPresented: $showingAccount) {
                         SignInView(remote: remote) { showingAccount = false }
                     }
+            }
+        }
+        // The Vault funnel rides over every destination: a paid-intent trigger, the browser
+        // hand-off, and the durable return states. Dismisses to `.idle` (back to the app).
+        .fullScreenCover(isPresented: Binding(
+            get: { vaultFunnel.state != .idle },
+            set: { if !$0 { vaultFunnel.dismiss() } })) {
+            VaultFunnelView(model: vaultFunnel)
+        }
+        // Server reconciliation is the mechanism (design law): reconcile entitlement on every
+        // foreground so a checkout finished/abandoned in the browser still resolves. Keep the
+        // id_token box fresh for the reconcile/checkout Bearer.
+        .onChange(of: scenePhase) { phase in
+            if phase == .active {
+                VaultAuthTokenBox.shared.token = remote.idToken
+                Task { await vaultFunnel.reconcileOnForeground() }
+            }
+        }
+        .onChange(of: remote.idToken) { VaultAuthTokenBox.shared.token = $0 }
+        // The return deep link is convenience only (it triggers an immediate reconcile).
+        .onOpenURL { url in
+            if url.scheme == "foundryx", url.host == "vault" {
+                Task { await vaultFunnel.handleReturn(url: url) }
             }
         }
         .task { await remote.restore() }
@@ -248,6 +279,9 @@ private struct MainTabs: View {
     /// Foundation Models), chat is the local whole-library surface, and nothing
     /// ever dials a door.
     let local: Bool
+    /// The Vault activation funnel, threaded down to Settings' "Your Vault" entry row
+    /// (track T-IOS-VAULT-ENTRY). Owned by RootView; MainTabs only passes it through.
+    let vaultFunnel: VaultFunnelModel
     @Binding var showingAccount: Bool
 
     @StateObject private var device: DeviceManager
@@ -270,11 +304,12 @@ private struct MainTabs: View {
     private let localSTT: WhisperKitSTT?
 
     init(target: DoorTarget, remote: RemoteSession, brains: BrainStore, local: Bool,
-         showingAccount: Binding<Bool>) {
+         vaultFunnel: VaultFunnelModel, showingAccount: Binding<Bool>) {
         self.target = target
         self.remote = remote
         self.brains = brains
         self.local = local
+        self.vaultFunnel = vaultFunnel
         _showingAccount = showingAccount
         let log = DoorLog()
         // Ship the phone's BLE/audio/capture/chat log to the relay diag sink so
@@ -509,7 +544,8 @@ private struct MainTabs: View {
             // the Capture home.
             NavigationStack {
                 SettingsScreen(brains: brains, remote: remote,
-                               device: device, manager: manager, sources: sources)
+                               device: device, manager: manager, sources: sources,
+                               vaultFunnel: vaultFunnel)
                     .navigationTitle(SettingsSheetPresentation.title)
                     .navigationBarTitleDisplayMode(.inline)
             }
