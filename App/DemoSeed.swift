@@ -33,12 +33,49 @@ enum DemoSeed {
             ConversationCardStore.save(
                 ConversationCardMeta(title: title, summary: summary, stage: stage),
                 captureId: id, baseDir: base)
+            let segments: [TranscriptSegment]
+            let speakers: [CaptureSpeaker]
+            if id == "omi-demo-2" {
+                segments = [
+                    TranscriptSegment(
+                        seq: 0, startMs: 0, endMs: 8_200,
+                        text: "The inspection is Friday, and after that we can lock the house timeline.",
+                        speaker: "speaker_0"),
+                    TranscriptSegment(
+                        seq: 1, startMs: 8_700, endMs: 17_100,
+                        text: "I can call the lender this afternoon and make sure the paperwork is ready.",
+                        speaker: "speaker_1"),
+                    TranscriptSegment(
+                        seq: 2, startMs: 17_900, endMs: 27_800,
+                        text: "Perfect. If that clears, let's plan on closing before the end of the month.",
+                        speaker: "speaker_0"),
+                    TranscriptSegment(
+                        seq: 3, startMs: 30_200, endMs: 33_600,
+                        text: "Excuse me, coming through on your left.",
+                        speaker: "speaker_2"),
+                ]
+                speakers = [
+                    CaptureSpeaker(
+                        slot: "speaker_0", status: .confirmed, name: "Dana",
+                        confirmedSpeakerId: "demo-dana"),
+                    CaptureSpeaker(
+                        slot: "speaker_1", status: .inferred, name: "Nick",
+                        inferScore: 0.88, inferredSpeakerId: "demo-nick"),
+                    CaptureSpeaker(slot: "speaker_2", status: .anonymous),
+                ]
+            } else {
+                segments = []
+                speakers = []
+            }
             // A cached transcript so the detail's Summary + Transcript faces populate
             // (the faces read fetched content OR this local cache).
             TranscriptCacheStore.save(
                 CachedTranscript(
-                    transcript: "\(title). \(summary) We agreed on the next steps and who owns what by when.",
-                    title: title, summary: summary, fetchedAt: UInt64(max(0, now))),
+                    transcript: segments.isEmpty
+                        ? "\(title). \(summary) We agreed on the next steps and who owns what by when."
+                        : segments.map(\.text).joined(separator: " "),
+                    title: title, summary: summary, segments: segments, speakers: speakers,
+                    fetchedAt: UInt64(max(0, now))),
                 captureId: id, baseDir: base)
         }
     }

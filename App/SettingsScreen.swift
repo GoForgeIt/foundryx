@@ -57,7 +57,7 @@ struct SettingsScreen: View {
                     }
                 }
             }
-            Section("Brain") {
+            Section {
                 brainRow(.justMyPhone,
                          subtitle: "Free. Recordings, transcripts, and summaries never leave this phone.")
                 brainRow(.myComputer,
@@ -85,6 +85,8 @@ struct SettingsScreen: View {
                         }
                     }
                 }
+            } header: {
+                GrainSectionEyebrow("BRAIN")
             }
 
             Section {
@@ -98,7 +100,7 @@ struct SettingsScreen: View {
                 Text("Light by day, Night Shift when your device switches to dark. One design, two renditions.")
             }
 
-            Section("Action Button") {
+            Section {
                 Picker("When pressed", selection: $actionChoice) {
                     ForEach(ActionButtonChoice.allCases, id: \.self) { c in
                         Text(c.label).tag(c)
@@ -107,9 +109,11 @@ struct SettingsScreen: View {
                 .onChange(of: actionChoice) { c in ActionButtonChoice.current = c }
                 Text("Bind “FoundryX Action” to the Action Button, Control Center, or back-tap in iOS Settings; Siri: “Start FoundryX recording”.")
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            } header: {
+                GrainSectionEyebrow("ACTION BUTTON")
             }
 
-            Section("Ambient intelligence") {
+            Section {
                 Toggle("Act on conversations", isOn: $ambientEnabled)
                     .onChange(of: ambientEnabled) { on in
                         UserDefaults.standard.set(on, forKey: AmbientPrefs.enabledKey)
@@ -173,6 +177,8 @@ struct SettingsScreen: View {
                             .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                     }
                 }
+            } header: {
+                GrainSectionEyebrow("AMBIENT INTELLIGENCE")
             }
 
             Section {

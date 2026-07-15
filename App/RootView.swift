@@ -479,6 +479,11 @@ private struct MainTabs: View {
             }
             Button("Open chat") { router.selected = .chat }
         }
+        .onOpenURL { url in
+            if url.scheme == "foundryx", url.host == "capture" {
+                router.selected = .capture
+            }
+        }
         // Keep the registry's Omi liveness in step with the BLE link from a SINGLE,
         // always-mounted place (not just the Device tab's onChange, which doesn't fire
         // unless that tab is on screen). This is what makes the active-source policy
@@ -490,6 +495,13 @@ private struct MainTabs: View {
             #if DEBUG
             // Screen-proof: open the Settings sheet on launch so it can be screenshot.
             if ProcessInfo.processInfo.arguments.contains("-OpenSettings") { showingSettings = true }
+            // Pill-proof: `-CapturePhase <phase>` seeds a throwaway active session (so the
+            // recording pill renders) and lands on a non-capture tab (where it shows).
+            if ProcessInfo.processInfo.arguments.contains("-CapturePhase") {
+                manager.seedPreviewSession(
+                    target: DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "local"))
+                router.selected = .activity
+            }
             #endif
             // Start the model fetch the moment the phone tier appears — so the
             // download runs (visibly) during first-run exploration, not silently on
@@ -559,14 +571,30 @@ private struct RecordingPill: View {
 
     var body: some View {
         if let wal = manager.active {
-            HStack(spacing: GrainSpacing.x2) {
-                RecordingRingView(meter: manager.meter, paused: manager.isPaused)
-                    .frame(width: 22, height: 22)
-                ElapsedLabel(since: wal.status.startedAt)
-                Button("End") { _ = manager.endCurrentConversation() }
-                    .grainTextStyle(.caption)
-                    .foregroundStyle(GrainColor.dangerRed)
-                    .buttonStyle(.plain)
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                let phase = displayedPhase()
+                let presentation = RecordingPillPresentation.make(from: phase)
+
+                HStack(spacing: GrainSpacing.x2) {
+                    RecordingRingView(meter: manager.meter, paused: phase == .paused)
+                        .frame(width: 22, height: 22)
+                    HStack(spacing: GrainSpacing.x1) {
+                        Circle()
+                            .fill(presentation.tone.recordingPillColor)
+                            .frame(width: 6, height: 6)
+                            .accessibilityHidden(true)
+                        Text(presentation.word)
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(presentation.tone.recordingPillColor)
+                    }
+                    ElapsedLabel(since: wal.status.startedAt)
+                    Button("End") { _ = manager.endCurrentConversation() }
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.dangerRed)
+                        .buttonStyle(.plain)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("\(presentation.word) capture")
             }
             .padding(.horizontal, GrainSpacing.x3)
             .padding(.vertical, GrainSpacing.x1)
@@ -575,8 +603,42 @@ private struct RecordingPill: View {
             .onTapGesture { onOpen() }
             .padding(.top, GrainSpacing.x1)
             .transition(.move(edge: .top).combined(with: .opacity))
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Recording in progress")
+        }
+    }
+
+    private func displayedPhase() -> CaptureActivityPhase {
+        #if DEBUG
+        let arguments = ProcessInfo.processInfo.arguments
+        if let index = arguments.firstIndex(of: "-CapturePhase"),
+           arguments.indices.contains(index + 1) {
+            switch arguments[index + 1].lowercased() {
+            case "listening": return .idle
+            case "recording": return .recordingActive
+            case "paused": return .paused
+            default: break
+            }
+        }
+        #endif
+
+        // CaptureManager records voice instants using Apple's reference-date clock;
+        // normalize that signal before comparing it with the requested Unix `now`.
+        let lastVoicedAt = manager.lastVoicedInstant().map {
+            Date(timeIntervalSinceReferenceDate: $0).timeIntervalSince1970
+        }
+        return CaptureLiveStatus.phase(
+            hasActiveSession: manager.active != nil,
+            isPaused: manager.isPaused,
+            lastVoicedAt: lastVoicedAt,
+            now: Date().timeIntervalSince1970)
+    }
+}
+
+private extension CaptureIndicatorTint {
+    var recordingPillColor: Color {
+        switch self {
+        case .recording: return GrainColor.dangerRed
+        case .paused: return GrainColor.forgeBlue
+        case .neutral: return GrainColor.textMuted
         }
     }
 }

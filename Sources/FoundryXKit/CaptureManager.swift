@@ -371,6 +371,17 @@ public final class CaptureManager: ObservableObject {
         fileprivate init(barCount: Int) { levels = Array(repeating: 0, count: barCount) }
     }
     @Published public private(set) var active: CaptureWAL?
+
+    #if DEBUG
+    /// DEV-only: seed a throwaway active session so the recording pill renders in a
+    /// screenshot (`-CapturePhase`). Visual proof only — no audio, no upload; the
+    /// elapsed clock starts now. No effect in a normal (non-preview) launch.
+    public func seedPreviewSession(target: DoorTarget) {
+        if active == nil {
+            active = CaptureWAL(captureId: "preview-active", target: target)
+        }
+    }
+    #endif
     @Published public private(set) var sourceState: AudioSourceState = .idle
     /// Ambient capture is paused (device stays connected; frames are dropped).
     @Published public private(set) var isPaused: Bool = false

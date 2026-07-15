@@ -29,6 +29,7 @@ struct CaptureLiveActivity: Widget {
                 .padding()
                 .activityBackgroundTint(Color.black.opacity(0.6))
                 .activitySystemActionForegroundColor(.white)
+                .widgetURL(URL(string: "foundryx://capture"))
         } dynamicIsland: { context in
             let state = context.state
             return DynamicIsland {
@@ -86,6 +87,7 @@ struct CaptureLiveActivity: Widget {
             } minimal: {
                 CaptureIndicator(phase: state.phase, size: 16)
             }
+            .widgetURL(URL(string: "foundryx://capture"))
             .keylineTint(state.phase.indicatorTint.color)
         }
     }

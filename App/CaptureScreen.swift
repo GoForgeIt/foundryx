@@ -216,9 +216,15 @@ struct CaptureScreen: View {
             if a.contains("-Screen"), a.contains("recording") { manager.startMicRecording() }
         }
         .fullScreenCover(isPresented: $deepDetail) {
+            // `-Capture <id>` picks which demo card's detail to open (default omi-demo-1);
+            // omi-demo-2 carries the seeded diarized (speaker-labeled) transcript.
+            let a = ProcessInfo.processInfo.arguments
+            let cid: String = a.firstIndex(of: "-Capture").flatMap { i in
+                a.indices.contains(i + 1) ? a[i + 1] : nil
+            } ?? "omi-demo-1"
             NavigationStack {
                 ConversationFacesView(
-                    target: target, manager: manager, captureId: "omi-demo-1",
+                    target: target, manager: manager, captureId: cid,
                     timeRange: "Tue, Jul 14 · 4:16 PM–4:28 PM · 12 min",
                     place: "Office", conversationDate: Date(), local: true)
             }
