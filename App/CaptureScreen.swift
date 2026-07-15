@@ -86,16 +86,38 @@ struct MeterCaption: View {
     }
 }
 
-/// The ticking elapsed readout (1 Hz), monospaced so it never wobbles.
+/// The ticking elapsed readout (1 Hz), monospaced so it never wobbles. Excludes paused
+/// spans so the counter STOPS while paused (the audio does) and resumes without a jump —
+/// it shows time actually recorded, not wall-clock since start.
 struct ElapsedLabel: View {
     let since: Date
+    /// Whether capture is currently paused — the counter freezes while true.
+    var paused: Bool = false
+
+    /// Total time already spent paused (accumulated across completed pause spans).
+    @State private var pausedAccumulated: TimeInterval = 0
+    /// When the CURRENT pause began, or nil when running.
+    @State private var pauseStartedAt: Date?
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { timeline in
-            let s = max(0, Int(timeline.date.timeIntervalSince(since)))
+            let now = timeline.date
+            // While paused, this span grows exactly as wall-clock does, holding the
+            // displayed elapsed steady; on resume it folds into pausedAccumulated.
+            let livePause = pauseStartedAt.map { now.timeIntervalSince($0) } ?? 0
+            let s = max(0, Int(now.timeIntervalSince(since) - pausedAccumulated - livePause))
             Text(String(format: "%d:%02d", s / 60, s % 60))
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                 .monospacedDigit()
+        }
+        .onAppear { if paused, pauseStartedAt == nil { pauseStartedAt = Date() } }
+        .onChange(of: paused) { nowPaused in
+            if nowPaused {
+                if pauseStartedAt == nil { pauseStartedAt = Date() }
+            } else if let start = pauseStartedAt {
+                pausedAccumulated += Date().timeIntervalSince(start)
+                pauseStartedAt = nil
+            }
         }
     }
 }
@@ -327,26 +349,49 @@ struct CaptureScreen: View {
     /// Mic circle + headline + the on-phone reassurance line. Tapping starts the
     /// existing phone-mic recording path.
     private var recordCTA: some View {
-        GrainRecordCTA(
-            title: CaptureHomeCopy.recordTitle,
-            subtitle: CaptureHomeCopy.recordSubtitle(local: local),
-            onRecord: { manager.startMicRecording() }
-        )
-        .accessibilityHidden(true)
-        .overlay {
-            // Grain's orb owns its native action; retain the app's existing
-            // full-row hit target with a single sibling control above it.
-            Button { manager.startMicRecording() } label: {
-                Color.clear
-                    .contentShape(Rectangle())
+        VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+            GrainRecordCTA(
+                title: CaptureHomeCopy.recordTitle,
+                subtitle: CaptureHomeCopy.recordSubtitle(local: local),
+                onRecord: { manager.startMicRecording() }
+            )
+            .accessibilityHidden(true)
+            .overlay {
+                // Grain's orb owns its native action; retain the app's existing
+                // full-row hit target with a single sibling control above it.
+                Button { manager.startMicRecording() } label: {
+                    Color.clear
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(CaptureHomeCopy.recordTitle)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(CaptureHomeCopy.recordTitle)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .disabled(!manager.phoneMicAvailable)
+
+            // A blocked/greyed record button is otherwise silent — say WHY. A missing mic
+            // source disables the button (so a tap can't set the reason), so surface that
+            // case directly; otherwise show whatever the last tap recorded.
+            if let reason = recordBlockCaption {
+                Text(reason)
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.amber)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("record-block-reason")
+            }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .disabled(!manager.phoneMicAvailable)
         .padding(.horizontal, GrainSpacing.x4)
         .padding(.top, GrainSpacing.x2)
+    }
+
+    /// The record-block explanation to show under the CTA, or nil when recording is
+    /// unblocked. A missing mic source greys the button (no tap → no manager reason),
+    /// so explain that directly; else defer to the manager's last-tap reason.
+    private var recordBlockCaption: String? {
+        if !manager.phoneMicAvailable {
+            return "Microphone access is needed — enable it in Settings"
+        }
+        return manager.lastRecordBlockReason
     }
 
     // MARK: "Recent on this phone" headline + Search all (prototype :2203)
@@ -731,7 +776,7 @@ struct CaptureScreen: View {
                 }
                 Spacer()
                 if let wal = manager.active {
-                    ElapsedLabel(since: wal.status.startedAt)
+                    ElapsedLabel(since: wal.status.startedAt, paused: manager.isPaused)
                 }
                 RecordingRingView(meter: manager.meter, paused: manager.isPaused)
                     .frame(width: 34, height: 34)

@@ -621,7 +621,7 @@ private struct RecordingPill: View {
                             .grainTextStyle(.caption)
                             .foregroundStyle(presentation.tone.recordingPillColor)
                     }
-                    ElapsedLabel(since: wal.status.startedAt)
+                    ElapsedLabel(since: wal.status.startedAt, paused: phase == .paused)
                     Button("End") { _ = manager.endCurrentConversation() }
                         .grainTextStyle(.caption)
                         .foregroundStyle(GrainColor.dangerRed)

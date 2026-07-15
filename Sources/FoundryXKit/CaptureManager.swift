@@ -436,6 +436,10 @@ public final class CaptureManager: ObservableObject {
     public var phoneMicAvailable: Bool { micSource != nil }
     /// True while the phone mic is actively recording (drives the Record/Stop button).
     @Published public private(set) var isRecordingMic: Bool = false
+    /// Why the last record-tap did nothing, or nil when the last start succeeded / none
+    /// attempted. Lets the Record CTA explain a SILENT block (no mic source / permission,
+    /// or an in-flight conversation) instead of tapping into a void.
+    @Published public private(set) var lastRecordBlockReason: String?
     /// The user's chosen capture device (Omi vs phone mic). Persisted. Selecting the
     /// phone mic stops the Omi from auto-grabbing an ambient session.
     @Published public private(set) var captureSource: CaptureSourceKind = CaptureSettings.captureSource
@@ -961,10 +965,22 @@ public final class CaptureManager: ObservableObject {
     /// when the Omi is disconnected). Drives the normal lifecycle via the mic's
     /// `.streaming` state → beginSession.
     public func startMicRecording() {
+        // Make a silent block OBSERVABLE: record WHY before the guard returns so the UI can
+        // explain it (the guard logic itself is unchanged — it stays correct).
+        if micSource == nil {
+            lastRecordBlockReason = "Microphone access is needed — enable it in Settings"
+        } else if isRecordingMic {
+            lastRecordBlockReason = nil   // already recording — not an error state
+        } else if !(active == nil || suspendedSession != nil) {
+            lastRecordBlockReason = "Finish the current conversation first"
+        } else {
+            lastRecordBlockReason = nil
+        }
         // Allowed when idle OR when the only "active" session is an Omi conversation
         // HELD for reconnect-grace (the user's explicit record outranks the hold —
         // onSourceState closes it and begins a fresh mic session).
         guard let micSource, !isRecordingMic, active == nil || suspendedSession != nil else { return }
+        lastRecordBlockReason = nil   // starting cleanly — clear any prior block message
         isRecordingMic = true
         router.resetSegmenter()
         micSource.start()
@@ -1017,6 +1033,13 @@ public final class CaptureManager: ObservableObject {
                 // reset the mic flag so the Record button returns to idle (no grace).
                 isRecordingMic = false
                 endSession()
+                // A permission-denied failure is otherwise silent — surface it so the
+                // Record CTA can point the user at Settings.
+                if case .failed(let reason) = state {
+                    lastRecordBlockReason = reason.range(of: "permission", options: .caseInsensitive) != nil
+                        ? "Microphone access is needed — enable it in Settings"
+                        : reason
+                }
             } else if let wal = active, suspendedSession == nil {
                 // Omi BLE dropped mid-conversation → HOLD it open for a brief reconnect
                 // grace so a flaky link doesn't split the conversation into fragments. The
