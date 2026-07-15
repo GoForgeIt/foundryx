@@ -18,8 +18,50 @@ struct RootView: View {
     /// own flag — established installs (onboarding migrated to "completed") still
     /// see it once after the update; "Set up later" dismisses it forever.
     @State private var showingWelcome = false
+    /// T5 (track 20260715T1502): once the connect-welcome gate's action fires, the
+    /// established user has entered — flips the gate off so the app opens and the
+    /// welcome never repeats.
+    @State private var enteredApp = false
 
     @StateObject private var brains = BrainStore()
+
+    /// T5: an established, signed-in, non-opted-out user sees the persona welcome AS
+    /// the post-sign-in connect gate (with live status) until they enter the app.
+    /// False for a signed-out user, a fresh install (not yet onboarded), an opted-out
+    /// user, and after entry — so every other entry path is untouched.
+    private var connectWelcomeActive: Bool {
+        remote.email != nil
+            && !WelcomePrefs.letStraightIn()
+            && OnboardingPrefs.completed
+            && !enteredApp
+    }
+
+    /// T5: the live connection line for the connect-welcome pill, from remote.status.
+    private var connectionNote: WelcomeConnectStatus? {
+        switch remote.status {
+        case .resolving:
+            return WelcomeConnectStatus(text: "Connecting to your computer…", settled: false)
+        case .connected:
+            let suffix = remote.email.map { " · \($0)" } ?? ""
+            return WelcomeConnectStatus(text: "Connected" + suffix, settled: true)
+        case .noHost:
+            return WelcomeConnectStatus(text: "On your phone", settled: true)
+        case .error:
+            return WelcomeConnectStatus(text: "Couldn't reach your computer", settled: false)
+        default:
+            return nil
+        }
+    }
+
+    /// T5: the connect-welcome's action — enter the app exactly once. Marking it seen
+    /// FIRST guarantees presentFirstRunSurfacesIfNeeded() (and the dest onChange) can
+    /// never re-present the legacy post-entry welcome (AC4).
+    private func enterApp() {
+        WelcomePrefs.markSeen()
+        enteredApp = true
+        splashElapsed = true
+        presentFirstRunSurfacesIfNeeded()
+    }
 
     var body: some View {
         // DEV-only visual harness: `-WelcomePreview` launch arg shows the persona
@@ -70,9 +112,20 @@ struct RootView: View {
         Group {
             switch dest {
             case .signInGate:
-                // The forced identity login (track 20260705T1100 decision #5) +
-                // the branded launch splash.
-                SignInView(remote: remote, onDone: { }, dismissable: false)
+                // T5 (track 20260715T1502): an established, non-opted-out user meets
+                // the cool persona welcome — carrying the live connection status — as
+                // the connect gate, instead of the bare SignInView. "Take me in" enters;
+                // "Skip the welcome" persists the opt-out and enters.
+                if connectWelcomeActive {
+                    PersonaWelcomeStep(
+                        onStart: enterApp,
+                        onSkip: { WelcomePrefs.setLetStraightIn(true); enterApp() },
+                        connect: connectionNote)
+                } else {
+                    // The forced identity login (track 20260705T1100 decision #5) +
+                    // the branded launch splash.
+                    SignInView(remote: remote, onDone: { }, dismissable: false)
+                }
             case .computerBrain:
                 if let target = remote.makeDoorTarget() {
                     MainTabs(target: target, remote: remote, brains: brains, local: false,
@@ -100,6 +153,10 @@ struct RootView: View {
         .task { await remote.restore() }
         .task {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
+            // T5 (track 20260715T1502): while the persona welcome IS the connect
+            // gate (established, non-opted-out user), do NOT auto-advance — the
+            // welcome's own action (enterApp) advances instead, so it's seen once.
+            guard !connectWelcomeActive else { return }
             splashElapsed = true
             // Already signed in from a restored session: the destination never
             // *changes*, so check the first-run gate here too. Existing installs

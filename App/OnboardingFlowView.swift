@@ -85,9 +85,24 @@ struct OnboardingFlowView: View {
 /// "What brings you here?" switch sits ABOVE the art and re-renders the screen
 /// in place; the choice persists and is editable in Settings. Either action
 /// marks the welcome seen (B2) — "Set up later" dismisses it forever.
+/// A quiet, live connection status shown on the welcome when it doubles as the
+/// post-sign-in CONNECT gate (track 20260715T1502). Default-nil on the welcome
+/// leaves the first-run flow + Settings-explorer renditions unchanged.
+struct WelcomeConnectStatus: Equatable {
+    let text: String
+    /// true once the connection settled (connected / on-phone) → a calm sage dot;
+    /// false while still resolving → a working amber dot.
+    let settled: Bool
+}
+
 struct PersonaWelcomeStep: View {
     let onStart: () -> Void
     let onSkip: () -> Void
+    /// When non-nil the welcome is standing in as the post-sign-in connect gate:
+    /// a quiet status pill renders above the actions and the action labels become
+    /// "Take me in" / "Skip the welcome" (track 20260715T1502). nil = the original
+    /// first-run + Settings-explorer welcome, unchanged.
+    var connect: WelcomeConnectStatus? = nil
 
     @State private var persona: OnboardingPersona = PersonaPrefs.persona()
 
@@ -123,11 +138,16 @@ struct PersonaWelcomeStep: View {
                     .frame(maxWidth: 300)
 
                 Spacer()
-                GrainButton(PersonaWelcomeLayout.primaryAction, variant: .filled, size: .regular) {
+                if let connect {
+                    connectPill(connect).padding(.bottom, GrainSpacing.x3)
+                }
+                GrainButton(connect == nil ? PersonaWelcomeLayout.primaryAction : "Take me in",
+                            variant: .filled, size: .regular) {
                     WelcomePrefs.markSeen()
                     onStart()
                 }
-                GrainButton(PersonaWelcomeLayout.quietAction, variant: .text, size: .regular) {
+                GrainButton(connect == nil ? PersonaWelcomeLayout.quietAction : "Skip the welcome",
+                            variant: .text, size: .regular) {
                     WelcomePrefs.markSeen()
                     onSkip()
                 }
@@ -192,6 +212,24 @@ struct PersonaWelcomeStep: View {
                 }
             }
         }
+    }
+
+    /// The connect-gate status pill (track 20260715T1502): a small settled/working
+    /// dot + the live status text. All Grain tokens — reads correctly light + dark.
+    @ViewBuilder private func connectPill(_ status: WelcomeConnectStatus) -> some View {
+        HStack(spacing: GrainSpacing.x2) {
+            Circle()
+                .fill(status.settled ? GrainColor.sage : GrainColor.amber)
+                .frame(width: 7, height: 7)
+                .accessibilityHidden(true)
+            Text(status.text)
+                .grainTextStyle(.caption)
+                .foregroundStyle(GrainColor.textMuted)
+        }
+        .padding(.horizontal, GrainSpacing.x3)
+        .padding(.vertical, GrainSpacing.x1)
+        .background(Capsule().fill(GrainColor.surfaceElevated))
+        .overlay(Capsule().strokeBorder(GrainColor.border, lineWidth: 1))
     }
 
     @ViewBuilder private var art: some View {
