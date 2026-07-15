@@ -52,6 +52,9 @@ struct SpeakerTranscriptSection: View {
     let transcript: SpeakerTranscript
     /// Called after a successful confirm/correct so the detail view re-fetches content.
     let onChanged: () async -> Void
+    /// Optimistic hook: fired the instant the door acknowledges a confirm so the detail
+    /// can flip the in-memory speaker for that slot before the authoritative re-fetch.
+    var onConfirmed: (ConfirmOutcome) -> Void = { _ in }
     /// Transcript-search highlights (track 20260713T0904): matches whose `row`
     /// indexes `transcript.turns`. Empty = no search active — the defaults keep
     /// every existing call site (and its behavior) unchanged.
@@ -94,7 +97,8 @@ struct SpeakerTranscriptSection: View {
                 speaker: speaker,
                 displayLabel: transcript.displayLabel(for: speaker.slot),
                 sampleWindow: transcript.voiceSampleWindow(for: speaker.slot),
-                onChanged: { await onChanged() }
+                onChanged: { await onChanged() },
+                onConfirmed: onConfirmed
             )
         }
     }
@@ -104,8 +108,9 @@ struct SpeakerTranscriptSection: View {
     private func confirmInferred(slot: String) async {
         let base = CaptureWAL.documentsCaptures()
         SpeakerConfirmQueue.enqueue(captureId: captureId, slot: slot, baseDir: base)
-        if (try? await DoorClient(target: target).confirmSpeaker(captureId: captureId, slot: slot)) != nil {
+        if let outcome = try? await DoorClient(target: target).confirmSpeaker(captureId: captureId, slot: slot) {
             SpeakerConfirmQueue.remove(captureId: captureId, slot: slot, baseDir: base)
+            onConfirmed(outcome)   // optimistic: show the confirmed name instantly
         }
         await onChanged()
     }
@@ -242,6 +247,9 @@ struct SpeakerTagSheet: View {
     /// slot has no timestamped segments — then no playback control is shown.
     var sampleWindow: (startMs: Int, endMs: Int)? = nil
     let onChanged: () async -> Void
+    /// Optimistic hook: fired the instant the door acknowledges a confirm so the detail
+    /// can flip the in-memory speaker for that slot before the authoritative re-fetch.
+    var onConfirmed: (ConfirmOutcome) -> Void = { _ in }
 
     @Environment(\.dismiss) private var dismiss
     @State private var name: String = ""
@@ -460,6 +468,7 @@ struct SpeakerTagSheet: View {
             let outcome = try await DoorClient(target: target)
                 .confirmSpeaker(captureId: captureId, slot: speaker.slot, name: name)
             SpeakerConfirmQueue.remove(captureId: captureId, slot: speaker.slot, baseDir: base)  // shipped → dequeue
+            onConfirmed(outcome)   // optimistic: flip this slot to confirmed instantly
             await onChanged()
             if outcome.offeredCaptures.isEmpty {
                 dismiss()
@@ -479,6 +488,9 @@ struct SpeakerTagSheet: View {
     private func applyOffer(_ outcome: ConfirmOutcome) async {
         busy = true; error = nil
         defer { busy = false }
+        // The current slot was already confirmed by `confirm()`; keep the optimistic
+        // in-memory reflection in sync (idempotent) before applying to past captures.
+        onConfirmed(outcome)
         let client = DoorClient(target: target)
         let base = CaptureWAL.documentsCaptures()
         for offered in outcome.offeredCaptures {

@@ -612,7 +612,8 @@ struct ConversationFacesView: View {
                             target: target,
                             captureId: captureId,
                             transcript: diarized,
-                            onChanged: { await fetchFromDoor() }
+                            onChanged: { await fetchFromDoor() },
+                            onConfirmed: { outcome in applyConfirmedSpeaker(outcome) }
                         )
                     } else {
                         // GrainSpeakerRow intentionally accepts plain words. Keep the
@@ -623,6 +624,7 @@ struct ConversationFacesView: View {
                             captureId: captureId,
                             transcript: diarized,
                             onChanged: { await fetchFromDoor() },
+                            onConfirmed: { outcome in applyConfirmedSpeaker(outcome) },
                             searchMatches: search.matches,
                             currentMatch: search.current
                         )
@@ -985,7 +987,63 @@ struct ConversationFacesView: View {
 
     private func contentDiffersFromCache(_ c: CaptureContent) -> Bool {
         guard let cached else { return true }
-        return c.transcript != cached.transcript || c.segments.count != cached.segments.count
+        // A speaker confirm/rename changes ONLY the speaker slots (status/name), not the
+        // transcript text or segment count — so those alone would discard a fresh confirm
+        // and keep rendering the stale inferred label. Compare speakers too.
+        return c.transcript != cached.transcript
+            || c.segments.count != cached.segments.count
+            || c.speakers != cached.speakers
+    }
+
+    /// Optimistic local adoption of a confirmed speaker — flips the in-memory `content`
+    /// and `cached` slot to `.confirmed` with the outcome's name IMMEDIATELY, so every
+    /// row keyed on that slot re-renders as that person without waiting on the door
+    /// re-fetch. The re-fetch (`fetchFromDoor`) remains the authoritative reconcile.
+    @MainActor
+    private func applyConfirmedSpeaker(slot: String, name: String, speakerId: String) {
+        func confirm(_ speakers: [CaptureSpeaker]) -> [CaptureSpeaker] {
+            var updated = speakers
+            if let i = updated.firstIndex(where: { $0.slot == slot }) {
+                let sp = updated[i]
+                updated[i] = CaptureSpeaker(
+                    slot: sp.slot, status: .confirmed,
+                    name: name.isEmpty ? sp.name : name,
+                    inferScore: sp.inferScore,
+                    inferredSpeakerId: sp.inferredSpeakerId,
+                    confirmedSpeakerId: speakerId.isEmpty ? sp.confirmedSpeakerId : speakerId)
+            } else {
+                // Confirming an anonymous slot that had no speaker record yet — add one so
+                // displayLabel resolves to the confirmed name (not "Speaker N").
+                updated.append(CaptureSpeaker(
+                    slot: slot, status: .confirmed,
+                    name: name.isEmpty ? nil : name,
+                    inferScore: nil, inferredSpeakerId: nil,
+                    confirmedSpeakerId: speakerId.isEmpty ? nil : speakerId))
+            }
+            return updated
+        }
+        if let c = content {
+            content = CaptureContent(
+                transcript: c.transcript, capturedAt: c.capturedAt, found: c.found,
+                title: c.title, summary: c.summary, titleModel: c.titleModel,
+                summarizing: c.summarizing, segments: c.segments,
+                speakers: confirm(c.speakers), paragraphs: c.paragraphs)
+        }
+        if let cc = cached {
+            cached = CachedTranscript(
+                transcript: cc.transcript, title: cc.title, summary: cc.summary,
+                segments: cc.segments, speakers: confirm(cc.speakers),
+                paragraphs: cc.paragraphs, fetchedAt: cc.fetchedAt)
+        }
+    }
+
+    /// Adapt a `ConfirmOutcome` to the optimistic slot update above. Called from the
+    /// child confirm flows the instant the door acknowledges the confirm.
+    @MainActor
+    private func applyConfirmedSpeaker(_ outcome: ConfirmOutcome) {
+        let slot = outcome.slotLabel
+        guard !slot.isEmpty else { return }
+        applyConfirmedSpeaker(slot: slot, name: outcome.speakerName, speakerId: outcome.speakerId)
     }
 
     private func cacheIfReady(_ c: CaptureContent?) {
@@ -1006,27 +1064,16 @@ struct ConversationFacesView: View {
     /// in a Task so first paint is never held. A no-op where a summary already exists,
     /// where a synth is already running/done, or where the OS has no on-device model
     /// (the face then honestly points at the transcript rather than spinning forever).
+    /// DISABLED (build 211 crash mitigation): on-device summary synthesis drove Apple's
+    /// FoundationModels, whose aggregator crashes with an UNCATCHABLE Swift runtime trap
+    /// (EXC_BREAKPOINT "Range requires lowerBound <= upperBound" in
+    /// TranscriptWritingAggregator.transcriptEntriesSlice — incident 81C00A61). A trap can't
+    /// be caught, so the only mitigation is to stop calling the model. The summary still
+    /// resolves from the door/Kiln summary and the crash-safe card-summary fallback
+    /// (`summaryText` → `provisional?.summary`); a conversation with a transcript but no
+    /// summary anywhere shows the honest "No summary yet" state instead of risking the crash.
     private func maybeSynthesizeSummary() {
-        if let s = summaryText, !s.isEmpty { return }
-        // Attempt at most once per open — even a transcript the model returns nothing for
-        // must not re-run the (expensive) synth on every subsequent load-path call.
-        guard synthesizedSummary == nil, !summarizing, !synthAttempted else { return }
-        guard let transcript = transcriptText, !transcript.isEmpty else { return }
-        guard let titler = makeSystemTitler(), titler.isAvailable else { return }
-        summarizing = true
-        synthAttempted = true
-        let capId = captureId
-        let baseDir = CaptureWAL.documentsCaptures()
-        Task {
-            let result = try? await titler.titleAndSummary(for: transcript)
-            await MainActor.run {
-                summarizing = false
-                guard let summary = result?.summary
-                    .trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty else { return }
-                synthesizedSummary = summary
-                ConversationCardStore.merge(captureId: capId, baseDir: baseDir, summary: summary)
-            }
-        }
+        // intentionally a no-op — see doc comment above.
     }
 
     // MARK: - audio replay (same semantics as the previous detail)
@@ -1081,6 +1128,9 @@ private struct GrainSpeakerTranscriptRows: View {
     let captureId: String
     let transcript: SpeakerTranscript
     let onChanged: () async -> Void
+    /// Optimistic hook: fired the instant the door acknowledges a confirm, so the
+    /// parent can flip the in-memory speaker for that slot before the re-fetch lands.
+    let onConfirmed: (ConfirmOutcome) -> Void
 
     @State private var tagging: CaptureSpeaker?
 
@@ -1107,7 +1157,8 @@ private struct GrainSpeakerTranscriptRows: View {
                 speaker: speaker,
                 displayLabel: transcript.displayLabel(for: speaker.slot),
                 sampleWindow: transcript.voiceSampleWindow(for: speaker.slot),
-                onChanged: { await onChanged() }
+                onChanged: { await onChanged() },
+                onConfirmed: onConfirmed
             )
         }
     }
@@ -1170,8 +1221,9 @@ private struct GrainSpeakerTranscriptRows: View {
     private func confirmInferred(slot: String) async {
         let base = CaptureWAL.documentsCaptures()
         SpeakerConfirmQueue.enqueue(captureId: captureId, slot: slot, baseDir: base)
-        if (try? await DoorClient(target: target).confirmSpeaker(captureId: captureId, slot: slot)) != nil {
+        if let outcome = try? await DoorClient(target: target).confirmSpeaker(captureId: captureId, slot: slot) {
             SpeakerConfirmQueue.remove(captureId: captureId, slot: slot, baseDir: base)
+            onConfirmed(outcome)   // optimistic: show the confirmed name instantly
         }
         await onChanged()
     }
