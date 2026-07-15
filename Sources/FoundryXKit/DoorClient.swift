@@ -136,7 +136,7 @@ public enum DoorError: Error, Equatable, Sendable {
 /// One selectable model for the chat header picker — a Kiln *target_id* (`id`) plus a
 /// friendly `label`. The door enumerates these from the operator's `~/.kiln/config.json`
 /// targets (`GET /foundryx/models`). Picking one sets `ChatRequest.requestedTarget = id`.
-public struct ModelOption: Decodable, Sendable, Equatable, Identifiable {
+public struct ModelOption: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public let label: String
 

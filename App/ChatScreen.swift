@@ -22,7 +22,10 @@ struct ChatScreen: View {
     @State private var showingChats = false
     /// A run artifact the user tapped to view (sheet with the in-app viewers).
     @State private var viewingArtifact: ChatViewModel.RunArtifact?
-    @State private var models: [ModelOption] = []
+    // Seed the picker synchronously from the warm cache so the dropdown paints the full
+    // grouped menu instantly on open (track 20260715T1501). `loadModels()` still runs on
+    // appear and refreshes this in the background — a changed live list replaces the cache.
+    @State private var models: [ModelOption] = ModelCache.load()
     /// The conversation currently hydrated into `model` — guards against reloading the
     /// live view mid-stream when nothing actually switched.
     @State private var loadedId = ""
@@ -216,7 +219,10 @@ struct ChatScreen: View {
     private func loadModels() async {
         do {
             let fetched = try await client.models()
+            // Refresh the live picker and rewrite the warm cache so the next open paints
+            // this list instantly (AC1/AC3). First-launch caches its first fetch too (AC2).
             await MainActor.run { models = fetched }
+            ModelCache.save(fetched)
         } catch {
             log.warn("model list fetch failed: \(error.localizedDescription)")
         }
