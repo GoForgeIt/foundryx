@@ -44,7 +44,19 @@ struct ConversationFacesView: View {
     var meaningIndex: TranscriptMeaningIndex? = nil
 
     // MARK: faces
-    @State private var face: DetailFace = .summary
+    @State private var face: DetailFace = {
+        #if DEBUG
+        let a = ProcessInfo.processInfo.arguments
+        if let i = a.firstIndex(of: "-Face"), i + 1 < a.count {
+            switch a[i + 1] {
+            case "actions": return .actions
+            case "transcript": return .transcript
+            default: break
+            }
+        }
+        #endif
+        return .summary
+    }()
 
     // MARK: content (same load pipeline as the previous detail)
     @State private var content: CaptureContent?

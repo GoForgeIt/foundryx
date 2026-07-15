@@ -33,6 +33,13 @@ enum DemoSeed {
             ConversationCardStore.save(
                 ConversationCardMeta(title: title, summary: summary, stage: stage),
                 captureId: id, baseDir: base)
+            // A cached transcript so the detail's Summary + Transcript faces populate
+            // (the faces read fetched content OR this local cache).
+            TranscriptCacheStore.save(
+                CachedTranscript(
+                    transcript: "\(title). \(summary) We agreed on the next steps and who owns what by when.",
+                    title: title, summary: summary, fetchedAt: UInt64(max(0, now))),
+                captureId: id, baseDir: base)
         }
     }
 }

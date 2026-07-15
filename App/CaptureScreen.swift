@@ -133,6 +133,9 @@ struct CaptureScreen: View {
     /// Phone-only tier: labels stay on-device ("Saved on phone", not "…to computer").
     var local: Bool = false
     @State private var pendingDeleteId: String?
+    #if DEBUG
+    @State private var deepDetail = false   // screen-proof: `-Screen detail`
+    #endif
 
     // MARK: find + organize (track 20260713T0902, features/capture-home.feature)
     /// The user's categories, stored beside the captures they organize.
@@ -204,6 +207,23 @@ struct CaptureScreen: View {
             }
         }
         .grainBackground()
+        #if DEBUG
+        // DEV screen-proof deep-links (real manager + target): `-Screen detail` opens a
+        // conversation's three-face detail; `-Screen recording` starts the instrument.
+        .onAppear {
+            let a = ProcessInfo.processInfo.arguments
+            if a.contains("-Screen"), a.contains("detail") { deepDetail = true }
+            if a.contains("-Screen"), a.contains("recording") { manager.startMicRecording() }
+        }
+        .fullScreenCover(isPresented: $deepDetail) {
+            NavigationStack {
+                ConversationFacesView(
+                    target: target, manager: manager, captureId: "omi-demo-1",
+                    timeRange: "Tue, Jul 14 · 4:16 PM–4:28 PM · 12 min",
+                    place: "Office", conversationDate: Date(), local: true)
+            }
+        }
+        #endif
         // Search sweeps local disk (cached transcripts) AND, when the computer is
         // connected, the FULL history in Lore (track 20260714T1200) — off-main, newest
         // state wins. The computer results are deduped against the local matches.

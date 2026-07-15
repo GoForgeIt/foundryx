@@ -38,6 +38,26 @@ struct RootView: View {
                 remote: remote, brains: brains, local: true,
                 showingAccount: .constant(false)))
         }
+        // DEV-only: `-Screen answer` mounts the answer/decision-brief with demo data
+        // (no manager needed) for screenshot-verification.
+        if ProcessInfo.processInfo.arguments.contains("-Screen"),
+           ProcessInfo.processInfo.arguments.contains("answer") {
+            let demo = AmbientAnswer(
+                title: "Blind Noise relay for launch",
+                text: """
+                Recommendation
+                Choose the blind Noise relay for the July launch.
+
+                Why
+                - Preserves end-to-end encryption.
+                - Adds about 40 ms.
+                - Gives the server no visibility.
+
+                Source
+                Architecture call, June 30. Three related conversations confirm the constraint.
+                """)
+            return AnyView(AnswerSurfaceView(answer: demo, onDone: {}))
+        }
         let dest = RootGate.destination(signedIn: remote.email != nil,
                                         splashElapsed: splashElapsed,
                                         brain: brains.choice,
