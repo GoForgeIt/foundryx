@@ -65,6 +65,15 @@ struct ConversationFacesView: View {
     @State private var loadError: String?
     @State private var loading = true
     @State private var didAttemptFetch = false
+    /// AC2 — the on-device summary synthesized from the transcript when no summary
+    /// exists at any source. Persisted to the card once produced so the CARD fills too.
+    @State private var synthesizedSummary: String?
+    /// True while the on-device synth runs — drives an honest "Summarizing…" state so
+    /// the Summary face is never a dead "No summary yet." tab while work is in flight.
+    @State private var summarizing = false
+    /// Set once a synth has been attempted this open, so a transcript the model yields
+    /// nothing for doesn't re-run the expensive synth on every subsequent load-path call.
+    @State private var synthAttempted = false
     @State private var confirmDelete = false
     @State private var didCopy = false
     @State private var receiptExpanded = false
@@ -114,7 +123,17 @@ struct ConversationFacesView: View {
             && !((provisional?.provisionalTranscript ?? "").isEmpty)
     }
 
-    private var summaryText: String? { content?.summary ?? cached?.summary }
+    /// The summary the face shows, in fidelity order: authoritative door content,
+    /// then the local cache, then the durable CARD tombstone (AC1 — the card already
+    /// carries the summary the home list shows), then an on-device synth (AC2). Each
+    /// source counts only when NON-EMPTY, so an empty string never wins over a real one.
+    private var summaryText: String? {
+        if let s = content?.summary, !s.isEmpty { return s }
+        if let s = cached?.summary, !s.isEmpty { return s }
+        if let s = provisional?.summary, !s.isEmpty { return s }
+        if let s = synthesizedSummary, !s.isEmpty { return s }
+        return nil
+    }
 
     private var copyableTranscript: String? {
         if let diarized = diarizedTranscript, diarized.hasSegments {
@@ -396,7 +415,12 @@ struct ConversationFacesView: View {
                 .foregroundStyle(GrainColor.ink)
                 .textSelection(.enabled)
         } else if content?.summarizing == true {
+            // The door/desktop is authoritatively summarizing — that copy wins over the
+            // local on-device fallback so we don't relabel desktop processing.
             Text("Summarizing on your computer, check back shortly.")
+                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+        } else if summarizing {
+            Text("Summarizing…")
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
         } else if transcriptText != nil {
             Text("No summary yet. The transcript face has the full conversation.")
@@ -903,6 +927,9 @@ struct ConversationFacesView: View {
         let base = CaptureWAL.documentsCaptures()
         cached = TranscriptCacheStore.load(captureId: captureId, baseDir: base)
         provisional = ConversationCardStore.load(captureId: captureId, baseDir: base)
+        // Kick the on-device summary synth off the loaded cache/card (AC2) — a no-op
+        // when a summary already exists or no transcript is on the phone yet.
+        maybeSynthesizeSummary()
         if cached != nil {
             loading = false
             // The cache renders instantly but may predate diarization / a fresher
@@ -932,6 +959,8 @@ struct ConversationFacesView: View {
         }
         loading = false
         refreshSearchAfterContentChange()
+        // Door content may have just landed a transcript with no summary (AC2).
+        maybeSynthesizeSummary()
         if content?.summarizing == true, (content?.title ?? "").isEmpty {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             if let refreshed = try? await DoorClient(target: target).captureContent(captureId: captureId) {
@@ -971,6 +1000,35 @@ struct ConversationFacesView: View {
         ConversationCardStore.merge(captureId: captureId, baseDir: baseDir,
                                     title: c.title, summary: c.summary, stage: nil)
         cached = entry
+    }
+
+    /// AC2 — when NO summary exists at any source but a transcript does, synthesize one
+    /// on-device (Apple Foundation Models) exactly ONCE, then persist it to the durable
+    /// CARD so the home list fills too. Non-blocking: kicked from the content-load path
+    /// in a Task so first paint is never held. A no-op where a summary already exists,
+    /// where a synth is already running/done, or where the OS has no on-device model
+    /// (the face then honestly points at the transcript rather than spinning forever).
+    private func maybeSynthesizeSummary() {
+        if let s = summaryText, !s.isEmpty { return }
+        // Attempt at most once per open — even a transcript the model returns nothing for
+        // must not re-run the (expensive) synth on every subsequent load-path call.
+        guard synthesizedSummary == nil, !summarizing, !synthAttempted else { return }
+        guard let transcript = transcriptText, !transcript.isEmpty else { return }
+        guard let titler = makeSystemTitler(), titler.isAvailable else { return }
+        summarizing = true
+        synthAttempted = true
+        let capId = captureId
+        let baseDir = CaptureWAL.documentsCaptures()
+        Task {
+            let result = try? await titler.titleAndSummary(for: transcript)
+            await MainActor.run {
+                summarizing = false
+                guard let summary = result?.summary
+                    .trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty else { return }
+                synthesizedSummary = summary
+                ConversationCardStore.merge(captureId: capId, baseDir: baseDir, summary: summary)
+            }
+        }
     }
 
     // MARK: - audio replay (same semantics as the previous detail)

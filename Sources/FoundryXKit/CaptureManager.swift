@@ -836,7 +836,7 @@ public final class CaptureManager: ObservableObject {
     /// summary merges) outside the manager's sight, and the render path reads it once
     /// per row (the title/summary a row shows live come from the poller's @Published
     /// state, so a slightly-stale disk read here has no visible effect anyway).
-    public func cardMeta(for captureId: String) -> ConversationCardMeta? {
+    public nonisolated func cardMeta(for captureId: String) -> ConversationCardMeta? {
         ConversationCardStore.load(captureId: captureId, baseDir: baseDir)
     }
 
