@@ -38,6 +38,16 @@ struct RootView: View {
                 remote: remote, brains: brains, local: true,
                 showingAccount: .constant(false)))
         }
+        // DEV-only: `-Screen <settings|...>` mounts a deep screen directly for
+        // screenshot-verification (screens a tab-tap can't reach reliably).
+        if let i = ProcessInfo.processInfo.arguments.firstIndex(of: "-Screen"),
+           i + 1 < ProcessInfo.processInfo.arguments.count {
+            switch ProcessInfo.processInfo.arguments[i + 1] {
+            case "settings":
+                return AnyView(NavigationStack { SettingsScreen(brains: brains, remote: remote) })
+            default: break
+            }
+        }
         let dest = RootGate.destination(signedIn: remote.email != nil,
                                         splashElapsed: splashElapsed,
                                         brain: brains.choice,
