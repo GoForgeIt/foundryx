@@ -9,6 +9,9 @@ struct FoundryXApp: App {
         PerfTelemetry.shared.markProcessStart()
         PerfTelemetry.shared.start(
             endpoint: RemoteConfig.fromBundle()?.gatewayHTTPURL.appendingPathComponent("diag/log"))
+        #if DEBUG
+        DemoSeed.seedIfRequested()   // `-MainPreview` only: seed demo cards for screen-proof
+        #endif
     }
 
     var body: some Scene {

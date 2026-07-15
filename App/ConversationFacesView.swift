@@ -334,19 +334,13 @@ struct ConversationFacesView: View {
         Button {
             showRelayAnswer = true
         } label: {
-            HStack(spacing: GrainSpacing.x2) {
-                Image(grain: .spark)
-                    .foregroundStyle(GrainColor.amber)
-                Text(ConversationSummaryPresentation.openRelayAnswerLabel)
-                    .grainTextStyle(.body)
-                    .fontWeight(.medium)
-                    .foregroundStyle(GrainColor.forgeBlue)
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .grainTextStyle(.caption)
-                    .foregroundStyle(GrainColor.textFaint)
-            }
-            .frame(minHeight: GrainSpacing.x8)
+            GrainSuggestionCard(
+                systemImage: "sparkles",
+                tint: .memory,
+                eyebrow: AnswerCopy.kicker,
+                title: ConversationSummaryPresentation.openRelayAnswerLabel,
+                body: answer.title
+            )
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("open-relay-answer")
@@ -447,12 +441,11 @@ struct ConversationFacesView: View {
                 }
             }
             Spacer(minLength: GrainSpacing.x2)
-            Text(row.state.rawValue)
-                .grainTextStyle(.caption)
-                .fontWeight(.bold)
-                .foregroundStyle(actionStateForeground(row.state))
-                .multilineTextAlignment(.trailing)
-                .fixedSize(horizontal: false, vertical: true)
+            GrainStatusWord(
+                row.state.rawValue,
+                tone: actionStatusTone(row.state),
+                showsDot: false
+            )
         }
         .padding(.vertical, GrainSpacing.x3)
         .overlay(alignment: .bottom) {
@@ -515,6 +508,16 @@ struct ConversationFacesView: View {
         }
     }
 
+    private func actionStatusTone(
+        _ state: ConversationActionsPresentation.Row.State
+    ) -> GrainStatusTone {
+        switch state {
+        case .completed, .ready: return .ready
+        case .open: return .attention
+        case .dismissed: return .neutral
+        }
+    }
+
     private func actionTileBackground(_ state: ConversationActionsPresentation.Row.State) -> Color {
         switch state {
         case .completed, .ready: return GrainColor.sage.opacity(0.12)
@@ -570,14 +573,26 @@ struct ConversationFacesView: View {
                     .accessibilityIdentifier("copy-transcript")
                 }
                 if let diarized = diarizedTranscript {
-                    SpeakerTranscriptSection(
-                        target: target,
-                        captureId: captureId,
-                        transcript: diarized,
-                        onChanged: { await fetchFromDoor() },
-                        searchMatches: search.matches,
-                        currentMatch: search.current
-                    )
+                    if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        GrainSpeakerTranscriptRows(
+                            target: target,
+                            captureId: captureId,
+                            transcript: diarized,
+                            onChanged: { await fetchFromDoor() }
+                        )
+                    } else {
+                        // GrainSpeakerRow intentionally accepts plain words. Keep the
+                        // existing attributed renderer while search is active so match
+                        // highlights and next/previous scrolling remain unchanged.
+                        SpeakerTranscriptSection(
+                            target: target,
+                            captureId: captureId,
+                            transcript: diarized,
+                            onChanged: { await fetchFromDoor() },
+                            searchMatches: search.matches,
+                            currentMatch: search.current
+                        )
+                    }
                 } else {
                     Text(TranscriptHighlighter.attributed(
                         transcript,
@@ -988,6 +1003,106 @@ struct ConversationFacesView: View {
         if case .playing = audioState { audioState = .idle }
         PlaybackSession.end(changed: playbackOwnsSession)
         playbackOwnsSession = false
+    }
+}
+
+/// Grain-backed diarized rows. Speaker management stays on the existing sheet and
+/// confirmation route; only the row body comes from the design system.
+private struct GrainSpeakerTranscriptRows: View {
+    let target: DoorTarget
+    let captureId: String
+    let transcript: SpeakerTranscript
+    let onChanged: () async -> Void
+
+    @State private var tagging: CaptureSpeaker?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if transcript.hasUnconfirmedInferred {
+                ReviewSpeakersBanner(count: transcript.inferredSlots.count) {
+                    if let slot = transcript.inferredSlots.first {
+                        tagging = transcript.speaker(for: slot)
+                    }
+                }
+                .padding(.bottom, GrainSpacing.x3)
+            }
+
+            ForEach(transcript.turns) { turn in
+                speakerRow(turn)
+                    .id(turn.id)
+            }
+        }
+        .sheet(item: $tagging) { speaker in
+            SpeakerTagSheet(
+                target: target,
+                captureId: captureId,
+                speaker: speaker,
+                displayLabel: transcript.displayLabel(for: speaker.slot),
+                sampleWindow: transcript.voiceSampleWindow(for: speaker.slot),
+                onChanged: { await onChanged() }
+            )
+        }
+    }
+
+    private func speakerRow(_ turn: SpeakerTurn) -> some View {
+        let speaker = transcript.speaker(for: turn.slot)
+        return VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+            GrainSpeakerRow(
+                speakerName: transcript.displayLabel(for: turn.slot),
+                speakerColor: speakerTint(for: turn.slot),
+                time: rowTime(turn, speaker: speaker),
+                words: turn.text
+            )
+            .opacity(speaker.isInferred ? 0.6 : 1)
+            .textSelection(.enabled)
+            .contentShape(Rectangle())
+            .onTapGesture { tagging = speaker }
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction(named: "Edit speaker") { tagging = speaker }
+
+            if speaker.isInferred, let name = speaker.name {
+                HStack(spacing: GrainSpacing.x2) {
+                    GrainButton("Confirm: \(name)", variant: .tonal, size: .sm) {
+                        Task { await confirmInferred(slot: turn.slot) }
+                    }
+                    GrainButton("Not them", variant: .text, size: .sm) {
+                        tagging = speaker
+                    }
+                }
+                .padding(.leading, GrainSpacing.x4)
+                .padding(.bottom, GrainSpacing.x2)
+            }
+        }
+    }
+
+    private func speakerTint(for slot: String) -> GrainSpeakerTint {
+        switch transcript.colorIndex(for: slot) % 3 {
+        case 0: return .forge
+        case 1: return .sage
+        default: return .amber
+        }
+    }
+
+    private func rowTime(_ turn: SpeakerTurn, speaker: CaptureSpeaker) -> String {
+        var parts: [String] = []
+        if let startMs = turn.startMs {
+            let seconds = max(0, startMs / 1_000)
+            parts.append(String(format: "%d:%02d", seconds / 60, seconds % 60))
+        }
+        if speaker.isInferred {
+            if let score = speaker.inferScore {
+                parts.append("tentative · \(Int((score * 100).rounded()))%")
+            } else {
+                parts.append("tentative")
+            }
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func confirmInferred(slot: String) async {
+        _ = try? await DoorClient(target: target)
+            .confirmSpeaker(captureId: captureId, slot: slot)
+        await onChanged()
     }
 }
 

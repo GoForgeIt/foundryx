@@ -29,6 +29,15 @@ struct RootView: View {
         if ProcessInfo.processInfo.arguments.contains("-WelcomePreview") {
             return AnyView(PersonaWelcomeStep(onStart: {}, onSkip: {}))
         }
+        // DEV-only visual harness: `-MainPreview` mounts the real tabs in phone-only
+        // mode (no auth, no door) over the demo cards DemoSeed dropped on disk, so every
+        // screen can be screenshot-verified against the prototype. No effect normally.
+        if ProcessInfo.processInfo.arguments.contains("-MainPreview") {
+            return AnyView(MainTabs(
+                target: DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "local"),
+                remote: remote, brains: brains, local: true,
+                showingAccount: .constant(false)))
+        }
         let dest = RootGate.destination(signedIn: remote.email != nil,
                                         splashElapsed: splashElapsed,
                                         brain: brains.choice,
@@ -283,7 +292,11 @@ private struct MainTabs: View {
                                          captureId: captureId.isEmpty ? nil : captureId)
                 }
             }
-            AmbientNotifier.requestAuthorizationIfNeeded()
+            // Skip the OS notification prompt under the screen-proof harness so it never
+            // covers a screenshot (no effect on a normal launch).
+            if !ProcessInfo.processInfo.arguments.contains("-MainPreview") {
+                AmbientNotifier.requestAuthorizationIfNeeded()
+            }
         }
         // Ship the on-device ambient GATE/CARD signal (redacted — DERIVED action +
         // outcome only, NEVER the utterance/window/seed) to the desktop door on the
@@ -304,6 +317,15 @@ private struct MainTabs: View {
         // Wire the interactive Live Activity buttons (App Intents) to this live manager.
         // The intent's perform() runs in the app process and routes through this broker.
         let router = TabRouter()
+        #if DEBUG
+        // Screen-proof: `-Tab <capture|activity|chat|device>` selects the initial tab so
+        // each screen can be screenshot without a tap (simctl can't tap the tab bar).
+        let args = ProcessInfo.processInfo.arguments
+        if let i = args.firstIndex(of: "-Tab"), i + 1 < args.count,
+           let t = AppTab(rawValue: args[i + 1]) {
+            router.selected = t
+        }
+        #endif
         _router = StateObject(wrappedValue: router)
         // An accepted ambient card ([Run]) lands on the chat tab; ChatScreen consumes
         // the broker's pendingSeed and starts the seeded kiln conversation there.
@@ -365,7 +387,11 @@ private struct MainTabs: View {
                     }
                     CaptureScreen(device: device, manager: manager, sources: sources, target: target, local: local)
                 }
-                .navigationTitle("Capture")
+                // The screen renders its OWN "Capture" header (title + status + search),
+                // matching the prototype — so the nav bar carries only the Settings gear,
+                // never a second large "Capture" title.
+                .navigationTitle("")
+                .navigationBarTitleDisplayMode(.inline)
                 .toolbar { settingsGear }
             }
             .tabItem { Label(AppTab.capture.label, systemImage: AppTab.capture.systemImage) }
@@ -401,7 +427,7 @@ private struct MainTabs: View {
             .tag(TabRouter.Tab.chat)
 
             NavigationStack {
-                DeviceScreen(device: device, battery: battery, manager: manager, sources: sources)
+                DeviceScreen(device: device, manager: manager, sources: sources, remote: remote)
                     .navigationTitle("Device")
             }
             .tabItem { Label(AppTab.device.label, systemImage: AppTab.device.systemImage) }

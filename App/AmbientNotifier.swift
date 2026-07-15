@@ -68,6 +68,11 @@ enum AmbientNotifier {
     /// presenter, and register the confirm-card category (Run/Dismiss). Best-effort —
     /// a denied user simply never sees ambient nudges; nothing else changes.
     static func requestAuthorizationIfNeeded() {
+        #if DEBUG
+        // Screen-proof harness: never raise the OS permission prompt (it would cover a
+        // screenshot). No effect on a normal launch.
+        if ProcessInfo.processInfo.arguments.contains("-MainPreview") { return }
+        #endif
         let center = UNUserNotificationCenter.current()
         center.delegate = AmbientNotificationPresenter.shared
         center.setNotificationCategories([
@@ -182,6 +187,9 @@ enum AmbientNotifier {
 
     private static func deliver(title: String, body: String, preview: Bool,
                                 seed: String? = nil, answerText: String? = nil) {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-MainPreview") { return }   // screen-proof: no OS prompts
+        #endif
         let center = UNUserNotificationCenter.current()
         let fire: () -> Void = {
             let content = UNMutableNotificationContent()

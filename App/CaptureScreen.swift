@@ -279,43 +279,26 @@ struct CaptureScreen: View {
     /// Mic circle + headline + the on-phone reassurance line. Tapping starts the
     /// existing phone-mic recording path.
     private var recordCTA: some View {
-        Button { manager.startMicRecording() } label: {
-            HStack(spacing: GrainSpacing.x3) {
-                ZStack {
-                    Circle().fill(GrainColor.forgeBlue)
-                        .frame(width: 44, height: 44)
-                    Image(systemName: "mic.fill")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(recordOrbGlyph)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(CaptureHomeCopy.recordTitle)
-                        .grainTextStyle(.body).fontWeight(.semibold)
-                        .foregroundStyle(GrainColor.ink)
-                    Text(CaptureHomeCopy.recordSubtitle(local: local))
-                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-                        .multilineTextAlignment(.leading)
-                }
-                Spacer(minLength: 0)
+        GrainRecordCTA(
+            title: CaptureHomeCopy.recordTitle,
+            subtitle: CaptureHomeCopy.recordSubtitle(local: local),
+            onRecord: { manager.startMicRecording() }
+        )
+        .accessibilityHidden(true)
+        .overlay {
+            // Grain's orb owns its native action; retain the app's existing
+            // full-row hit target with a single sibling control above it.
+            Button { manager.startMicRecording() } label: {
+                Color.clear
+                    .contentShape(Rectangle())
             }
-            .padding(GrainSpacing.x3)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
-                .fill(GrainColor.surface))
-            .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
-                .strokeBorder(GrainColor.borderFaint, lineWidth: 1))
-            .contentShape(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous))
+            .buttonStyle(.plain)
+            .accessibilityLabel(CaptureHomeCopy.recordTitle)
         }
-        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .disabled(!manager.phoneMicAvailable)
-        .accessibilityLabel(CaptureHomeCopy.recordTitle)
         .padding(.horizontal, GrainSpacing.x4)
         .padding(.top, GrainSpacing.x2)
-    }
-
-    /// The mic glyph sits on a forge-blue fill — adaptive warm-white in both modes.
-    private var recordOrbGlyph: Color {
-        colorScheme == .dark ? GrainColor.ink : GrainColor.surface
     }
 
     // MARK: "Recent on this phone" headline + Search all (prototype :2203)
@@ -323,9 +306,7 @@ struct CaptureScreen: View {
     private var recentHeadline: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(CaptureHomeCopy.recentHeadline)
-                    .grainTextStyle(.body).fontWeight(.semibold)
-                    .foregroundStyle(GrainColor.ink)
+                GrainSectionEyebrow(CaptureHomeCopy.recentHeadline)
                 Text(CaptureHomeCopy.conversationCount(manager.visibleCaptures.count))
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             }
@@ -948,36 +929,16 @@ private struct CaptureCard: View {
 
     var body: some View {
         let p = presentation
-        VStack(alignment: .leading, spacing: GrainSpacing.x2) {
-            // Content first (prototype .flat-row): TITLE + inline category pill,
-            // the single human status word trailing.
-            HStack(alignment: .top, spacing: GrainSpacing.x2) {
-                (titleText(p) + categoryPillText(p))
-                    .lineLimit(2)
-                Spacer(minLength: GrainSpacing.x2)
-                statusIndicator(p)
-            }
-
-            // The quiet meta line: "Tue, Jul 14 · 4:16 PM–4:18 PM · 2 min · Office".
-            Text(p.metaLine)
-                .grainTextStyle(.caption)
-                .foregroundStyle(GrainColor.textFaint)
-
-            // The conversation's SUMMARY (what it was about) — on the card, so the
-            // whole timeline is scannable. Two-line clamp.
-            if let summary = p.summaryLine {
-                Text(summary).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-                    .lineLimit(2)
-            }
-
-            if !p.waveform.isEmpty { WaveformThumbView(profile: p.waveform) }
-        }
-        .padding(GrainSpacing.x3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
-            .fill(GrainColor.surface))
-        .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
-            .strokeBorder(GrainColor.borderFaint, lineWidth: 1))
+        GrainConversationCard(
+            title: p.title,
+            categoryLabel: p.categoryLabel,
+            summaryLine: p.summaryLine,
+            meta: p.metaLine,
+            statusWord: p.statusWord,
+            status: statusTone(for: p),
+            waveform: p.waveform,
+            onTap: nil
+        )
         // Drive the door→Lore status poll while the card is on screen; stop when it
         // scrolls off (the poller itself also stops at a terminal stage, F11). Also
         // cache a recent conversation's transcript on sight (offline/instant later).
@@ -991,64 +952,17 @@ private struct CaptureCard: View {
         }
     }
 
-    /// The card's headline — content first, styled inline so the category pill
-    /// wraps with the title exactly like the prototype's row-title + tag.
-    private func titleText(_ p: CaptureCardPresentation) -> Text {
-        Text(p.title)
-            .font(GrainFont.font(.body))
-            .fontWeight(.semibold)
-            .foregroundColor(GrainColor.ink)
-    }
-
-    /// The inline "<category>, auto" tag beside the title (empty when unfiled).
-    private func categoryPillText(_ p: CaptureCardPresentation) -> Text {
-        guard let label = p.categoryLabel else { return Text(verbatim: "") }
-        return Text("  \(label)")
-            .font(GrainFont.font(.caption))
-            .foregroundColor(GrainColor.forgeBlue)
-    }
-
-    /// Calm status dot + the ONE human word for where the conversation is.
-    private func statusIndicator(_ p: CaptureCardPresentation) -> some View {
-        HStack(spacing: GrainSpacing.x1) {
-            GrainStatusDot(p.progress.statusDot, size: .sm)
-            Text(p.statusWord)
-                .grainTextStyle(.caption)
-                .foregroundStyle(p.progress == .failed ? GrainColor.dangerRed : GrainColor.textMuted)
-                .lineLimit(1)
+    private func statusTone(for presentation: CaptureCardPresentation) -> GrainStatusTone {
+        switch presentation.progress {
+        case .ready, .savedToComputer:
+            return .ready
+        case .savedOnPhone:
+            return presentation.statusWord == "Saved on this phone" ? .ready : .attention
+        case .recording, .transcribing:
+            return .attention
+        case .failed:
+            return .failed
         }
-        .fixedSize(horizontal: true, vertical: false)
-    }
-}
-
-/// The row's small waveform: real segment-size energy, normalized. Purely
-/// decorative summary of the recording's shape — hidden entirely when audio has
-/// been pruned (no fake waveforms).
-private struct WaveformThumbView: View {
-    let profile: [Double]
-
-    var body: some View {
-        Canvas { ctx, size in
-            let n = profile.count
-            guard n > 1 else { return }
-            let step = size.width / CGFloat(n - 1)
-            let middle = size.height / 2
-            var path = Path()
-            for (i, v) in profile.enumerated() {
-                let x = CGFloat(i) * step
-                let amplitude = max(1, size.height * CGFloat(v) * 0.42)
-                let direction: CGFloat = i.isMultiple(of: 2) ? -1 : 1
-                let point = CGPoint(x: x, y: middle + direction * amplitude)
-                if i == 0 { path.move(to: point) } else { path.addLine(to: point) }
-            }
-            ctx.stroke(
-                path,
-                with: .color(GrainColor.forgeBlue.opacity(0.55)),
-                style: StrokeStyle(lineWidth: 1, lineCap: .round, lineJoin: .round)
-            )
-        }
-        .frame(width: GrainSpacing.x8 + GrainSpacing.x8, height: GrainSpacing.x4)
-        .accessibilityHidden(true)
     }
 }
 

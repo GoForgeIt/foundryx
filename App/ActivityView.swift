@@ -34,8 +34,6 @@ struct ActivityView: View {
     /// in FoundryXKit so its logic is tested; this view is a thin renderer.
     @StateObject private var recap: ActivityRecapModel
 
-    @Environment(\.colorScheme) private var colorScheme
-
     @State private var allEntries: [ActivityEntry] = []
     @State private var days: [ActivityDay] = []
     @State private var weekCard: RecapCard?
@@ -111,34 +109,13 @@ struct ActivityView: View {
 
     /// The Today | This week segmented control — toggles which single recap shows.
     private var recapModeToggle: some View {
-        HStack(spacing: 0) {
-            recapSegment("Today", .day)
-            recapSegment("This week", .week)
-        }
-        .padding(3)
-        .background(RoundedRectangle(cornerRadius: GrainRadius.md, style: .continuous)
-            .fill(GrainColor.surfaceElevated))
-        .overlay(RoundedRectangle(cornerRadius: GrainRadius.md, style: .continuous)
-            .strokeBorder(GrainColor.border, lineWidth: 1))
-    }
-
-    private func recapSegment(_ title: String, _ mode: ActivityRecapModel.Mode) -> some View {
-        let selected = recap.mode == mode
-        // On the filled (forge-blue) segment the label flips to the adaptive surface
-        // ink so it stays legible in both light and dark.
-        return Button { recap.mode = mode } label: {
-            Text(title)
-                .grainTextStyle(.caption)
-                .fontWeight(selected ? .semibold : .regular)
-                .foregroundStyle(selected
-                    ? (colorScheme == .dark ? GrainColor.ink : GrainColor.surface)
-                    : GrainColor.textMuted)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, GrainSpacing.x2)
-                .background(RoundedRectangle(cornerRadius: GrainRadius.sm, style: .continuous)
-                    .fill(selected ? GrainColor.forgeBlue : Color.clear))
-        }
-        .buttonStyle(.plain)
+        GrainSegmentedControl(
+            ["Today", "This week"],
+            selection: Binding(
+                get: { recap.mode == .day ? 0 : 1 },
+                set: { recap.mode = $0 == 0 ? .day : .week }
+            )
+        )
     }
 
     private var emptyState: some View {
@@ -343,74 +320,30 @@ struct ActivityView: View {
     /// line, and — for the week — an ad-hoc "Update week to date" action. Wears the
     /// GrainMemoryRings watermark — this is synthesized from your conversations.
     private func conversationRecapCard(_ card: ActivityRecapPresentation) -> some View {
-        VStack(alignment: .leading, spacing: GrainSpacing.x3) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(card.eyebrow.uppercased())
-                        .font(.system(size: 11, weight: .semibold)).kerning(1.2)
-                        .foregroundStyle(GrainColor.forgeBlue)
-                    Text(card.heading).grainTextStyle(.title).foregroundStyle(GrainColor.ink)
-                }
-                Spacer()
-                if card.showsUpdateWeekToDate {
-                    Button {
-                        Task { await recap.updateWeekToDate() }
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(grain: .spark).font(.system(size: 11, weight: .light))
-                            Text("Update week to date").grainTextStyle(.caption)
-                        }
-                        .foregroundStyle(GrainColor.forgeBlue)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            Text(card.narrative)
-                .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if !card.insights.isEmpty {
-                VStack(alignment: .leading, spacing: GrainSpacing.x2) {
-                    Text("INSIGHTS")
-                        .font(.system(size: 11, weight: .semibold)).kerning(1.2)
-                        .foregroundStyle(GrainColor.textFaint)
-                    ForEach(Array(card.insights.enumerated()), id: \.offset) { _, insight in
-                        VStack(alignment: .leading, spacing: 1) {
-                            (Text(insight.kind.rawValue + ": ").fontWeight(.semibold)
-                                .foregroundColor(GrainColor.ink)
-                             + Text(insight.text).foregroundColor(GrainColor.textMuted))
-                                .grainTextStyle(.caption)
-                                .fixedSize(horizontal: false, vertical: true)
-                            if !insight.provenance.isEmpty {
-                                Text(insight.provenance)
-                                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-                            }
-                        }
-                    }
-                }
-                .padding(.top, GrainSpacing.x1)
-            }
-
-            HStack(alignment: .top, spacing: 5) {
-                Image(grain: .spark).font(.system(size: 11, weight: .light))
-                    .foregroundStyle(GrainColor.textFaint).padding(.top, 2)
-                Text(card.freshnessLine)
-                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+        let action: (label: String, perform: () -> Void)?
+        if card.showsUpdateWeekToDate {
+            action = (label: "Update week to date", perform: {
+                Task { await recap.updateWeekToDate() }
+            })
+        } else {
+            action = nil
         }
-        .padding(GrainSpacing.x4)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
-                .fill(GrainColor.surfaceElevated)
-                .overlay(alignment: .topTrailing) {
-                    GrainMemoryRings(color: GrainColor.forgeBlue)
-                        .frame(width: 64, height: 64).opacity(0.10)
-                        .padding(GrainSpacing.x2)
-                })
-        .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
-            .strokeBorder(GrainColor.border, lineWidth: 1))
+
+        return GrainRecapCard(
+            eyebrow: card.eyebrow,
+            title: card.heading,
+            narrative: [card.narrative],
+            insights: card.insights.map { insight in
+                GrainInsightRow(
+                    lead: insight.provenance.isEmpty
+                        ? insight.kind.rawValue + ":"
+                        : "\(insight.kind.rawValue): \(insight.provenance)",
+                    detail: insight.text
+                )
+            },
+            freshness: card.freshnessLine,
+            action: action
+        )
     }
 
     // MARK: - Loading

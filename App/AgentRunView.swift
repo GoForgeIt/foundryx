@@ -103,6 +103,17 @@ struct AgentRunView: View {
         unfolded ? steps : Array(steps[layout.visible])
     }
 
+    private var visibleTimelineSteps: [GrainRunStepModel] {
+        visibleSteps.map { tile in
+            GrainRunStepModel(
+                systemImage: tile.symbol,
+                title: tile.title,
+                output: tile.outcome ?? "",
+                state: tile.isRunning ? .current : .complete
+            )
+        }
+    }
+
     @ViewBuilder private var stepsSection: some View {
         if !steps.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
@@ -123,15 +134,32 @@ struct AgentRunView: View {
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("run-step-fold")
                 }
-                ForEach(visibleSteps.indices, id: \.self) { index in
-                    StepTileRow(
-                        tile: visibleSteps[index],
-                        isLast: index == visibleSteps.count - 1
-                    )
-                }
+                runTimeline
             }
             .accessibilityIdentifier("run-steps")
         }
+    }
+
+    private var runTimeline: some View {
+        GrainRunTimeline(steps: visibleTimelineSteps)
+            // Grain owns the visual rows but exposes no per-row modifier hooks.
+            // Keep the app's established UI-test identifiers in the equivalent
+            // accessibility-only representation.
+            .accessibilityRepresentation {
+                VStack(alignment: .leading) {
+                    ForEach(visibleSteps) { tile in
+                        VStack(alignment: .leading) {
+                            Text(tile.title)
+                            if let outcome = tile.outcome {
+                                Text(outcome)
+                                    .accessibilityIdentifier("run-step-outcome")
+                            }
+                        }
+                        .accessibilityIdentifier("run-step")
+                    }
+                }
+                .accessibilityIdentifier("run-steps")
+            }
     }
 
     // MARK: finished-run summary + follow-up
@@ -206,91 +234,6 @@ struct AgentRunView: View {
         guard !text.isEmpty else { return }
         followUp = ""
         onFollowUp(text)
-    }
-}
-
-/// One step tile: tool glyph, action line, one-line outcome (or a live dot
-/// while the step is still running).
-private struct StepTileRow: View {
-    let tile: RunStepTile
-    let isLast: Bool
-
-    var body: some View {
-        HStack(alignment: .top, spacing: GrainSpacing.x3) {
-            ZStack {
-                RoundedRectangle(cornerRadius: GrainRadius.md, style: .continuous)
-                    .fill(tileBackground)
-                Image(grain: tileIcon)
-                    .grainTextStyle(.caption)
-                    .foregroundStyle(tileForeground)
-            }
-            .frame(width: GrainSpacing.x8, height: GrainSpacing.x8)
-            .overlay {
-                RoundedRectangle(cornerRadius: GrainRadius.md, style: .continuous)
-                    .strokeBorder(tileBorder, lineWidth: 1)
-            }
-
-            VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-                Text(tile.title)
-                    .grainTextStyle(.caption)
-                    .foregroundStyle(GrainColor.ink)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if let outcome = tile.outcome {
-                    Text(outcome)
-                        .grainTextStyle(.caption)
-                        .foregroundStyle(tile.isError ? GrainColor.amber : GrainColor.textFaint)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .accessibilityIdentifier("run-step-outcome")
-                }
-            }
-            .padding(.top, GrainSpacing.x1)
-
-            Spacer(minLength: 0)
-        }
-        .padding(.bottom, isLast ? 0 : GrainSpacing.x2)
-        .overlay(alignment: .topLeading) {
-            if !isLast {
-                Rectangle()
-                    .fill(GrainColor.borderFaint)
-                    .frame(width: 1)
-                    .padding(.leading, GrainSpacing.x4)
-                    .padding(.top, GrainSpacing.x8)
-            }
-        }
-        .accessibilityIdentifier("run-step")
-    }
-
-    private var tileForeground: Color {
-        if tile.isError { return GrainColor.amber }
-        if tile.isRunning { return GrainColor.forgeBlue }
-        return GrainColor.sage
-    }
-
-    private var tileBackground: Color {
-        if tile.isError { return GrainColor.amber.opacity(0.14) }
-        if tile.isRunning { return GrainColor.forgeBlueBg }
-        return GrainColor.sage.opacity(0.14)
-    }
-
-    private var tileBorder: Color {
-        tile.isRunning ? GrainColor.forgeBlueBorder : GrainColor.borderFaint
-    }
-
-    private var tileIcon: GrainIcon {
-        let symbol = tile.symbol.lowercased()
-        if symbol.contains("search") || symbol.contains("magnifying") { return .search }
-        if symbol.contains("doc") || symbol.contains("note") || symbol.contains("text") { return .doc }
-        if symbol.contains("pencil") || symbol.contains("write") || symbol.contains("edit") { return .pencil }
-        if symbol.contains("calendar") || symbol.contains("clock") { return .calendar }
-        if symbol.contains("chat") || symbol.contains("bubble") || symbol.contains("message") { return .chat }
-        if symbol.contains("wave") || symbol.contains("activity") { return .waveform }
-        if symbol.contains("mic") { return .mic }
-        if symbol.contains("device") || symbol.contains("iphone") { return .device }
-        if symbol.contains("check") { return .check }
-        if symbol.contains("play") { return .play }
-        return .gear
     }
 }
 
