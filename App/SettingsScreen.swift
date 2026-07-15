@@ -11,6 +11,11 @@ import Grain
 struct SettingsScreen: View {
     @ObservedObject var brains: BrainStore
     @ObservedObject var remote: RemoteSession
+    // Device management lives here now (Nick 2026-07-14) as a "Devices & connections"
+    // page, not a competing bottom tab.
+    @ObservedObject var device: DeviceManager
+    @ObservedObject var manager: CaptureManager
+    @ObservedObject var sources: CaptureSourceRegistry
     @State private var actionChoice = ActionButtonChoice.current
     @State private var waitlistJoined =
         UserDefaults.standard.bool(forKey: "foundryx.waitlist.joined")
@@ -27,8 +32,30 @@ struct SettingsScreen: View {
     @State private var showingWaitlistSignIn = false
     @State private var waitlistSignInDismissed = false
 
+    /// A glanceable one-line status for the Devices row (the deeper page has the detail).
+    private var deviceStatusSubtitle: String {
+        if case .connected = device.connectionState { return "Omi connected" }
+        return "Omi, phone mic, and your computer"
+    }
+
     var body: some View {
         List {
+            Section {
+                NavigationLink {
+                    DeviceScreen(device: device, manager: manager, sources: sources, remote: remote)
+                        .navigationTitle("Devices")
+                        .navigationBarTitleDisplayMode(.inline)
+                } label: {
+                    HStack(spacing: GrainSpacing.x2) {
+                        Image(systemName: "earbuds")
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Devices & connections").grainTextStyle(.body)
+                            Text(deviceStatusSubtitle)
+                                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                        }
+                    }
+                }
+            }
             Section("Brain") {
                 brainRow(.justMyPhone,
                          subtitle: "Free. Recordings, transcripts, and summaries never leave this phone.")

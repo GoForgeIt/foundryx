@@ -196,30 +196,31 @@ final class WelcomeGateTests: XCTestCase {
     }
 }
 
-/// The app shell (features/app-shell.feature, spec §1/§9): four tabs in order,
-/// Capture first, no Settings tab; Settings presents as a sheet with an X close.
+/// The app shell (features/app-shell.feature, spec §1/§9 + Nick 2026-07-14): three
+/// CONTENT tabs in order, Capture first; no Settings tab AND no Device tab — Device
+/// management lives inside Settings, which presents as a sheet with an X close.
 final class AppShellPresentationTests: XCTestCase {
 
-    // Scenario: the app shows Capture, Activity, Chat, Device tabs in order
-    func testTabBarIsCaptureActivityChatDeviceInOrder() {
-        XCTAssertEqual(AppTab.allCases, [.capture, .activity, .chat, .device])
+    // Scenario: the app shows Capture, Activity, Chat tabs in order (Device moved to Settings)
+    func testTabBarIsCaptureActivityChatInOrder() {
+        XCTAssertEqual(AppTab.allCases, [.capture, .activity, .chat])
         XCTAssertEqual(AppTab.allCases.map(\.label),
-                       ["Capture", "Activity", "Chat", "Device"])
+                       ["Capture", "Activity", "Chat"])
         XCTAssertEqual(AppTab.launch, .capture, "Capture is the launch/home tab")
     }
 
-    // Scenario: there is no Settings tab
-    func testNoSettingsTab() {
-        XCTAssertFalse(AppTab.allCases.map(\.label).contains("Settings"))
+    // Scenario: neither Settings NOR Device is a bottom tab
+    func testNoSettingsOrDeviceTab() {
+        let labels = AppTab.allCases.map(\.label)
+        XCTAssertFalse(labels.contains("Settings"))
+        XCTAssertFalse(labels.contains("Device"), "Device lives inside Settings, not a tab")
     }
 
-    // Every tab carries a usable SF Symbol; Device reads as a wearable, not an antenna.
+    // Every tab carries a usable SF Symbol.
     func testTabIcons() {
         for tab in AppTab.allCases {
             XCTAssertFalse(tab.systemImage.isEmpty, "\(tab) needs an icon")
         }
-        XCTAssertFalse(AppTab.device.systemImage.contains("antenna"),
-                       "the Device tab is a wearable/earbud, not an antenna")
     }
 
     // Scenario: Settings opens as a dismissable sheet with an X close

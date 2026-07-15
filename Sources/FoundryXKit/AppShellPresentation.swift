@@ -11,7 +11,9 @@ import Foundation
 
 /// The bottom tab bar, in declaration = render order.
 public enum AppTab: String, CaseIterable, Hashable, Sendable {
-    case capture, activity, chat, device
+    // Content loops only (Nick 2026-07-14): Device management moved into Settings, so
+    // the tab bar is the three daily surfaces — no competing management tab.
+    case capture, activity, chat
 
     /// The launch/home tab (prototype: Capture first).
     public static let launch: AppTab = .capture
@@ -21,17 +23,14 @@ public enum AppTab: String, CaseIterable, Hashable, Sendable {
         case .capture: return "Capture"
         case .activity: return "Activity"
         case .chat: return "Chat"
-        case .device: return "Device"
         }
     }
 
-    /// SF Symbol per tab. Device is a wearable/earbud, not an antenna (spec §1).
     public var systemImage: String {
         switch self {
         case .capture: return "waveform"
         case .activity: return "waveform.path.ecg"
         case .chat: return "message"
-        case .device: return "earbuds"
         }
     }
 }

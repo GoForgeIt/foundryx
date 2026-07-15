@@ -38,16 +38,6 @@ struct RootView: View {
                 remote: remote, brains: brains, local: true,
                 showingAccount: .constant(false)))
         }
-        // DEV-only: `-Screen <settings|...>` mounts a deep screen directly for
-        // screenshot-verification (screens a tab-tap can't reach reliably).
-        if let i = ProcessInfo.processInfo.arguments.firstIndex(of: "-Screen"),
-           i + 1 < ProcessInfo.processInfo.arguments.count {
-            switch ProcessInfo.processInfo.arguments[i + 1] {
-            case "settings":
-                return AnyView(NavigationStack { SettingsScreen(brains: brains, remote: remote) })
-            default: break
-            }
-        }
         let dest = RootGate.destination(signedIn: remote.email != nil,
                                         splashElapsed: splashElapsed,
                                         brain: brains.choice,
@@ -435,18 +425,15 @@ private struct MainTabs: View {
             }
             .tabItem { Label(AppTab.chat.label, systemImage: AppTab.chat.systemImage) }
             .tag(TabRouter.Tab.chat)
-
-            NavigationStack {
-                DeviceScreen(device: device, manager: manager, sources: sources, remote: remote)
-                    .navigationTitle("Device")
-            }
-            .tabItem { Label(AppTab.device.label, systemImage: AppTab.device.systemImage) }
-            .tag(TabRouter.Tab.device)
         }
-        // Settings as a modal sheet (§9): X close, keeps every settings row.
+        // Settings as a modal sheet (§9): X close, keeps every settings row. Device
+        // management now lives HERE as a "Devices & connections" page (Nick 2026-07-14:
+        // one management home, not a competing Device tab) — connection STATUS stays
+        // glanceable on the Capture home.
         .sheet(isPresented: $showingSettings) {
             NavigationStack {
-                SettingsScreen(brains: brains, remote: remote)
+                SettingsScreen(brains: brains, remote: remote,
+                               device: device, manager: manager, sources: sources)
                     .navigationTitle(SettingsSheetPresentation.title)
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
@@ -477,6 +464,10 @@ private struct MainTabs: View {
         .onChange(of: device.connectionState) { _ in syncOmiConnection() }
         .onAppear {
             syncOmiConnection()
+            #if DEBUG
+            // Screen-proof: open the Settings sheet on launch so it can be screenshot.
+            if ProcessInfo.processInfo.arguments.contains("-OpenSettings") { showingSettings = true }
+            #endif
             // Start the model fetch the moment the phone tier appears — so the
             // download runs (visibly) during first-run exploration, not silently on
             // the first "stop recording". Best-effort; the banner shows progress.
