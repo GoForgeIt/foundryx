@@ -1064,27 +1064,16 @@ struct ConversationFacesView: View {
     /// in a Task so first paint is never held. A no-op where a summary already exists,
     /// where a synth is already running/done, or where the OS has no on-device model
     /// (the face then honestly points at the transcript rather than spinning forever).
+    /// DISABLED (build 211 crash mitigation): on-device summary synthesis drove Apple's
+    /// FoundationModels, whose aggregator crashes with an UNCATCHABLE Swift runtime trap
+    /// (EXC_BREAKPOINT "Range requires lowerBound <= upperBound" in
+    /// TranscriptWritingAggregator.transcriptEntriesSlice — incident 81C00A61). A trap can't
+    /// be caught, so the only mitigation is to stop calling the model. The summary still
+    /// resolves from the door/Kiln summary and the crash-safe card-summary fallback
+    /// (`summaryText` → `provisional?.summary`); a conversation with a transcript but no
+    /// summary anywhere shows the honest "No summary yet" state instead of risking the crash.
     private func maybeSynthesizeSummary() {
-        if let s = summaryText, !s.isEmpty { return }
-        // Attempt at most once per open — even a transcript the model returns nothing for
-        // must not re-run the (expensive) synth on every subsequent load-path call.
-        guard synthesizedSummary == nil, !summarizing, !synthAttempted else { return }
-        guard let transcript = transcriptText, !transcript.isEmpty else { return }
-        guard let titler = makeSystemTitler(), titler.isAvailable else { return }
-        summarizing = true
-        synthAttempted = true
-        let capId = captureId
-        let baseDir = CaptureWAL.documentsCaptures()
-        Task {
-            let result = try? await titler.titleAndSummary(for: transcript)
-            await MainActor.run {
-                summarizing = false
-                guard let summary = result?.summary
-                    .trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty else { return }
-                synthesizedSummary = summary
-                ConversationCardStore.merge(captureId: capId, baseDir: baseDir, summary: summary)
-            }
-        }
+        // intentionally a no-op — see doc comment above.
     }
 
     // MARK: - audio replay (same semantics as the previous detail)
