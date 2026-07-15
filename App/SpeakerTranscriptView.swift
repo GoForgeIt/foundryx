@@ -102,7 +102,11 @@ struct SpeakerTranscriptSection: View {
     /// Bare confirm of an inferred match (the inline "Confirm" affordance) — confirms
     /// the slot's existing inferred speaker without renaming.
     private func confirmInferred(slot: String) async {
-        _ = try? await DoorClient(target: target).confirmSpeaker(captureId: captureId, slot: slot)
+        let base = CaptureWAL.documentsCaptures()
+        SpeakerConfirmQueue.enqueue(captureId: captureId, slot: slot, baseDir: base)
+        if (try? await DoorClient(target: target).confirmSpeaker(captureId: captureId, slot: slot)) != nil {
+            SpeakerConfirmQueue.remove(captureId: captureId, slot: slot, baseDir: base)
+        }
         await onChanged()
     }
 }
@@ -449,9 +453,13 @@ struct SpeakerTagSheet: View {
     private func confirm(name: String?) async {
         busy = true; error = nil
         defer { busy = false }
+        // Durable FIRST: record the intent to disk so a hub blip can never lose it.
+        let base = CaptureWAL.documentsCaptures()
+        SpeakerConfirmQueue.enqueue(captureId: captureId, slot: speaker.slot, name: name, baseDir: base)
         do {
             let outcome = try await DoorClient(target: target)
                 .confirmSpeaker(captureId: captureId, slot: speaker.slot, name: name)
+            SpeakerConfirmQueue.remove(captureId: captureId, slot: speaker.slot, baseDir: base)  // shipped → dequeue
             await onChanged()
             if outcome.offeredCaptures.isEmpty {
                 dismiss()
@@ -459,7 +467,10 @@ struct SpeakerTagSheet: View {
                 offer = outcome   // surface the apply-to-past-conversations offer
             }
         } catch {
-            self.error = (error as NSError).localizedDescription
+            // Hub unreachable: the confirm stays QUEUED and ships on the next drain —
+            // don't lose it, and don't freeze the user behind a scary error. Save + close.
+            await onChanged()
+            dismiss()
         }
     }
 
@@ -469,10 +480,15 @@ struct SpeakerTagSheet: View {
         busy = true; error = nil
         defer { busy = false }
         let client = DoorClient(target: target)
+        let base = CaptureWAL.documentsCaptures()
         for offered in outcome.offeredCaptures {
-            _ = try? await client.confirmSpeaker(
+            SpeakerConfirmQueue.enqueue(captureId: offered.captureId, slot: offered.slotLabel,
+                                        speakerId: outcome.speakerId, baseDir: base)
+            if (try? await client.confirmSpeaker(
                 captureId: offered.captureId, slot: offered.slotLabel,
-                speakerId: outcome.speakerId)
+                speakerId: outcome.speakerId)) != nil {
+                SpeakerConfirmQueue.remove(captureId: offered.captureId, slot: offered.slotLabel, baseDir: base)
+            }
         }
         await onChanged()
         applied = true

@@ -1112,8 +1112,11 @@ private struct GrainSpeakerTranscriptRows: View {
     }
 
     private func confirmInferred(slot: String) async {
-        _ = try? await DoorClient(target: target)
-            .confirmSpeaker(captureId: captureId, slot: slot)
+        let base = CaptureWAL.documentsCaptures()
+        SpeakerConfirmQueue.enqueue(captureId: captureId, slot: slot, baseDir: base)
+        if (try? await DoorClient(target: target).confirmSpeaker(captureId: captureId, slot: slot)) != nil {
+            SpeakerConfirmQueue.remove(captureId: captureId, slot: slot, baseDir: base)
+        }
         await onChanged()
     }
 }

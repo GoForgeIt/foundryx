@@ -1946,6 +1946,7 @@ public final class CaptureManager: ObservableObject {
         // conversation-close (door/Lore was down, or segments weren't ACK'd yet).
         await retryPendingFinalizes()
         await retryPendingDeletes()
+        await retryPendingSpeakerConfirms()   // durable speaker-name confirms (hub-blip safe)
         shipAmbientSignalIfDue()   // redacted gate/card signal → desktop door (v3.3)
         await maybePrune()   // retention sweeps — throttled + run OFF the main thread
     }
@@ -2252,6 +2253,24 @@ public final class CaptureManager: ObservableObject {
     /// Instance shim for the reconcile path — delegates to the nonisolated primitive.
     private func newestSegmentAge(_ captureId: String) -> TimeInterval? {
         Self.newestSegmentAgeOnDisk(captureId, baseDir: baseDir)
+    }
+
+    /// Ship any speaker-name confirms that couldn't reach the hub when the user made them
+    /// (durable + offline-safe — mirrors the finalize/delete retry ethos). Stops on the
+    /// first transport failure (hub still down) to avoid hammering; resumes next drain.
+    public func retryPendingSpeakerConfirms() async {
+        let entries = SpeakerConfirmQueue.pending(baseDir: baseDir)
+        guard !entries.isEmpty else { return }
+        let client = DoorClient(target: target)
+        for e in entries {
+            do {
+                _ = try await client.confirmSpeaker(captureId: e.captureId, slot: e.slot,
+                                                    speakerId: e.speakerId, name: e.name)
+                SpeakerConfirmQueue.remove(captureId: e.captureId, slot: e.slot, baseDir: baseDir)
+            } catch {
+                break   // hub unreachable — keep the rest queued, retry next drain
+            }
+        }
     }
 
     /// Retry finalize for every capture still marked pending-finalize. Safe to call
