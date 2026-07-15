@@ -1052,10 +1052,21 @@ struct ConversationFacesView: View {
         let entry = CachedTranscript(transcript: c.transcript, title: c.title,
                                      summary: c.summary, segments: c.segments, speakers: c.speakers,
                                      fetchedAt: UInt64(max(0, Date().timeIntervalSince1970)))
-        TranscriptCacheStore.save(entry, captureId: captureId, baseDir: baseDir)
-        ConversationCardStore.merge(captureId: captureId, baseDir: baseDir,
-                                    title: c.title, summary: c.summary, stage: nil)
+        // Adopt the cache IN MEMORY immediately — the value is already in hand, so every
+        // row keyed on it re-renders now without waiting on disk. The dominant hang was
+        // doing the full-transcript JSONEncoder + atomic write (TranscriptCacheStore.save)
+        // and the card merge SYNCHRONOUSLY on the @MainActor after every fetch/confirm
+        // (0.9–1.5s per confirm). Push that disk work off the main actor; identical
+        // semantics, just deferred (same entry, same merge args).
         cached = entry
+        let capId = captureId
+        let title = c.title
+        let summary = c.summary
+        Task.detached(priority: .utility) {
+            TranscriptCacheStore.save(entry, captureId: capId, baseDir: baseDir)
+            ConversationCardStore.merge(captureId: capId, baseDir: baseDir,
+                                        title: title, summary: summary, stage: nil)
+        }
     }
 
     /// AC2 — when NO summary exists at any source but a transcript does, synthesize one
@@ -1220,12 +1231,18 @@ private struct GrainSpeakerTranscriptRows: View {
 
     private func confirmInferred(slot: String) async {
         let base = CaptureWAL.documentsCaptures()
-        SpeakerConfirmQueue.enqueue(captureId: captureId, slot: slot, baseDir: base)
+        let capId = captureId
+        // Durable first, but OFF the main actor — the queue's file read+rewrite must never
+        // hang the tap. Await so the intent is on disk before the door call (a crash between
+        // them must not lose it).
+        await Task.detached { SpeakerConfirmQueue.enqueue(captureId: capId, slot: slot, baseDir: base) }.value
         if let outcome = try? await DoorClient(target: target).confirmSpeaker(captureId: captureId, slot: slot) {
-            SpeakerConfirmQueue.remove(captureId: captureId, slot: slot, baseDir: base)
+            await Task.detached { SpeakerConfirmQueue.remove(captureId: capId, slot: slot, baseDir: base) }.value
             onConfirmed(outcome)   // optimistic: show the confirmed name instantly
         }
-        await onChanged()
+        // Reconcile the authoritative content in the background — don't hold the tap on a
+        // full captureContent re-fetch round-trip.
+        Task { await onChanged() }
     }
 }
 

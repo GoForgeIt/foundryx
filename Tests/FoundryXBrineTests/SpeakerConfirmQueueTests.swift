@@ -48,4 +48,62 @@ final class SpeakerConfirmQueueTests: XCTestCase {
         XCTAssertEqual(pending.count, 1, "de-duped by (captureId, slot)")
         XCTAssertEqual(pending.first?.name, "Nicholas", "latest intent supersedes the earlier one")
     }
+
+    // MARK: - Batch APIs (apply-to-N-past-conversations, collapsed to ONE read/write)
+
+    /// `enqueueAll` records every intent in ONE atomic write; a pre-existing intent for a
+    /// touched slot is superseded (latest-wins), never duplicated.
+    func testEnqueueAllPersistsAllEntriesLatestWins() throws {
+        let dir = try tmp()
+        // A stale intent for a slot the batch also touches — must be superseded, not doubled.
+        SpeakerConfirmQueue.enqueue(captureId: "cap-1", slot: "S1", name: "old", baseDir: dir)
+
+        SpeakerConfirmQueue.enqueueAll([
+            (captureId: "cap-1", slot: "S1", speakerId: "spk-1"),
+            (captureId: "cap-2", slot: "S1", speakerId: "spk-1"),
+            (captureId: "cap-3", slot: "S2", speakerId: "spk-1"),
+        ], baseDir: dir)
+
+        let pending = SpeakerConfirmQueue.pending(baseDir: dir)
+        XCTAssertEqual(pending.count, 3, "all batched intents present, the stale slot superseded (no dup)")
+        let byKey = Dictionary(pending.map { ("\($0.captureId)/\($0.slot)", $0) }, uniquingKeysWith: { a, _ in a })
+        XCTAssertEqual(byKey["cap-1/S1"]?.speakerId, "spk-1", "batch intent replaced the stale one")
+        XCTAssertNil(byKey["cap-1/S1"]?.name, "assign-to-existing batch carries no name")
+        XCTAssertEqual(byKey["cap-2/S1"]?.speakerId, "spk-1")
+        XCTAssertEqual(byKey["cap-3/S2"]?.speakerId, "spk-1")
+
+        // Durable across a re-read from disk (a single write left a valid file).
+        XCTAssertEqual(SpeakerConfirmQueue.pending(baseDir: dir).count, 3)
+    }
+
+    /// `removeAll` drops EXACTLY the given keys in one write; unknown keys are ignored and
+    /// untouched intents remain.
+    func testRemoveAllDropsExactlyTheGivenKeys() throws {
+        let dir = try tmp()
+        SpeakerConfirmQueue.enqueueAll([
+            (captureId: "cap-1", slot: "S1", speakerId: "spk-1"),
+            (captureId: "cap-2", slot: "S1", speakerId: "spk-1"),
+            (captureId: "cap-3", slot: "S2", speakerId: "spk-1"),
+        ], baseDir: dir)
+
+        SpeakerConfirmQueue.removeAll([
+            (captureId: "cap-1", slot: "S1"),
+            (captureId: "cap-3", slot: "S2"),
+            (captureId: "cap-9", slot: "S9"),   // not queued — ignored, no effect
+        ], baseDir: dir)
+
+        let remaining = SpeakerConfirmQueue.pending(baseDir: dir)
+        XCTAssertEqual(remaining.map { "\($0.captureId)/\($0.slot)" }, ["cap-2/S1"],
+                       "exactly the given keys removed; the rest untouched")
+    }
+
+    /// Empty batches are inert — they never clobber an existing queue.
+    func testBatchEmptyIsNoOp() throws {
+        let dir = try tmp()
+        SpeakerConfirmQueue.enqueue(captureId: "cap-1", slot: "S1", name: "Nick", baseDir: dir)
+        SpeakerConfirmQueue.enqueueAll([], baseDir: dir)
+        XCTAssertEqual(SpeakerConfirmQueue.pending(baseDir: dir).count, 1, "empty enqueueAll leaves the queue untouched")
+        SpeakerConfirmQueue.removeAll([], baseDir: dir)
+        XCTAssertEqual(SpeakerConfirmQueue.pending(baseDir: dir).count, 1, "empty removeAll leaves the queue untouched")
+    }
 }

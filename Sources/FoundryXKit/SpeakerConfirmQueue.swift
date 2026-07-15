@@ -48,10 +48,42 @@ public enum SpeakerConfirmQueue {
         write(entries, baseDir: baseDir)
     }
 
+    /// Durably record MANY intents in ONE read + ONE atomic write (latest-wins per slot,
+    /// name defaults to nil — the assign-to-existing / bulk-apply path). Calling `enqueue`
+    /// per capture is O(file) each → O(N²) for a bulk apply; this collapses it to a single
+    /// rewrite so "apply to N past conversations" doesn't hammer the disk N times.
+    public static func enqueueAll(_ entries: [(captureId: String, slot: String, speakerId: String?)],
+                                  baseDir: URL,
+                                  now: UInt64 = UInt64(max(0, Date().timeIntervalSince1970))) {
+        guard !entries.isEmpty else { return }
+        let incoming = Set(entries.map(Self.key))
+        var kept = pending(baseDir: baseDir).filter { !incoming.contains(key($0.captureId, $0.slot)) }
+        for e in entries {
+            kept.append(Entry(captureId: e.captureId, slot: e.slot, name: nil, speakerId: e.speakerId, ts: now))
+        }
+        write(kept, baseDir: baseDir)
+    }
+
     /// Drop the queued intent for a slot (called once it has shipped).
     public static func remove(captureId: String, slot: String, baseDir: URL) {
         let remaining = pending(baseDir: baseDir).filter { !($0.captureId == captureId && $0.slot == slot) }
         write(remaining, baseDir: baseDir)
+    }
+
+    /// Drop MANY queued intents in ONE read + ONE atomic write (the batch counterpart to
+    /// `remove` — for a bulk apply whose confirms all shipped). Keys not present are ignored.
+    public static func removeAll(_ keys: [(captureId: String, slot: String)], baseDir: URL) {
+        guard !keys.isEmpty else { return }
+        let drop = Set(keys.map { key($0.captureId, $0.slot) })
+        let remaining = pending(baseDir: baseDir).filter { !drop.contains(key($0.captureId, $0.slot)) }
+        write(remaining, baseDir: baseDir)
+    }
+
+    /// A collision-safe dedupe key for a (captureId, slot) pair (control-char separator
+    /// can't appear in a captureId or slot label).
+    private static func key(_ captureId: String, _ slot: String) -> String { "\(captureId)\u{1}\(slot)" }
+    private static func key(_ e: (captureId: String, slot: String, speakerId: String?)) -> String {
+        key(e.captureId, e.slot)
     }
 
     private static func write(_ entries: [Entry], baseDir: URL) {

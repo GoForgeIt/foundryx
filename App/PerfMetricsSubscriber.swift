@@ -158,8 +158,7 @@ extension PerfTelemetry: MXMetricManagerSubscriber {
         var flat: [String] = []
         func walk(_ frame: [String: Any]) {
             let bin = frame["binaryName"] as? String ?? "?"
-            let sym = frame["symbolName"] as? String
-                ?? (frame["address"] as? Int).map { "0x\(String($0, radix: 16))" } ?? "?"
+            let sym = frame["symbolName"] as? String ?? Self.slidBlame(frame)
             flat.append("0 \(bin) \(sym)")
             for sub in (frame["subFrames"] as? [[String: Any]]) ?? [] { walk(sub) }
         }
@@ -167,6 +166,21 @@ extension PerfTelemetry: MXMetricManagerSubscriber {
             for root in (stack["callStackRootFrames"] as? [[String: Any]]) ?? [] { walk(root) }
         }
         return PerfDiag.firstOwnFrame(in: flat, own: "FoundryX")
+    }
+
+    /// The blame token for an UN-symbolicated frame. A raw slid `address` is useless
+    /// off-device (it depends on ASLR), but MetricKit also gives us the STABLE
+    /// `offsetIntoBinaryTextSegment` + the frame's `binaryUUID` — from which we can
+    /// symbolicate later with the matching dSYM. Emit `at=<first8ofUUID>+0x<offset>`
+    /// when both are present; fall back to the raw address only when they're missing.
+    private static func slidBlame(_ frame: [String: Any]) -> String {
+        if let offset = frame["offsetIntoBinaryTextSegment"] as? Int,
+           let uuid = frame["binaryUUID"] as? String, !uuid.isEmpty {
+            let short = uuid.replacingOccurrences(of: "-", with: "").prefix(8).lowercased()
+            return "\(short)+0x\(String(offset, radix: 16))"
+        }
+        if let address = frame["address"] as? Int { return "0x\(String(address, radix: 16))" }
+        return "?"
     }
 }
 

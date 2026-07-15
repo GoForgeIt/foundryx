@@ -107,12 +107,17 @@ struct SpeakerTranscriptSection: View {
     /// the slot's existing inferred speaker without renaming.
     private func confirmInferred(slot: String) async {
         let base = CaptureWAL.documentsCaptures()
-        SpeakerConfirmQueue.enqueue(captureId: captureId, slot: slot, baseDir: base)
+        let capId = captureId
+        // Durable first, but OFF the main actor — the queue's file read+rewrite must never
+        // hang the tap. Await so the intent is on disk before the door call.
+        await Task.detached { SpeakerConfirmQueue.enqueue(captureId: capId, slot: slot, baseDir: base) }.value
         if let outcome = try? await DoorClient(target: target).confirmSpeaker(captureId: captureId, slot: slot) {
-            SpeakerConfirmQueue.remove(captureId: captureId, slot: slot, baseDir: base)
+            await Task.detached { SpeakerConfirmQueue.remove(captureId: capId, slot: slot, baseDir: base) }.value
             onConfirmed(outcome)   // optimistic: show the confirmed name instantly
         }
-        await onChanged()
+        // Reconcile the authoritative content in the background — don't hold the tap on a
+        // full captureContent re-fetch round-trip.
+        Task { await onChanged() }
     }
 }
 
@@ -461,25 +466,36 @@ struct SpeakerTagSheet: View {
     private func confirm(name: String?) async {
         busy = true; error = nil
         defer { busy = false }
-        // Durable FIRST: record the intent to disk so a hub blip can never lose it.
+        // Durable FIRST: record the intent to disk so a hub blip can never lose it — but
+        // OFF the main actor so the queue's file read+rewrite never hangs the sheet. Await
+        // so the intent is on disk before the door call (a crash between them must not lose it).
         let base = CaptureWAL.documentsCaptures()
-        SpeakerConfirmQueue.enqueue(captureId: captureId, slot: speaker.slot, name: name, baseDir: base)
+        let capId = captureId
+        let slot = speaker.slot
+        await Task.detached { SpeakerConfirmQueue.enqueue(captureId: capId, slot: slot, name: name, baseDir: base) }.value
         do {
             let outcome = try await DoorClient(target: target)
                 .confirmSpeaker(captureId: captureId, slot: speaker.slot, name: name)
-            SpeakerConfirmQueue.remove(captureId: captureId, slot: speaker.slot, baseDir: base)  // shipped → dequeue
+            await Task.detached { SpeakerConfirmQueue.remove(captureId: capId, slot: slot, baseDir: base) }.value  // shipped → dequeue
             onConfirmed(outcome)   // optimistic: flip this slot to confirmed instantly
-            await onChanged()
             if outcome.offeredCaptures.isEmpty {
+                // Nothing more the user must see → dismiss IMMEDIATELY; reconcile the
+                // authoritative content in the background (was: await a full re-fetch
+                // round-trip BEFORE dismissing — the painfully slow "confirm" UX).
                 dismiss()
+                Task { await onChanged() }
             } else {
-                offer = outcome   // surface the apply-to-past-conversations offer
+                // The offer sheet needs the confirmed state on screen — reconcile first,
+                // then surface the apply-to-past-conversations offer.
+                await onChanged()
+                offer = outcome
             }
         } catch {
             // Hub unreachable: the confirm stays QUEUED and ships on the next drain —
-            // don't lose it, and don't freeze the user behind a scary error. Save + close.
-            await onChanged()
+            // don't lose it, and don't freeze the user behind a scary error. Close now,
+            // reconcile in the background.
             dismiss()
+            Task { await onChanged() }
         }
     }
 
@@ -493,14 +509,45 @@ struct SpeakerTagSheet: View {
         onConfirmed(outcome)
         let client = DoorClient(target: target)
         let base = CaptureWAL.documentsCaptures()
-        for offered in outcome.offeredCaptures {
-            SpeakerConfirmQueue.enqueue(captureId: offered.captureId, slot: offered.slotLabel,
-                                        speakerId: outcome.speakerId, baseDir: base)
-            if (try? await client.confirmSpeaker(
-                captureId: offered.captureId, slot: offered.slotLabel,
-                speakerId: outcome.speakerId)) != nil {
-                SpeakerConfirmQueue.remove(captureId: offered.captureId, slot: offered.slotLabel, baseDir: base)
+        let speakerId = outcome.speakerId
+        let offered = outcome.offeredCaptures
+
+        // (a)+(b) Enqueue ALL intents in ONE atomic write, OFF the main actor. Was a
+        // per-capture enqueue+remove (each a full-file read+rewrite on the MainActor →
+        // O(N²)) that made "apply as me" across many past conversations crawl.
+        let intents = offered.map { (captureId: $0.captureId, slot: $0.slotLabel, speakerId: Optional(speakerId)) }
+        await Task.detached { SpeakerConfirmQueue.enqueueAll(intents, baseDir: base) }.value
+
+        // (c) Ship the confirms CONCURRENTLY with a bounded task group (≤6 in flight;
+        // DoorClient is Sendable), collecting the ones that succeeded. `busy` already
+        // shows progress.
+        let succeeded = await withTaskGroup(
+            of: (captureId: String, slot: String)?.self
+        ) { group -> [(captureId: String, slot: String)] in
+            let maxInFlight = 6
+            func ship(_ o: OfferedCapture) -> @Sendable () async -> (captureId: String, slot: String)? {
+                {
+                    let ok = (try? await client.confirmSpeaker(
+                        captureId: o.captureId, slot: o.slotLabel, speakerId: speakerId)) != nil
+                    return ok ? (captureId: o.captureId, slot: o.slotLabel) : nil
+                }
             }
+            var next = 0
+            while next < offered.count && next < maxInFlight {
+                group.addTask(operation: ship(offered[next])); next += 1
+            }
+            var done: [(captureId: String, slot: String)] = []
+            while let result = await group.next() {
+                if let r = result { done.append(r) }
+                if next < offered.count { group.addTask(operation: ship(offered[next])); next += 1 }
+            }
+            return done
+        }
+
+        // (d) Drop the SUCCEEDED intents in ONE batched write; failures stay queued for
+        // the capture drain to retry.
+        if !succeeded.isEmpty {
+            await Task.detached { SpeakerConfirmQueue.removeAll(succeeded, baseDir: base) }.value
         }
         await onChanged()
         applied = true
