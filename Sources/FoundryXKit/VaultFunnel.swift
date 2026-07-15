@@ -1,0 +1,403 @@
+// VaultFunnel — the phone-side activation spine for the paid Vault (track T-IOS-FUNNEL,
+// design canon: funnel-and-auth-spine-design.md "6 · Vault").
+//
+// The free app is on-device only (no Vault). A paid-intent action (chat / search
+// everything / add a device) that needs the Vault routes to a TRIGGER when the Vault is
+// off, or straight through when it's live — entitlement-aware routing (never a dead end).
+// Turning the Vault on hands off to an EXTERNAL browser for login + payment (Apple's rules
+// + review-clean). The mechanism of return is SERVER RECONCILIATION, not the deep link: a
+// checkout attempt is persisted BEFORE the browser opens, and entitlement is reconciled on
+// every foreground. A dismissed browser is NOT a failure — the server is authoritative.
+//
+// This file is the PURE, hermetically-testable core: the state enum, the routing rule, the
+// durable checkout-attempt store, the network/browser SEAMS (protocols), and the model that
+// drives the flow. The SwiftUI screens (App/VaultFunnelView.swift) and the live network
+// client (VaultSignupClient.swift) sit on top of these seams.
+
+import Foundation
+
+// MARK: - Actions + entitlement (pure routing)
+
+/// A paid-intent action — something that only works with a live Vault.
+public enum VaultAction: String, CaseIterable, Equatable, Sendable {
+    /// Ask Foundry about everything you've captured.
+    case chat
+    /// Search every capture by meaning (not just exact text).
+    case searchEverything
+    /// Add another device to your Vault.
+    case addDevice
+
+    /// The context label shown on the trigger ("Chat · Search everything").
+    public var triggerLabel: String {
+        switch self {
+        case .chat: return "Chat"
+        case .searchEverything: return "Search everything"
+        case .addDevice: return "Add a device"
+        }
+    }
+}
+
+/// Whether this phone currently has a live, paid Vault.
+public enum VaultEntitlement: Equatable, Sendable {
+    case off
+    case live
+}
+
+/// Where a paid-intent action lands.
+public enum VaultRoute: Equatable, Sendable {
+    /// No Vault: guide the user into setup, preserving the attempted action.
+    case trigger(VaultAction)
+    /// Vault live: perform the action against the Vault.
+    case vault(VaultAction)
+}
+
+public enum VaultRouter {
+    /// Entitlement-aware routing (design §"Routing must be entitlement-aware"): a
+    /// Vault-only action routes to the trigger when the Vault is off, to the Vault
+    /// when it's live. Never a dead end.
+    public static func route(action: VaultAction, entitlement: VaultEntitlement) -> VaultRoute {
+        switch entitlement {
+        case .off: return .trigger(action)
+        case .live: return .vault(action)
+        }
+    }
+}
+
+// MARK: - Plans (native pricing rows)
+
+/// A Vault plan. Copy locked from the design (rewritten differentiator copy).
+public enum VaultPlan: String, CaseIterable, Equatable, Sendable {
+    case starter
+    case pro
+    case power
+
+    public var title: String {
+        switch self {
+        case .starter: return "Starter"
+        case .pro: return "Pro"
+        case .power: return "Power"
+        }
+    }
+
+    public var priceUSD: Int {
+        switch self {
+        case .starter: return 29
+        case .pro: return 79
+        case .power: return 199
+        }
+    }
+
+    public var blurb: String {
+        switch self {
+        case .starter:
+            return "Search every capture by meaning, and connect your memory to your own tools."
+        case .pro:
+            return "Everything in Starter, plus chat with Foundry about anything you've captured. Larger AI allowance."
+        case .power:
+            return "Everything in Pro, plus scheduled playbooks, advanced approvals, and premium voice recognition."
+        }
+    }
+
+    /// Pro is the recommended default (design: three selectable rows, Pro★).
+    public var recommended: Bool { self == .pro }
+
+    /// The default selection when the plans screen opens.
+    public static let recommendedDefault: VaultPlan = .pro
+}
+
+// MARK: - Provisioning status (what the server tells us on reconcile)
+
+/// The server-authoritative outcome of a reconcile / return-ticket exchange. The
+/// opaque single-use ticket NEVER carries the cell URL or bearer (design law) — the
+/// server returns them here, only after verifying payment.
+public enum VaultProvisionStatus: Equatable, Sendable {
+    /// No verified payment yet (browser dismissed, still processing). NOT a failure —
+    /// the funnel stays in "Checking payment" and reconciles again on next foreground.
+    case pending
+    /// Payment verified; the isolated cell is still being provisioned.
+    case provisioning
+    /// The Vault is live: connect to `cellURL` with `handoff` as the door bearer.
+    case ready(cellURL: String, handoff: String)
+}
+
+/// The result of persisting a checkout attempt: the opaque id we reconcile against,
+/// plus the browser URL to open (server-provided, else the model builds the canonical
+/// `goforgeit.com/vault/start` URL).
+public struct VaultCheckoutAttempt: Equatable, Sendable {
+    public let id: String
+    public let checkoutURL: URL?
+    public init(id: String, checkoutURL: URL? = nil) {
+        self.id = id
+        self.checkoutURL = checkoutURL
+    }
+}
+
+// MARK: - Seams (network + browser)
+
+/// The signup-service seam (live impl: VaultSignupClient → foundry-signup Cloud Run).
+/// Stubbed in the hermetic test — the funnel never dials the live service under test.
+public protocol VaultSignupService: Sendable {
+    /// POST /signup/checkout-attempt — persist a checkout reference BEFORE opening the
+    /// browser (the return-reconciliation model). Returns the opaque attempt id.
+    func createCheckoutAttempt(plan: VaultPlan, idToken: String?) async throws -> VaultCheckoutAttempt
+    /// POST /signup/reconcile (Bearer id_token) — server-authoritative entitlement for
+    /// this attempt. Called on every foreground.
+    func reconcile(attemptId: String, idToken: String?) async throws -> VaultProvisionStatus
+    /// POST /app/return {ticket} — exchange the deep-link ticket for provisioning status
+    /// (a callback proves navigation, not payment — this verifies server-side).
+    func exchangeReturn(ticket: String, idToken: String?) async throws -> VaultProvisionStatus
+}
+
+/// The external-browser seam (live impl wraps ASWebAuthenticationSession). Returns the
+/// return-callback URL if the session completed with one, or nil if the user dismissed
+/// it (dismissal ≠ failure). Stubbed in the hermetic test.
+public protocol VaultCheckoutBrowser: Sendable {
+    func open(_ url: URL) async throws -> URL?
+}
+
+// MARK: - Durable checkout-attempt store
+
+/// Persists the in-flight checkout attempt (id + plan) so reconcile survives the app
+/// being backgrounded or killed mid-checkout (design: "reconcile entitlement on every
+/// launch/foreground"). UserDefaults-backed, injectable for tests.
+public struct VaultCheckoutAttemptStore {
+    private static let idKey = "foundryx.vault.checkoutAttempt.id"
+    private static let planKey = "foundryx.vault.checkoutAttempt.plan"
+
+    private let defaults: UserDefaults
+    public init(defaults: UserDefaults = .standard) { self.defaults = defaults }
+
+    public struct Pending: Equatable, Sendable {
+        public let attemptId: String
+        public let plan: VaultPlan
+        public init(attemptId: String, plan: VaultPlan) {
+            self.attemptId = attemptId
+            self.plan = plan
+        }
+    }
+
+    public func save(attemptId: String, plan: VaultPlan) {
+        defaults.set(attemptId, forKey: Self.idKey)
+        defaults.set(plan.rawValue, forKey: Self.planKey)
+    }
+
+    public func load() -> Pending? {
+        guard let id = defaults.string(forKey: Self.idKey), !id.isEmpty else { return nil }
+        let plan = defaults.string(forKey: Self.planKey).flatMap(VaultPlan.init) ?? .pro
+        return Pending(attemptId: id, plan: plan)
+    }
+
+    public func clear() {
+        defaults.removeObject(forKey: Self.idKey)
+        defaults.removeObject(forKey: Self.planKey)
+    }
+}
+
+// MARK: - The funnel state machine
+
+/// Every screen the funnel can show. The trigger carries the attempted action so it can
+/// be preserved + resumed after provisioning (design: "Preserve the attempted action").
+public enum VaultFunnelState: Equatable, Sendable {
+    /// No funnel on screen — the free app. `entitlement` decides routing.
+    case idle
+    /// "This lives in your Vault" — paid intent hit while the Vault is off.
+    case trigger(VaultAction)
+    /// "Turn on your Vault" — the intro / on-device→Vault framing.
+    case intro
+    /// Native pricing rows; `selected` is the chosen plan.
+    case plans(selected: VaultPlan)
+    /// The CTA fired: persisting the attempt + opening the external browser.
+    case opening(plan: VaultPlan)
+    /// "Checking your payment…" — durable, server-reconciled (a dismissal lands here).
+    case checkingPayment
+    /// "Setting up your Vault." — payment confirmed, the cell is provisioning.
+    case settingUp
+    /// "Your Vault is live." — connected to the cell (CellConfig carried for the app).
+    case live(CellConfig)
+}
+
+/// Drives the Vault funnel: routing, browser hand-off, and reconcile. Holds the seams and
+/// the durable attempt store. `@MainActor ObservableObject` so the SwiftUI screens observe
+/// `state`; driven identically from the hermetic Brine steps (via MainActor.run).
+@MainActor
+public final class VaultFunnelModel: ObservableObject {
+    @Published public private(set) var state: VaultFunnelState = .idle
+    /// The connected Vault brain, set the moment provisioning reports ready — the app
+    /// hands this to the capture pipeline / chat exactly like the desktop door.
+    @Published public private(set) var connectedVault: CellBackend?
+
+    /// Current entitlement, derived from whether a Vault is connected/paired.
+    public var entitlement: VaultEntitlement { connectedVault == nil ? .off : .live }
+
+    private let service: VaultSignupService
+    private let browser: VaultCheckoutBrowser
+    private let cellStore: CellStore
+    private let attempts: VaultCheckoutAttemptStore
+    private let idToken: @Sendable () -> String?
+    /// The base for the canonical checkout URL when the service doesn't return one.
+    private let checkoutBase: URL
+    /// The deep-link return callback the browser redirects to.
+    private let returnCallback: URL
+
+    public init(service: VaultSignupService,
+                browser: VaultCheckoutBrowser,
+                cellStore: CellStore,
+                attempts: VaultCheckoutAttemptStore = VaultCheckoutAttemptStore(),
+                checkoutBase: URL = URL(string: "https://goforgeit.com/vault/start")!,
+                returnCallback: URL = URL(string: "foundryx://vault/return")!,
+                idToken: @escaping @Sendable () -> String? = { nil }) {
+        self.service = service
+        self.browser = browser
+        self.cellStore = cellStore
+        self.attempts = attempts
+        self.checkoutBase = checkoutBase
+        self.returnCallback = returnCallback
+        self.idToken = idToken
+    }
+
+    // MARK: entry + routing
+
+    /// A paid-intent action fired. Routes to the trigger (Vault off) or returns the
+    /// vault route (Vault live). Returns the route so the caller can perform the action
+    /// when it's live; drives the funnel onto the trigger when it's off.
+    @discardableResult
+    public func intent(_ action: VaultAction) -> VaultRoute {
+        let route = VaultRouter.route(action: action, entitlement: entitlement)
+        if case .trigger(let a) = route { state = .trigger(a) }
+        return route
+    }
+
+    /// Trigger → intro ("Set up your Vault").
+    public func beginSetup() { state = .intro }
+
+    /// Intro → native pricing (Pro pre-selected).
+    public func seePlans() { state = .plans(selected: .recommendedDefault) }
+
+    /// Select a plan row on the plans screen.
+    public func selectPlan(_ plan: VaultPlan) {
+        guard case .plans = state else { return }
+        state = .plans(selected: plan)
+    }
+
+    /// Dismiss the funnel (Not now) — back to the free app, action not performed.
+    public func dismiss() { state = .idle }
+
+    // MARK: browser hand-off
+
+    /// The plans CTA. Persist the checkout attempt FIRST (return-recon model), then open
+    /// the external browser. Whether the browser completes with a return URL or the user
+    /// dismisses it, we land in "Checking payment" and let reconcile decide — the server
+    /// is authoritative, so a dismissed sheet is never a failure.
+    public func continueToCheckout(plan: VaultPlan) async {
+        state = .opening(plan: plan)
+        let attempt: VaultCheckoutAttempt
+        do {
+            attempt = try await service.createCheckoutAttempt(plan: plan, idToken: idToken())
+        } catch {
+            // Couldn't even register the attempt — return to plans so the user can retry.
+            state = .plans(selected: plan)
+            return
+        }
+        // Persist BEFORE opening the browser so reconcile works even if we're killed.
+        attempts.save(attemptId: attempt.id, plan: plan)
+
+        let url = attempt.checkoutURL ?? canonicalCheckoutURL(plan: plan, attemptId: attempt.id)
+        let returned = (try? await browser.open(url)) ?? nil
+        // Either path is durable: move to Checking payment and reconcile.
+        state = .checkingPayment
+        if let returned {
+            await handleReturn(url: returned)
+        } else {
+            await reconcileOnForeground()
+        }
+    }
+
+    /// The canonical `goforgeit.com/vault/start` URL when the service didn't supply one.
+    private func canonicalCheckoutURL(plan: VaultPlan, attemptId: String) -> URL {
+        var comps = URLComponents(url: checkoutBase, resolvingAgainstBaseURL: false)
+        comps?.queryItems = [
+            URLQueryItem(name: "plan", value: plan.rawValue),
+            URLQueryItem(name: "attempt", value: attemptId),
+            URLQueryItem(name: "return", value: returnCallback.absoluteString),
+        ]
+        return comps?.url ?? checkoutBase
+    }
+
+    // MARK: return + reconcile (server-authoritative)
+
+    /// The return deep link (`foundryx://vault/return?ticket=…`). Convenience only: it
+    /// triggers an immediate reconcile via the opaque single-use ticket. If the ticket
+    /// yields nothing verified yet, fall through to the durable foreground reconcile.
+    public func handleReturn(url: URL) async {
+        guard let ticket = Self.ticket(from: url) else {
+            await reconcileOnForeground()
+            return
+        }
+        let status = (try? await service.exchangeReturn(ticket: ticket, idToken: idToken())) ?? .pending
+        await apply(status)
+        if status == .pending { await reconcileOnForeground() }
+    }
+
+    /// Called on EVERY app foreground/launch. If a checkout attempt is pending, ask the
+    /// server for the authoritative status and advance the durable states. No attempt ⇒
+    /// no-op (a returning free user is never dragged into the funnel).
+    public func reconcileOnForeground() async {
+        guard let pending = attempts.load() else { return }
+        // If nothing is on screen yet but an attempt is mid-flight, surface the durable
+        // "checking" state so the user sees progress, never a dead free screen.
+        if case .idle = state { state = .checkingPayment }
+        guard let status = try? await service.reconcile(attemptId: pending.attemptId, idToken: idToken())
+        else { return }        // network blip: keep the current durable state, retry next foreground
+        await apply(status)
+    }
+
+    /// Apply a server-authoritative status to the funnel + entitlement.
+    private func apply(_ status: VaultProvisionStatus) async {
+        switch status {
+        case .pending:
+            // Not verified yet — hold "Checking payment" unless we've already advanced.
+            if isWaiting { state = .checkingPayment }
+        case .provisioning:
+            state = .settingUp
+        case .ready(let cellURL, let handoff):
+            connect(cellURL: cellURL, handoff: handoff)
+        }
+    }
+
+    /// True while we're in a durable waiting state (so a later `.pending` reconcile
+    /// doesn't yank a `settingUp` back to `checkingPayment`).
+    private var isWaiting: Bool {
+        switch state {
+        case .checkingPayment, .opening: return true
+        default: return false
+        }
+    }
+
+    // MARK: hand-off to CellBackend
+
+    /// The Vault is live: pair the cell + build the CellBackend the whole app drives, and
+    /// clear the completed checkout attempt. The bearer is the door handoff the cell minted
+    /// (never seen in any URL). Failure to build a valid target holds the durable state so
+    /// a retry can recover, rather than dead-ending.
+    private func connect(cellURL: String, handoff: String) {
+        let config = CellConfig(url: cellURL, auth: .bearer(handoff))
+        do {
+            let backend = try CellBackend(cellURL: cellURL, bearer: handoff)
+            cellStore.pair(config)
+            connectedVault = backend
+            attempts.clear()
+            state = .live(config)
+        } catch {
+            // A malformed cell URL/bearer from the server — stay in setting-up; reconcile
+            // will try again. Fail loud in logs, not by dropping the user out of the funnel.
+            state = .settingUp
+        }
+    }
+
+    /// Extract the opaque ticket from a return URL (`?ticket=…`).
+    public nonisolated static func ticket(from url: URL) -> String? {
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "ticket" })?.value
+            .flatMap { $0.isEmpty ? nil : $0 }
+    }
+}

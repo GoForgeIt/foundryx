@@ -25,6 +25,14 @@ struct RootView: View {
 
     @StateObject private var brains = BrainStore()
 
+    /// The Vault activation funnel (track T-IOS-FUNNEL): paid-intent trigger → browser
+    /// hand-off → server reconciliation → live Vault. Presented over the app whenever its
+    /// state leaves `.idle`; reconciled on every foreground so a dismissed browser still
+    /// completes. The entitlement router (`vaultFunnel.intent`) is what Vault-only actions
+    /// call to route to the trigger (Vault off) or straight through (Vault live).
+    @StateObject private var vaultFunnel = VaultFunnelModel.live()
+    @Environment(\.scenePhase) private var scenePhase
+
     /// T5: an established, signed-in, non-opted-out user sees the persona welcome AS
     /// the post-sign-in connect gate (with live status) until they enter the app.
     /// False for a signed-out user, a fresh install (not yet onboarded), an opted-out
@@ -148,6 +156,29 @@ struct RootView: View {
                     .sheet(isPresented: $showingAccount) {
                         SignInView(remote: remote) { showingAccount = false }
                     }
+            }
+        }
+        // The Vault funnel rides over every destination: a paid-intent trigger, the browser
+        // hand-off, and the durable return states. Dismisses to `.idle` (back to the app).
+        .fullScreenCover(isPresented: Binding(
+            get: { vaultFunnel.state != .idle },
+            set: { if !$0 { vaultFunnel.dismiss() } })) {
+            VaultFunnelView(model: vaultFunnel)
+        }
+        // Server reconciliation is the mechanism (design law): reconcile entitlement on every
+        // foreground so a checkout finished/abandoned in the browser still resolves. Keep the
+        // id_token box fresh for the reconcile/checkout Bearer.
+        .onChange(of: scenePhase) { phase in
+            if phase == .active {
+                VaultAuthTokenBox.shared.token = remote.idToken
+                Task { await vaultFunnel.reconcileOnForeground() }
+            }
+        }
+        .onChange(of: remote.idToken) { VaultAuthTokenBox.shared.token = $0 }
+        // The return deep link is convenience only (it triggers an immediate reconcile).
+        .onOpenURL { url in
+            if url.scheme == "foundryx", url.host == "vault" {
+                Task { await vaultFunnel.handleReturn(url: url) }
             }
         }
         .task { await remote.restore() }
