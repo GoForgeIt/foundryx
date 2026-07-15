@@ -61,7 +61,8 @@ struct RootView: View {
         let dest = RootGate.destination(signedIn: remote.email != nil,
                                         splashElapsed: splashElapsed,
                                         brain: brains.choice,
-                                        hostResolved: remote.makeDoorTarget() != nil)
+                                        hostResolved: remote.makeDoorTarget() != nil,
+                                        letStraightIn: WelcomePrefs.letStraightIn())
         return AnyView(bodyContent(dest))
     }
 
@@ -154,6 +155,8 @@ struct RootView: View {
     /// standalone persona welcome (established installs that haven't seen it).
     private func presentFirstRunSurfacesIfNeeded() {
         OnboardingPrefs.migrateIfPriorUse(baseDir: CaptureWAL.documentsCaptures())
+        // Honor "take me straight in" — no welcome ceremony when the user turned it off.
+        if WelcomePrefs.letStraightIn() { return }
         let onboardingWillPresent =
             OnboardingGate.shouldPresent(signedIn: true, completed: OnboardingPrefs.completed)
         if onboardingWillPresent {

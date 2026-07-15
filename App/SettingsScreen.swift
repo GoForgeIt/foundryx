@@ -25,6 +25,7 @@ struct SettingsScreen: View {
         UserDefaults.standard.string(forKey: AmbientPrefs.agentNameKey) ?? ""
     @State private var fullContextGrading = AmbientPrefs.fullContextGrading()
     @State private var showingTour = false
+    @State private var letStraightIn = WelcomePrefs.letStraightIn()
     @State private var persona = PersonaPrefs.persona()
     /// B5 (track 20260714T1800): a tokenless (phone-only) user tapping the
     /// waitlist gets the sign-in sheet first; the POST fires on sign-in success;
@@ -188,6 +189,17 @@ struct SettingsScreen: View {
                             .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                     }
                 }
+                Toggle(isOn: Binding(
+                    get: { letStraightIn },
+                    set: { on in letStraightIn = on; WelcomePrefs.setLetStraightIn(on) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Open straight to the app").grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                        Text("Skip the welcome and take me in the moment I open the app — even before connecting.")
+                            .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                    }
+                }
+                .tint(GrainColor.forgeBlue)
                 Button("Replay the full first-run tour") { showingTour = true }
                 NavigationLink("Privacy & your data") { PrivacyView() }
             } header: {

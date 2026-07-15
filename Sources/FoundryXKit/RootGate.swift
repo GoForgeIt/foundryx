@@ -20,8 +20,12 @@ public enum RootGate {
     public static func destination(signedIn: Bool,
                                    splashElapsed: Bool,
                                    brain: BrainChoice,
-                                   hostResolved: Bool) -> RootDestination {
-        guard signedIn, splashElapsed else { return .signInGate }
+                                   hostResolved: Bool,
+                                   letStraightIn: Bool = false) -> RootDestination {
+        guard splashElapsed else { return .signInGate }   // the branded launch splash first
+        // "Take me straight in": a returning user who turned the welcome/sign-in gate off
+        // opens directly into the phone-only tier — whole and offline, no forced sign-in.
+        if !signedIn { return letStraightIn ? .phoneBrain : .signInGate }
         if brain == .myComputer, hostResolved { return .computerBrain }
         return .phoneBrain
     }

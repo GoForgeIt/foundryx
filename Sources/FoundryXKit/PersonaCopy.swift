@@ -102,6 +102,11 @@ public enum PersonaWelcomeLayout {
 /// suppress the WELCOME: established installs see it once after the update.
 public enum WelcomePrefs {
     public static let seenKey = "foundryx.welcome.seen"
+    /// "Take me straight in": skip the short welcome AND the forced sign-in gate, so the
+    /// app opens directly into the phone-only tier — whole and offline. Default OFF (the
+    /// welcome + sign-in still lead); a returning user who doesn't want the ceremony flips
+    /// it once in Settings.
+    public static let letStraightInKey = "foundryx.welcome.letStraightIn"
 
     public static func seen(defaults: UserDefaults = .standard) -> Bool {
         defaults.bool(forKey: seenKey)
@@ -109,6 +114,14 @@ public enum WelcomePrefs {
 
     public static func markSeen(defaults: UserDefaults = .standard) {
         defaults.set(true, forKey: seenKey)
+    }
+
+    public static func letStraightIn(defaults: UserDefaults = .standard) -> Bool {
+        defaults.bool(forKey: letStraightInKey)
+    }
+
+    public static func setLetStraightIn(_ on: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(on, forKey: letStraightInKey)
     }
 }
 
