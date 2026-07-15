@@ -93,7 +93,7 @@ enum AmbientNotifier {
     }
 
     /// Post the ROUTED outcome of a real gate candidate. Lookups notify with the
-    /// actual answer from the user's memory (informational). todo/workflow/agent
+    /// actual answer from the user's memory (informational). todo/playbook/workflow/agent
     /// become CONFIRM CARDS — "Want me to X?" with Run/Dismiss; Run seeds a kiln
     /// chat with the moment (nothing executes without it).
     static func post(candidate: AmbientCandidate, outcome: AmbientRouteOutcome?,
@@ -126,11 +126,21 @@ enum AmbientNotifier {
             title = "You called your agent"
             body = "Want me to: \(ask)?"
             seed = chatSeed(candidate)
+        case ("playbook", _):
+            title = "Noticed a to-do"
+            if let pick = outcome?.playbook {
+                body = "Run the “\(pick.kind)” playbook?"
+                seed = playbookSeed(candidate, pick)
+            } else {
+                // No specific pick means a plain confirm card. Never ask the chat
+                // to execute a playbook the door could not name.
+                body = "Want me to: \(ask)?"
+                seed = chatSeed(candidate)
+            }
         // The door routes a repeatable moment as `playbook` (renamed from the
-        // retired `workflow` term). Match `workflow` too as a transitional alias
-        // so a new phone still handles an older door build during rollout — drop
-        // it once every door in the field emits `playbook`.
-        case ("todo", _), ("playbook", _), ("workflow", _):
+        // retired `workflow` term). Match `workflow` as a transitional generic
+        // alias during rollout; it carries no selected playbook.
+        case ("todo", _), ("workflow", _):
             title = "Noticed a to-do"
             body = "Want me to: \(ask)?"
             seed = chatSeed(candidate)
@@ -173,6 +183,11 @@ enum AmbientNotifier {
     /// agent has the context the user's own ears had.
     private static func chatSeed(_ c: AmbientCandidate) -> String {
         "While I was recording, this came up: “\(c.utterance)”\n\nPlease \(c.summary.isEmpty ? "help with that" : c.summary)."
+    }
+
+    private static func playbookSeed(_ c: AmbientCandidate,
+                                     _ pick: AmbientPlaybookPick) -> String {
+        "While I was recording, this came up: “\(c.utterance)”.\n\nThis looks like the “\(pick.kind)” playbook — \(pick.reason).\n\nPlease run it, and tell me which playbook you're running and why as you go."
     }
 
     /// Fire a sample notification so the user can experience the surface before any

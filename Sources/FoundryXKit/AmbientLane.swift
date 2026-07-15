@@ -16,6 +16,44 @@
 
 import Foundation
 
+// MARK: - Preferences
+
+/// Ambient-intelligence preference keys (track 20260710T2030 v3). One place so the
+/// lane wiring, Settings, and the door client agree. The master switch defaults OFF;
+/// full-context grading defaults ON only when this device has an enrolled owner voice.
+enum AmbientPrefs {
+    static let enabledKey = "foundryx.ambient.enabled"
+    static let agentNameKey = "foundryx.ambient.agentName"
+    static let gradingKey = "foundryx.ambient.grading"
+
+    /// Honor an explicit user choice. Until one exists, only an enrolled owner voice
+    /// opts this device into sending raw context for grading.
+    static func fullContextGrading(
+        defaults: UserDefaults = .standard,
+        ownerVoiceBaseDir: URL = CaptureWAL.documentsCaptures()
+    ) -> Bool {
+        if defaults.object(forKey: gradingKey) != nil {
+            return defaults.bool(forKey: gradingKey)
+        }
+        if case .enrolled = OwnerVoiceStore.state(baseDir: ownerVoiceBaseDir) {
+            return true
+        }
+        return false
+    }
+
+    /// The Tier-1 gate decision log (shared by the lane wiring, the debug readout,
+    /// and the Temper scorer). One place so they never disagree.
+    static func decisionLogURL() -> URL {
+        CaptureWAL.documentsCaptures().appendingPathComponent("ambient-decisions.jsonl")
+    }
+
+    /// The redacted-signal shipper's persisted byte-offset watermark (track v3.3) —
+    /// beside the logs so it moves with them.
+    static func signalWatermarkURL() -> URL {
+        CaptureWAL.documentsCaptures().appendingPathComponent(".ambient-signal-shipped")
+    }
+}
+
 // MARK: - Gate seam
 
 /// An actionable moment the gate surfaced from a transcript window. Tier 2 (the
@@ -35,26 +73,48 @@ public struct AmbientCandidate: Codable, Equatable, Sendable {
     }
 }
 
+public struct AmbientPlaybookPick: Codable, Equatable, Sendable {
+    public let kind: String
+    public let reason: String
+
+    public init(kind: String, reason: String) {
+        self.kind = kind
+        self.reason = reason
+    }
+}
+
 /// The door's Tier-2 verdict on a candidate: how it routed, and — for lookups —
 /// the answer compiled from the user's OWN memory (nil = memory had nothing, or a
 /// non-lookup route). Wire shape of `POST /foundryx/ambient/candidate`.
 public struct AmbientRouteOutcome: Codable, Equatable, Sendable {
-    /// `lookup` | `todo` | `workflow` | `agent`
+    /// `lookup` | `todo` | `playbook` | `agent` (`workflow` during rollout)
     public let route: String
     public let answer: String?
     /// Agent route only: did the command's VOICE match a confirmed enrolled
     /// speaker (the owner gate)? Absent/false ⇒ never offer the agent card.
     public let ownerVerified: Bool?
+    /// Playbook route only: the repeatable playbook the door selected and why.
+    public let playbook: AmbientPlaybookPick?
 
     enum CodingKeys: String, CodingKey {
-        case route, answer
+        case route, answer, playbook
         case ownerVerified = "owner_verified"
     }
 
-    public init(route: String, answer: String? = nil, ownerVerified: Bool? = nil) {
+    public init(route: String, answer: String? = nil, ownerVerified: Bool? = nil,
+                playbook: AmbientPlaybookPick? = nil) {
         self.route = route
         self.answer = answer
         self.ownerVerified = ownerVerified
+        self.playbook = playbook
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        route = try values.decode(String.self, forKey: .route)
+        answer = try values.decodeIfPresent(String.self, forKey: .answer)
+        ownerVerified = try values.decodeIfPresent(Bool.self, forKey: .ownerVerified)
+        playbook = try values.decodeIfPresent(AmbientPlaybookPick.self, forKey: .playbook)
     }
 }
 

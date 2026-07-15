@@ -8,26 +8,6 @@
 import SwiftUI
 import Grain
 
-/// Ambient-intelligence preference keys (track 20260710T2030 v3). One place so the
-/// lane wiring (RootView), the Settings toggle, and tests agree. DEFAULT OFF —
-/// `bool(forKey:)` on a missing key is false, which IS the opt-out state.
-enum AmbientPrefs {
-    static let enabledKey = "foundryx.ambient.enabled"
-    static let agentNameKey = "foundryx.ambient.agentName"
-
-    /// The Tier-1 gate decision log (shared by the lane wiring, the debug readout,
-    /// and — later — the Temper scorer). One place so they never disagree.
-    static func decisionLogURL() -> URL {
-        CaptureWAL.documentsCaptures().appendingPathComponent("ambient-decisions.jsonl")
-    }
-
-    /// The redacted-signal shipper's persisted byte-offset watermark (track v3.3) —
-    /// beside the logs so it moves with them.
-    static func signalWatermarkURL() -> URL {
-        CaptureWAL.documentsCaptures().appendingPathComponent(".ambient-signal-shipped")
-    }
-}
-
 struct SettingsScreen: View {
     @ObservedObject var brains: BrainStore
     @ObservedObject var remote: RemoteSession
@@ -38,6 +18,7 @@ struct SettingsScreen: View {
         UserDefaults.standard.bool(forKey: AmbientPrefs.enabledKey)
     @State private var agentName =
         UserDefaults.standard.string(forKey: AmbientPrefs.agentNameKey) ?? ""
+    @State private var fullContextGrading = AmbientPrefs.fullContextGrading()
     @State private var showingTour = false
     @State private var persona = PersonaPrefs.persona()
     /// B5 (track 20260714T1800): a tokenless (phone-only) user tapping the
@@ -125,6 +106,25 @@ struct SettingsScreen: View {
                     }
                     Text("Say this name in a conversation to ask your agent for something. Only offered — nothing runs without your confirmation.")
                         .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+
+                    VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                        Toggle(isOn: Binding(
+                            get: { fullContextGrading },
+                            set: { on in
+                                fullContextGrading = on
+                                UserDefaults.standard.set(on, forKey: AmbientPrefs.gradingKey)
+                            }
+                        )) {
+                            Text("Full-context grading")
+                                .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                        }
+                        .tint(GrainColor.forgeBlue)
+                        Text("Logs the raw conversation window on this device so the council can grade decisions. On for you; off by default for others.")
+                            .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                    }
+                    .onAppear {
+                        fullContextGrading = AmbientPrefs.fullContextGrading()
+                    }
 
                     Button("Preview a notification") { AmbientNotifier.postPreview() }
                     Text("See how a nudge feels before anything real triggers.")

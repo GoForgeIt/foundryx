@@ -937,7 +937,7 @@ public final class DoorClient: @unchecked Sendable {
 
     /// Route an ambient-gate candidate through the door's Tier-2 router
     /// (`POST /foundryx/ambient/candidate`): the door classifies it
-    /// (lookup/todo/workflow/agent) and, for lookups, answers from the user's OWN
+    /// (lookup/todo/playbook/agent) and, for lookups, answers from the user's OWN
     /// memory (lore search + local-model compile) — so the phone's notification can
     /// carry the actual answer. Read-only server-side; nothing executes. Relay-aware
     /// like chat; throws on transport failure so the caller can fall back to a plain
@@ -950,10 +950,12 @@ public final class DoorClient: @unchecked Sendable {
             let captureId: String, utterance: String, summary: String
             let confidence: Double, window: String
             let windowAudioB64: String?
+            let grade: Bool
         }
         let payload = try JSONEncoder().encode(Req(
             captureId: captureId, utterance: utterance, summary: summary,
-            confidence: confidence, window: window, windowAudioB64: windowAudioB64))
+            confidence: confidence, window: window, windowAudioB64: windowAudioB64,
+            grade: AmbientPrefs.fullContextGrading()))
         if let relay = target.relay?.interactive() {
             let resp = try await RelayHTTP.roundTrip(
                 relay: relay, bearer: target.bearer, method: "POST",
