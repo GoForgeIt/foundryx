@@ -229,6 +229,73 @@ final class ConversationRecapTests: XCTestCase {
         XCTAssertTrue(model.daily?.freshnessLine.hasPrefix("Grows after each processed conversation") ?? false)
     }
 
+    // T3 AC3/AC4: a pool signature is stable for the same set, order-independent,
+    // and changes on any add or content edit.
+    func testPoolSignatureStableAndChangeSensitive() {
+        let start = cal.startOfDay(for: day("2026-07-14 00:00"))
+        let span = RecapSpan.day(start)
+        let a = convo("a", "One", "first.", "2026-07-14 09:00")
+        let b = convo("b", "Two", "second.", "2026-07-14 12:00")
+        let s1 = ConversationRecapEngine.poolSignature(for: span, from: [a, b], calendar: cal)
+        let s2 = ConversationRecapEngine.poolSignature(for: span, from: [b, a], calendar: cal)
+        XCTAssertEqual(s1, s2, "same set ⇒ same signature regardless of input order")
+        let c = convo("c", "Three", "third.", "2026-07-14 15:00")
+        XCTAssertNotEqual(
+            s1, ConversationRecapEngine.poolSignature(for: span, from: [a, b, c], calendar: cal),
+            "an added conversation changes the signature")
+        let bEdited = convo("b", "Two", "second, edited.", "2026-07-14 12:00")
+        XCTAssertNotEqual(
+            s1, ConversationRecapEngine.poolSignature(for: span, from: [a, bEdited], calendar: cal),
+            "an edited summary changes the signature")
+    }
+
+    // T3 AC3/AC4: recaps persist to a cache and render instantly on the next visit;
+    // inference re-runs only when the conversation set changed.
+    @MainActor
+    func testRecapCachePersistsRendersInstantlyAndGatesInference() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recap-cache-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let today = Calendar.current.startOfDay(for: Date())
+        func at(_ hour: Int, _ id: String, _ title: String) -> RecapConversation {
+            RecapConversation(captureId: id, title: title, summary: "\(title) summary.",
+                              at: today.addingTimeInterval(TimeInterval(hour * 3600 + 3600)))
+        }
+        let pool = [at(1, "a", "Morning"), at(2, "b", "Noon")]
+
+        // Cold cache: the first model builds and persists.
+        let composer1 = CountingComposer()
+        let model1 = ActivityRecapModel(poolProvider: { pool }, composer: composer1,
+                                        cacheBaseDir: dir, observesFinalized: false)
+        XCTAssertNil(model1.daily, "cold cache: nothing to render yet")
+        await model1.rebuildAll()
+        XCTAssertEqual(model1.daily?.conversationCount, 2)
+        XCTAssertGreaterThan(composer1.calls, 0, "cold build runs inference")
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: RecapCacheStore.fileURL(baseDir: dir).path), "cache file written")
+
+        // AC3: a second model over the SAME pool renders instantly from cache in
+        // init — before any rebuild. AC4: rebuild does NOT re-run inference.
+        let composer2 = CountingComposer()
+        let model2 = ActivityRecapModel(poolProvider: { pool }, composer: composer2,
+                                        cacheBaseDir: dir, observesFinalized: false)
+        XCTAssertEqual(model2.daily?.conversationCount, 2, "AC3: daily instant from cache")
+        XCTAssertEqual(model2.weekly?.conversationCount, 2, "AC3: weekly instant from cache")
+        await model2.rebuildAll()
+        XCTAssertEqual(composer2.calls, 0, "AC4: unchanged set does not re-run inference")
+
+        // AC4: a changed set refreshes — inference re-runs and the count grows.
+        let grownPool = pool + [at(3, "c", "Evening")]
+        let composer3 = CountingComposer()
+        let model3 = ActivityRecapModel(poolProvider: { grownPool }, composer: composer3,
+                                        cacheBaseDir: dir, observesFinalized: false)
+        await model3.rebuildAll()
+        XCTAssertGreaterThan(composer3.calls, 0, "AC4: a changed set refreshes")
+        XCTAssertEqual(model3.daily?.conversationCount, 3)
+    }
+
     // The composer seam replaces the prose when available; count/freshness stay real.
     func testComposerSeamReplacesProse() async {
         struct FixedComposer: RecapComposer {
@@ -246,6 +313,20 @@ final class ConversationRecapTests: XCTestCase {
         XCTAssertEqual(r?.insights.map(\.text), ["model insight one", "model insight two"])
         XCTAssertEqual(r?.insights.allSatisfy { $0.sourceTitle == "X" }, true, "attributed to the real convo")
         XCTAssertEqual(r?.conversationCount, 1, "count is always real, model or not")
+    }
+}
+
+/// A composer that always answers and counts how many times it was invoked —
+/// so a test can assert inference re-runs only when the pool changed (AC4).
+private final class CountingComposer: RecapComposer, @unchecked Sendable {
+    /// Invocations are serial in these tests (each rebuild is awaited before the
+    /// next), so a plain counter is sufficient.
+    private(set) var calls = 0
+    var isAvailable: Bool { true }
+    func compose(_ conversations: [RecapConversation], span: RecapSpan)
+        async -> (narrative: String, insights: [String])? {
+        calls += 1
+        return ("A model narrative.", ["model insight"])
     }
 }
 
