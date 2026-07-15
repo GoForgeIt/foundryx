@@ -9,11 +9,17 @@ import Foundation
 public enum BrainChoice: String, CaseIterable, Sendable {
     case justMyPhone = "phone"
     case myComputer = "computer"
+    /// Rung 3 (track 20260705T1100 §5): a hosted Foundry CELL as the brain. Same
+    /// FoundryX door surface (`/foundryx/*`) as "my computer", but reached over a
+    /// direct public HTTPS URL (the cell has a public address — no relay), grant =
+    /// the user's sign-in id_token OR a pasted door bearer (see CellBackend).
+    case foundryCloud = "cloud"
 
     public var label: String {
         switch self {
         case .justMyPhone: return "Just my phone"
         case .myComputer: return "My computer"
+        case .foundryCloud: return "Foundry Cloud"
         }
     }
 }
