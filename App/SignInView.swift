@@ -19,7 +19,10 @@ struct SignInView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                // Subtle forge-blue gradient wash behind the Grain background.
+                // Same base texture as the welcome (PersonaWelcomeStep) so the
+                // connection page reads as one design, not a separate "old" screen.
+                GrainDotField(density: 0.5)
+                // Subtle forge-blue gradient wash over the dot field.
                 LinearGradient(
                     colors: [GrainColor.forgeBlue.opacity(0.18), GrainColor.surfaceElevated.opacity(0.0)],
                     startPoint: .top, endPoint: .center
