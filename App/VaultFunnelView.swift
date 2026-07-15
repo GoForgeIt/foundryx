@@ -10,6 +10,9 @@ import AuthenticationServices
 #if canImport(UIKit)
 import UIKit
 #endif
+#if canImport(StoreKit)
+import StoreKit
+#endif
 
 // VaultFunnelView — the phone-side Vault activation screens (track T-IOS-FUNNEL, design
 // canon "6 · Vault"). One view, driven entirely by VaultFunnelModel.state: the paid-intent
@@ -301,6 +304,22 @@ final class VaultAuthTokenBox: @unchecked Sendable {
     var token: String?
 }
 
+/// Bridges the StoreKit App Store storefront to the funnel's synchronous `storefrontCountryCode`
+/// seam (track T-STOREFRONT). `Storefront.current` is async, so RootView refreshes this box on
+/// launch + foreground; the pure gate (VaultStorefrontGate) reads the cached code. Nil until the
+/// first read — which FAILS CLOSED (no purchase CTA), exactly the review-clean default.
+final class VaultStorefrontBox: @unchecked Sendable {
+    static let shared = VaultStorefrontBox()
+    var countryCode: String?
+
+    /// Read the current App Store storefront country (ISO alpha-3, e.g. "USA") and cache it.
+    @MainActor func refresh() async {
+        #if canImport(StoreKit)
+        countryCode = await Storefront.current?.countryCode
+        #endif
+    }
+}
+
 extension VaultFunnelModel {
     /// The deployed foundry-signup service (Cloud Run).
     static let signupServiceBase =
@@ -313,7 +332,8 @@ extension VaultFunnelModel {
             service: VaultSignupClient(baseURL: signupServiceBase),
             browser: ASWebAuthenticationVaultBrowser(),
             cellStore: CellStore(),
-            idToken: { VaultAuthTokenBox.shared.token })
+            idToken: { VaultAuthTokenBox.shared.token },
+            storefrontCountryCode: { VaultStorefrontBox.shared.countryCode })
     }
 }
 #endif

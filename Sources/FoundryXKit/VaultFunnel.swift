@@ -73,32 +73,60 @@ public enum VaultRouter {
 public enum VaultEntry {
     /// What the Settings row shows for a given entitlement.
     public struct Presentation: Equatable, Sendable {
-        /// The row title ("Turn on your Vault" off · "Your Vault" live).
+        /// The row title ("Turn on your Vault" off · "Your Vault" live · "Open your Vault"
+        /// when purchasing is gated off by the storefront).
         public let title: String
         /// The supporting line under the title.
         public let subtitle: String
-        /// True when tapping should launch setup (off); false once the Vault is live.
+        /// True when tapping should do something (off ⇒ launch setup or sign-in; a live Vault
+        /// is not actionable — there's nothing to turn on).
         public let actionable: Bool
+        /// Whether tapping should launch the PURCHASE path (native plans → external checkout).
+        /// False when the Vault is live (nothing to buy) OR when the App Store storefront
+        /// disallows purchasing here (track T-STOREFRONT) — then the row is sign-in only so an
+        /// existing subscriber can still open their Vault, with NO purchase CTA (review-clean).
+        public let showsPurchaseCTA: Bool
 
-        public init(title: String, subtitle: String, actionable: Bool) {
+        public init(title: String, subtitle: String, actionable: Bool, showsPurchaseCTA: Bool = false) {
             self.title = title
             self.subtitle = subtitle
             self.actionable = actionable
+            self.showsPurchaseCTA = showsPurchaseCTA
         }
     }
 
+    /// Legacy single-arg presentation — the purchase-eligible world (storefront allows it).
+    /// Kept for callers that don't gate on the storefront; delegates to the gated form.
     public static func presentation(entitlement: VaultEntitlement) -> Presentation {
+        presentation(entitlement: entitlement, purchaseAllowed: true)
+    }
+
+    /// The storefront-aware presentation (track T-STOREFRONT). `purchaseAllowed` comes from
+    /// VaultStorefrontGate over the App Store storefront country. When the Vault is off and
+    /// purchasing is disallowed (or the storefront is unknown → fail closed), the row becomes
+    /// sign-in only: an existing subscriber can still open their Vault, and NO purchase CTA is
+    /// shown anywhere the storefront doesn't allow it.
+    public static func presentation(entitlement: VaultEntitlement, purchaseAllowed: Bool) -> Presentation {
         switch entitlement {
-        case .off:
-            return Presentation(
-                title: "Turn on your Vault",
-                subtitle: "Search everything, chat with your memory, and let Foundry act — on your private, isolated Vault.",
-                actionable: true)
         case .live:
             return Presentation(
                 title: "Your Vault",
                 subtitle: "On. Encrypted, isolated, and yours — only your voice and login open it.",
-                actionable: false)
+                actionable: false,
+                showsPurchaseCTA: false)
+        case .off where purchaseAllowed:
+            return Presentation(
+                title: "Turn on your Vault",
+                subtitle: "Search everything, chat with your memory, and let Foundry act — on your private, isolated Vault.",
+                actionable: true,
+                showsPurchaseCTA: true)
+        case .off:
+            // Storefront-gated off: no purchase CTA. Existing subscribers sign in to open it.
+            return Presentation(
+                title: "Open your Vault",
+                subtitle: "Already have a Vault? Sign in to open it on this iPhone.",
+                actionable: true,
+                showsPurchaseCTA: false)
         }
     }
 }
@@ -274,10 +302,20 @@ public final class VaultFunnelModel: ObservableObject {
     private let cellStore: CellStore
     private let attempts: VaultCheckoutAttemptStore
     private let idToken: @Sendable () -> String?
+    /// The App Store storefront country code (StoreKit `Storefront`, read via a thin adapter
+    /// at the app edge). Gates the purchase path — track T-STOREFRONT.
+    private let storefrontCountryCode: @Sendable () -> String?
     /// The base for the canonical checkout URL when the service doesn't return one.
     private let checkoutBase: URL
     /// The deep-link return callback the browser redirects to.
     private let returnCallback: URL
+
+    /// Whether the paid Vault purchase path may be shown on this device, gated by the App
+    /// Store storefront (US-first; unknown → fail closed). Non-eligible / unknown storefronts
+    /// get sign-in only, never the plans/checkout CTA (App-Review-clean).
+    public var purchaseAllowed: Bool {
+        VaultStorefrontGate.purchaseAllowed(storefrontCountryCode: storefrontCountryCode())
+    }
 
     public init(service: VaultSignupService,
                 browser: VaultCheckoutBrowser,
@@ -285,7 +323,8 @@ public final class VaultFunnelModel: ObservableObject {
                 attempts: VaultCheckoutAttemptStore = VaultCheckoutAttemptStore(),
                 checkoutBase: URL = URL(string: "https://goforgeit.com/vault/start")!,
                 returnCallback: URL = URL(string: "foundryx://vault/return")!,
-                idToken: @escaping @Sendable () -> String? = { nil }) {
+                idToken: @escaping @Sendable () -> String? = { nil },
+                storefrontCountryCode: @escaping @Sendable () -> String? = { nil }) {
         self.service = service
         self.browser = browser
         self.cellStore = cellStore
@@ -293,6 +332,7 @@ public final class VaultFunnelModel: ObservableObject {
         self.checkoutBase = checkoutBase
         self.returnCallback = returnCallback
         self.idToken = idToken
+        self.storefrontCountryCode = storefrontCountryCode
     }
 
     // MARK: entry + routing
@@ -316,11 +356,19 @@ public final class VaultFunnelModel: ObservableObject {
     /// so the same row never dead-ends nor re-triggers a paid user.
     public func activateFromSettings() {
         guard entitlement == .off else { return }
+        // Storefront-gated (track T-STOREFRONT): only launch the purchase funnel where the
+        // App Store storefront allows it. A blocked/unknown storefront is sign-in only — the
+        // Settings row presents sign-in itself, so this is a no-op (never the plans path).
+        guard purchaseAllowed else { return }
         beginSetup()
     }
 
-    /// Intro → native pricing (Pro pre-selected).
-    public func seePlans() { state = .plans(selected: .recommendedDefault) }
+    /// Intro → native pricing (Pro pre-selected). Purchase-gated: a storefront that disallows
+    /// buying here never reaches the plans screen (defense in depth behind the entry gate).
+    public func seePlans() {
+        guard purchaseAllowed else { return }
+        state = .plans(selected: .recommendedDefault)
+    }
 
     /// Select a plan row on the plans screen.
     public func selectPlan(_ plan: VaultPlan) {
@@ -338,6 +386,9 @@ public final class VaultFunnelModel: ObservableObject {
     /// dismisses it, we land in "Checking payment" and let reconcile decide — the server
     /// is authoritative, so a dismissed sheet is never a failure.
     public func continueToCheckout(plan: VaultPlan) async {
+        // Storefront-gated (track T-STOREFRONT): never open external checkout where the App
+        // Store storefront disallows purchasing — fail closed, the last line of defense.
+        guard purchaseAllowed else { return }
         state = .opening(plan: plan)
         let attempt: VaultCheckoutAttempt
         do {

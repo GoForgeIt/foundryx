@@ -34,6 +34,23 @@ public struct AccountClient: Sendable {
         await post("account/waitlist", idToken: idToken, name: nil)
     }
 
+    /// POST /account/delete — the Apple-required in-app account deletion (track T-STOREFRONT).
+    /// `scope` is one of "hostedVault" (tear down the cell, keep the account) or "everywhere"
+    /// (delete the account + every Vault). The relay verifies the id_token and derives the
+    /// account from it; the body carries only the scope. Throws on a non-2xx so the deletion
+    /// model can surface a retryable failure rather than a silent no-op.
+    public func deleteAccount(scope: AccountDeletionScope, idToken: String) async throws {
+        var req = URLRequest(url: baseURL.appendingPathComponent("account/delete"))
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(idToken)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["scope": scope.rawValue])
+        let (_, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw AccountDeletionError.server
+        }
+    }
+
     private func post(_ path: String, idToken: String, name: String?) async -> Bool {
         var req = URLRequest(url: baseURL.appendingPathComponent(path))
         req.httpMethod = "POST"

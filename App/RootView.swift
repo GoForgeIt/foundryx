@@ -31,6 +31,8 @@ struct RootView: View {
     /// completes. The entitlement router (`vaultFunnel.intent`) is what Vault-only actions
     /// call to route to the trigger (Vault off) or straight through (Vault live).
     @StateObject private var vaultFunnel = VaultFunnelModel.live()
+    /// In-app account deletion (track T-STOREFRONT) — Apple-required, three scopes.
+    @StateObject private var accountDeletion = AccountDeletionModel.live()
     @Environment(\.scenePhase) private var scenePhase
 
     /// T5: an established, signed-in, non-opted-out user sees the persona welcome AS
@@ -86,7 +88,7 @@ struct RootView: View {
             return AnyView(MainTabs(
                 target: DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "local"),
                 remote: remote, brains: brains, local: true,
-                vaultFunnel: vaultFunnel, showingAccount: .constant(false)))
+                vaultFunnel: vaultFunnel, accountDeletion: accountDeletion, showingAccount: .constant(false)))
         }
         // DEV-only: `-Screen answer` mounts the answer/decision-brief with demo data
         // (no manager needed) for screenshot-verification.
@@ -137,7 +139,7 @@ struct RootView: View {
             case .computerBrain:
                 if let target = remote.makeDoorTarget() {
                     MainTabs(target: target, remote: remote, brains: brains, local: false,
-                             vaultFunnel: vaultFunnel, showingAccount: $showingAccount)
+                             vaultFunnel: vaultFunnel, accountDeletion: accountDeletion, showingAccount: $showingAccount)
                         // A resolved-host change OR a refreshed bearer (after a token-expiry
                         // re-auth) rebuilds the tabs (+ their clients) so every door request
                         // uses the fresh id_token — never a stale, expired one.
@@ -151,7 +153,7 @@ struct RootView: View {
                 MainTabs(target: DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!,
                                             bearer: "local"),
                          remote: remote, brains: brains, local: true,
-                         vaultFunnel: vaultFunnel, showingAccount: $showingAccount)
+                         vaultFunnel: vaultFunnel, accountDeletion: accountDeletion, showingAccount: $showingAccount)
                     .id("local-brain")
                     .sheet(isPresented: $showingAccount) {
                         SignInView(remote: remote) { showingAccount = false }
@@ -171,6 +173,9 @@ struct RootView: View {
         .onChange(of: scenePhase) { phase in
             if phase == .active {
                 VaultAuthTokenBox.shared.token = remote.idToken
+                // Refresh the App Store storefront (T-STOREFRONT) so the purchase gate reflects
+                // the current country before the funnel or the Settings Vault row is shown.
+                Task { await VaultStorefrontBox.shared.refresh() }
                 Task { await vaultFunnel.reconcileOnForeground() }
             }
         }
@@ -182,6 +187,7 @@ struct RootView: View {
             }
         }
         .task { await remote.restore() }
+        .task { await VaultStorefrontBox.shared.refresh() }
         .task {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             // T5 (track 20260715T1502): while the persona welcome IS the connect
@@ -282,6 +288,9 @@ private struct MainTabs: View {
     /// The Vault activation funnel, threaded down to Settings' "Your Vault" entry row
     /// (track T-IOS-VAULT-ENTRY). Owned by RootView; MainTabs only passes it through.
     let vaultFunnel: VaultFunnelModel
+    /// In-app account deletion (track T-STOREFRONT), threaded to Settings' Account section.
+    /// Owned by RootView; MainTabs only passes it through.
+    let accountDeletion: AccountDeletionModel
     @Binding var showingAccount: Bool
 
     @StateObject private var device: DeviceManager
@@ -304,12 +313,14 @@ private struct MainTabs: View {
     private let localSTT: WhisperKitSTT?
 
     init(target: DoorTarget, remote: RemoteSession, brains: BrainStore, local: Bool,
-         vaultFunnel: VaultFunnelModel, showingAccount: Binding<Bool>) {
+         vaultFunnel: VaultFunnelModel, accountDeletion: AccountDeletionModel,
+         showingAccount: Binding<Bool>) {
         self.target = target
         self.remote = remote
         self.brains = brains
         self.local = local
         self.vaultFunnel = vaultFunnel
+        self.accountDeletion = accountDeletion
         _showingAccount = showingAccount
         let log = DoorLog()
         // Ship the phone's BLE/audio/capture/chat log to the relay diag sink so
@@ -545,7 +556,7 @@ private struct MainTabs: View {
             NavigationStack {
                 SettingsScreen(brains: brains, remote: remote,
                                device: device, manager: manager, sources: sources,
-                               vaultFunnel: vaultFunnel)
+                               vaultFunnel: vaultFunnel, accountDeletion: accountDeletion)
                     .navigationTitle(SettingsSheetPresentation.title)
                     .navigationBarTitleDisplayMode(.inline)
             }

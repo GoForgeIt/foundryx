@@ -127,7 +127,10 @@ final class VaultWorld: @unchecked Sendable {
             self.attemptPersistedWhenBrowserOpened = (attemptsRef.load() != nil)
         }
         model = VaultFunnelModel(service: service, browser: browser, cellStore: cellStore,
-                                 attempts: attempts, idToken: { "id-token-abc" })
+                                 attempts: attempts, idToken: { "id-token-abc" },
+                                 // The funnel's purchase path is storefront-gated (T-STOREFRONT);
+                                 // these scenarios exercise the eligible (US) storefront.
+                                 storefrontCountryCode: { "USA" })
     }
 
     @MainActor var state: VaultFunnelState { model.state }
