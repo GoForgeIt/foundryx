@@ -14,6 +14,24 @@
 
 import Foundation
 
+// MARK: - Scan-free warm row
+
+/// A lightweight placeholder row for the FIRST paint of the Capture list (T1 AC5):
+/// captureId + title + a short date label, read from `card.json` only — NO segment scan.
+/// Replaced by the real `CaptureWAL` cards the instant off-main hydration completes.
+public struct ConversationRowLite: Identifiable, Sendable, Equatable {
+    public let captureId: String
+    public let title: String
+    public let dateLabel: String
+    public var id: String { captureId }
+
+    public init(captureId: String, title: String, dateLabel: String) {
+        self.captureId = captureId
+        self.title = title
+        self.dateLabel = dateLabel
+    }
+}
+
 // MARK: - Search
 
 public enum ConversationSearch {
@@ -191,10 +209,17 @@ extension CaptureManager {
 // MARK: - Waveform thumbnail
 
 public enum WaveformThumb {
-    /// Buckets real segment sizes into a 0…1 energy profile for the row
-    /// thumbnail. Fewer segments than buckets → one bar per segment (honest,
-    /// never interpolated). Empty input → empty profile (no fake waveform).
-    public static func profile(sizes: [Int], buckets: Int) -> [Double] {
+    /// Buckets real segment sizes into a 0…1 energy profile for the row thumbnail.
+    /// Fewer segments than buckets → one bar per segment. The real per-segment
+    /// amplitude is HONEST and never interpolated: a profile with genuinely varied
+    /// amplitude is returned UNCHANGED (contract holds — the seed never overwrites real
+    /// data, T1 AC7).
+    ///
+    /// ONLY a DEGENERATE profile — ≤1 bucket, or near-constant / all-equal amplitude —
+    /// falls back to a `seed`-derived varied shape, so no card renders a dead flat line
+    /// (T1 AC4). Empty input still yields an empty profile (no fake waveform; the card
+    /// draws no line).
+    public static func profile(sizes: [Int], buckets: Int, seed: String = "") -> [Double] {
         guard !sizes.isEmpty, buckets > 0 else { return [] }
         let n = min(buckets, sizes.count)
         let per = Double(sizes.count) / Double(n)
@@ -205,6 +230,44 @@ public enum WaveformThumb {
             out.append(Double(slice.reduce(0, +)) / Double(slice.count))
         }
         let peak = out.max() ?? 1
-        return peak > 0 ? out.map { $0 / peak } : out
+        let normalized = peak > 0 ? out.map { $0 / peak } : out
+        // Degenerate-only fallback: a single bucket, or a profile so flat it reads as a
+        // line, gets a deterministic seeded shape (same card → same waveform every time).
+        return isDegenerate(normalized) ? seededProfile(seed: seed, buckets: buckets) : normalized
+    }
+
+    /// A profile is degenerate when it can't render an up/down shape: ≤1 point, or its
+    /// amplitude spread is too small to be seen (near-constant / all-equal segments).
+    static func isDegenerate(_ profile: [Double]) -> Bool {
+        guard profile.count > 1 else { return true }
+        let mn = profile.min() ?? 0, mx = profile.max() ?? 0
+        return (mx - mn) < 0.15
+    }
+
+    /// A deterministic varied profile seeded by the capture id — mirrors the prototype's
+    /// `y = 7 + (rand()-.5)*9` shape (baseline 0.5, ±~0.32) so the fallback looks like a
+    /// real little waveform. Deterministic (FNV-1a seed → LCG) so a card's fallback never
+    /// jitters between renders.
+    static func seededProfile(seed: String, buckets: Int) -> [Double] {
+        let n = max(2, min(buckets, 24))
+        var state = fnv1a(seed.isEmpty ? "waveform" : seed)
+        var out: [Double] = []
+        out.reserveCapacity(n)
+        for _ in 0..<n {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            let r = Double((state >> 11) & 0xFFFF_FFFF) / Double(0xFFFF_FFFF)
+            let v = 0.5 + (r - 0.5) * (9.0 / 14.0)   // prototype 7 ± 4.5 on a ~14 scale
+            out.append(max(0, min(1, v)))
+        }
+        return out
+    }
+
+    private static func fnv1a(_ s: String) -> UInt64 {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in s.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x0000_0100_0000_01b3
+        }
+        return hash == 0 ? 0x0000_0100_0000_01b3 : hash
     }
 }

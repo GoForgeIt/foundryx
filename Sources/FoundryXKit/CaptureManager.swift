@@ -194,6 +194,14 @@ public final class CaptureManager: ObservableObject {
     /// list view just reads this array.
     @Published public private(set) var visibleCaptures: [CaptureWAL] = []
 
+    /// Scan-free warm seed for the FIRST paint of the Capture list (T1 AC5): the newest
+    /// captures' captureId + title + date, read from `card.json` ONLY — NO CaptureWAL /
+    /// segment scan (the per-segment stat storm is what hung launch, so it stays off-main
+    /// in `loadExisting`). Seeded synchronously in `init`; the Capture list renders these
+    /// populated rows immediately and swaps to the real WAL cards the instant off-main
+    /// hydration publishes `visibleCaptures` (which clears this).
+    @Published public private(set) var listRows: [ConversationRowLite] = []
+
     /// Recompute the visible list. Hide ones that recorded NOTHING (0 segments, not
     /// streaming) — useless empty cards; keep ones with real audio, still-streaming, or a
     /// pruned-to-transcript tombstone. Order newest-first by the durable conversation start.
@@ -202,6 +210,9 @@ public final class CaptureManager: ObservableObject {
             .filter { self.isBrowsable($0) }
             .sorted { self.startTime(of: $0) > self.startTime(of: $1) }
         visibleCaptures = visible
+        // Once the real WAL cards exist, the scan-free seed has done its job — drop it so
+        // the list renders from one source of truth (and the seed can't linger stale).
+        if !visible.isEmpty, !listRows.isEmpty { listRows = [] }
         // Count "still processing" conversations HERE (the single list-rebuild choke
         // point) so the processing banner reads a cached count — no per-render disk
         // churn. A conversation is processing when it has real audio but no transcript
@@ -516,6 +527,11 @@ public final class CaptureManager: ObservableObject {
     /// watchdog and got the app SIGKILL'd (FRONTBOARD). Older captures stay on disk.
     public nonisolated static let maxCapturesToLoad = 300
 
+    /// How many scan-free placeholder rows to seed for the FIRST paint of the Capture
+    /// list (T1 AC5) — about a first screen's worth. Bounded so the synchronous warm read
+    /// stays O(first-screen), never O(all folders).
+    public nonisolated static let warmSeedCount = 10
+
     /// Discarded junk fragments (`.discarded`) kept on disk beyond this age are pruned — the
     /// audio was never uploaded and is not shown, so retaining tens of thousands of tiny
     /// folders forever only bloats the container + slows launch enumeration. A short window
@@ -792,6 +808,7 @@ public final class CaptureManager: ObservableObject {
             (micSource as? MicFrameSource)?.onPCM = { [liveBox] buf in liveBox.append(buf) }
         }
         #endif
+        seedWarmListRows()     // scan-free first-paint rows (T1 AC5) — before the off-main hydrate
         loadExisting()         // OFF-MAIN hydration; finishes via finishStartupAfterHydration
         startDrainTimer()
         startSegmentTimer()    // wall-clock silence + runaway force-split watchdog
@@ -802,6 +819,11 @@ public final class CaptureManager: ObservableObject {
     private func finishStartupAfterHydration(prunedAudioIds: [String]) {
         reconcileOrphanedCaptures()  // give crash-orphaned captures real bounds + finalize them
         applyRetentionSweep(prunedAudioIds: prunedAudioIds)  // the sweep already ran off-main
+        // Hydration is authoritative now — drop the scan-free warm seed unconditionally.
+        // (rebuildVisibleCaptures only clears it when `visible` is non-empty; a library whose
+        // newest captures are ALL filler resolves to visible==[] with a non-empty seed, which
+        // would otherwise leave hidden-filler rows on the home surface. Clearing here covers it.)
+        if !listRows.isEmpty { listRows = [] }
         // Seed the home-screen widget with current (idle / last-conversation) state so it
         // renders correctly before the first capture transition fires.
         CaptureWidgetSnapshotStore.write(makeWidgetSnapshot())
@@ -2321,6 +2343,58 @@ public final class CaptureManager: ObservableObject {
     /// folders on disk). A large backlog of discarded fragments used to be hydrated in full
     /// on the main thread and SIGKILL'd the app (FRONTBOARD watchdog). Old discarded folders
     /// are reclaimed separately, off the launch path (`pruneDiscardedFragments`).
+    /// Seed the scan-free warm list so the Capture home paints POPULATED on the very first
+    /// frame — WITHOUT re-introducing the launch-time segment-scan hang (T1 AC5). This
+    /// enumerates directory NAMES once (one cheap bulk syscall, same as `loadExisting`),
+    /// takes the newest `warmSeedCount`, and reads each capture's `card.json` (title +
+    /// durable start) — NO `CaptureWAL`/`makeWAL`, NO per-segment stat storm (the getxattr
+    /// storm that caused the 7.5s hang lives ONLY inside `CaptureWAL.scanExisting`, which
+    /// this never touches). Bounded to a first screen, so the work is O(first-screen small
+    /// JSON reads), never O(all folders × all segments). The off-main WAL hydration then
+    /// replaces these with the real cards + their status pollers.
+    private func seedWarmListRows() {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(at: baseDir, includingPropertiesForKeys: nil)
+        else { return }
+        // Newest-first by the capture id's embedded start time (prefix-agnostic — a
+        // non-`omi-` id would sort wrong under a raw lexicographic name sort). Cheap:
+        // derived from the id string, no card.json read. Ties/unparseable fall back to name.
+        let names = entries.map { $0.lastPathComponent }
+            .filter { !$0.hasPrefix(".") }
+            .sorted { a, b in
+                let ta = CaptureIdTime.startedAt(fromCaptureId: a) ?? 0
+                let tb = CaptureIdTime.startedAt(fromCaptureId: b) ?? 0
+                return ta != tb ? ta > tb : a > b
+            }
+        var rows: [ConversationRowLite] = []
+        rows.reserveCapacity(Self.warmSeedCount)
+        for name in names {
+            if rows.count >= Self.warmSeedCount { break }
+            let dir = baseDir.appendingPathComponent(name, isDirectory: true)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            if fm.fileExists(atPath: dir.appendingPathComponent(".discarded").path) { continue }
+            if fm.fileExists(atPath: dir.appendingPathComponent(".deleted").path) { continue }
+            // Title + date from card.json only (no segment scan). Skip captures without a
+            // card tombstone — they simply appear once the off-main WAL hydration lands.
+            guard let card = ConversationCardStore.load(captureId: name, baseDir: baseDir) else { continue }
+            let started = card.startedAt ?? CaptureIdTime.startedAt(fromCaptureId: name) ?? 0
+            let title = (card.title?.isEmpty == false) ? card.title! : "Conversation"
+            rows.append(ConversationRowLite(
+                captureId: name, title: title, dateLabel: Self.warmDateLabel(started)))
+        }
+        listRows = rows
+    }
+
+    /// A compact "when" label for a scan-free seed row (the full time·place·duration meta
+    /// arrives with the real card).
+    private static func warmDateLabel(_ startedAt: UInt64) -> String {
+        guard startedAt > 0 else { return "" }
+        let f = DateFormatter()
+        f.dateFormat = "EEE, MMM d · h:mm a"
+        return f.string(from: Date(timeIntervalSince1970: TimeInterval(startedAt)))
+    }
+
     private func loadExisting() {
         // The WHOLE hydrate runs off the main actor: constructing a CaptureWAL
         // scans its segment dir and stats every segment file (bytes/acks) — 300

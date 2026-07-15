@@ -228,8 +228,8 @@ struct RootView: View {
 
 /// Routes intent-driven navigation (Action Button / Siri / Control Center) onto
 /// the tab bar from anywhere in the process (track 20260705T1100, Phase 5).
-/// The tab set IS the tested AppTab presentation (track 20260714T1800 §1):
-/// Capture → Activity → Chat → Device, Capture first, no Settings tab.
+/// The tab set IS the tested AppTab presentation (track 20260714T1800 §1, T1
+/// 20260715T1457): Capture → Activity → Chat → Settings, Capture first.
 @MainActor
 final class TabRouter: ObservableObject {
     typealias Tab = AppTab
@@ -259,9 +259,6 @@ private struct MainTabs: View {
     // tab switches and app foregrounding (its own Application Support JSON file).
     @StateObject private var chats = ChatConversationStore(storageURL: ChatConversationStore.defaultStorageURL())
     @StateObject private var router = TabRouter()
-    /// Settings presents as a SHEET from the Capture/Activity gear (§9) — it is
-    /// not a tab (prototype `bottomNav`).
-    @State private var showingSettings = false
     /// The ambient broker: pendingSeed (chat) + pendingAnswer (answer surface).
     @ObservedObject private var broker = AmbientCardBroker.shared
     // Phone-tier only: on-device brain readiness for the "setting up your private
@@ -454,9 +451,10 @@ private struct MainTabs: View {
     }
 
     var body: some View {
-        // Prototype `bottomNav` (track 20260714T1800 §1): Capture → Activity →
-        // Chat → Device, Capture first. Settings is NOT a tab — the gear in the
-        // Capture/Activity top bars opens it as a sheet (§9).
+        // Prototype `bottomNav` (track 20260714T1800 §1, T1 20260715T1457): Capture →
+        // Activity → Chat → Settings, Capture first. Settings is a first-class bottom-nav
+        // tab now (Nick 2026-07-15, superseding the "Settings as a sheet" decision);
+        // Device management still lives INSIDE Settings.
         TabView(selection: $router.selected) {
             NavigationStack {
                 VStack(spacing: 0) {
@@ -468,11 +466,10 @@ private struct MainTabs: View {
                     CaptureScreen(device: device, manager: manager, sources: sources, target: target, local: local)
                 }
                 // The screen renders its OWN "Capture" header (title + status + search),
-                // matching the prototype — so the nav bar carries only the Settings gear,
-                // never a second large "Capture" title.
+                // matching the prototype — so the nav bar carries no second large
+                // "Capture" title and no header gear (Settings is a tab now).
                 .navigationTitle("")
                 .navigationBarTitleDisplayMode(.inline)
-                .toolbar { settingsGear }
             }
             .tabItem { Label(AppTab.capture.label, systemImage: AppTab.capture.systemImage) }
             .tag(TabRouter.Tab.capture)
@@ -487,7 +484,6 @@ private struct MainTabs: View {
                 )
                 .toolbar {
                     NavigationLink("Stats") { StatsView(summary: manager.statsSummary) }
-                    settingsGear
                 }
             }
             .tabItem { Label(AppTab.activity.label, systemImage: AppTab.activity.systemImage) }
@@ -505,28 +501,20 @@ private struct MainTabs: View {
             }
             .tabItem { Label(AppTab.chat.label, systemImage: AppTab.chat.systemImage) }
             .tag(TabRouter.Tab.chat)
-        }
-        // Settings as a modal sheet (§9): X close, keeps every settings row. Device
-        // management now lives HERE as a "Devices & connections" page (Nick 2026-07-14:
-        // one management home, not a competing Device tab) — connection STATUS stays
-        // glanceable on the Capture home.
-        .sheet(isPresented: $showingSettings) {
+
+            // Settings as a first-class bottom-nav tab (Nick 2026-07-15, T1
+            // 20260715T1457 — supersedes the sheet). Keeps every settings row; Device
+            // management lives HERE as a "Devices & connections" page (one management
+            // home, not a competing Device tab) — connection STATUS stays glanceable on
+            // the Capture home.
             NavigationStack {
                 SettingsScreen(brains: brains, remote: remote,
                                device: device, manager: manager, sources: sources)
                     .navigationTitle(SettingsSheetPresentation.title)
                     .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button {
-                                showingSettings = false
-                            } label: {
-                                Image(systemName: "xmark")
-                            }
-                            .accessibilityLabel(SettingsSheetPresentation.closeAccessibilityLabel)
-                        }
-                    }
             }
+            .tabItem { Label(AppTab.settings.label, systemImage: AppTab.settings.systemImage) }
+            .tag(TabRouter.Tab.settings)
         }
         // The Action Button's "Ask me" chooser (Phase 5, decision #4).
         .confirmationDialog("FoundryX", isPresented: $router.showActionChooser) {
@@ -550,8 +538,8 @@ private struct MainTabs: View {
         .onAppear {
             syncOmiConnection()
             #if DEBUG
-            // Screen-proof: open the Settings sheet on launch so it can be screenshot.
-            if ProcessInfo.processInfo.arguments.contains("-OpenSettings") { showingSettings = true }
+            // Screen-proof: land on the Settings tab on launch so it can be screenshot.
+            if ProcessInfo.processInfo.arguments.contains("-OpenSettings") { router.selected = .settings }
             // Pill-proof: `-CapturePhase <phase>` seeds a throwaway active session (so the
             // recording pill renders) and lands on a non-capture tab (where it shows).
             if ProcessInfo.processInfo.arguments.contains("-CapturePhase") {
@@ -586,17 +574,6 @@ private struct MainTabs: View {
                 AnswerSurfaceView(answer: answer, onDone: { broker.pendingAnswer = nil })
             }
         }
-    }
-
-    /// The quiet settings gear in the Capture/Activity top bars (prototype
-    /// `data-jump="settings"`) — the ONLY way into Settings.
-    private var settingsGear: some View {
-        Button {
-            showingSettings = true
-        } label: {
-            Image(systemName: "gearshape")
-        }
-        .accessibilityLabel(SettingsSheetPresentation.gearAccessibilityLabel)
     }
 
     /// The "setting up your private on-device brain" banner (model download UX).

@@ -1,19 +1,22 @@
 // AppShellPresentation — the app shell's pure presentation (track 20260714T1800
-// ux_prototype_realignment §1/§9, features/app-shell.feature).
+// ux_prototype_realignment §1/§9, features/app-shell.feature; T1 20260715T1457).
 //
 // One bottom tab bar, exactly four tabs, in order: Capture → Activity → Chat →
-// Device, Capture as the launch tab (prototype `bottomNav`). Settings is NOT a
-// tab — a gear in the Capture/Activity top bars opens it as a dismissable sheet
-// with an X close. The views render FROM these values (RootView's TabRouter.Tab
-// IS AppTab), so the tests assert exactly what the shell shows.
+// Settings, Capture as the launch tab (prototype `bottomNav`). Settings is a
+// FIRST-CLASS bottom-nav tab now (Nick 2026-07-15) — superseding the 2026-07-14
+// "Settings as a dismissable sheet / 3 content tabs" decision. Device management
+// still lives INSIDE Settings (no competing Device tab). The views render FROM
+// these values (RootView's TabRouter.Tab IS AppTab), so the tests assert exactly
+// what the shell shows.
 
 import Foundation
 
 /// The bottom tab bar, in declaration = render order.
 public enum AppTab: String, CaseIterable, Hashable, Sendable {
-    // Content loops only (Nick 2026-07-14): Device management moved into Settings, so
-    // the tab bar is the three daily surfaces — no competing management tab.
-    case capture, activity, chat
+    // Three daily surfaces + Settings (Nick 2026-07-15): Settings is the 4th
+    // bottom-nav tab. Device management still lives INSIDE Settings — no competing
+    // Device tab.
+    case capture, activity, chat, settings
 
     /// The launch/home tab (prototype: Capture first).
     public static let launch: AppTab = .capture
@@ -23,6 +26,7 @@ public enum AppTab: String, CaseIterable, Hashable, Sendable {
         case .capture: return "Capture"
         case .activity: return "Activity"
         case .chat: return "Chat"
+        case .settings: return "Settings"
         }
     }
 
@@ -31,16 +35,15 @@ public enum AppTab: String, CaseIterable, Hashable, Sendable {
         case .capture: return "waveform"
         case .activity: return "waveform.path.ecg"
         case .chat: return "message"
+        case .settings: return "gearshape"
         }
     }
 }
 
-/// Settings-as-a-sheet (spec §9, prototype "19 Settings"): opened from the
-/// Capture/Activity gear, dismissed with an X — never a bottom tab.
+/// Settings presentation constants (spec §9, prototype "19 Settings"). Settings is
+/// now the 4th bottom-nav tab (Nick 2026-07-15); this just carries its title.
 public enum SettingsSheetPresentation {
     public static let title = "Settings"
-    public static let gearAccessibilityLabel = "Settings"
-    public static let closeAccessibilityLabel = "Close Settings"
 }
 
 /// B5 — joining the Foundry Cloud waitlist never silently no-ops. A tokenless

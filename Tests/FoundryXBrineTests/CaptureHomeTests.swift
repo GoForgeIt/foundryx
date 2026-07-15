@@ -140,9 +140,45 @@ final class CaptureHomeTests: XCTestCase {
         XCTAssertLessThanOrEqual(profile.max() ?? 0, 1.0)
     }
 
-    func testWaveformProfileEmptyAndShort() {
+    // Empty input → empty profile (no fake waveform; the card draws no line — T1 AC4).
+    func testWaveformProfileEmptyStaysEmpty() {
         XCTAssertTrue(WaveformThumb.profile(sizes: [], buckets: 8).isEmpty)
-        XCTAssertEqual(WaveformThumb.profile(sizes: [50], buckets: 8).count, 1,
-                       "fewer segments than buckets → one bar per segment, honest")
+    }
+
+    // AC7: genuinely varied REAL amplitude is returned UNCHANGED — the seed never
+    // overwrites real data (the "honest, never interpolated" contract holds).
+    func testWaveformProfileKeepsRealVariedData() {
+        let sizes = [10, 90, 20, 100, 15, 80]
+        let profile = WaveformThumb.profile(sizes: sizes, buckets: 6, seed: "cap-real")
+        XCTAssertEqual(profile.count, 6)
+        // The real bucket shape (normalized by peak) is preserved, not replaced.
+        let peak = Double(sizes.max()!)
+        XCTAssertEqual(profile, sizes.map { Double($0) / peak })
+    }
+
+    // AC4: a DEGENERATE profile (near-uniform / all-equal segments) falls back to a
+    // seeded VARIED shape — never a flat line.
+    func testWaveformProfileSeedsNearUniform() {
+        let profile = WaveformThumb.profile(sizes: [50, 50, 50, 50], buckets: 8, seed: "cap-flat")
+        XCTAssertGreaterThan(profile.count, 1, "degenerate → a full seeded shape, not one flat bar")
+        let spread = (profile.max() ?? 0) - (profile.min() ?? 0)
+        XCTAssertGreaterThan(spread, 0.15, "the seeded fallback is visibly varied")
+    }
+
+    // A single-segment (≤1 bucket) profile is degenerate → seeded varied shape, not one bar.
+    func testWaveformProfileSeedsSingleSegment() {
+        let profile = WaveformThumb.profile(sizes: [50], buckets: 8, seed: "cap-single")
+        XCTAssertGreaterThan(profile.count, 1)
+        let spread = (profile.max() ?? 0) - (profile.min() ?? 0)
+        XCTAssertGreaterThan(spread, 0.15)
+    }
+
+    // The seed is DETERMINISTIC: same capture id → same fallback waveform (no per-render jitter).
+    func testWaveformSeedIsDeterministic() {
+        let a = WaveformThumb.profile(sizes: [50, 50, 50], buckets: 8, seed: "cap-x")
+        let b = WaveformThumb.profile(sizes: [50, 50, 50], buckets: 8, seed: "cap-x")
+        XCTAssertEqual(a, b)
+        let c = WaveformThumb.profile(sizes: [50, 50, 50], buckets: 8, seed: "cap-y")
+        XCTAssertNotEqual(a, c, "different capture ids seed distinct shapes")
     }
 }
