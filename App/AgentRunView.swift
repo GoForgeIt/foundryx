@@ -28,6 +28,8 @@ struct AgentRunView: View {
     let steps: [RunStepTile]
     /// True once the run's turn completed.
     let isFinished: Bool
+    /// The finding headline a finished run leads with ("Done. report.md is ready.").
+    var findingHeadline: String? = nil
     /// The findings summary a finished run shows (the run's final message).
     var findings: String? = nil
     /// Sends a follow-up that continues the run's session.
@@ -136,18 +138,35 @@ struct AgentRunView: View {
 
     private var summarySection: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x3) {
-            if let findings, !findings.isEmpty {
+            if findingHeadline != nil || findings?.isEmpty == false {
                 VStack(alignment: .leading, spacing: GrainSpacing.x1) {
                     Text("Finding")
                         .grainTextStyle(.caption)
                         .fontWeight(.bold)
                         .textCase(.uppercase)
                         .foregroundStyle(GrainColor.sage)
-                    Text(findings)
-                        .grainTextStyle(.body)
-                        .foregroundStyle(GrainColor.ink)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("run-findings")
+                    if let findingHeadline {
+                        Text(findingHeadline)
+                            .grainTextStyle(.body)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(GrainColor.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("run-finding-headline")
+                    }
+                    if let findings, !findings.isEmpty {
+                        Text(findings)
+                            .grainTextStyle(.body)
+                            .foregroundStyle(GrainColor.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("run-findings")
+                    }
+                    // What the run consulted, stated plainly (the user's own
+                    // conversations — never "citations").
+                    Text(AgentRunFinding.sourcesLine(steps: steps))
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.textFaint)
+                        .padding(.top, GrainSpacing.x1)
+                        .accessibilityIdentifier("run-sources")
                 }
             }
 
@@ -291,13 +310,17 @@ struct AgentRunCard: View {
     }
 
     var body: some View {
+        // The finding presentation is pure + tested (AgentRunFinding); this
+        // wrapper just binds it to the live model.
+        let finding = AgentRunFinding.make(from: model)
         AgentRunView(
             title: title,
             originLabel: originLabel,
             hostedLine: hostedLine,
-            steps: model.activities.map(RunStepTile.init),
+            steps: finding?.steps ?? model.activities.map(RunStepTile.init),
             isFinished: isFinished,
-            findings: isFinished ? model.assistantText : nil,
+            findingHeadline: finding?.headline,
+            findings: finding?.body,
             onFollowUp: onFollowUp)
     }
 }

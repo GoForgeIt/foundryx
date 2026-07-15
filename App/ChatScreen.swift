@@ -43,11 +43,22 @@ struct ChatScreen: View {
                          // (fetched from the desktop over the door, track 20260713T1500).
                          onOpenArtifact: { viewingArtifact = $0 })
                     .frame(maxWidth: .infinity, alignment: .leading)
+
+                // A FINISHED tool-using turn reads as a Finding card — the run's
+                // steps (older ones folded), the finding, and what it consulted —
+                // never a bare "DONE" row (track 20260714T1800 §7).
+                if AgentRunFinding.make(from: model) != nil {
+                    AgentRunCard(model: model,
+                                 title: lastUserMessage,
+                                 onFollowUp: { text in input = text; send() })
+                        .padding(.horizontal, GrainSpacing.x4)
+                        .padding(.bottom, GrainSpacing.x2)
+                }
             }
             .scrollDismissesKeyboard(.interactively)
             .contentShape(Rectangle())
             .onTapGesture { hideKeyboard() }
-            GrainComposer("Message the local brain…", text: $input, isSending: streaming, onSend: send)
+            GrainComposer(ChatCopy.composerPlaceholder, text: $input, isSending: streaming, onSend: send)
         }
         .grainBackground()
         .onAppear {
@@ -177,15 +188,20 @@ struct ChatScreen: View {
                     await MainActor.run { model.apply(ev) }
                 }
                 if !sawEvent {
-                    log.warn("stream ended with 0 events (door closed before any reply)")
-                    await MainActor.run { model.setConnection(.error(detail: "no response from door (0 events)")) }
+                    // The thread stays calm; the engineering truth goes to the log.
+                    log.warn(ChatSendFailure.emptyReplyLogDetail)
+                    await MainActor.run {
+                        model.setConnection(.error(detail: ChatSendFailure.emptyReply))
+                        model.apply(.error(code: "", reason: ChatSendFailure.emptyReply))
+                    }
                 }
             } catch {
-                let detail = Self.errorDetail(error)
-                log.error("turn failed: \(detail)")
+                // Calm human copy in the thread; the code/domain detail is DoorLog-only.
+                let calm = ChatSendFailure.calmMessage(for: error)
+                log.error("turn failed: \(ChatSendFailure.logDetail(for: error))")
                 await MainActor.run {
-                    model.setConnection(.error(detail: detail))
-                    model.apply(.boundary(label: "error: \(detail)"))
+                    model.setConnection(.error(detail: calm))
+                    model.apply(.error(code: "", reason: calm))
                 }
             }
             // Snapshot the rendered turn back into the durable store (only if we're still
@@ -212,16 +228,9 @@ struct ChatScreen: View {
         #endif
     }
 
-    private static func errorDetail(_ error: Error) -> String {
-        if let de = error as? DoorError {
-            switch de {
-            case .unauthorized: return "401 unauthorized (bad token)"
-            case .http(let code): return "HTTP \(code)"
-            case .transport(let msg): return msg
-            }
-        }
-        let ns = error as NSError
-        return "\(ns.localizedDescription) [\(ns.domain) \(ns.code)]"
+    /// What the run was asked to do — the Finding card's task line.
+    private var lastUserMessage: String {
+        model.messages.last(where: { $0.role == "user" })?.text ?? "Agent run"
     }
 
     private func answer(_ callId: String, _ decision: String) {

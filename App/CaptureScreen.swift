@@ -58,9 +58,7 @@ private extension ConversationProgress {
 /// sync indicator so nothing ever feels lost into the phone.
 /// The instrument's ring at 12 Hz: observes ONLY the meter model, so its tick
 /// invalidates just this small view (the law the old MeterStrip obeyed). The
-/// caption keeps the honest listening/paused line + the frames diagnostic
-/// ("are frames arriving?" — framesReceived stuck at 0 ⇒ the source isn't
-/// notifying, not a ring bug).
+/// caption beside it stays a human word (Listening / Recording / Paused).
 struct RecordingRingView: View {
     @ObservedObject var meter: CaptureManager.AudioMeterModel
     let paused: Bool
@@ -75,19 +73,16 @@ struct RecordingRingView: View {
     }
 }
 
-/// The honest listening line + frames diagnostic, in its own meter-observing
-/// subview (12 Hz tick stays contained, exactly like the ring).
+/// The instrument's caption — a human state only (the ring already shows the
+/// level). The old frames/bytes diagnostics were build telemetry; they live in
+/// the logs now, never on a consumer surface.
 struct MeterCaption: View {
-    @ObservedObject var meter: CaptureManager.AudioMeterModel
     let paused: Bool
     let isRecordingMic: Bool
 
     var body: some View {
-        Text(paused ? "Paused, not listening"
-             : (isRecordingMic ? "Recording from phone mic" : "Listening")
-             + " · frames \(meter.framesReceived) · last \(meter.lastFrameBytes)B")
+        Text(MeterCaptionText.caption(paused: paused, isRecordingMic: isRecordingMic))
             .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-            .monospacedDigit()
     }
 }
 
@@ -101,6 +96,24 @@ struct ElapsedLabel: View {
             Text(String(format: "%d:%02d", s / 60, s % 60))
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                 .monospacedDigit()
+        }
+    }
+}
+
+/// Activity's parameter wiring, extracted from the old buried Capture
+/// NavigationLink so the top-level Activity TAB (spec §1/§6, track
+/// 20260714T1800) mounts the SAME configured surface: the ambient decision
+/// log, the manager's recap pool, chat handoff via the ambient broker, and the
+/// old Stats readout one tap deeper (subsumed, not lost).
+enum CaptureActivityWiring {
+    @MainActor static func activityView(manager: CaptureManager) -> some View {
+        ActivityView(
+            decisionLogURL: AmbientPrefs.decisionLogURL(),
+            recapPool: manager.recapConversationPool(),
+            onOpenChat: { seed in AmbientCardBroker.shared.run(seed: seed) }
+        )
+        .toolbar {
+            NavigationLink("Stats") { StatsView(summary: manager.statsSummary) }
         }
     }
 }
@@ -124,9 +137,9 @@ struct CaptureScreen: View {
     // MARK: find + organize (track 20260713T0902, features/capture-home.feature)
     /// The user's categories, stored beside the captures they organize.
     @StateObject private var categories: ConversationCategoryStore
-    /// Search over what the phone holds (titles + cached transcripts).
-    @State private var searchOpen = false
-    @State private var query = ""
+    /// Search over what the phone holds (titles + cached transcripts) — open/closed
+    /// + query live in the durable, tested find state ("Search all" opens it).
+    @StateObject private var find = CaptureFindState()
     /// nil = no search active; else the ids that matched (computed off-main).
     @State private var searchMatches: Set<String>?
     /// The computer/Lore half of search (track 20260714T1200): resolved from the door
@@ -174,12 +187,18 @@ struct CaptureScreen: View {
                 }
             }
             syncBar
+            // The calm "Record a conversation" CTA card (prototype 08 Capture home) —
+            // hidden while the live instrument is up (recording IS the surface then).
+            if !isShowingCapture {
+                recordCTA
+            }
             if manager.visibleCaptures.isEmpty {
                 // Keep the header search affordance honest even before the first
                 // capture: opening it still reveals the same local search field.
-                if searchOpen { findBar }
+                if find.searchOpen { findBar }
                 emptyState
             } else {
+                recentHeadline
                 findBar
                 conversationList
             }
@@ -188,8 +207,8 @@ struct CaptureScreen: View {
         // Search sweeps local disk (cached transcripts) AND, when the computer is
         // connected, the FULL history in Lore (track 20260714T1200) — off-main, newest
         // state wins. The computer results are deduped against the local matches.
-        .task(id: query) {
-            let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        .task(id: find.query) {
+            let q = find.query.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !q.isEmpty else { searchMatches = nil; remoteState = .idle; return }
             let ids = manager.visibleCaptures.map(\.captureId)
             let titles = Dictionary(uniqueKeysWithValues: ids.map {
@@ -202,7 +221,7 @@ struct CaptureScreen: View {
                     title: { titles[$0] ?? nil },
                     transcript: { mgr.searchText(for: $0) }))
             }.value
-            guard query.trimmingCharacters(in: .whitespacesAndNewlines) == q else { return }
+            guard find.query.trimmingCharacters(in: .whitespacesAndNewlines) == q else { return }
             searchMatches = matched
             // Reach the computer's whole library (phone-only tier → notConnected note).
             remoteState = .searching
@@ -211,7 +230,7 @@ struct CaptureScreen: View {
             let rs = await FullHistorySearch.remoteState(
                 query: q, localIds: Set(ids), computerConnected: connected,
                 search: { try await DoorClient(target: localTarget).searchConversations(query: $0) })
-            if query.trimmingCharacters(in: .whitespacesAndNewlines) == q { remoteState = rs }
+            if find.query.trimmingCharacters(in: .whitespacesAndNewlines) == q { remoteState = rs }
         }
         .alert("Rename category", isPresented: Binding(
             get: { renamingCategory != nil },
@@ -255,16 +274,85 @@ struct CaptureScreen: View {
         }
     }
 
+    // MARK: record CTA — the calm "Record a conversation" card (prototype :2202)
+
+    /// Mic circle + headline + the on-phone reassurance line. Tapping starts the
+    /// existing phone-mic recording path.
+    private var recordCTA: some View {
+        Button { manager.startMicRecording() } label: {
+            HStack(spacing: GrainSpacing.x3) {
+                ZStack {
+                    Circle().fill(GrainColor.forgeBlue)
+                        .frame(width: 44, height: 44)
+                    Image(systemName: "mic.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(recordOrbGlyph)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(CaptureHomeCopy.recordTitle)
+                        .grainTextStyle(.body).fontWeight(.semibold)
+                        .foregroundStyle(GrainColor.ink)
+                    Text(CaptureHomeCopy.recordSubtitle(local: local))
+                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                        .multilineTextAlignment(.leading)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(GrainSpacing.x3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
+                .fill(GrainColor.surface))
+            .overlay(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
+                .strokeBorder(GrainColor.borderFaint, lineWidth: 1))
+            .contentShape(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(!manager.phoneMicAvailable)
+        .accessibilityLabel(CaptureHomeCopy.recordTitle)
+        .padding(.horizontal, GrainSpacing.x4)
+        .padding(.top, GrainSpacing.x2)
+    }
+
+    /// The mic glyph sits on a forge-blue fill — adaptive warm-white in both modes.
+    private var recordOrbGlyph: Color {
+        colorScheme == .dark ? GrainColor.ink : GrainColor.surface
+    }
+
+    // MARK: "Recent on this phone" headline + Search all (prototype :2203)
+
+    private var recentHeadline: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(CaptureHomeCopy.recentHeadline)
+                    .grainTextStyle(.body).fontWeight(.semibold)
+                    .foregroundStyle(GrainColor.ink)
+                Text(CaptureHomeCopy.conversationCount(manager.visibleCaptures.count))
+                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            }
+            Spacer()
+            // "Search all" = the same full-history search the header icon opens.
+            Button(CaptureHomeCopy.searchAll) {
+                withAnimation(.easeOut(duration: 0.2)) { find.openSearchAll() }
+            }
+            .grainTextStyle(.caption)
+            .foregroundStyle(GrainColor.forgeBlue)
+            .buttonStyle(.plain)
+            .accessibilityLabel("Search all conversations")
+        }
+        .padding(.horizontal, GrainSpacing.x4)
+        .padding(.top, GrainSpacing.x3)
+    }
+
     // MARK: find + organize bar (search + category chips)
 
     private var findBar: some View {
         VStack(spacing: GrainSpacing.x2) {
-            if searchOpen {
+            if find.searchOpen {
                 HStack(spacing: GrainSpacing.x2) {
                     Image(grain: .search)
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(GrainColor.textFaint)
-                    TextField("Search conversations on this phone", text: $query)
+                    TextField("Search people, words, or places", text: $find.query)
                         .textFieldStyle(.plain)
                         .grainTextStyle(.body)
                         .foregroundStyle(GrainColor.ink)
@@ -284,7 +372,7 @@ struct CaptureScreen: View {
             chips
         }
         .padding(.horizontal, GrainSpacing.x4)
-        .padding(.top, searchOpen ? GrainSpacing.x2 : GrainSpacing.x1)
+        .padding(.top, find.searchOpen ? GrainSpacing.x2 : GrainSpacing.x1)
         .padding(.bottom, GrainSpacing.x2)
     }
 
@@ -311,8 +399,39 @@ struct CaptureScreen: View {
                 }
                 chip(label: "+", selected: false) { showingNewCategory = true }
                     .accessibilityLabel("New category")
+                editChip
             }
         }
+    }
+
+    /// The discoverable Edit affordance (prototype :2208): rename or delete a
+    /// category without knowing about the chips' long-press menu. Deleting a
+    /// category never deletes conversations.
+    private var editChip: some View {
+        Menu {
+            ForEach(categories.categories) { cat in
+                Menu(cat.name) {
+                    Button("Rename") {
+                        renamingCategory = cat
+                        renameText = cat.name
+                    }
+                    Button("Delete", role: .destructive) {
+                        if categoryFilter == cat.id { categoryFilter = nil }
+                        categories.delete(categoryId: cat.id)
+                    }
+                }
+            }
+        } label: {
+            Text("Edit")
+                .grainTextStyle(.caption)
+                .foregroundStyle(GrainColor.textMuted)
+                .lineLimit(1)
+                .padding(.horizontal, GrainSpacing.x3)
+                .padding(.vertical, GrainSpacing.x1)
+                .overlay(Capsule().strokeBorder(GrainColor.borderFaint, lineWidth: 1))
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityLabel("Rename or delete category")
     }
 
     private func chip(label: String, selected: Bool, action: @escaping () -> Void) -> some View {
@@ -348,19 +467,6 @@ struct CaptureScreen: View {
             items = items.filter { ids.contains($0.captureId) }
         }
         return items
-    }
-
-    /// Activity (track 20260713T0905): the ledger + recaps + plain-word measures,
-    /// with the old Stats readout one tap deeper (subsumed, not lost).
-    private var activityDestination: some View {
-        ActivityView(
-            decisionLogURL: AmbientPrefs.decisionLogURL(),
-            recapPool: manager.recapConversationPool(),
-            onOpenChat: { seed in AmbientCardBroker.shared.run(seed: seed) }
-        )
-        .toolbar {
-            NavigationLink("Stats") { StatsView(summary: manager.statsSummary) }
-        }
     }
 
     // MARK: conversation list — grouped into dated sections (Feature 5)
@@ -408,8 +514,8 @@ struct CaptureScreen: View {
     /// section (each opens the same three-face detail, fetched by id — AC4); the
     /// connection states are said honestly.
     @ViewBuilder private var remoteResultsSection: some View {
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        if searchOpen, !q.isEmpty {
+        let q = find.query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if find.searchOpen, !q.isEmpty {
             switch remoteState {
             case .idle, .searching:
                 EmptyView()
@@ -486,8 +592,8 @@ struct CaptureScreen: View {
                 manager: manager,
                 captureId: wal.captureId,
                 timeRange: manager.conversationMeta(for: wal.captureId)
-                    .map { CaptureCard.timeRangeString(meta: $0, fallback: wal.status.startedAt) }
-                    ?? CaptureCard.timeRangeString(meta: nil, fallback: wal.status.startedAt),
+                    .map { CaptureCardPresentation.timeRangeString(meta: $0, fallback: wal.status.startedAt) }
+                    ?? CaptureCardPresentation.timeRangeString(meta: nil, fallback: wal.status.startedAt),
                 place: manager.conversationMeta(for: wal.captureId)?.location?.label,
                 conversationDate: manager.conversationMeta(for: wal.captureId)
                     .map { Date(timeIntervalSince1970: TimeInterval($0.startedAt)) }
@@ -505,6 +611,7 @@ struct CaptureScreen: View {
                     onSight: { manager.ensureRecentTranscriptCached(wal.captureId) },
                     local: local,
                     categoryName: categories.category(for: wal.captureId)?.name,
+                    categoryAutoFiled: categories.acceptsAutoSuggestion(for: wal.captureId),
                     loadWaveform: { [weak manager] in
                         WaveformThumb.profile(sizes: manager?.segmentSizes(for: wal.captureId) ?? [],
                                               buckets: 24)
@@ -582,8 +689,7 @@ struct CaptureScreen: View {
                     .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
                     .lineLimit(1)
             }
-            MeterCaption(meter: manager.meter, paused: manager.isPaused,
-                         isRecordingMic: manager.isRecordingMic)
+            MeterCaption(paused: manager.isPaused, isRecordingMic: manager.isRecordingMic)
         }
         .padding(.horizontal, GrainSpacing.x4)
         .padding(.top, GrainSpacing.x2)
@@ -619,51 +725,32 @@ struct CaptureScreen: View {
     /// it keeps the original behavior of clearing the local query and results.
     private var headerSearchButton: some View {
         Button {
-            withAnimation(.easeOut(duration: 0.2)) {
-                searchOpen.toggle()
-                if !searchOpen { query = "" }
-            }
+            withAnimation(.easeOut(duration: 0.2)) { find.toggleSearch() }
         } label: {
             Image(grain: .search)
                 .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(searchOpen ? GrainColor.forgeBlue : GrainColor.textMuted)
+                .foregroundStyle(find.searchOpen ? GrainColor.forgeBlue : GrainColor.textMuted)
                 .frame(width: GrainSpacing.x8 + GrainSpacing.x2,
                        height: GrainSpacing.x8 + GrainSpacing.x2)
-                .background(Circle().fill(GrainColor.surface.opacity(searchOpen ? 1 : 0)))
+                .background(Circle().fill(GrainColor.surface.opacity(find.searchOpen ? 1 : 0)))
                 .overlay(Circle().strokeBorder(
-                    GrainColor.borderFaint.opacity(searchOpen ? 1 : 0), lineWidth: 1))
+                    GrainColor.borderFaint.opacity(find.searchOpen ? 1 : 0), lineWidth: 1))
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(searchOpen ? "Close conversation search" : "Search conversations")
-        .accessibilityValue(searchOpen ? "Open" : "Closed")
-    }
-
-    /// Activity remains one tap from Capture, with the same destination and Stats
-    /// toolbar, but shares the prototype's quiet circular icon treatment.
-    private var activityButton: some View {
-        NavigationLink {
-            activityDestination
-        } label: {
-            Image(grain: .spark)
-                .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(GrainColor.textMuted)
-                .frame(width: GrainSpacing.x8 + GrainSpacing.x2,
-                       height: GrainSpacing.x8 + GrainSpacing.x2)
-                .contentShape(Circle())
-        }
-        .accessibilityLabel("Activity")
+        .accessibilityLabel(find.searchOpen ? "Close conversation search" : "Search all conversations")
+        .accessibilityValue(find.searchOpen ? "Open" : "Closed")
     }
 
     // MARK: connect header — auto-connect STATUS + the inline "Connect your Omi" affordance
 
-    /// The capture header shown when the Omi isn't connected. Source connection is
-    /// automatic + self-healing, so the connecting / reconnecting / searching states read
-    /// as ambient STATUS (a spinner + a line) — the user does NOT drive a scan. A clean
-    /// nothing-connected idle (or Bluetooth-off) surfaces the inline "Connect your Omi"
-    /// affordance, whose tap kicks off the automatic connect flow. The phone-mic record
-    /// sphere is always offered as a manual source. Discovered Omis fold in below only for
-    /// first-time pairing (no saved device yet), so the user can tap theirs.
+    /// The capture header shown when the Omi isn't connected. ONE clean headline row
+    /// per the prototype top bar ("Capture" + quiet icon actions — the record path
+    /// lives on the CTA card below, not up here). Source connection is automatic +
+    /// self-healing, so the connecting / reconnecting / searching states read as
+    /// ambient STATUS (a spinner + a line) — the user does NOT drive a scan. A clean
+    /// nothing-connected idle (or Bluetooth-off) surfaces the inline "Connect your
+    /// Omi" affordance. Discovered Omis fold in below only for first-time pairing.
     private func connectHeader(_ p: CaptureSourcePresentation) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: GrainSpacing.x2) {
@@ -678,11 +765,6 @@ struct CaptureScreen: View {
                 }
                 Spacer(minLength: GrainSpacing.x2)
                 headerSearchButton
-                activityButton
-                // The phone-mic record sphere — a manual capture source, always available.
-                if manager.phoneMicAvailable {
-                    MicSphereButton(recording: manager.isRecordingMic) { manager.toggleMicRecording() }
-                }
             }
             .padding(.horizontal, GrainSpacing.x4)
             .padding(.vertical, GrainSpacing.x2)
@@ -743,7 +825,6 @@ struct CaptureScreen: View {
                 GrainButton("New", variant: .tonal, size: .sm) { manager.splitConversation() }
             }
             headerSearchButton
-            activityButton
             // (The record/pause control moved onto the recording instrument strip —
             // one control, beside the ring it commands.)
         }
@@ -836,94 +917,60 @@ private struct CaptureCard: View {
     let onSight: () -> Void
     /// Phone-only tier: on-device labels (no "computer").
     var local: Bool = false
-    /// The category it's filed under (chip on the card; nil = unfiled).
+    /// The category it's filed under (inline pill beside the title; nil = unfiled).
     var categoryName: String?
+    /// Whether the on-device model filed it (renders as "<category>, auto").
+    var categoryAutoFiled: Bool = false
     /// Real segment sizes → the row's waveform thumbnail (loaded lazily; empty =
     /// audio pruned or not yet loaded — no waveform is drawn, never a fake one).
     var loadWaveform: (@Sendable () -> [Double])? = nil
     @State private var waveform: [Double] = []
 
-    /// The conversation's NAME — the live poll's title, falling back to the durable card.
-    private var name: String? {
-        if let t = poller.title, !t.isEmpty { return t }
-        if let t = card?.title, !t.isEmpty { return t }
-        return nil
-    }
-    /// The conversation's DESCRIPTION — the live poll's summary, falling back to the card.
-    private var description: String? {
-        if let s = poller.summary, !s.isEmpty { return s }
-        if let s = card?.summary, !s.isEmpty { return s }
-        return nil
-    }
-
-    /// The on-device PROVISIONAL transcript body shown the instant a capture is stopped,
-    /// until the authoritative Kiln summary lands (Feature 1). Only when the card is still
-    /// provisional and the poller hasn't returned a real title yet.
-    private var provisionalPreview: String? {
-        guard card?.isProvisional == true, (poller.title ?? "").isEmpty else { return nil }
-        guard let body = card?.provisionalTranscript, !body.isEmpty else { return nil }
-        return body
+    /// EVERYTHING the card shows, as pure tested data (track 20260714T1800): title,
+    /// summary, one human status word, the quiet meta line, the category pill. The
+    /// presentation has no field for sync statistics or raw errors — a card cannot
+    /// leak what its data cannot carry.
+    private var presentation: CaptureCardPresentation {
+        CaptureCardPresentation.make(
+            status: wal.status,
+            meta: meta,
+            card: card,
+            pollerStage: poller.stage,
+            pollerTitle: poller.title,
+            pollerSummary: poller.summary,
+            droppedReason: poller.droppedReason,
+            hasCachedTranscript: hasCachedTranscript,
+            local: local,
+            categoryName: categoryName,
+            categoryAutoFiled: categoryAutoFiled,
+            waveform: waveform)
     }
 
     var body: some View {
+        let p = presentation
         VStack(alignment: .leading, spacing: GrainSpacing.x2) {
-            // Kiln-generated title as the card's headline once known (live poll OR the
-            // durable card tombstone); the progress chip drops to a secondary line.
-            // Falls back to chip-only until a title exists.
-            if let name {
-                HStack(alignment: .top, spacing: GrainSpacing.x2) {
-                    // Generic/duplicate titles (near-silent "Thank you", "Okay"…) get the
-                    // start time appended so two different short captures read distinctly
-                    // (track 20260628T1609). Specific titles render unchanged.
-                    Text(ConversationTitleDisplay.display(
-                        title: name, start: cardStart,
-                        timeString: { Self.timeFmt.string(from: $0) }))
-                        .grainTextStyle(.body)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(GrainColor.ink)
-                        .lineLimit(2)
-                    Spacer(minLength: GrainSpacing.x2)
-                    statusIndicator
-                }
-            } else {
-                HStack {
-                    statusIndicator
-                    Spacer()
-                }
+            // Content first (prototype .flat-row): TITLE + inline category pill,
+            // the single human status word trailing.
+            HStack(alignment: .top, spacing: GrainSpacing.x2) {
+                (titleText(p) + categoryPillText(p))
+                    .lineLimit(2)
+                Spacer(minLength: GrainSpacing.x2)
+                statusIndicator(p)
             }
 
-            Text(metadataLine)
+            // The quiet meta line: "Tue, Jul 14 · 4:16 PM–4:18 PM · 2 min · Office".
+            Text(p.metaLine)
                 .grainTextStyle(.caption)
                 .foregroundStyle(GrainColor.textFaint)
 
-            // The conversation's DESCRIPTION (what it was about) — shown on the card,
-            // not just inside the detail view, so the whole timeline is scannable.
-            if let description {
-                Text(description).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+            // The conversation's SUMMARY (what it was about) — on the card, so the
+            // whole timeline is scannable. Two-line clamp.
+            if let summary = p.summaryLine {
+                Text(summary).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                     .lineLimit(2)
-            } else if let preview = provisionalPreview {
-                // Instant on-device body until Kiln's summary overrides it in place.
-                Text(preview).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-                    .lineLimit(2)
-                Text("On-device transcript · finishing on your computer…")
-                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             }
 
-            HStack(spacing: GrainSpacing.x2) {
-                if let categoryName {
-                    Text(categoryName)
-                        .grainTextStyle(.caption)
-                        .foregroundStyle(GrainColor.forgeBlue)
-                        .lineLimit(1)
-                        .padding(.horizontal, GrainSpacing.x2)
-                        .padding(.vertical, GrainSpacing.x1)
-                        .background(Capsule().fill(GrainColor.forgeBlueBg))
-                        .overlay(Capsule().strokeBorder(GrainColor.forgeBlueBorder, lineWidth: 1))
-                }
-                Text(detail).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-                Spacer(minLength: GrainSpacing.x1)
-                if !waveform.isEmpty { WaveformThumbView(profile: waveform) }
-            }
+            if !p.waveform.isEmpty { WaveformThumbView(profile: p.waveform) }
         }
         .padding(GrainSpacing.x3)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -944,99 +991,36 @@ private struct CaptureCard: View {
         }
     }
 
-    /// The calm, folded processing chip (local WAL stage + door pipeline stage).
-    private var progress: ConversationProgress {
-        ConversationProgress.resolve(
-            wal: wal.status.stage,
-            streaming: wal.status.streaming,
-            door: poller.stage,
-            hasTitle: !(poller.title ?? "").isEmpty,
-            hasCachedTranscript: hasCachedTranscript
-        )
+    /// The card's headline — content first, styled inline so the category pill
+    /// wraps with the title exactly like the prototype's row-title + tag.
+    private func titleText(_ p: CaptureCardPresentation) -> Text {
+        Text(p.title)
+            .font(GrainFont.font(.body))
+            .fontWeight(.semibold)
+            .foregroundColor(GrainColor.ink)
     }
 
-    /// Calm status dot + the same honest pipeline copy the original card exposed.
-    private var statusIndicator: some View {
+    /// The inline "<category>, auto" tag beside the title (empty when unfiled).
+    private func categoryPillText(_ p: CaptureCardPresentation) -> Text {
+        guard let label = p.categoryLabel else { return Text(verbatim: "") }
+        return Text("  \(label)")
+            .font(GrainFont.font(.caption))
+            .foregroundColor(GrainColor.forgeBlue)
+    }
+
+    /// Calm status dot + the ONE human word for where the conversation is.
+    private func statusIndicator(_ p: CaptureCardPresentation) -> some View {
         HStack(spacing: GrainSpacing.x1) {
-            GrainStatusDot(progress.statusDot, size: .sm)
-            Text(statusText)
+            GrainStatusDot(p.progress.statusDot, size: .sm)
+            Text(p.statusWord)
                 .grainTextStyle(.caption)
-                .foregroundStyle(progress == .failed ? GrainColor.dangerRed : GrainColor.textMuted)
+                .foregroundStyle(p.progress == .failed ? GrainColor.dangerRed : GrainColor.textMuted)
                 .lineLimit(1)
         }
         .fixedSize(horizontal: true, vertical: false)
     }
-
-    /// A dropped capture keeps Lore's specific terminal reason instead of a
-    /// misleading generic retry label.
-    private var statusText: String {
-        if progress == .failed {
-            return ConversationProgress.failureMessage(droppedReason: poller.droppedReason)
-                ?? progress.label(local: local)
-        }
-        return progress.label(local: local)
-    }
-
-    /// "10:41–10:47 AM · 6 min" when closed; start time alone while open.
-    private var timeRange: String { Self.timeRangeString(meta: meta, fallback: wal.status.startedAt) }
-
-    /// Time and optional place share the prototype's single quiet metadata line.
-    private var metadataLine: String {
-        guard let place else { return timeRange }
-        return "\(timeRange) · \(place)"
-    }
-
-    /// The conversation's durable REAL START (for the title-time suffix). Same
-    /// processing-time-proof priority the list uses: meta → card → capture-id → (last
-    /// resort) the WAL launch time.
-    private var cardStart: Date {
-        if let s = meta?.startedAt, s > 0 { return Date(timeIntervalSince1970: TimeInterval(s)) }
-        if let s = card?.startedAt, s > 0 { return Date(timeIntervalSince1970: TimeInterval(s)) }
-        if let s = CaptureIdTime.startedAt(fromCaptureId: wal.captureId), s > 0 {
-            return Date(timeIntervalSince1970: TimeInterval(s))
-        }
-        return wal.status.startedAt
-    }
-
-    /// Shared formatter so the conversation detail view shows the SAME time range
-    /// as the card. `fallback` is the WAL start used when there's no metadata sidecar.
-    static func timeRangeString(meta: ConversationMeta?, fallback: Date) -> String {
-        // Lead with the DATE so "when the recording happened" is unambiguous (captures
-        // span days), then the time-of-day range + duration.
-        guard let meta else { return "\(dayFmt.string(from: fallback)) · \(timeFmt.string(from: fallback))" }
-        let start = Date(timeIntervalSince1970: TimeInterval(meta.startedAt))
-        let day = dayFmt.string(from: start)
-        guard let endSecs = meta.endedAt else { return "\(day) · \(timeFmt.string(from: start))" }
-        let end = Date(timeIntervalSince1970: TimeInterval(endSecs))
-        let span = "\(timeFmt.string(from: start))–\(timeFmt.string(from: end))"
-        if let dur = meta.durationSeconds {
-            let mins = max(1, Int((Double(dur) / 60).rounded()))
-            return "\(day) · \(span) · \(mins) min"
-        }
-        return "\(day) · \(span)"
-    }
-
-    private var place: String? { meta?.location?.label }
-
-    private var detail: String {
-        let s = wal.status
-        let kb = String(format: "%.1f", Double(s.bytes) / 1024)
-        let synced = "\(s.syncedSegments)/\(s.totalSegments) segments synced · \(kb) KB"
-        if let err = s.lastSyncError, s.pendingSegments > 0 { return "\(synced) · \(err)" }
-        return synced
-    }
-
-    private static let timeFmt: DateFormatter = {
-        let f = DateFormatter(); f.dateFormat = "h:mm a"; return f
-    }()
-    private static let dayFmt: DateFormatter = {
-        let f = DateFormatter(); f.dateFormat = "EEE, MMM d"; return f
-    }()
 }
 
-/// The phone-mic record control as a compact sphere (Feature 3). Idle: a subtle mic
-/// glyph in a quiet circle. Recording: a RED record sphere with an animated pulse ring
-/// radiating outward, so "you're recording" reads at a glance. Tapping toggles.
 /// The row's small waveform: real segment-size energy, normalized. Purely
 /// decorative summary of the recording's shape — hidden entirely when audio has
 /// been pruned (no fake waveforms).
@@ -1065,51 +1049,6 @@ private struct WaveformThumbView: View {
         }
         .frame(width: GrainSpacing.x8 + GrainSpacing.x8, height: GrainSpacing.x4)
         .accessibilityHidden(true)
-    }
-}
-
-private struct MicSphereButton: View {
-    let recording: Bool
-    let action: () -> Void
-    @State private var pulse = false
-
-    var body: some View {
-        Button(action: action) {
-            ZStack {
-                // Pulsing ring (recording only): expands + fades, forever.
-                if recording {
-                    Circle()
-                        .fill(GrainColor.dangerRed.opacity(0.35))
-                        .frame(width: 44, height: 44)
-                        .scaleEffect(pulse ? 1.3 : 0.8)
-                        .opacity(pulse ? 0.0 : 0.7)
-                }
-                Circle()
-                    .fill(recording ? GrainColor.dangerRed : GrainColor.surfaceElevated)
-                    .frame(width: 34, height: 34)
-                    .overlay(
-                        Circle().strokeBorder(recording ? Color.clear : GrainColor.border, lineWidth: 1)
-                    )
-                Image(systemName: recording ? "stop.fill" : "mic.fill")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(recording ? Color.white : GrainColor.ink)
-            }
-            .frame(width: 46, height: 46)
-            .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(recording ? "Stop recording" : "Record")
-        .onAppear { syncPulse(recording) }
-        .onChange(of: recording) { now in syncPulse(now) }
-    }
-
-    private func syncPulse(_ on: Bool) {
-        if on {
-            pulse = false
-            withAnimation(.easeOut(duration: 1.1).repeatForever(autoreverses: false)) { pulse = true }
-        } else {
-            withAnimation(.easeOut(duration: 0.2)) { pulse = false }
-        }
     }
 }
 

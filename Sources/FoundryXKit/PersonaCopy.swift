@@ -1,13 +1,16 @@
 // PersonaCopy — the persona-routed welcome voice (track 20260713T0901,
-// features/persona-welcome.feature). One flow skeleton; only words and artwork
-// route by who is arriving. This table is THE tweak point when the design locks:
-// copy changes land here once and the welcome follows.
+// features/persona-welcome.feature; realigned to the prototype by track
+// 20260714T1800 §2). One flow skeleton; only words and artwork route by who is
+// arriving. This table is THE tweak point when the design locks: copy changes
+// land here once and the welcome follows.
 //
 // Copy laws (each earned in review):
 //  - individual never says "apprentice" (Nick, 2026-07-12)
-//  - every persona keeps a privacy lock line (no absolute claims — "stays on your
-//    devices, under your keys", never "nothing leaves")
-//  - headlines come from the live site language (for-you / for-business)
+//  - every persona shows the ONE canonical privacy line: "Your memory stays on
+//    your devices, under your keys." (no per-persona prefixes, no absolutes)
+//  - headlines come from the prototype (fullflow2.html WELCOME_COPY): work
+//    "Take the work back." / life "It adapts to you." / firm "One standard,
+//    inside your perimeter."
 
 import Foundation
 
@@ -35,33 +38,88 @@ public struct PersonaWelcomeCopy: Equatable, Sendable {
 }
 
 public enum PersonaCopy {
+    /// The single privacy line every persona shows — one canon, zero prefixes
+    /// (prototype `privacy-line`, spec §2).
+    public static let canonicalLockLine = "Your memory stays on your devices, under your keys."
+
     public static func welcome(for persona: OnboardingPersona) -> PersonaWelcomeCopy {
         switch persona {
         case .expert:
             return PersonaWelcomeCopy(
-                headline: "The expert work is why they hire you.",
-                emphasis: "why they hire you.",
-                sub: "The busywork gets struck through. The judgment stays yours.",
-                lockLine: "Privileged by default. Your memory stays on your devices, under your keys."
+                headline: "Take the work back.",
+                emphasis: "",
+                sub: "Clients come for your judgment. FoundryX carries the record, recall, and follow-through.",
+                lockLine: canonicalLockLine
             )
         case .individual:
             return PersonaWelcomeCopy(
                 headline: "It adapts to you.",
-                emphasis: "It adapts",
+                emphasis: "",
                 // Individual = a person organizing their LIFE, not their job.
                 // The Catch: it catches what you'd have forgotten and brings it
                 // back at the moment it matters. Never "how you work".
-                sub: "It catches what you'd have forgotten, and brings it back right when it matters.",
-                lockLine: "Private by design. Your memory stays on your devices, under your keys."
+                sub: "It catches the parts of life you meant to remember, right when they matter.",
+                lockLine: canonicalLockLine
             )
         case .firm:
             return PersonaWelcomeCopy(
-                headline: "Your data stays under your control.",
-                emphasis: "your control.",
-                sub: "Never trained on. Works offline. Yours by architecture.",
-                lockLine: "Encrypted on your hardware. Never trained on."
+                headline: "One standard, inside your perimeter.",
+                emphasis: "",
+                sub: "Hard-won judgment becomes one private standard. It is not used for training, and stays useful offline.",
+                lockLine: canonicalLockLine
             )
         }
+    }
+}
+
+// MARK: - The welcome's fixed skeleton (spec §2 — one skeleton, words route)
+
+/// The persona-independent pieces of the welcome surface, in render order.
+/// The view renders FROM this — tests assert the same values the screen shows.
+public enum PersonaWelcomeLayout {
+    /// The skeleton's elements, top to bottom (prototype `renderWelcome`):
+    /// wordmark → prompt + persona switch (ABOVE the art) → art → headline +
+    /// body → actions (+ the privacy line).
+    public enum Element: Equatable, CaseIterable, Sendable {
+        case wordmark, prompt, personaSwitch, art, headline, body, actions
+    }
+
+    public static let order: [Element] =
+        [.wordmark, .prompt, .personaSwitch, .art, .headline, .body, .actions]
+
+    public static let prompt = "What brings you here?"
+    /// Primary → voice enrollment; quiet → capture home (dismisses forever).
+    public static let primaryAction = "Continue"
+    public static let quietAction = "Set up later"
+    public static let privacyLine = PersonaCopy.canonicalLockLine
+}
+
+// MARK: - The welcome-seen gate (B2)
+
+/// Whether THIS install has seen the persona welcome — its own flag, deliberately
+/// independent of `foundryx.onboarding.completed` so `migrateIfPriorUse` (which
+/// suppresses the voice/consent ONBOARDING for established installs) can never
+/// suppress the WELCOME: established installs see it once after the update.
+public enum WelcomePrefs {
+    public static let seenKey = "foundryx.welcome.seen"
+
+    public static func seen(defaults: UserDefaults = .standard) -> Bool {
+        defaults.bool(forKey: seenKey)
+    }
+
+    public static func markSeen(defaults: UserDefaults = .standard) {
+        defaults.set(true, forKey: seenKey)
+    }
+}
+
+/// The pure presentation rule (mirrors OnboardingGate's style): sign-in FIRST
+/// (locked decision #5), then the welcome once — unless the full onboarding
+/// flow is about to present (it opens with the same welcome).
+public enum WelcomeGate {
+    public static func shouldPresent(signedIn: Bool,
+                                     onboardingWillPresent: Bool,
+                                     welcomeSeen: Bool) -> Bool {
+        signedIn && !onboardingWillPresent && !welcomeSeen
     }
 }
 

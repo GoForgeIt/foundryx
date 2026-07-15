@@ -15,6 +15,25 @@ Feature: Conversation detail with three faces and transcript search
     When I open the conversation
     Then I see the summary, when it happened, and where
 
+  @faces
+  Scenario: The summary face says what mattered
+    Given a transcribed conversation whose summary covers several points
+    When I open the Summary face
+    Then I see a "What mattered" list with one bullet per point
+
+  @faces
+  Scenario: The summary face links to the relay answer
+    Given a conversation that has been transcribed
+    And an ambient answer surfaced from this conversation
+    When I open the Summary face
+    Then I can open the relay answer from the summary
+
+  @faces
+  Scenario: A conversation without a linked answer offers no answer row
+    Given no ambient answer surfaced from this conversation
+    When I open the Summary face
+    Then there is no answer row to open
+
   Scenario: Searching the transcript highlights matches and shows the count
     Given a conversation whose transcript mentions "budget" three times
     When I search the transcript for "budg"
@@ -61,15 +80,38 @@ Feature: Conversation detail with three faces and transcript search
     And the conversation surfaced an action that I dismissed
     And the conversation surfaced an action I have not decided on
     When I open the Actions face
-    Then the first card reads "Sent to chat"
+    Then the first card shows it was completed
     And the second card reads "Dismissed"
-    And the third card shows it is still waiting on me
+    And the third card shows it is still open
+
+  @faces
+  Scenario: The actions face is populated from what actually surfaced
+    Given the conversation surfaced an action that I sent to chat
+    And an ambient answer surfaced from this conversation
+    And the conversation surfaced an action I have not decided on
+    When I open the Actions face
+    Then I see rows marked Completed, Ready, and Open
+
+  @faces
+  Scenario: I can add an action to a conversation
+    Given a conversation during which nothing actionable surfaced
+    When I add an action "Send Sarah the deck"
+    Then the Actions face lists "Send Sarah the deck" as an open item
+    And it is still there when I come back
 
   Scenario: An action card knows which conversation it came from
     Given an action that surfaced during a conversation
     Then its card carries a link back to that conversation
 
+  @faces
   Scenario: A conversation with no actions says so honestly
     Given a conversation during which nothing actionable surfaced
     When I open the Actions face
-    Then I see that nothing actionable came up, not an error
+    Then I see that nothing surfaced from this conversation yet, not an error
+    And I can still add an action
+
+  @faces
+  Scenario: The detail faces show no processing stepper
+    Given a conversation that is still being processed
+    When I open the conversation
+    Then no processing stepper appears in any face

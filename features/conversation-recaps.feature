@@ -39,3 +39,31 @@ Feature: Daily and weekly recaps of my conversations
     When the daily recap is built
     Then the insights mention the client call and the dentist appointment
     And no insight references a topic that was not discussed
+
+  Scenario: every insight carries a type and its source conversation
+    Given three conversations finished processing today
+    When the daily recap is built
+    Then every insight is labelled with one of the recap insight types
+    And every insight names the conversation it came from
+
+  Scenario: the daily recap rebuilds when a conversation finishes processing
+    Given a daily recap covering two conversations
+    When a conversation finishes processing and a finished event is posted
+    Then the daily recap covers three conversations without leaving the screen
+    And its freshness line grows after each processed conversation
+
+  Scenario: the weekly recap updates at week end
+    Given conversations across several days this week
+    When the weekly recap is built
+    Then the weekly card says the final weekly recap closes Sunday
+    And the weekly card offers an update-week-to-date action
+
+  Scenario: I can ask for a week-to-date update
+    Given conversations earlier this week and today
+    When I request an update week to date on the weekly card
+    Then the weekly freshness line reads that the week to date was updated just now
+
+  Scenario: selecting a period shows exactly one recap card
+    Given a daily recap and a weekly recap both exist
+    Then the daily card shows a "Daily recap" eyebrow with a "Today" heading
+    And the weekly card shows a "Weekly recap" eyebrow with a "This week" heading

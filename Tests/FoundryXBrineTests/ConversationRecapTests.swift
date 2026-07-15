@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import Combine
 import FoundryXKit
 
 /// Living conversation recaps (features/conversation-recaps.feature). The prose
@@ -45,7 +46,9 @@ final class ConversationRecapTests: XCTestCase {
         XCTAssertEqual(r.conversationCount, 3, "only today's three")
         XCTAssertTrue(r.narrative.contains("3 conversations today"))
         XCTAssertFalse(r.insights.isEmpty)
-        XCTAssertTrue(r.freshnessLine.contains("3 conversations"))
+        XCTAssertTrue(r.freshnessLine().contains("3 conversations"))
+        // Daily freshness advertises that the recap grows through the day.
+        XCTAssertTrue(r.freshnessLine().hasPrefix("Grows after each processed conversation"))
     }
 
     // Scenario: the daily recap is rebuilt after each new conversation (freshness reflects newest)
@@ -102,13 +105,128 @@ final class ConversationRecapTests: XCTestCase {
         guard let r = await ConversationRecapEngine.build(span: .day(start), from: pool, calendar: cal) else {
             return XCTFail("expected a recap")
         }
-        XCTAssertTrue(r.insights.contains("Client call"))
-        XCTAssertTrue(r.insights.contains("Dentist appointment"))
-        // Nothing outside the two subjects.
+        let sources = r.insights.map(\.sourceTitle)
+        XCTAssertTrue(sources.contains("Client call"))
+        XCTAssertTrue(sources.contains("Dentist appointment"))
+        // Every insight traces to one of the two real conversations — never invented.
         for insight in r.insights {
-            XCTAssertTrue(insight == "Client call" || insight == "Dentist appointment",
-                          "no invented insight: \(insight)")
+            XCTAssertTrue(insight.sourceTitle == "Client call" || insight.sourceTitle == "Dentist appointment",
+                          "no invented insight source: \(insight.sourceTitle)")
         }
+    }
+
+    // Scenario: every insight carries a type and its source conversation
+    func testEveryInsightIsTypedAndAttributed() async {
+        let start = cal.startOfDay(for: day("2026-07-14 00:00"))
+        let pool = [
+            convo("a", "Standup", "We agreed to ship Friday.", "2026-07-14 09:30"),
+            convo("b", "Client call", "Henderson wants the brief by Tuesday.", "2026-07-14 14:00"),
+            convo("c", "Dentist", "Rescheduled to next week.", "2026-07-14 17:00"),
+        ]
+        guard let r = await ConversationRecapEngine.build(span: .day(start), from: pool, calendar: cal) else {
+            return XCTFail("expected a recap")
+        }
+        XCTAssertFalse(r.insights.isEmpty)
+        let allowed = Set(RecapInsight.Kind.allCases)
+        let titles = Set(pool.map(\.title))
+        for insight in r.insights {
+            XCTAssertTrue(allowed.contains(insight.kind), "typed from the fixed set")
+            XCTAssertFalse(insight.text.isEmpty, "prose is non-empty")
+            XCTAssertTrue(titles.contains(insight.sourceTitle), "attributed to a real conversation")
+            XCTAssertTrue(insight.provenance.hasPrefix("from "), "provenance names the source")
+        }
+    }
+
+    // The deterministic labeler classifies the prototype's own insight lines (pure heuristic).
+    func testLabelerClassifiesPrototypeInsightLines() {
+        let day = RecapSpan.day(Date())
+        let week = RecapSpan.week(Date())
+        func kind(_ t: String, _ span: RecapSpan = .day(Date())) -> RecapInsight.Kind {
+            ConversationRecapEngine.label(forText: t, source: nil, span: span)
+        }
+        XCTAssertEqual(kind("Keep the blind Noise relay for the launch."), .decision)
+        XCTAssertEqual(kind("Send the template, add Mom's appointment, and hold Thursday evening."), .followUp)
+        XCTAssertEqual(kind("The relay call already answers the appendix questions raised this morning."), .connection)
+        XCTAssertEqual(kind("Sarah owns the appendix; Dana is coordinating the weekend."), .people)
+        XCTAssertEqual(kind("Privacy came up in five conversations, more than any other theme.", week), .trend)
+        _ = day
+    }
+
+    // Scenario: selecting a period shows exactly one recap card (eyebrow + heading)
+    func testPresentationEyebrowAndHeading() async {
+        let start = cal.startOfDay(for: day("2026-07-14 00:00"))
+        let weekStart = day("2026-07-13 00:00")
+        let pool = [convo("a", "Standup", "We agreed to ship Friday.", "2026-07-14 10:00")]
+        let daily = await ConversationRecapEngine.build(span: .day(start), from: pool, calendar: cal)
+        let weekly = await ConversationRecapEngine.build(span: .week(weekStart), from: pool, calendar: cal)
+        let dp = ActivityRecapPresentation.make(from: try! XCTUnwrap(daily))
+        let wp = ActivityRecapPresentation.make(from: try! XCTUnwrap(weekly))
+        XCTAssertEqual(dp.eyebrow, "Daily recap")
+        XCTAssertEqual(dp.heading, "Today")
+        XCTAssertFalse(dp.showsUpdateWeekToDate)
+        XCTAssertEqual(wp.eyebrow, "Weekly recap")
+        XCTAssertEqual(wp.heading, "This week")
+        XCTAssertTrue(wp.showsUpdateWeekToDate)
+    }
+
+    // Scenario: the weekly recap updates at week end (close copy + distinct ad-hoc action)
+    func testWeeklyCardStatesCloseAndOffersUpdate() async {
+        let weekStart = day("2026-07-13 00:00")
+        let pool = [
+            convo("a", "Mon", "M.", "2026-07-13 10:00"),
+            convo("b", "Wed", "W.", "2026-07-15 10:00"),
+        ]
+        let weekly = await ConversationRecapEngine.build(span: .week(weekStart), from: pool, calendar: cal)
+        let p = ActivityRecapPresentation.make(from: try! XCTUnwrap(weekly))
+        XCTAssertTrue(p.freshnessLine.contains("Final weekly recap closes Sunday."))
+        XCTAssertTrue(p.showsUpdateWeekToDate, "the update-week-to-date action is distinct from the close")
+    }
+
+    // Scenario: I can ask for a week-to-date update (freshness flips to updated just now)
+    func testWeekToDateUpdateFlipsFreshness() async {
+        let weekStart = day("2026-07-13 00:00")
+        let asOf = day("2026-07-15 15:00")
+        let pool = [convo("a", "Mon", "M.", "2026-07-13 10:00"),
+                    convo("b", "Wed", "W.", "2026-07-15 10:00")]
+        let wtd = await ConversationRecapEngine.build(
+            span: .weekToDate(start: weekStart, asOf: asOf), from: pool, calendar: cal)
+        let updated = ActivityRecapPresentation.make(from: try! XCTUnwrap(wtd), weekUpdated: true)
+        XCTAssertTrue(updated.freshnessLine.contains("Week to date updated just now"))
+        XCTAssertTrue(updated.freshnessLine.contains("Final weekly recap closes Sunday."))
+    }
+
+    // Scenario: the daily recap rebuilds when a conversation finishes processing
+    @MainActor
+    func testDailyRebuildsOnConversationFinishedNotification() async {
+        // A pool the model reads live; appending simulates a new finished conversation.
+        var pool = [
+            convo("a", "Morning", "First.", "2026-07-14 09:00"),
+            convo("b", "Noon", "Second.", "2026-07-14 12:00"),
+        ]
+        // Use a fixed "now" via a UTC calendar; the model reads Date() for spans, so
+        // seed the pool on TODAY's date so the day span captures them.
+        let today = Calendar.current.startOfDay(for: Date())
+        func at(_ hour: Int, _ id: String, _ title: String) -> RecapConversation {
+            RecapConversation(captureId: id, title: title, summary: "\(title) summary.",
+                              at: today.addingTimeInterval(TimeInterval(hour * 3600)))
+        }
+        pool = [at(1, "a", "Morning"), at(2, "b", "Noon")]
+        let model = ActivityRecapModel(poolProvider: { pool }, composer: nil)
+        await model.rebuildAll()
+        XCTAssertEqual(model.daily?.conversationCount, 2)
+
+        // A third conversation finishes; the finished event rebuilds the daily recap live.
+        let exp = expectation(description: "daily grows to three on the finished event")
+        let cancellable = model.$daily.sink { pres in
+            if pres?.conversationCount == 3 { exp.fulfill() }
+        }
+        pool.append(at(3, "c", "Evening"))
+        NotificationCenter.default.post(name: .foundryxConversationFinalized,
+                                        object: nil, userInfo: ["captureId": "c"])
+        await fulfillment(of: [exp], timeout: 3.0)
+        cancellable.cancel()
+        XCTAssertEqual(model.daily?.conversationCount, 3, "rebuilt without leaving the screen")
+        XCTAssertTrue(model.daily?.freshnessLine.hasPrefix("Grows after each processed conversation") ?? false)
     }
 
     // The composer seam replaces the prose when available; count/freshness stay real.
@@ -124,7 +242,9 @@ final class ConversationRecapTests: XCTestCase {
         let r = await ConversationRecapEngine.build(span: .day(start), from: pool,
                                                     composer: FixedComposer(), calendar: cal)
         XCTAssertEqual(r?.narrative, "A warm model narrative.")
-        XCTAssertEqual(r?.insights, ["model insight one", "model insight two"])
+        // The composer's PROSE is preserved; the engine adds the type + provenance.
+        XCTAssertEqual(r?.insights.map(\.text), ["model insight one", "model insight two"])
+        XCTAssertEqual(r?.insights.allSatisfy { $0.sourceTitle == "X" }, true, "attributed to the real convo")
         XCTAssertEqual(r?.conversationCount, 1, "count is always real, model or not")
     }
 }

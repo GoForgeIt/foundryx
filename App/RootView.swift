@@ -14,6 +14,10 @@ struct RootView: View {
     // re-run it, so we never bounce back to the gate mid-session.
     @State private var splashElapsed = false
     @State private var showingOnboarding = false
+    /// B2 (track 20260714T1800): the persona welcome, ONCE post-sign-in, on its
+    /// own flag — established installs (onboarding migrated to "completed") still
+    /// see it once after the update; "Set up later" dismisses it forever.
+    @State private var showingWelcome = false
 
     @StateObject private var brains = BrainStore()
 
@@ -70,27 +74,28 @@ struct RootView: View {
             // Already signed in from a restored session: the destination never
             // *changes*, so check the first-run gate here too. Existing installs
             // (any recordings on disk) are migrated to "onboarded" silently.
-            OnboardingPrefs.migrateIfPriorUse(baseDir: CaptureWAL.documentsCaptures())
-            if remote.email != nil,
-               OnboardingGate.shouldPresent(signedIn: true, completed: OnboardingPrefs.completed) {
-                showingOnboarding = true
-            }
+            if remote.email != nil { presentFirstRunSurfacesIfNeeded() }
         }
         // First-run onboarding (runs ONCE, after the first sign-in): teach the owner's
         // voice + the ambient opt-in. Dismissing counts as done — never re-prompts;
-        // both steps stay reachable from Settings.
+        // both steps stay reachable from Settings. B2: migration suppresses ONLY
+        // that onboarding — the persona welcome rides its own foundryx.welcome.seen
+        // flag and still shows once for established installs.
         .onChange(of: dest) { d in
-            if d != .signInGate {
-                OnboardingPrefs.migrateIfPriorUse(baseDir: CaptureWAL.documentsCaptures())
-                if OnboardingGate.shouldPresent(signedIn: true, completed: OnboardingPrefs.completed) {
-                    showingOnboarding = true
-                }
-            }
+            if d != .signInGate { presentFirstRunSurfacesIfNeeded() }
         }
         .fullScreenCover(isPresented: $showingOnboarding) {
             OnboardingFlowView(baseDir: CaptureWAL.documentsCaptures()) {
                 showingOnboarding = false
             }
+        }
+        // The standalone persona welcome (B2) for installs whose onboarding is
+        // already done: shows once before the tabs; both actions mark it seen
+        // (inside PersonaWelcomeStep) and it stays reachable from Settings →
+        // "Welcome & who it's for".
+        .fullScreenCover(isPresented: $showingWelcome) {
+            PersonaWelcomeStep(onStart: { showingWelcome = false },
+                               onSkip: { showingWelcome = false })
         }
         // One design, two renditions (Nick 2026-07-13): the app FOLLOWS the
         // device — Grain's light rendition by day, the Night Shift register
@@ -114,14 +119,32 @@ struct RootView: View {
             }
         }
     }
+
+    /// The post-sign-in first-run ladder (B2): migrate, then EITHER the full
+    /// onboarding flow (fresh installs — it opens with the welcome) OR the
+    /// standalone persona welcome (established installs that haven't seen it).
+    private func presentFirstRunSurfacesIfNeeded() {
+        OnboardingPrefs.migrateIfPriorUse(baseDir: CaptureWAL.documentsCaptures())
+        let onboardingWillPresent =
+            OnboardingGate.shouldPresent(signedIn: true, completed: OnboardingPrefs.completed)
+        if onboardingWillPresent {
+            showingOnboarding = true
+        } else if WelcomeGate.shouldPresent(signedIn: true,
+                                            onboardingWillPresent: false,
+                                            welcomeSeen: WelcomePrefs.seen()) {
+            showingWelcome = true
+        }
+    }
 }
 
 /// Routes intent-driven navigation (Action Button / Siri / Control Center) onto
 /// the tab bar from anywhere in the process (track 20260705T1100, Phase 5).
+/// The tab set IS the tested AppTab presentation (track 20260714T1800 §1):
+/// Capture → Activity → Chat → Device, Capture first, no Settings tab.
 @MainActor
 final class TabRouter: ObservableObject {
-    enum Tab: Hashable { case chat, capture, device, settings }
-    @Published var selected: Tab = .capture
+    typealias Tab = AppTab
+    @Published var selected: Tab = AppTab.launch
     @Published var showActionChooser = false
 }
 
@@ -147,6 +170,9 @@ private struct MainTabs: View {
     // tab switches and app foregrounding (its own Application Support JSON file).
     @StateObject private var chats = ChatConversationStore(storageURL: ChatConversationStore.defaultStorageURL())
     @StateObject private var router = TabRouter()
+    /// Settings presents as a SHEET from the Capture/Activity gear (§9) — it is
+    /// not a tab (prototype `bottomNav`).
+    @State private var showingSettings = false
     /// The ambient broker: pendingSeed (chat) + pendingAnswer (answer surface).
     @ObservedObject private var broker = AmbientCardBroker.shared
     // Phone-tier only: on-device brain readiness for the "setting up your private
@@ -326,21 +352,10 @@ private struct MainTabs: View {
     }
 
     var body: some View {
+        // Prototype `bottomNav` (track 20260714T1800 §1): Capture → Activity →
+        // Chat → Device, Capture first. Settings is NOT a tab — the gear in the
+        // Capture/Activity top bars opens it as a sheet (§9).
         TabView(selection: $router.selected) {
-            NavigationStack {
-                Group {
-                    if local {
-                        LocalChatScreen(baseDir: CaptureWAL.documentsCaptures(), remote: remote)
-                    } else {
-                        ChatScreen(target: target, store: chats, log: log)
-                    }
-                }
-                .navigationTitle("FoundryX")
-                .toolbar { Button("Account") { showingAccount = true } }
-            }
-            .tabItem { Label("Chat", systemImage: "message") }
-            .tag(TabRouter.Tab.chat)
-
             NavigationStack {
                 VStack(spacing: 0) {
                     // Phone tier: the model-download banner sits above capture so the
@@ -351,25 +366,64 @@ private struct MainTabs: View {
                     CaptureScreen(device: device, manager: manager, sources: sources, target: target, local: local)
                 }
                 .navigationTitle("Capture")
-                .toolbar { Button("Account") { showingAccount = true } }
+                .toolbar { settingsGear }
             }
-            .tabItem { Label("Capture", systemImage: "waveform") }
+            .tabItem { Label(AppTab.capture.label, systemImage: AppTab.capture.systemImage) }
             .tag(TabRouter.Tab.capture)
+
+            // Activity is FIRST-CLASS (§6): the same destination CaptureScreen
+            // used to bury behind a NavigationLink, one tap from anywhere.
+            NavigationStack {
+                ActivityView(
+                    decisionLogURL: AmbientPrefs.decisionLogURL(),
+                    recapPool: manager.recapConversationPool(),
+                    onOpenChat: { seed in AmbientCardBroker.shared.run(seed: seed) }
+                )
+                .toolbar {
+                    NavigationLink("Stats") { StatsView(summary: manager.statsSummary) }
+                    settingsGear
+                }
+            }
+            .tabItem { Label(AppTab.activity.label, systemImage: AppTab.activity.systemImage) }
+            .tag(TabRouter.Tab.activity)
+
+            NavigationStack {
+                Group {
+                    if local {
+                        LocalChatScreen(baseDir: CaptureWAL.documentsCaptures(), remote: remote)
+                    } else {
+                        ChatScreen(target: target, store: chats, log: log)
+                    }
+                }
+                .navigationTitle("FoundryX")
+            }
+            .tabItem { Label(AppTab.chat.label, systemImage: AppTab.chat.systemImage) }
+            .tag(TabRouter.Tab.chat)
 
             NavigationStack {
                 DeviceScreen(device: device, battery: battery, manager: manager, sources: sources)
                     .navigationTitle("Device")
-                    .toolbar { Button("Account") { showingAccount = true } }
             }
-            .tabItem { Label("Device", systemImage: "antenna.radiowaves.left.and.right") }
+            .tabItem { Label(AppTab.device.label, systemImage: AppTab.device.systemImage) }
             .tag(TabRouter.Tab.device)
-
+        }
+        // Settings as a modal sheet (§9): X close, keeps every settings row.
+        .sheet(isPresented: $showingSettings) {
             NavigationStack {
                 SettingsScreen(brains: brains, remote: remote)
-                    .navigationTitle("Settings")
+                    .navigationTitle(SettingsSheetPresentation.title)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button {
+                                showingSettings = false
+                            } label: {
+                                Image(systemName: "xmark")
+                            }
+                            .accessibilityLabel(SettingsSheetPresentation.closeAccessibilityLabel)
+                        }
+                    }
             }
-            .tabItem { Label("Settings", systemImage: "gearshape") }
-            .tag(TabRouter.Tab.settings)
         }
         // The Action Button's "Ask me" chooser (Phase 5, decision #4).
         .confirmationDialog("FoundryX", isPresented: $router.showActionChooser) {
@@ -413,6 +467,17 @@ private struct MainTabs: View {
                 AnswerSurfaceView(answer: answer, onDone: { broker.pendingAnswer = nil })
             }
         }
+    }
+
+    /// The quiet settings gear in the Capture/Activity top bars (prototype
+    /// `data-jump="settings"`) — the ONLY way into Settings.
+    private var settingsGear: some View {
+        Button {
+            showingSettings = true
+        } label: {
+            Image(systemName: "gearshape")
+        }
+        .accessibilityLabel(SettingsSheetPresentation.gearAccessibilityLabel)
     }
 
     /// The "setting up your private on-device brain" banner (model download UX).

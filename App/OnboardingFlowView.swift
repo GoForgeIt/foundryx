@@ -26,6 +26,11 @@ enum OnboardingPrefs {
     /// Migration: a user with recordings predates this flow — mark them onboarded
     /// silently so the wizard never interrupts an established install
     /// (feature: "an already-onboarded user is never re-prompted").
+    ///
+    /// B2 (track 20260714T1800): this suppresses ONLY the voice/consent
+    /// onboarding. The persona WELCOME has its own independent flag
+    /// (`WelcomePrefs`, `foundryx.welcome.seen`) that migration never touches —
+    /// established installs still see the welcome once after the update.
     static func migrateIfPriorUse(baseDir: URL) {
         guard !completed else { return }
         let entries = (try? FileManager.default.contentsOfDirectory(atPath: baseDir.path)) ?? []
@@ -60,6 +65,9 @@ struct OnboardingFlowView: View {
         // Set the once-flag on first completion; ALWAYS call onDone so a re-run
         // from Settings ("Show the welcome tour") can still dismiss itself.
         if !OnboardingPrefs.completed { OnboardingPrefs.completed = true }
+        // The flow OPENED with the persona welcome, so it counts as seen —
+        // the standalone welcome must not re-present over a finished flow.
+        WelcomePrefs.markSeen()
         onDone()
     }
 
@@ -71,9 +79,12 @@ struct OnboardingFlowView: View {
 // MARK: - The persona-routed welcome (track 20260713T0901)
 
 /// The Night Shift welcome: one skeleton, words + artwork routed by persona
-/// (features/persona-welcome.feature). Copy comes from PersonaCopy — THE tweak
-/// point once the design locks. The quiet "What brings you here?" rows re-render
-/// the screen in place; the choice persists and is editable in Settings.
+/// (features/persona-welcome.feature; layout per the prototype `renderWelcome`,
+/// track 20260714T1800 §2). Copy comes from PersonaCopy, the fixed skeleton from
+/// PersonaWelcomeLayout — THE tweak points once the design locks. The quiet
+/// "What brings you here?" switch sits ABOVE the art and re-renders the screen
+/// in place; the choice persists and is editable in Settings. Either action
+/// marks the welcome seen (B2) — "Set up later" dismisses it forever.
 struct PersonaWelcomeStep: View {
     let onStart: () -> Void
     let onSkip: () -> Void
@@ -85,12 +96,16 @@ struct PersonaWelcomeStep: View {
     var body: some View {
         ZStack {
             GrainDotField(density: 0.5)
+            // Prototype order (PersonaWelcomeLayout.order): wordmark → prompt +
+            // persona switch → art → headline + body → actions.
             VStack(spacing: 0) {
                 Text("F O U N D R Y X")
                     .font(.system(size: 11, design: .monospaced))
                     .kerning(3)
                     .foregroundStyle(GrainColor.textFaint)
                     .padding(.top, GrainSpacing.x6)
+
+                chooser.padding(.top, GrainSpacing.x4)
 
                 Spacer()
                 art
@@ -107,11 +122,15 @@ struct PersonaWelcomeStep: View {
                     .padding(.top, GrainSpacing.x2)
                     .frame(maxWidth: 300)
 
-                chooser.padding(.top, GrainSpacing.x4)
-
                 Spacer()
-                GrainButton("Get started", variant: .filled, size: .regular) { onStart() }
-                GrainButton("Skip for now", variant: .text, size: .regular) { onSkip() }
+                GrainButton(PersonaWelcomeLayout.primaryAction, variant: .filled, size: .regular) {
+                    WelcomePrefs.markSeen()
+                    onStart()
+                }
+                GrainButton(PersonaWelcomeLayout.quietAction, variant: .text, size: .regular) {
+                    WelcomePrefs.markSeen()
+                    onSkip()
+                }
                 HStack(spacing: 5) {
                     Image(grain: .key).font(.system(size: 10, weight: .light))
                     Text(copy.lockLine)
@@ -147,7 +166,7 @@ struct PersonaWelcomeStep: View {
     /// "What brings you here?" — three quiet rows; choosing re-renders in place.
     private var chooser: some View {
         VStack(spacing: GrainSpacing.x2) {
-            Text("What brings you here?")
+            Text(PersonaWelcomeLayout.prompt)
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             HStack(spacing: GrainSpacing.x2) {
                 ForEach(OnboardingPersona.allCases, id: \.self) { p in
@@ -179,7 +198,7 @@ struct PersonaWelcomeStep: View {
         switch persona {
         case .expert:
             GrainStrikeList(
-                lines: ["The drafting.", "The filing.", "The chasing.", "The scheduling."],
+                lines: ["The filing.", "The chasing.", "The scheduling.", "The follow-ups."],
                 survivor: "The judgment stays."
             )
         case .individual:

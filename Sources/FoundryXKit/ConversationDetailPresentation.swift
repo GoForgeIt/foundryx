@@ -1,0 +1,281 @@
+// ConversationDetailPresentation — the pure presentation models behind the
+// conversation detail's Summary and Actions faces (track 20260714T1800
+// ux_prototype_realignment §5, features/conversation-detail.feature @faces).
+//
+// The prototype (fullflow2.html renderDetail) shows:
+//   • Summary face: a narrative lede, a "What mattered" bullet list, and an
+//     "Open the relay answer" text action when an ambient answer is linked to
+//     this capture.
+//   • Actions face: a POPULATED list of the conversation's real surfaced items
+//     (nudges, answers, open items) with the human outcome vocabulary
+//     Completed / Ready / Open, plus an "Add an action" affordance. Empty state:
+//     "Nothing surfaced from this conversation yet."
+//
+// Everything here is pure or file-backed (no SwiftUI) so the brine step-defs
+// drive the REAL builders the view renders from (blocker resolution B1a).
+// App/ConversationFacesView.swift is the thin wrapper.
+
+import Foundation
+
+// MARK: - Summary face
+
+/// The Summary face's presentation: the "What mattered" bullets derived from
+/// the summary text, plus the ambient answer linked to this capture (when one
+/// surfaced) behind the "Open the relay answer" row.
+public struct ConversationSummaryPresentation: Equatable, Sendable {
+    /// The bullet list's label, exactly as the prototype renders it.
+    public static let whatMatteredLabel = "What mattered"
+    /// The linked-answer row's label, exactly as the prototype renders it.
+    public static let openRelayAnswerLabel = "Open the relay answer"
+
+    /// The "What mattered" bullets. Empty when the summary has fewer than two
+    /// sentences (a one-line summary IS the lede — no list to repeat it).
+    public let bullets: [String]
+    /// The ambient answer linked to this capture — `nil` means NO answer row.
+    public let linkedAnswer: LinkedConversationAnswer?
+
+    public init(bullets: [String], linkedAnswer: LinkedConversationAnswer?) {
+        self.bullets = bullets
+        self.linkedAnswer = linkedAnswer
+    }
+
+    /// Build the face from the card/summary text + the answers surfaced from
+    /// this capture (see `ConversationAnswerLog.answers`).
+    public static func build(summary: String?,
+                             linkedAnswers: [LinkedConversationAnswer]) -> Self {
+        Self(bullets: bullets(fromSummary: summary), linkedAnswer: linkedAnswers.first)
+    }
+
+    /// Derive the "What mattered" bullets from the summary text: one bullet per
+    /// sentence, capped at `limit`. A summary with fewer than two sentences
+    /// yields NO bullets — the narrative lede already says it.
+    public static func bullets(fromSummary summary: String?, limit: Int = 3) -> [String] {
+        guard let summary, limit > 0 else { return [] }
+        var sentences: [String] = []
+        var current = ""
+        for ch in summary {
+            current.append(ch)
+            if ch == "." || ch == "!" || ch == "?" || ch == "\n" {
+                let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { sentences.append(trimmed) }
+                current = ""
+            }
+        }
+        let tail = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !tail.isEmpty { sentences.append(tail) }
+        guard sentences.count >= 2 else { return [] }
+        return Array(sentences.prefix(limit))
+    }
+}
+
+/// An ambient answer that surfaced from a specific capture — what the Summary
+/// face's "Open the relay answer" row opens.
+public struct LinkedConversationAnswer: Equatable, Sendable {
+    /// Short headline for the moment (the utterance that asked it).
+    public let title: String
+    /// The answer itself.
+    public let text: String
+
+    public init(title: String, text: String) {
+        self.title = title
+        self.text = text
+    }
+}
+
+/// Read-only view over the delivered-answer log (ambient-answers.jsonl, written
+/// by the notifier): the answers linked to ONE capture. Missing file or garbage
+/// lines read as no answers — nothing is invented.
+public enum ConversationAnswerLog {
+    public static func answers(at url: URL, captureId: String) -> [LinkedConversationAnswer] {
+        guard !captureId.isEmpty, let data = try? Data(contentsOf: url) else { return [] }
+        return data.split(separator: UInt8(ascii: "\n")).compactMap { line in
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line))
+                    as? [String: Any],
+                  obj["kind"] as? String == "answer",
+                  obj["captureId"] as? String == captureId,
+                  let answer = obj["answer"] as? String, !answer.isEmpty
+            else { return nil }
+            let utterance = (obj["utterance"] as? String) ?? ""
+            return LinkedConversationAnswer(
+                title: utterance.isEmpty ? "From your memory" : utterance,
+                text: answer)
+        }
+    }
+}
+
+// MARK: - Actions face
+
+/// The Actions face's presentation: rows built from the conversation's REAL
+/// surfaced items — ambient nudges joined to their outcomes, delivered answers,
+/// and the user's own added actions — in the prototype's outcome vocabulary.
+public struct ConversationActionsPresentation: Equatable, Sendable {
+    /// The empty state, per the prototype realignment.
+    public static let emptyStateText = "Nothing surfaced from this conversation yet."
+    /// The add affordance's label.
+    public static let addActionLabel = "Add an action"
+
+    public struct Row: Equatable, Sendable, Identifiable {
+        /// Where the row came from — drives the icon, never shown as text.
+        public enum Kind: String, Equatable, Sendable {
+            /// An ambient nudge that surfaced during the conversation.
+            case surfaced
+            /// An answer compiled from the user's memory.
+            case answer
+            /// An action the user added by hand.
+            case user
+        }
+
+        /// The human outcome word the state chip renders.
+        public enum State: String, Equatable, Sendable {
+            case completed = "Completed"
+            case ready = "Ready"
+            case open = "Open"
+            case dismissed = "Dismissed"
+        }
+
+        public let id: String
+        /// The row's primary line ("Send Sarah the deck").
+        public let label: String
+        /// The secondary line (the utterance, the asked question, provenance).
+        public let meta: String?
+        public let kind: Kind
+        public let state: State
+        /// True when the item is finished.
+        public var done: Bool { state == .completed }
+
+        public init(id: String, label: String, meta: String?, kind: Kind, state: State) {
+            self.id = id
+            self.label = label
+            self.meta = meta
+            self.kind = kind
+            self.state = state
+        }
+    }
+
+    public let rows: [Row]
+    public var isEmpty: Bool { rows.isEmpty }
+
+    public init(rows: [Row]) {
+        self.rows = rows
+    }
+
+    /// Build the face from everything that ACTUALLY surfaced for this capture:
+    /// ambient candidates joined to their outcomes (ConversationActions), the
+    /// delivered answers linked to it, and the user's own added actions.
+    public static func build(captureId: String,
+                             decisions: [AmbientDecision],
+                             outcomes: [CardOutcomeRecord],
+                             answers: [LinkedConversationAnswer],
+                             userActions: [UserConversationAction]) -> Self {
+        var rows: [Row] = []
+        for card in ConversationActions.cards(
+            for: captureId, decisions: decisions, outcomes: outcomes) {
+            let label = card.summary.isEmpty ? card.utterance : card.summary
+            let meta = (!card.summary.isEmpty && card.utterance != card.summary)
+                ? "\u{201C}\(card.utterance)\u{201D}" : nil
+            rows.append(Row(id: "surfaced-\(card.id)", label: label, meta: meta,
+                            kind: .surfaced, state: state(of: card.outcome)))
+        }
+        for (i, answer) in answers.enumerated() {
+            rows.append(Row(id: "answer-\(i)", label: "Answer found",
+                            meta: answer.title, kind: .answer, state: .ready))
+        }
+        for action in userActions {
+            rows.append(Row(id: "user-\(action.id)", label: action.title,
+                            meta: "Added by you", kind: .user,
+                            state: action.done ? .completed : .open))
+        }
+        return Self(rows: rows)
+    }
+
+    /// The prototype's outcome vocabulary over the logged card outcomes.
+    static func state(of outcome: ActionOutcome) -> Row.State {
+        switch outcome {
+        case .sentToChat: return .completed
+        case .answered: return .ready
+        case .pending: return .open
+        case .dismissed: return .dismissed
+        }
+    }
+}
+
+// MARK: - User-added actions
+
+/// An action the user added to a conversation by hand (the Actions face's
+/// "Add an action" affordance).
+public struct UserConversationAction: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public var title: String
+    public var done: Bool
+    /// Unix seconds when the user added it.
+    public let createdAt: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, done
+        case createdAt = "created_at"
+    }
+
+    public init(id: String = UUID().uuidString, title: String, done: Bool = false,
+                createdAt: UInt64 = UInt64(max(0, Date().timeIntervalSince1970))) {
+        self.id = id
+        self.title = title
+        self.done = done
+        self.createdAt = createdAt
+    }
+}
+
+/// Durable per-capture storage for user-added actions — a small `actions.json`
+/// next to the card meta, following ConversationCardStore's pattern (atomic
+/// write, tolerant load, missing file reads as none).
+public enum UserActionStore {
+    public static let filename = "actions.json"
+
+    static func url(captureId: String, baseDir: URL) -> URL {
+        baseDir.appendingPathComponent(captureId, isDirectory: true)
+            .appendingPathComponent(filename)
+    }
+
+    /// Load a capture's user-added actions, oldest first. Missing or unreadable
+    /// file reads as none.
+    public static func load(captureId: String, baseDir: URL) -> [UserConversationAction] {
+        guard let data = try? Data(contentsOf: url(captureId: captureId, baseDir: baseDir))
+        else { return [] }
+        return (try? JSONDecoder().decode([UserConversationAction].self, from: data)) ?? []
+    }
+
+    /// Durably persist (atomic write). Creates the capture dir if needed.
+    public static func save(_ actions: [UserConversationAction],
+                            captureId: String, baseDir: URL) {
+        let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        guard let data = try? JSONEncoder().encode(actions) else { return }
+        try? data.write(to: url(captureId: captureId, baseDir: baseDir), options: [.atomic])
+    }
+
+    /// Append a user action and persist. A blank title adds nothing.
+    @discardableResult
+    public static func add(title: String, captureId: String,
+                           baseDir: URL) -> UserConversationAction? {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        var actions = load(captureId: captureId, baseDir: baseDir)
+        let action = UserConversationAction(title: trimmed)
+        actions.append(action)
+        save(actions, captureId: captureId, baseDir: baseDir)
+        return action
+    }
+}
+
+// MARK: - Speaker name suggestion (transcript face)
+
+/// The transcript face's standing people-hint, exactly as the prototype words
+/// it: "Sarah matches 3 past conversations. Use this name in all 3."
+public enum SpeakerNameSuggestion {
+    public static func standingHint(name: String, matchCount: Int) -> String {
+        guard !name.isEmpty, matchCount > 0 else { return "" }
+        if matchCount == 1 {
+            return "\(name) matches 1 past conversation. Use this name in it."
+        }
+        return "\(name) matches \(matchCount) past conversations. Use this name in all \(matchCount)."
+    }
+}

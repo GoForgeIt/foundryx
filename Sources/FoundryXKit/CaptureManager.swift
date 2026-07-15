@@ -224,6 +224,11 @@ public final class CaptureManager: ObservableObject {
     /// the visible conversation list is rebuilt, so SwiftUI renders never read disk.
     @Published public private(set) var statsSummary: StatsSummary = .empty
 
+    /// When a conversation last finished processing (B3). Set at the END of the
+    /// finalize success path alongside the `.foundryxConversationFinalized` post,
+    /// so the Activity recap can rebuild the DAILY recap live as the day fills in.
+    @Published public private(set) var lastFinalizedAt: Date?
+
     private func makeStatsSummary(for visible: [CaptureWAL]) -> StatsSummary {
         let snapshots = visible.map { wal in
             StatsConversationSnapshot(
@@ -1830,6 +1835,11 @@ public final class CaptureManager: ObservableObject {
             // The conversation is now the authoritative last-finished; make sure the home
             // widget's snapshot reflects it the moment finalize completes (best-effort hint).
             refreshHomeWidget()
+            // B3: announce the finished conversation so the Activity daily recap
+            // rebuilds live (grows through the day), not only on screen appear.
+            lastFinalizedAt = Date()
+            NotificationCenter.default.post(name: .foundryxConversationFinalized,
+                                            object: nil, userInfo: ["captureId": id])
             log?.info("capture \(id): finalized → advanced to Lore inbox")
         } catch {
             log?.warn("capture \(id): finalize failed (\((error as NSError).localizedDescription)) — staying pending, will retry")

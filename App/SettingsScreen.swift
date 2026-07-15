@@ -40,6 +40,11 @@ struct SettingsScreen: View {
         UserDefaults.standard.string(forKey: AmbientPrefs.agentNameKey) ?? ""
     @State private var showingTour = false
     @State private var persona = PersonaPrefs.persona()
+    /// B5 (track 20260714T1800): a tokenless (phone-only) user tapping the
+    /// waitlist gets the sign-in sheet first; the POST fires on sign-in success;
+    /// a dismissed sign-in leaves the honest "Sign in to join" caption.
+    @State private var showingWaitlistSignIn = false
+    @State private var waitlistSignInDismissed = false
 
     var body: some View {
         List {
@@ -60,8 +65,16 @@ struct SettingsScreen: View {
                             .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
                     }
                     Spacer()
-                    Button(waitlistJoined ? "On the list ✓" : "Join waitlist") { joinWaitlist() }
-                        .disabled(waitlistJoined || remote.idToken == nil)
+                    VStack(alignment: .trailing, spacing: 2) {
+                        // Never disabled for a tokenless user (B5) — tapping
+                        // routes through sign-in instead of silently no-opping.
+                        Button(waitlistJoined ? "On the list ✓" : "Join waitlist") { joinWaitlist() }
+                            .disabled(waitlistJoined)
+                        if !waitlistJoined, waitlistSignInDismissed, remote.idToken == nil {
+                            Text(WaitlistJoin.signInCaption)
+                                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                        }
+                    }
                 }
             }
 
@@ -167,6 +180,18 @@ struct SettingsScreen: View {
         .fullScreenCover(isPresented: $showingTour) {
             OnboardingFlowView(baseDir: CaptureWAL.documentsCaptures()) { showingTour = false }
         }
+        // B5: the waitlist's sign-in leg. On a successful sign-in the POST fires
+        // with the fresh token; a dismissal without a token leaves the caption.
+        .sheet(isPresented: $showingWaitlistSignIn, onDismiss: {
+            if remote.idToken != nil {
+                waitlistSignInDismissed = false
+                postWaitlist()
+            } else {
+                waitlistSignInDismissed = true
+            }
+        }) {
+            SignInView(remote: remote) { showingWaitlistSignIn = false }
+        }
     }
 
     private func brainRow(_ c: BrainChoice, subtitle: String) -> some View {
@@ -195,7 +220,20 @@ struct SettingsScreen: View {
         }
     }
 
+    /// B5: the tap routes by the tested WaitlistJoin rule — tokenless users get
+    /// the sign-in sheet first, never a silent no-op.
     private func joinWaitlist() {
+        switch WaitlistJoin.step(joined: waitlistJoined, hasIdToken: remote.idToken != nil) {
+        case .alreadyJoined:
+            return
+        case .signInFirst:
+            showingWaitlistSignIn = true
+        case .post:
+            postWaitlist()
+        }
+    }
+
+    private func postWaitlist() {
         guard let token = remote.idToken,
               let base = RemoteConfig.fromBundle()?.gatewayHTTPURL else { return }
         Task {

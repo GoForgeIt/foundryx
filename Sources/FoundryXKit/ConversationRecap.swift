@@ -13,6 +13,43 @@
 // into an insight — so nothing is fabricated.
 
 import Foundation
+import Combine
+
+/// The conversation-finished event (blocker resolution B3): `CaptureManager` posts
+/// this at the END of the finalize success path with the finalized captureId, so
+/// the Activity recap can rebuild the DAILY recap live — it grows through the day
+/// as conversations finish, not only when the screen (re)appears.
+public extension Notification.Name {
+    static let foundryxConversationFinalized = Notification.Name("foundryxConversationFinalized")
+}
+
+/// One typed insight in a recap (blocker resolution B4). The TYPE is a
+/// deterministic label from a fixed set (testable, pure heuristic); the TEXT is
+/// composer-generated prose (model or deterministic double); the SOURCE is the
+/// conversation it was drawn from, so every insight is attributed.
+public struct RecapInsight: Equatable, Sendable {
+    public enum Kind: String, CaseIterable, Sendable {
+        case connection = "Connection"
+        case decision   = "Decision"
+        case people     = "People"
+        case followUp   = "Follow up"
+        case trend      = "Trend"
+    }
+    public let kind: Kind
+    /// The insight prose (composer-generated). Asserted only for non-emptiness.
+    public let text: String
+    /// The title of the conversation this insight was drawn from (provenance).
+    public let sourceTitle: String
+
+    public init(kind: Kind, text: String, sourceTitle: String) {
+        self.kind = kind
+        self.text = text
+        self.sourceTitle = sourceTitle
+    }
+
+    /// The provenance line shown under an insight — "from <conversation title>".
+    public var provenance: String { sourceTitle.isEmpty ? "" : "from \(sourceTitle)" }
+}
 
 /// One conversation's contribution to a recap: what the app knows about it.
 public struct RecapConversation: Equatable, Sendable {
@@ -42,9 +79,9 @@ public struct ConversationRecap: Equatable, Sendable, Identifiable {
     public let span: RecapSpan
     /// Multi-sentence narrative of the period.
     public let narrative: String
-    /// A few insights (connections, follow-ups, subjects) drawn from the
-    /// conversations — each references something actually discussed.
-    public let insights: [String]
+    /// A few TYPED insights (connections, decisions, people, follow-ups, trends)
+    /// drawn from the conversations — each carries its type + source conversation.
+    public let insights: [RecapInsight]
     /// How many conversations this covers.
     public let conversationCount: Int
     /// The newest conversation's time — drives the "updated after N" freshness line.
@@ -58,11 +95,35 @@ public struct ConversationRecap: Equatable, Sendable, Identifiable {
         }
     }
 
-    /// The freshness line shown under the recap.
-    public var freshnessLine: String {
+    /// The freshness line shown under the recap (prototype "13 Activity" copy). The
+    /// daily line advertises that the recap grows through the day; the weekly line
+    /// states the end-of-week close, and flips to "updated just now" after an
+    /// ad-hoc week-to-date refresh.
+    /// - Parameter weekUpdated: true right after the user tapped "Update week to date".
+    public func freshnessLine(weekUpdated: Bool = false) -> String {
         let n = conversationCount
-        return "Updated after \(n) conversation\(n == 1 ? "" : "s")"
+        let countPhrase = "\(n) conversation\(n == 1 ? "" : "s")"
+        switch span {
+        case .day:
+            return "Grows after each processed conversation · Updated after \(countPhrase) · \(Self.timeString(updatedAt))"
+        case .week:
+            return "Week to date · Updated after \(countPhrase). Final weekly recap closes Sunday."
+        case .weekToDate:
+            return weekUpdated
+                ? "Week to date updated just now. Final weekly recap closes Sunday."
+                : "Week to date · Updated after \(countPhrase). Final weekly recap closes Sunday."
+        }
     }
+
+    private static func timeString(_ date: Date) -> String {
+        timeFormatter.string(from: date)
+    }
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.timeStyle = .short
+        f.dateStyle = .none
+        return f
+    }()
 }
 
 /// Produces the narrative + insights prose from a period's conversations. The
@@ -117,12 +178,81 @@ public enum ConversationRecapEngine {
         } else {
             composed = deterministic(convos, span: span)
         }
+        // Wrap the composer's prose insights into TYPED, ATTRIBUTED insights (B4):
+        // the label is a deterministic pure heuristic; the prose is the composer's;
+        // each is traced back to the real conversation it best matches.
+        let typed = typedInsights(from: composed.insights, over: convos, span: span)
         return ConversationRecap(
             span: span,
             narrative: composed.narrative,
-            insights: composed.insights,
+            insights: typed,
             conversationCount: convos.count,
             updatedAt: convos.map(\.at).max() ?? Date(timeIntervalSince1970: 0))
+    }
+
+    /// Turn composer prose insights into typed, attributed `RecapInsight`s. The
+    /// TYPE comes from the deterministic `label` heuristic (testable); the TEXT is
+    /// the composer's prose; the SOURCE is the conversation whose title/summary the
+    /// insight best matches, so nothing is unattributed.
+    public static func typedInsights(from prose: [String], over convos: [RecapConversation],
+                                     span: RecapSpan) -> [RecapInsight] {
+        prose.compactMap { raw -> RecapInsight? in
+            let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            let source = bestSource(for: text, in: convos)
+            let kind = label(forText: text, source: source, span: span)
+            return RecapInsight(kind: kind, text: text, sourceTitle: source?.title ?? "")
+        }
+    }
+
+    /// Deterministic insight-type heuristic (pure, testable). Priority order is
+    /// deliberate so the prototype's own insight lines classify correctly:
+    /// Decision → Trend (weekly) → Follow up → Connection → People, else Connection.
+    public static func label(forText text: String, source: RecapConversation?,
+                             span: RecapSpan) -> RecapInsight.Kind {
+        let haystack = (text + " " + (source?.summary ?? "")).lowercased()
+        func has(_ words: [String]) -> Bool { words.contains { haystack.contains($0) } }
+
+        if has(["decide", "decided", "chose", "choose", "agreed", "keep the",
+                "approved", "go with", "settled on"]) { return .decision }
+
+        let isWeek: Bool
+        switch span { case .day: isWeek = false; default: isWeek = true }
+        if isWeek, has(["came up", "more than", "most ", "recurring", "pattern",
+                        "trend", "across ", "every day", "than any other"]) { return .trend }
+
+        if has(["send", "review", "due", "resched", "follow up", "follow-up",
+                "next week", "tomorrow", "reminder", "remind", "publish", "draft",
+                "schedule", "hold thursday", "protect thursday", "add ", "task",
+                "finish"]) { return .followUp }
+
+        if has(["same", "both", "answer", "connect", "relates", "shared",
+                "need the same"]) { return .connection }
+
+        if has(["owns", "coordinat", "bridge", "between", " with ", "team",
+                "client", "call", "meeting", "standup", "sync", "1:1"]) { return .people }
+
+        return .connection
+    }
+
+    /// The conversation an insight best belongs to: exact title match wins, else the
+    /// conversation whose title/summary shares the most words with the insight, else
+    /// the first conversation (so provenance is always real, never invented).
+    static func bestSource(for text: String, in convos: [RecapConversation]) -> RecapConversation? {
+        guard !convos.isEmpty else { return nil }
+        let lowered = text.lowercased()
+        if let exact = convos.first(where: { !$0.title.isEmpty && lowered.contains($0.title.lowercased()) }) {
+            return exact
+        }
+        let words = Set(lowered.split { !$0.isLetter }.map(String.init).filter { $0.count > 3 })
+        func overlap(_ c: RecapConversation) -> Int {
+            let cw = Set((c.title + " " + c.summary).lowercased()
+                .split { !$0.isLetter }.map(String.init).filter { $0.count > 3 })
+            return words.intersection(cw).count
+        }
+        let best = convos.max { overlap($0) < overlap($1) }
+        if let best, overlap(best) > 0 { return best }
+        return convos.first
     }
 
     /// A genuinely useful recap with NO model: thread the conversation summaries
@@ -178,5 +308,156 @@ public enum ConversationRecapEngine {
             // Inclusive of `asOf` (a tick past, so "through now" includes now).
             return start..<asOf.addingTimeInterval(1)
         }
+    }
+}
+
+// MARK: - Presentation (B1: pure model the Activity view renders from)
+
+/// Everything the Activity recap card renders, computed from a built recap. The
+/// SwiftUI view is a thin renderer of this; the brine tests assert on THIS (App
+/// views aren't in the SPM package). Mirrors the prototype "13 Activity" card:
+/// eyebrow micro-label → serif heading → narrative → typed insights → freshness.
+public struct ActivityRecapPresentation: Equatable, Sendable {
+    /// The forge micro-label eyebrow: "Daily recap" / "Weekly recap".
+    public let eyebrow: String
+    /// The serif heading: "Today" / "This week".
+    public let heading: String
+    public let narrative: String
+    public let insights: [RecapInsight]
+    public let freshnessLine: String
+    /// Weekly cards carry the ad-hoc "Update week to date" button; daily do not.
+    public let showsUpdateWeekToDate: Bool
+    public let conversationCount: Int
+
+    public init(eyebrow: String, heading: String, narrative: String,
+                insights: [RecapInsight], freshnessLine: String,
+                showsUpdateWeekToDate: Bool, conversationCount: Int) {
+        self.eyebrow = eyebrow
+        self.heading = heading
+        self.narrative = narrative
+        self.insights = insights
+        self.freshnessLine = freshnessLine
+        self.showsUpdateWeekToDate = showsUpdateWeekToDate
+        self.conversationCount = conversationCount
+    }
+
+    /// Build the card presentation from a recap. `weekUpdated` flips the weekly
+    /// freshness line to "updated just now" after an ad-hoc week-to-date refresh.
+    public static func make(from recap: ConversationRecap, weekUpdated: Bool = false)
+        -> ActivityRecapPresentation {
+        let isWeek: Bool
+        switch recap.span { case .day: isWeek = false; default: isWeek = true }
+        return ActivityRecapPresentation(
+            eyebrow: isWeek ? "Weekly recap" : "Daily recap",
+            heading: isWeek ? "This week" : "Today",
+            narrative: recap.narrative,
+            insights: recap.insights,
+            freshnessLine: recap.freshnessLine(weekUpdated: weekUpdated),
+            showsUpdateWeekToDate: isWeek,
+            conversationCount: recap.conversationCount)
+    }
+}
+
+// MARK: - Live recap model (B3: rebuilds the daily recap on the finished event)
+
+/// The Activity view's recap driver. It owns the daily + weekly presentations and
+/// rebuilds the DAILY recap whenever a conversation finishes processing (the
+/// `.foundryxConversationFinalized` event `CaptureManager` posts, B3) — so the
+/// daily recap grows through the day without leaving the screen. The weekly recap
+/// refreshes on demand (ad-hoc "Update week to date") and otherwise reflects the
+/// closed week. This lives in FoundryXKit so it is testable (the SwiftUI view is a
+/// thin renderer of `daily`/`weekly`).
+@MainActor
+public final class ActivityRecapModel: ObservableObject {
+    public enum Mode: Equatable, Sendable { case day, week }
+
+    @Published public private(set) var daily: ActivityRecapPresentation?
+    @Published public private(set) var weekly: ActivityRecapPresentation?
+    /// The selected segment — the view shows exactly one card for it.
+    @Published public var mode: Mode = .day
+
+    private let poolProvider: () -> [RecapConversation]
+    private let composer: RecapComposer?
+    private let calendar: Calendar
+    private var weekUpdated = false
+    // Set once on init (main), read once in the nonisolated deinit — unsafe-marked so
+    // Swift 6 permits the deinit read of this non-Sendable token.
+    private nonisolated(unsafe) var observer: NSObjectProtocol?
+    private var inFlight: Task<Void, Never>?
+
+    /// - Parameter observesFinalized: subscribe to the finished event (production).
+    ///   Tests can drive `rebuildDaily()` directly, or post the notification.
+    public init(poolProvider: @escaping () -> [RecapConversation],
+                composer: RecapComposer? = nil,
+                calendar: Calendar = .current,
+                observesFinalized: Bool = true) {
+        self.poolProvider = poolProvider
+        self.composer = composer
+        self.calendar = calendar
+        if observesFinalized {
+            observer = NotificationCenter.default.addObserver(
+                forName: .foundryxConversationFinalized, object: nil, queue: .main) { [weak self] _ in
+                    // Delivered on main; hop through the actor + track for tests.
+                    MainActor.assumeIsolated { self?.scheduleDailyRebuild() }
+            }
+        }
+    }
+
+    deinit {
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+    }
+
+    /// Build both recaps (screen appear).
+    public func rebuildAll() async {
+        await rebuildDaily()
+        await rebuildWeekly()
+    }
+
+    /// Rebuild TODAY's recap from the current pool — the live, per-conversation path.
+    public func rebuildDaily() async {
+        let pool = poolProvider()
+        let spans = ConversationRecapEngine.currentSpans(calendar: calendar)
+        if let recap = await ConversationRecapEngine.build(span: spans.day, from: pool,
+                                                           composer: composer, calendar: calendar) {
+            daily = .make(from: recap)
+        } else {
+            daily = nil
+        }
+    }
+
+    /// Rebuild the WEEK's recap (closed-week view: "Final weekly recap closes Sunday").
+    public func rebuildWeekly() async {
+        weekUpdated = false
+        let pool = poolProvider()
+        let spans = ConversationRecapEngine.currentSpans(calendar: calendar)
+        if let recap = await ConversationRecapEngine.build(span: spans.week, from: pool,
+                                                          composer: composer, calendar: calendar) {
+            weekly = .make(from: recap, weekUpdated: false)
+        } else {
+            weekly = nil
+        }
+    }
+
+    /// Ad-hoc "Update week to date": rebuild the weekly card over week-start→now and
+    /// flip its freshness line to "updated just now" — distinct from the week-end close.
+    public func updateWeekToDate() async {
+        let pool = poolProvider()
+        let spans = ConversationRecapEngine.currentSpans(calendar: calendar)
+        guard case .week(let start) = spans.week else { return }
+        let span = RecapSpan.weekToDate(start: start, asOf: Date())
+        if let recap = await ConversationRecapEngine.build(span: span, from: pool,
+                                                          composer: composer, calendar: calendar) {
+            weekUpdated = true
+            weekly = .make(from: recap, weekUpdated: true)
+        }
+    }
+
+    private func scheduleDailyRebuild() {
+        inFlight = Task { [weak self] in await self?.rebuildDaily() }
+    }
+
+    /// Await any in-flight rebuild scheduled by the finished event (tests).
+    public func settle() async {
+        await inFlight?.value
     }
 }

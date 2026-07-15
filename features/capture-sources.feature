@@ -8,6 +8,11 @@ Feature: FoundryX capture-source registry with per-source toggles
   real CaptureSourceRegistry with an in-memory store + a fake input discovery — no UI,
   no hardware.
 
+  The device page itself (track 20260714T1800 §8) renders from pure presentation
+  values: the phone mic is offered as a second capture source, the Computer memory
+  section offers pairing honestly on this screen (no Settings redirect), and the
+  app-only scanner / splitting / add-source controls are gone.
+
   Scenario: the registry lists the built-in capture sources, both enabled by default
     Given a fresh capture-source registry
     Then it lists the "Omi wearable" and "Phone microphone" sources
@@ -47,3 +52,26 @@ Feature: FoundryX capture-source registry with per-source toggles
     When I add the Apple Watch source
     Then the "Apple Watch" source is present but cannot be toggled
     And the Apple Watch is never the active source
+
+  Scenario: phone mic is offered as a second source
+    Given a fresh capture-source registry
+    Then the device page describes the phone microphone as "Use this iPhone as another capture source"
+    And the phone microphone row has its own toggle
+
+  Scenario: the device page offers my computer connection honestly
+    Given no computer is paired
+    Then the computer memory section is titled "Connect your computer"
+    And it explains "Pair the desktop app for full-history search and local Brain runs"
+    And its status reads "Not connected"
+    And a primary "Connect your computer" button offers pairing right there
+    And the pairing footer reads "Pairing is end-to-end encrypted to your own machine."
+    When my computer "Nick's MacBook" pairs
+    Then the computer memory section shows "Nick's MacBook"
+    And it reads "Desktop app paired · Full-history search ready"
+    And its status reads "Connected"
+    And a "Disconnect computer" option replaces the connect button
+
+  Scenario: the device page keeps only what the prototype shows
+    Given the device page as shipped
+    Then it has no Bluetooth battery scanner, no conversation splitting, and no add-source controls
+    And the device metrics are Battery, Signal, and Firmware

@@ -60,11 +60,19 @@ struct AnswerSurfaceView: View {
 
     private var answerCard: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(answer.text)
-                .grainTextStyle(.body)
-                .foregroundStyle(GrainColor.ink)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("answer-text")
+            // A structured answer renders as a decision brief (Recommendation /
+            // Why / Source, fullflow2 "Relay decision brief"); anything else
+            // keeps the plain free-text layout. The parse is pure + tested
+            // (AnswerBrief, track 20260714T1800 §7).
+            if let brief = AnswerBrief.parse(answer.text) {
+                briefBody(brief)
+            } else {
+                Text(answer.text)
+                    .grainTextStyle(.body)
+                    .foregroundStyle(GrainColor.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("answer-text")
+            }
 
             if !answer.sources.isEmpty {
                 VStack(alignment: .leading, spacing: GrainSpacing.x2) {
@@ -100,6 +108,55 @@ struct AnswerSurfaceView: View {
             RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
                 .strokeBorder(GrainColor.borderFaint, lineWidth: 1)
         }
+    }
+
+    /// The decision-brief layout: RECOMMENDATION / WHY (bullets) / SOURCE.
+    private func briefBody(_ brief: AnswerBrief) -> some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x3) {
+            VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                briefHeading(AnswerBriefCopy.recommendation)
+                Text(brief.recommendation)
+                    .grainTextStyle(.body)
+                    .foregroundStyle(GrainColor.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("brief-recommendation")
+            }
+
+            VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                briefHeading(AnswerBriefCopy.why)
+                ForEach(brief.why, id: \.self) { reason in
+                    HStack(alignment: .top, spacing: GrainSpacing.x2) {
+                        Text("•")
+                            .grainTextStyle(.body)
+                            .foregroundStyle(GrainColor.textMuted)
+                        Text(reason)
+                            .grainTextStyle(.body)
+                            .foregroundStyle(GrainColor.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .accessibilityIdentifier("brief-why")
+                }
+            }
+
+            if let source = brief.source {
+                VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                    briefHeading(AnswerBriefCopy.source)
+                    Text(source)
+                        .grainTextStyle(.body)
+                        .foregroundStyle(GrainColor.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("brief-source")
+                }
+            }
+        }
+        .accessibilityIdentifier("answer-brief")
+    }
+
+    private func briefHeading(_ text: String) -> some View {
+        Text(text.uppercased())
+            .grainTextStyle(.caption)
+            .fontWeight(.bold)
+            .foregroundStyle(GrainColor.textFaint)
     }
 
     private func sourceChip(_ text: String) -> some View {

@@ -11,6 +11,32 @@ Feature: Answers, agent runs, and their artifacts are legible
   images) and say so honestly when we can't, with an export path. Artifact
   bytes ride the same door file route the app already uses for capture files.
 
+  Scenario: the chat composer invites the user with "Ask FoundryX"
+    Given I open Chat
+    Then the composer placeholder reads "Ask FoundryX"
+
+  Scenario: a failed send reads calmly, never a code
+    Given my computer cannot be reached
+    When I send a message and it fails
+    Then the chat says "Your computer couldn't be reached."
+    And a rejected send says "That didn't go through — try again."
+    And the thread never shows "DoorError", "HTTP", or a bracketed code
+    And the technical detail goes to the door log instead
+
+  Scenario: an answer with a recommendation renders the decision brief
+    Given an answer whose text carries a recommendation, why bullets, and a source
+    When the answer surface opens
+    Then I see a Recommendation section with the recommended call
+    And the reasons render as Why bullets
+    And the Source section names where it came from
+    And an answer without that structure keeps the plain answer layout
+
+  Scenario: a finished agent run folds into a finding
+    Given a tool-using turn that finished with seven steps
+    Then the run reads as a Finding card, not a bare done row
+    And the three older steps are folded behind "3 more steps"
+    And the card carries the sources-consulted line
+
   Scenario: an ambient answer opens with the answer and its sources
     Given an ambient answer compiled from my memory with two sources
     When the answer surface opens

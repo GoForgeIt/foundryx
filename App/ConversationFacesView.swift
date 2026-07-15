@@ -1,14 +1,18 @@
 // ConversationFacesView — the Night Shift conversation detail (track
-// 20260713T0904, features/conversation-detail.feature): a conversation opens
-// into THREE FACES — Summary (summary + metadata + receipt), Actions (the cards
-// that surfaced during it, each with its outcome), Transcript (the diarized
-// speaker transcript with in-transcript search).
+// 20260713T0904 + 20260714T1800 realignment, features/conversation-detail.feature):
+// a conversation opens into THREE FACES — Summary (narrative lede + "What
+// mattered" bullets + the linked relay answer + receipt), Actions (the
+// conversation's real surfaced items with human outcomes + "Add an action"),
+// Transcript (the diarized speaker transcript with in-transcript search).
 //
 // This is a re-arrangement of working functionality, not a rewrite: it binds to
 // the SAME stores and flows the previous detail bound to — DoorClient /content,
 // TranscriptCacheStore, ConversationCardStore, AudioReplayCache + PlaybackSession
 // (Listen), SpeakerTranscriptSection (speaker labels, confirm-speaker, voice
-// sample), ConversationStepper, transcript copy, delete.
+// sample), transcript copy, delete. The faces render from the PURE presentation
+// models in FoundryXKit (ConversationSummaryPresentation /
+// ConversationActionsPresentation) so the brine step-defs drive the real logic.
+// Per the prototype, no processing stepper renders inside the detail.
 //
 // Search: pure matching lives in FoundryXKit.TranscriptSearch; this view feeds it
 // the transcript rows and renders highlights + "n of m" + next/previous. MEANING
@@ -55,8 +59,12 @@ struct ConversationFacesView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
 
-    // MARK: actions face
-    @State private var actionCards: [ConversationActionCard] = []
+    // MARK: summary + actions faces (presentation-model backed)
+    @State private var actions = ConversationActionsPresentation(rows: [])
+    @State private var linkedAnswer: LinkedConversationAnswer?
+    @State private var showRelayAnswer = false
+    @State private var addingAction = false
+    @State private var newActionTitle = ""
 
     // MARK: transcript search
     @State private var query = ""
@@ -111,14 +119,6 @@ struct ConversationFacesView: View {
             return SpeakerTranscript(speakers: cached.speakers, segments: cached.segments)
         }
         return nil
-    }
-
-    private var stepperProgress: ConversationProgress? {
-        if copyableTranscript != nil { return nil }
-        let waiting = loading || (didAttemptFetch && content?.found == false)
-        guard waiting else { return nil }
-        if manager.statusPoller(for: captureId)?.stage == .failed { return .failed }
-        return .transcribing
     }
 
     /// The rows the transcript search runs over: speaker turns when diarized,
@@ -190,8 +190,13 @@ struct ConversationFacesView: View {
         }
         .refreshable { await fetchFromDoor() }
         .task { await initialLoad() }
-        .onAppear { loadActionCards() }
+        .onAppear { loadFaceData() }
         .onDisappear { stopPlayback() }
+        .sheet(isPresented: $showRelayAnswer) {
+            if let answer = linkedAnswer {
+                relayAnswerSheet(answer)
+            }
+        }
         .onChange(of: query) { newQuery in
             if meaningMode {
                 runMeaningSearch(newQuery)
@@ -273,12 +278,11 @@ struct ConversationFacesView: View {
                 listenRow
                 Spacer(minLength: 0)
             }
-            if let sp = stepperProgress {
-                ConversationStepper(progress: sp, local: local)
-                    .padding(.vertical, GrainSpacing.x1)
-            }
-            VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+            VStack(alignment: .leading, spacing: GrainSpacing.x3) {
                 summaryNarrative
+                if !summaryBullets.isEmpty {
+                    whatMatteredList
+                }
             }
             .padding(.vertical, GrainSpacing.x3)
             .overlay(alignment: .top) {
@@ -287,7 +291,94 @@ struct ConversationFacesView: View {
             .overlay(alignment: .bottom) {
                 Rectangle().fill(GrainColor.borderFaint).frame(height: 1)
             }
+            if let answer = linkedAnswer {
+                relayAnswerRow(answer)
+            }
             receiptSection
+        }
+    }
+
+    /// The "What mattered" bullets, derived from the summary text by the pure
+    /// FoundryXKit builder the brine step-defs drive.
+    private var summaryBullets: [String] {
+        ConversationSummaryPresentation.bullets(fromSummary: summaryText)
+    }
+
+    private var whatMatteredList: some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+            Text(ConversationSummaryPresentation.whatMatteredLabel)
+                .grainTextStyle(.caption)
+                .fontWeight(.semibold)
+                .textCase(.uppercase)
+                .foregroundStyle(GrainColor.textMuted)
+            VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+                ForEach(Array(summaryBullets.enumerated()), id: \.offset) { _, bullet in
+                    HStack(alignment: .firstTextBaseline, spacing: GrainSpacing.x2) {
+                        Text("\u{2022}")
+                            .grainTextStyle(.body)
+                            .foregroundStyle(GrainColor.forgeBlue)
+                        Text(bullet)
+                            .grainTextStyle(.body)
+                            .foregroundStyle(GrainColor.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+        .padding(.top, GrainSpacing.x2)
+    }
+
+    /// The "Open the relay answer" text-action — present only when an ambient
+    /// answer surfaced from THIS capture (never a dead control).
+    private func relayAnswerRow(_ answer: LinkedConversationAnswer) -> some View {
+        Button {
+            showRelayAnswer = true
+        } label: {
+            HStack(spacing: GrainSpacing.x2) {
+                Image(grain: .spark)
+                    .foregroundStyle(GrainColor.amber)
+                Text(ConversationSummaryPresentation.openRelayAnswerLabel)
+                    .grainTextStyle(.body)
+                    .fontWeight(.medium)
+                    .foregroundStyle(GrainColor.forgeBlue)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textFaint)
+            }
+            .frame(minHeight: GrainSpacing.x8)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("open-relay-answer")
+    }
+
+    private func relayAnswerSheet(_ answer: LinkedConversationAnswer) -> some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: GrainSpacing.x3) {
+                    Text("From your memory")
+                        .grainTextStyle(.caption)
+                        .textCase(.uppercase)
+                        .foregroundStyle(GrainColor.amber)
+                    Text(answer.title)
+                        .grainTextStyle(.title)
+                        .foregroundStyle(GrainColor.ink)
+                    Text(answer.text)
+                        .grainTextStyle(.body)
+                        .foregroundStyle(GrainColor.ink)
+                        .textSelection(.enabled)
+                }
+                .padding(GrainSpacing.x4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .grainBackground()
+            .navigationTitle("Relay answer")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { showRelayAnswer = false }
+                }
+            }
         }
     }
 
@@ -313,52 +404,53 @@ struct ConversationFacesView: View {
     // MARK: - Actions face
 
     @ViewBuilder private var actionsFace: some View {
-        if actionCards.isEmpty {
-            VStack(alignment: .leading, spacing: GrainSpacing.x2) {
-                Text("Nothing actionable came up")
-                    .grainTextStyle(.title).foregroundStyle(GrainColor.ink)
-                Text("When something worth doing surfaces during a conversation, its card lands here with what came of it.")
-                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-            }
-            .padding(.vertical, GrainSpacing.x4)
-        } else {
-            VStack(spacing: 0) {
-                Rectangle().fill(GrainColor.borderFaint).frame(height: 1)
-                ForEach(actionCards) { card in
-                    actionCardRow(card)
+        VStack(alignment: .leading, spacing: GrainSpacing.x4) {
+            if actions.isEmpty {
+                Text(ConversationActionsPresentation.emptyStateText)
+                    .grainTextStyle(.body)
+                    .foregroundStyle(GrainColor.textMuted)
+                    .padding(.vertical, GrainSpacing.x3)
+                    .accessibilityIdentifier("actions-empty-state")
+            } else {
+                VStack(spacing: 0) {
+                    Rectangle().fill(GrainColor.borderFaint).frame(height: 1)
+                    ForEach(actions.rows) { row in
+                        actionRow(row)
+                    }
                 }
             }
+            addActionControl
         }
     }
 
-    private func actionCardRow(_ card: ConversationActionCard) -> some View {
+    private func actionRow(_ row: ConversationActionsPresentation.Row) -> some View {
         HStack(alignment: .top, spacing: GrainSpacing.x3) {
             ZStack {
                 RoundedRectangle(cornerRadius: GrainRadius.md, style: .continuous)
-                    .fill(actionTileBackground(card.outcome))
-                Image(grain: actionIcon(card.outcome))
+                    .fill(actionTileBackground(row.state))
+                Image(grain: actionIcon(row))
                     .grainTextStyle(.body)
-                    .foregroundStyle(actionOutcomeForeground(card.outcome))
+                    .foregroundStyle(actionStateForeground(row.state))
             }
             .frame(width: GrainSpacing.x8, height: GrainSpacing.x8)
 
             VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-                Text(card.summary.isEmpty ? card.utterance : card.summary)
+                Text(row.label)
                     .grainTextStyle(.body)
                     .fontWeight(.semibold)
                     .foregroundStyle(GrainColor.ink)
-                if !card.summary.isEmpty, card.utterance != card.summary {
-                    Text("\u{201C}\(card.utterance)\u{201D}")
+                if let meta = row.meta, !meta.isEmpty {
+                    Text(meta)
                         .grainTextStyle(.caption)
                         .foregroundStyle(GrainColor.textMuted)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Spacer(minLength: GrainSpacing.x2)
-            Text(card.outcome.label)
+            Text(row.state.rawValue)
                 .grainTextStyle(.caption)
                 .fontWeight(.bold)
-                .textCase(.uppercase)
-                .foregroundStyle(actionOutcomeForeground(card.outcome))
+                .foregroundStyle(actionStateForeground(row.state))
                 .multilineTextAlignment(.trailing)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -368,43 +460,85 @@ struct ConversationFacesView: View {
         }
     }
 
-    private func actionIcon(_ outcome: ActionOutcome) -> GrainIcon {
-        switch outcome {
-        case .sentToChat: return .chat
-        case .answered: return .check
-        case .dismissed: return .check
-        case .pending: return .bolt
+    /// The "Add an action" affordance: a quiet button that opens an inline
+    /// field; the added action persists in the per-capture UserActionStore.
+    @ViewBuilder private var addActionControl: some View {
+        if addingAction {
+            HStack(spacing: GrainSpacing.x2) {
+                TextField("What needs doing?", text: $newActionTitle)
+                    .textFieldStyle(.plain)
+                    .grainTextStyle(.body)
+                    .foregroundStyle(GrainColor.ink)
+                    .submitLabel(.done)
+                    .onSubmit { commitNewAction() }
+                    .accessibilityIdentifier("new-action-title")
+                GrainButton("Add", variant: .filled, size: .sm) { commitNewAction() }
+            }
+            .padding(GrainSpacing.x3)
+            .background(
+                RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
+                    .fill(GrainColor.surface))
+            .overlay(
+                RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
+                    .strokeBorder(GrainColor.border, lineWidth: 1))
+        } else {
+            GrainButton(ConversationActionsPresentation.addActionLabel,
+                        variant: .outlined, size: .regular) {
+                addingAction = true
+            }
+            .frame(maxWidth: .infinity)
+            .accessibilityIdentifier("add-an-action")
         }
     }
 
-    private func actionOutcomeForeground(_ outcome: ActionOutcome) -> Color {
-        switch outcome {
-        case .sentToChat: return GrainColor.forgeBlue
-        case .answered: return GrainColor.sage
+    private func commitNewAction() {
+        UserActionStore.add(title: newActionTitle, captureId: captureId,
+                            baseDir: CaptureWAL.documentsCaptures())
+        newActionTitle = ""
+        addingAction = false
+        loadFaceData()
+    }
+
+    private func actionIcon(_ row: ConversationActionsPresentation.Row) -> GrainIcon {
+        if row.kind == .answer { return .spark }
+        switch row.state {
+        case .completed, .dismissed, .ready: return .check
+        case .open: return .bolt
+        }
+    }
+
+    private func actionStateForeground(_ state: ConversationActionsPresentation.Row.State) -> Color {
+        switch state {
+        case .completed, .ready: return GrainColor.sage
+        case .open: return GrainColor.amber
         case .dismissed: return GrainColor.textFaint
-        case .pending: return GrainColor.amber
         }
     }
 
-    private func actionTileBackground(_ outcome: ActionOutcome) -> Color {
-        switch outcome {
-        case .sentToChat: return GrainColor.forgeBlueBg
-        case .answered: return GrainColor.sage.opacity(0.12)
+    private func actionTileBackground(_ state: ConversationActionsPresentation.Row.State) -> Color {
+        switch state {
+        case .completed, .ready: return GrainColor.sage.opacity(0.12)
+        case .open: return GrainColor.amber.opacity(0.12)
         case .dismissed: return GrainColor.borderFaint
-        case .pending: return GrainColor.amber.opacity(0.12)
         }
     }
 
-    /// The cards for THIS conversation: candidate decisions from the ambient
-    /// decision log joined to their outcomes in the card-outcome log. Read-only
-    /// over the intelligence lane's files.
-    private func loadActionCards() {
-        let decisions = AmbientLane.readDecisions(at: AmbientPrefs.decisionLogURL())
+    /// Build both presentation faces for THIS conversation from the intelligence
+    /// lane's logs + the per-capture user-action store. Read-only joins over the
+    /// REAL builders the brine step-defs assert on.
+    private func loadFaceData() {
+        let decisionLog = AmbientPrefs.decisionLogURL()
+        let decisions = AmbientLane.readDecisions(at: decisionLog)
         let outcomes = ConversationActions.readOutcomes(
-            at: CaptureWAL.documentsCaptures()
-                .appendingPathComponent(ConversationActions.outcomeLogFilename))
-        actionCards = ConversationActions.cards(
-            for: captureId, decisions: decisions, outcomes: outcomes)
+            at: ActivityStore.cardsLogURL(besides: decisionLog))
+        let answers = ConversationAnswerLog.answers(
+            at: ActivityStore.answersLogURL(besides: decisionLog), captureId: captureId)
+        let userActions = UserActionStore.load(
+            captureId: captureId, baseDir: CaptureWAL.documentsCaptures())
+        linkedAnswer = answers.first
+        actions = ConversationActionsPresentation.build(
+            captureId: captureId, decisions: decisions, outcomes: outcomes,
+            answers: answers, userActions: userActions)
     }
 
     // MARK: - Transcript face
@@ -465,10 +599,6 @@ struct ConversationFacesView: View {
             Text("Loading transcript…")
                 .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
         } else if didAttemptFetch, content?.found == false, loadError == nil {
-            if let sp = stepperProgress {
-                ConversationStepper(progress: sp, local: local)
-                    .padding(.vertical, GrainSpacing.x1)
-            }
             Text("Transcript still processing…")
                 .grainTextStyle(.title).foregroundStyle(GrainColor.ink)
             Text("Your conversation is saved. The transcript shows up here once it's been processed on your computer.")
@@ -498,7 +628,7 @@ struct ConversationFacesView: View {
                     Image(grain: .search)
                         .grainTextStyle(.body)
                         .foregroundStyle(GrainColor.textMuted)
-                    TextField("Search the transcript", text: $query)
+                    TextField("Search this transcript", text: $query)
                         .textFieldStyle(.plain)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()

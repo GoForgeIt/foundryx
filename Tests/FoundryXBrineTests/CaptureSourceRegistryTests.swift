@@ -202,6 +202,11 @@ final class CaptureSourceWorld: @unchecked Sendable {
     let store = InMemoryCaptureSourceStore()
     let discovery = CaptureSourceRegistryTests.FakeAudioInputDiscovery()
     var registry: CaptureSourceRegistry?
+    /// Device-page presentation state (track 20260714T1800 §8): the computer
+    /// pairing the Computer memory section renders from, plus the shipped
+    /// DeviceScreen source for the prototype-parity guard steps.
+    var pairing: ComputerPairingState = .notConnected
+    var deviceScreenSource: String?
 
     @MainActor func freshRegistry() -> CaptureSourceRegistry {
         // "Fresh" = a clean slate: the world's store/discovery are shared across the
@@ -340,6 +345,124 @@ enum CaptureSourceSteps {
             defineCheck("the Apple Watch is never the active source") { _, _, _ in
                 let cat = await MainActor.run { world.registry?.activeSource?.category }
                 guard cat != .appleWatch else { throw CaptureSourceStepError("Apple Watch became active") }
+            },
+
+            // ── Device-page presentation (track 20260714T1800 §8) ────────────
+            // These assert through the REAL presentation builders the App's
+            // DeviceScreen renders from — no fakes of the logic under test.
+
+            defineCheck("the device page describes the phone microphone as {string}") { _, p, _ in
+                let expected = try p.requireString(0)
+                let subtitle: String? = await MainActor.run {
+                    world.registry?.sources
+                        .first { $0.category == .phoneMic }
+                        .map { CaptureSourceRowPresentation.resolve(for: $0, omiConnected: false).subtitle }
+                }
+                guard subtitle == expected else {
+                    throw CaptureSourceStepError("phone mic row reads \(subtitle ?? "nil"), expected \(expected)")
+                }
+            },
+            defineCheck("the phone microphone row has its own toggle") { _, _, _ in
+                let ok = await MainActor.run {
+                    world.registry?.sources.first { $0.category == .phoneMic }?.canToggle ?? false
+                }
+                guard ok else { throw CaptureSourceStepError("phone mic row is not toggleable") }
+            },
+            defineStep("no computer is paired") { ctx, _, _ in
+                world.pairing = .notConnected
+                return ctx
+            },
+            defineStep("my computer {string} pairs") { ctx, p, _ in
+                world.pairing = .connected(name: try p.requireString(0))
+                return ctx
+            },
+            defineCheck("the computer memory section is titled {string}") { _, p, _ in
+                let expected = try p.requireString(0)
+                let title = ComputerMemoryPresentation.resolve(world.pairing).title
+                guard title == expected else {
+                    throw CaptureSourceStepError("computer memory titled \(title), expected \(expected)")
+                }
+            },
+            defineCheck("the computer memory section shows {string}") { _, p, _ in
+                let expected = try p.requireString(0)
+                let title = ComputerMemoryPresentation.resolve(world.pairing).title
+                guard title == expected else {
+                    throw CaptureSourceStepError("computer memory shows \(title), expected \(expected)")
+                }
+            },
+            defineCheck("it explains {string}") { _, p, _ in
+                let expected = try p.requireString(0)
+                let subtitle = ComputerMemoryPresentation.resolve(world.pairing).subtitle
+                guard subtitle == expected else {
+                    throw CaptureSourceStepError("subtitle \(subtitle), expected \(expected)")
+                }
+            },
+            defineCheck("it reads {string}") { _, p, _ in
+                let expected = try p.requireString(0)
+                let subtitle = ComputerMemoryPresentation.resolve(world.pairing).subtitle
+                guard subtitle == expected else {
+                    throw CaptureSourceStepError("subtitle \(subtitle), expected \(expected)")
+                }
+            },
+            defineCheck("its status reads {string}") { _, p, _ in
+                let expected = try p.requireString(0)
+                let status = ComputerMemoryPresentation.resolve(world.pairing).statusLabel
+                guard status == expected else {
+                    throw CaptureSourceStepError("status \(status), expected \(expected)")
+                }
+            },
+            defineCheck("a primary {string} button offers pairing right there") { _, p, _ in
+                let expected = try p.requireString(0)
+                let pres = ComputerMemoryPresentation.resolve(world.pairing)
+                guard pres.actionTitle == expected, pres.actionIsPrimary else {
+                    throw CaptureSourceStepError(
+                        "action is \(pres.actionTitle) (primary=\(pres.actionIsPrimary)), expected primary \(expected)")
+                }
+            },
+            defineCheck("a {string} option replaces the connect button") { _, p, _ in
+                let expected = try p.requireString(0)
+                let pres = ComputerMemoryPresentation.resolve(world.pairing)
+                guard pres.actionTitle == expected, !pres.actionIsPrimary else {
+                    throw CaptureSourceStepError(
+                        "action is \(pres.actionTitle) (primary=\(pres.actionIsPrimary)), expected secondary \(expected)")
+                }
+            },
+            defineCheck("the pairing footer reads {string}") { _, p, _ in
+                let expected = try p.requireString(0)
+                let footer = ComputerMemoryPresentation.resolve(world.pairing).footer
+                guard footer == expected else {
+                    throw CaptureSourceStepError("footer \(footer), expected \(expected)")
+                }
+            },
+            defineStep("the device page as shipped") { ctx, _, _ in
+                // The shipped App-target view file (App/*.swift is outside the SPM
+                // package, so parity is asserted on its source — the B1 source-guard
+                // mechanism).
+                var url = URL(fileURLWithPath: #filePath)
+                for _ in 0..<3 { url.deleteLastPathComponent() }
+                let path = url.appendingPathComponent("App/DeviceScreen.swift").path
+                world.deviceScreenSource = try String(contentsOfFile: path, encoding: .utf8)
+                return ctx
+            },
+            defineCheck("it has no Bluetooth battery scanner, no conversation splitting, and no add-source controls") { _, _, _ in
+                guard let src = world.deviceScreenSource else {
+                    throw CaptureSourceStepError("DeviceScreen source not loaded")
+                }
+                let forbidden = ["Bluetooth battery", "Conversation splitting",
+                                 "Add source", "AddSourceSheet", "managed in Settings",
+                                 "Pair in Settings"]
+                let leaked = forbidden.filter { src.contains($0) }
+                guard leaked.isEmpty else {
+                    throw CaptureSourceStepError("DeviceScreen still contains: \(leaked)")
+                }
+            },
+            defineCheck("the device metrics are Battery, Signal, and Firmware") { _, _, _ in
+                guard DeviceMetricsPresentation.labels == ["Battery", "Signal", "Firmware"] else {
+                    throw CaptureSourceStepError("metric labels are \(DeviceMetricsPresentation.labels)")
+                }
+                if let src = world.deviceScreenSource, src.contains("Device ID") {
+                    throw CaptureSourceStepError("DeviceScreen still shows a Device ID metric")
+                }
             },
         ]
     }
