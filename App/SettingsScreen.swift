@@ -20,6 +20,9 @@ struct SettingsScreen: View {
     /// the low-collision entry point that launches it. Observed so the row flips to the
     /// connected state the moment the Vault goes live.
     @ObservedObject var vaultFunnel: VaultFunnelModel
+    /// The in-app account-deletion model (track T-STOREFRONT) — Apple-required deletion,
+    /// three scopes. Drives the "Delete account" affordance in the Account section.
+    @ObservedObject var accountDeletion: AccountDeletionModel
     @State private var actionChoice = ActionButtonChoice.current
     @State private var waitlistJoined =
         UserDefaults.standard.bool(forKey: "foundryx.waitlist.joined")
@@ -36,6 +39,10 @@ struct SettingsScreen: View {
     /// a dismissed sign-in leaves the honest "Sign in to join" caption.
     @State private var showingWaitlistSignIn = false
     @State private var waitlistSignInDismissed = false
+    /// The sign-in-only Vault entry (track T-STOREFRONT): where the App Store storefront
+    /// disallows purchasing, the "Your Vault" row offers sign-in (open an existing Vault),
+    /// never the purchase funnel.
+    @State private var showingVaultSignIn = false
 
     /// A glanceable one-line status for the Devices row (the deeper page has the detail).
     private var deviceStatusSubtitle: String {
@@ -232,9 +239,25 @@ struct SettingsScreen: View {
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                 Button("Sign out") { remote.signOut() }
                     .foregroundStyle(GrainColor.dangerRed)
+                // Apple-required in-app account deletion (track T-STOREFRONT): three scopes,
+                // each behind a destructive confirmation.
+                NavigationLink {
+                    AccountDeletionView(
+                        model: accountDeletion,
+                        idToken: { remote.idToken },
+                        onDeleted: { scope in
+                            if scope != .hostedVault { remote.signOut() }
+                        })
+                } label: {
+                    Text("Delete account").foregroundStyle(GrainColor.dangerRed)
+                }
             }
         }
         .grainBackground()
+        // Storefront sign-in-only Vault entry: open an existing Vault where purchasing is gated.
+        .sheet(isPresented: $showingVaultSignIn) {
+            SignInView(remote: remote) { showingVaultSignIn = false }
+        }
         .fullScreenCover(isPresented: $showingTour) {
             OnboardingFlowView(baseDir: CaptureWAL.documentsCaptures()) { showingTour = false }
         }
@@ -256,9 +279,18 @@ struct SettingsScreen: View {
     /// VaultEntry.presentation(entitlement:); tapping (when off) drives the funnel via
     /// vaultFunnel.activateFromSettings() → RootView's fullScreenCover presents it.
     @ViewBuilder private var vaultEntryRow: some View {
-        let p = VaultEntry.presentation(entitlement: vaultFunnel.entitlement)
+        // Storefront-aware (track T-STOREFRONT): US → the purchase CTA (launches the funnel);
+        // non-US / unknown storefront → sign-in only (open an existing Vault), NO purchase CTA.
+        let p = VaultEntry.presentation(entitlement: vaultFunnel.entitlement,
+                                        purchaseAllowed: vaultFunnel.purchaseAllowed)
         if p.actionable {
-            Button { vaultFunnel.activateFromSettings() } label: {
+            Button {
+                if p.showsPurchaseCTA {
+                    vaultFunnel.activateFromSettings()   // → the purchase funnel (plans/checkout)
+                } else {
+                    showingVaultSignIn = true            // sign-in only — no purchase path here
+                }
+            } label: {
                 HStack(spacing: GrainSpacing.x2) {
                     Image(systemName: "key.fill").foregroundStyle(GrainColor.forgeBlue)
                     VStack(alignment: .leading, spacing: 2) {
