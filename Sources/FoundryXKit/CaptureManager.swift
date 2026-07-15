@@ -788,10 +788,9 @@ public final class CaptureManager: ObservableObject {
 
     /// Startup work that NEEDS the hydrated timeline (orphan reconcile, retention
     /// sweeps, the widget seed) — runs once hydration lands on the main actor.
-    private func finishStartupAfterHydration() {
+    private func finishStartupAfterHydration(prunedAudioIds: [String]) {
         reconcileOrphanedCaptures()  // give crash-orphaned captures real bounds + finalize them
-        pruneOldTranscripts()  // ~14d transcript-text sweep (keeps name/description metadata)
-        pruneOldAudio()        // ~30d audio sweep (keeps transcripts, prunes safe-in-Lore audio)
+        applyRetentionSweep(prunedAudioIds: prunedAudioIds)  // the sweep already ran off-main
         // Seed the home-screen widget with current (idle / last-conversation) state so it
         // renders correctly before the first capture transition fires.
         CaptureWidgetSnapshotStore.write(makeWidgetSnapshot())
@@ -1948,7 +1947,7 @@ public final class CaptureManager: ObservableObject {
         await retryPendingFinalizes()
         await retryPendingDeletes()
         shipAmbientSignalIfDue()   // redacted gate/card signal → desktop door (v3.3)
-        maybePrune()   // retention sweeps — throttled OFF the every-5s main path
+        await maybePrune()   // retention sweeps — throttled + run OFF the main thread
     }
 
     private func drainBatch(now: TimeInterval) -> [CaptureWAL] {
@@ -2146,70 +2145,91 @@ public final class CaptureManager: ObservableObject {
     /// cadence so the UI stays responsive. Tunable.
     public nonisolated static let pruneInterval: TimeInterval = 120
     private var lastPruneAt: TimeInterval = 0
-    private func maybePrune() {
+    private func maybePrune() async {
         let now = Date().timeIntervalSince1970
         guard now - lastPruneAt >= Self.pruneInterval else { return }
         lastPruneAt = now
-        pruneOldTranscripts()   // ~14d transcript-text sweep (keeps name/description metadata)
-        pruneOldAudio()         // periodic retention sweep (cheap: stats files, only acts >30d)
+        // The retention sweep enumerates every capture's directory (contentsOfDirectory
+        // → getattrlistbulk). Run ON the main actor it was the 0.5s-per-capture hang
+        // STORM (spindump: 51 samples pinned on com.apple.main-thread). Snapshot the ids
+        // on the main actor, do ALL the disk scanning + pruning OFF the main thread, then
+        // apply the (small) UI result back on the main actor.
+        let activeId = active?.captureId
+        let ids = captures.compactMap { $0.captureId == activeId ? nil : $0.captureId }
+        let base = baseDir
+        let prunedAudio = await Task.detached(priority: .utility) {
+            Self.retentionSweep(ids: ids, baseDir: base)
+        }.value
+        applyRetentionSweep(prunedAudioIds: prunedAudio)
     }
 
-    // MARK: retention (prune transcript text after ~14d; prune local audio after ~30d)
+    // MARK: retention — the sweep runs OFF the main actor (pure disk); the caller applies
+    // the small UI result on the main actor. Prunes ~14d transcript TEXT (keeping the
+    // name/description tombstone) and ~30d local AUDIO (only when confirmed in Lore AND a
+    // readable tombstone survives). Idempotent + offline-safe. Never the active capture.
 
-    /// Prune the cached transcript TEXT for every conversation older than the ~14-day
-    /// window, FIRST copying its name/description into the durable card tombstone so the
-    /// conversation stays browsable (and the transcript stays loadable on demand from
-    /// the door). Keeps `meta.json`, `card.json`, `.lore-confirmed`. Never touches the
-    /// active capture or a recent one. Offline-safe (disk only).
-    public func pruneOldTranscripts() {
-        for wal in captures where wal !== active {
-            let id = wal.captureId
-            guard !isDeleted(id) else { continue }
+    /// The full retention sweep for `ids`, done ENTIRELY off the main thread. NOTHING here
+    /// touches actor state — disk only — so it is safe to run from a detached task. Returns
+    /// the ids whose local audio was pruned, so the caller can refresh those WALs + rebuild
+    /// the visible list on the main actor.
+    nonisolated static func retentionSweep(ids: [String], baseDir: URL) -> [String] {
+        // ~14d transcript TEXT (preserve the name/description card first, then drop the text).
+        for id in ids {
+            guard !isDeletedOnDisk(id, baseDir: baseDir) else { continue }
             guard TranscriptCacheStore.hasCachedTranscript(captureId: id, baseDir: baseDir) else { continue }
-            guard CaptureRetention.shouldPruneTranscript(conversationAge: conversationAgeSeconds(id)) else { continue }
-            // Preserve the readable name/description before dropping the transcript text.
+            guard CaptureRetention.shouldPruneTranscript(
+                conversationAge: conversationAgeOnDisk(id, baseDir: baseDir)) else { continue }
             if let t = TranscriptCacheStore.load(captureId: id, baseDir: baseDir) {
                 ConversationCardStore.merge(captureId: id, baseDir: baseDir,
                                             title: t.title, summary: t.summary, stage: nil)
             }
             TranscriptCacheStore.pruneTranscriptText(captureId: id, baseDir: baseDir)
-            log?.info("capture \(id): pruned transcript text (>14d) — name/description kept, loadable on demand")
         }
-    }
-
-    // MARK: retention (prune local audio after 30d once it's safe in Lore — keep a readable tombstone)
-
-    /// Prune the local audio for every capture whose newest segment is older than the
-    /// retention window AND is confirmed durably in Lore AND has a cached transcript.
-    /// Deletes the `seg-*.opus` + `.ack` files but KEEPS the dir + `transcript.json`
-    /// (a readable tombstone). Never prunes the active capture, an unconfirmed
-    /// capture, or one without a cached transcript. Idempotent + offline-safe (all
-    /// inputs come from disk — no network).
-    public func pruneOldAudio() {
-        var prunedAny = false
-        for wal in captures where wal !== active {
-            let id = wal.captureId
-            guard !isDeleted(id) else { continue }
-            guard let age = newestSegmentAge(id) else { continue }   // nil ⇒ no audio (already pruned)
+        // ~30d local AUDIO (confirmed in Lore AND a readable tombstone survives).
+        var prunedAudio: [String] = []
+        for id in ids {
+            guard !isDeletedOnDisk(id, baseDir: baseDir) else { continue }
+            guard let age = newestSegmentAgeOnDisk(id, baseDir: baseDir) else { continue }
             let confirmed = TranscriptCacheStore.isConfirmedInLore(captureId: id, baseDir: baseDir)
-            // A readable tombstone survives locally as either the cached transcript or —
-            // once that's been pruned at ~14d — the lightweight name/description card.
             let tombstone = TranscriptCacheStore.hasCachedTranscript(captureId: id, baseDir: baseDir)
                 || ConversationCardStore.exists(captureId: id, baseDir: baseDir)
             guard CaptureRetention.shouldPruneAudio(newestSegmentAge: age,
                                                     confirmedInLore: confirmed,
                                                     hasReadableTombstone: tombstone) else { continue }
-            deleteLocalAudio(id)
-            wal.refreshStatus()
-            prunedAny = true
-            log?.info("capture \(id): pruned local audio (>30d, confirmed in Lore, transcript cached) — transcript kept")
+            deleteLocalAudioOnDisk(id, baseDir: baseDir)
+            prunedAudio.append(id)
         }
-        if prunedAny { rebuildVisibleCaptures() }   // membership may shift to tombstone state
+        return prunedAudio
     }
 
-    /// Age (seconds) of the newest `seg-*.opus` segment by file mtime, or `nil` when
-    /// there are no segments left on disk.
-    private func newestSegmentAge(_ captureId: String) -> TimeInterval? {
+    /// Apply the off-main sweep's audio-prune result on the main actor: refresh the pruned
+    /// WALs' status (membership may shift to tombstone) and rebuild the visible list once.
+    private func applyRetentionSweep(prunedAudioIds: [String]) {
+        guard !prunedAudioIds.isEmpty else { return }
+        let pruned = Set(prunedAudioIds)
+        for wal in captures where pruned.contains(wal.captureId) { wal.refreshStatus() }
+        rebuildVisibleCaptures()
+        log?.info("retention: pruned local audio for \(prunedAudioIds.count) capture(s) (>30d, confirmed, tombstoned)")
+    }
+
+    // MARK: retention — nonisolated disk primitives (safe to run off the main actor)
+
+    /// True when the capture carries a `.deleted` tombstone marker.
+    nonisolated static func isDeletedOnDisk(_ captureId: String, baseDir: URL) -> Bool {
+        FileManager.default.fileExists(
+            atPath: baseDir.appendingPathComponent(captureId, isDirectory: true)
+                .appendingPathComponent(".deleted").path)
+    }
+
+    /// Age (seconds) since the conversation started, from its meta on disk (0 when absent).
+    nonisolated static func conversationAgeOnDisk(_ captureId: String, baseDir: URL) -> TimeInterval {
+        guard let started = ConversationMetaStore.load(captureId: captureId, baseDir: baseDir)?.startedAt,
+              started > 0 else { return 0 }
+        return max(0, Date().timeIntervalSince1970 - TimeInterval(started))
+    }
+
+    /// Age (seconds) of the newest `seg-*.opus` by mtime, or nil when no segments remain.
+    nonisolated static func newestSegmentAgeOnDisk(_ captureId: String, baseDir: URL) -> TimeInterval? {
         let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
         let files = (try? FileManager.default.contentsOfDirectory(
             at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
@@ -2220,14 +2240,18 @@ public final class CaptureManager: ObservableObject {
         return Date().timeIntervalSince(newest)
     }
 
-    /// Delete a capture's `seg-*.opus` + `seg-*.ack` files, keeping everything else
-    /// (the dir, `transcript.json`, `meta.json`, markers) as a tombstone.
-    private func deleteLocalAudio(_ captureId: String) {
+    /// Delete a capture's `seg-*.opus` + `seg-*.ack`, keeping the dir + tombstone files.
+    nonisolated static func deleteLocalAudioOnDisk(_ captureId: String, baseDir: URL) {
         let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
         let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
         for f in files where f.pathExtension == "opus" || f.pathExtension == "ack" {
             try? FileManager.default.removeItem(at: f)
         }
+    }
+
+    /// Instance shim for the reconcile path — delegates to the nonisolated primitive.
+    private func newestSegmentAge(_ captureId: String) -> TimeInterval? {
+        Self.newestSegmentAgeOnDisk(captureId, baseDir: baseDir)
     }
 
     /// Retry finalize for every capture still marked pending-finalize. Safe to call
@@ -2302,13 +2326,15 @@ public final class CaptureManager: ObservableObject {
             }
             guard let self else { return }
             let hydrated = picked.map { self.makeWAL(captureId: $0) }   // the stat storm, off-main
+            // Retention sweep ALSO off the main actor (was the startup main-thread hang).
+            let prunedAudio = Self.retentionSweep(ids: picked, baseDir: self.baseDir)
             let ms = span.elapsedMs()
             await MainActor.run {
                 // A capture STARTED before hydration finished sits at index 0
                 // (newest); the hydrated backlog appends behind it — order holds.
                 self.captures.append(contentsOf: hydrated)   // one didSet -> one rebuild
                 self.pruneDiscardedFragments()
-                self.finishStartupAfterHydration()
+                self.finishStartupAfterHydration(prunedAudioIds: prunedAudio)
             }
             // Ship the hydration cost (count + ms) — a slow one greps out as SLOW.
             PerfHook.span("capture-hydrate-n\(hydrated.count)", ms: ms)
