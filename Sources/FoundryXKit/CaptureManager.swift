@@ -631,15 +631,19 @@ public final class CaptureManager: ObservableObject {
     public nonisolated static func hasUploadSubstance(voicedFrames: Int,
                                                       onDeviceTranscript: String?,
                                                       durationSeconds: TimeInterval?) -> Bool {
-        let hasTranscript = !(onDeviceTranscript?
-            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
-        if hasTranscript {
-            // Speech-gated: meaningful content keeps it; noise/filler drops it.
-            return ConversationContentFilter.isMeaningful(transcript: onDeviceTranscript,
-                                                          durationSeconds: durationSeconds)
+        // A strong VOICED-AUDIO signal always wins, regardless of the on-device transcript.
+        // The on-device transcript is the low-quality LIVE PREVIEW (SpeechAnalyzer/WhisperKit),
+        // NOT the authoritative Kiln transcript that runs after upload — so a real, long
+        // conversation whose preview classified as filler must NOT be destroyed before Kiln
+        // ever sees it (2026-07-15: an 11,669-voiced-frame / ~4-min conversation was discarded
+        // this way). Keep when EITHER the (preview) transcript is meaningful OR there is
+        // substantial voiced audio (>= the ~60 s bar); only genuinely thin captures — a filler
+        // preview AND sub-bar voiced audio — are dropped.
+        if voicedFrames >= minVoicedFramesToUpload {
+            return true
         }
-        // No transcript at all — keep only a genuinely long voiced capture.
-        return voicedFrames >= minVoicedFramesToUpload
+        return ConversationContentFilter.isMeaningful(transcript: onDeviceTranscript,
+                                                      durationSeconds: durationSeconds)
     }
 
     /// Whether an Omi reconnect-grace hold that began at `suspendedAt` has elapsed by `now`
@@ -1798,7 +1802,7 @@ public final class CaptureManager: ObservableObject {
             discardLowSubstance(finished.captureId, voicedFrames: voiced)
             rebuildVisibleCaptures()                     // ensure the fragment never shows
             pushLiveState(.end)
-            log?.info("capture \(finished.captureId): DISCARDED — \(voiced) voiced frame(s) < \(Self.minVoicedFramesToUpload), no meaningful transcript; not uploaded")
+            log?.info("capture \(finished.captureId): DISCARDED — thin capture (\(voiced) voiced frame(s) < \(Self.minVoicedFramesToUpload) AND on-device preview not meaningful); not uploaded")
             return
         }
         // Above the bar — the existing real-conversation finalize path. Persist the

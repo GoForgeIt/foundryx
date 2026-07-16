@@ -79,17 +79,33 @@ final class CaptureSubstanceGateTests: XCTestCase {
     /// THE FIX: when a transcript exists, content — not amplitude — decides. Ambient noise
     /// that cleared the level threshold for a long time but transcribes to nothing/filler is
     /// DROPPED, where the old amplitude-only gate uploaded it as a junk conversation.
-    func testAmplitudeAloneNoLongerUploadsNoise() async {
+    func testSubstantialVoicedAudioIsNeverDestroyedByAFillerPreview() async {
         let bar = CaptureManager.minVoicedFramesToUpload
-        // Long voiced audio + a FILLER transcript (near-silent ambient) → dropped now.
-        XCTAssertFalse(CaptureManager.hasUploadSubstance(
+        // PHILOSOPHY CHANGE (2026-07-15, omi-informed): the on-device transcript is the
+        // LOW-QUALITY LIVE PREVIEW, not the authoritative Kiln transcript. Trusting it to
+        // DISCARD destroyed a real ~4-min, 11,669-voiced-frame conversation. Following omi
+        // (which never deletes voiced audio — low value becomes a restorable flag, only
+        // truly-empty captures are dropped), SUBSTANTIAL VOICED AUDIO now always uploads,
+        // even when the preview classifies it as filler. Genuine ambient noise is caught
+        // downstream by Kiln's authoritative transcript, where a real transcript exists —
+        // the harm of destroying a real conversation vastly outweighs an occasional noise
+        // upload. (Was: `bar+1000 + filler → FALSE`; that rule caused the data loss.)
+        XCTAssertTrue(CaptureManager.hasUploadSubstance(
             voicedFrames: bar + 1000, onDeviceTranscript: "thank you. okay. you.", durationSeconds: 45))
-        // Real speech of ANY length clears it — content is what matters.
+        // The specific regression: an 11,669-voiced-frame (~4 min) capture whose preview
+        // read as filler is KEPT, not discarded.
+        XCTAssertTrue(CaptureManager.hasUploadSubstance(
+            voicedFrames: 11_669, onDeviceTranscript: "you. um. okay.", durationSeconds: 233))
+        // Real speech of ANY length still clears it — content is what matters.
         XCTAssertTrue(CaptureManager.hasUploadSubstance(
             voicedFrames: 30, onDeviceTranscript: "can you grab milk on the way home", durationSeconds: 4))
         // A genuinely long capture with NO transcript (STT failed) is still kept.
         XCTAssertTrue(CaptureManager.hasUploadSubstance(
             voicedFrames: bar, onDeviceTranscript: nil, durationSeconds: 200))
+        // Still dropped: thin captures — a filler preview AND sub-bar voiced audio (real
+        // noise/ack fragments), the only case both signals agree is not worth keeping.
+        XCTAssertFalse(CaptureManager.hasUploadSubstance(
+            voicedFrames: 5, onDeviceTranscript: "thank you", durationSeconds: 2))
     }
 
     func testHasUploadSubstanceTranscriptSafetyValve() async {
