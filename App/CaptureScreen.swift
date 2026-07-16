@@ -172,6 +172,9 @@ struct CaptureScreen: View {
     // (open conversation) is preserved when NOT in multi-select.
     @State private var selectionMode = false
     @State private var selectedIds: Set<String> = []
+    /// After a merge lands, the primary conversation to OPEN so you see it all together
+    /// (drives a programmatic push into its detail). Cleared when the detail is dismissed.
+    @State private var justMergedId: String?
     #if DEBUG
     @State private var deepDetail = false      // screen-proof: `-Screen detail`
     @State private var deepRecording = false   // screen-proof: `-Screen recording`
@@ -274,6 +277,17 @@ struct CaptureScreen: View {
             if selectionMode { mergeActionBar.transition(.move(edge: .bottom)) }
         }
         .animation(.easeOut(duration: 0.2), value: selectionMode)
+        // After a merge lands, push straight into the merged conversation so you see it all
+        // together (iOS-16 programmatic push; coexists with the rows' own NavigationLinks).
+        .navigationDestination(isPresented: Binding(
+            get: { justMergedId != nil },
+            set: { if !$0 { justMergedId = nil } }
+        )) {
+            if let id = justMergedId,
+               let wal = manager.captures.first(where: { $0.captureId == id }) {
+                conversationDetail(wal)
+            }
+        }
         #if DEBUG
         // DEV screen-proof deep-links (real manager + target): `-Screen detail` opens a
         // conversation's three-face detail; `-Screen recording` presents the full
@@ -924,8 +938,15 @@ struct CaptureScreen: View {
                 .foregroundStyle(GrainColor.textMuted)
             GrainButton("Merge \(selectedIds.count)", variant: .filled, size: .lg) {
                 let ids = Array(selectedIds)
-                exitSelection()   // snappy exit; the list refreshes when the merge lands
-                Task { _ = await manager.merge(captureIds: ids) }
+                exitSelection()   // snappy exit
+                Task {
+                    // Open the merged conversation so you land on it all together (the door
+                    // re-ingests the fuller transcript in the background; the detail refreshes
+                    // as it arrives). No-op merge (nil) leaves you on the list.
+                    if let primaryId = await manager.merge(captureIds: ids) {
+                        justMergedId = primaryId
+                    }
+                }
             }
             .disabled(selectedIds.count < 2)
             .opacity(selectedIds.count < 2 ? 0.5 : 1)
