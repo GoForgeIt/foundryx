@@ -189,7 +189,7 @@ public struct ChatView: View {
             Image(systemName: "hammer.fill")
                 .font(.system(size: 11))
                 .foregroundStyle(GrainColor.forgeBlue)
-            Text("Agent — reads & writes files, runs commands. Asks before it acts.")
+            Text(ChatViewModel.agenticAffordance)
                 .grainTextStyle(.caption)
                 .foregroundStyle(GrainColor.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
