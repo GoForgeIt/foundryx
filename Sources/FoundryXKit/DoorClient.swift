@@ -772,6 +772,10 @@ public final class DoorClient: @unchecked Sendable {
     /// transcribed it yet → returned as `found:false` (a "still processing" state,
     /// NOT an error). Relay-aware: routes through the tunnel when configured.
     public func captureContent(captureId: String) async throws -> CaptureContent {
+        try await PerfHook.timed("door-content") { try await self.captureContentUncounted(captureId: captureId) }
+    }
+
+    private func captureContentUncounted(captureId: String) async throws -> CaptureContent {
         let notReady = CaptureContent(transcript: "", capturedAt: 0, found: false)
         // Interactive channel: transcript fetch is a user-facing read, so it rides the
         // chat tunnel (own door pool), never queuing behind bulk capture sync.
@@ -812,6 +816,12 @@ public final class DoorClient: @unchecked Sendable {
     /// search; a transport failure / non-2xx throws (the caller says "couldn't reach
     /// your computer"). An empty `query` asks the door for the recent list.
     public func searchConversations(query: String, limit: Int = 50) async throws -> [ConversationHit] {
+        try await PerfHook.timed("door-conversations") {
+            try await self.searchConversationsUncounted(query: query, limit: limit)
+        }
+    }
+
+    private func searchConversationsUncounted(query: String, limit: Int) async throws -> [ConversationHit] {
         // Encode the term as a query VALUE (alphanumerics-only allow-set → spaces and
         // separators become %XX, which the door percent-decodes) so `&`/`=`/spaces in
         // the search never break the query string.
@@ -1104,6 +1114,10 @@ public final class DoorClient: @unchecked Sendable {
     /// throws) when the door doesn't yet expose the route (404) or has no targets —
     /// the picker then just offers "Auto (router)".
     public func models() async throws -> [ModelOption] {
+        try await PerfHook.timed("door-models") { try await self.modelsUncounted() }
+    }
+
+    private func modelsUncounted() async throws -> [ModelOption] {
         if let relay = target.relay?.interactive() {
             let resp = try await RelayHTTP.roundTrip(
                 relay: relay, bearer: target.bearer, method: "GET",

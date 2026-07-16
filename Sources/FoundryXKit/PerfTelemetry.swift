@@ -101,6 +101,58 @@ public enum PerfHook {
         lock.lock(); let f = _report; lock.unlock()
         f?(name, ms)
     }
+
+    /// Time an async operation and report it as a span — on BOTH the success and
+    /// the error path (a door timeout or a slow fetch is exactly what we need to
+    /// see, and those surface as thrown errors). Failures report as `<name>-err`.
+    @discardableResult
+    public static func timed<T>(
+        _ name: String,
+        isolation: isolated (any Actor)? = #isolation,
+        _ op: () async throws -> T
+    ) async rethrows -> T {
+        let span = PerfSpan(name: name)
+        do {
+            let r = try await op()
+            PerfHook.span(name, ms: span.elapsedMs())
+            return r
+        } catch {
+            PerfHook.span("\(name)-err", ms: span.elapsedMs())
+            throw error
+        }
+    }
+}
+
+/// Thrown when a `withPerfTimeout` op outruns its budget — bounds a hang (e.g. a
+/// wedged on-device model turn, a stale-port door round-trip) so it surfaces as a
+/// clean, reportable error instead of an indefinite spinner. (A hard SIGTRAP in a
+/// framework can't be caught by this — that's mitigated separately — but a HANG is.)
+public struct PerfTimeout: Error, Sendable {
+    public let name: String
+    public let ms: Int
+    public init(name: String, ms: Int) { self.name = name; self.ms = ms }
+}
+
+/// Race `op` against a deadline. Returns op's result if it finishes first; throws
+/// `PerfTimeout` (and cancels op) if the deadline wins. Also reports a `<name>-timeout`
+/// span so the timeout is visible in the perf stream.
+public func withPerfTimeout<T: Sendable>(
+    _ name: String, ms: Int,
+    _ op: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask { try await op() }
+        group.addTask {
+            try await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
+            PerfHook.span("\(name)-timeout", ms: ms)
+            throw PerfTimeout(name: name, ms: ms)
+        }
+        defer { group.cancelAll() }
+        guard let result = try await group.next() else {
+            throw PerfTimeout(name: name, ms: ms)
+        }
+        return result
+    }
 }
 
 /// A wall-clock span timer. Injectable monotonic clock so tests are deterministic;

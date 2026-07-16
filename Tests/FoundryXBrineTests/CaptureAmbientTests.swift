@@ -90,6 +90,9 @@ extension CaptureAmbientTests {
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "t")
         let mgr = CaptureManager(target: target, baseDir: dir, source: omi, micSource: mic,
                                  finalize: { _, _ in })
+        #if os(iOS)
+        mgr.micPermissionOverrideForTests = true  // sim can't drive the real permission prompt
+        #endif
 
         // Omi conversation starts, streams, then BLE drops → held for reconnect grace.
         omi.onState?(.streaming)

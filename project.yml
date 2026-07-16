@@ -12,6 +12,15 @@ packages:
   WhisperKit:
     url: https://github.com/argmaxinc/WhisperKit.git
     from: 0.9.0
+  # This repo's own SPM package — exposes the FoundryXKit library product so the
+  # iOS-simulator test target can `import FoundryXKit` (the same sources the app
+  # inlines) built for the iOS runtime, where FoundationModels/MetricKit live.
+  FoundryXKitPackage:
+    path: .
+  # The generic Swift Brine runner (Foundation-only; now iOS-declared) — the
+  # BrineSwiftCore product the scenario/step tests drive.
+  BrineSwift:
+    path: ../brine-private/runners/implementations/swift
 targets:
   FoundryX:
     type: application
@@ -104,6 +113,35 @@ targets:
         Release:
           # Device/archive (TestFlight) signs via the team + automatic provisioning.
           CODE_SIGNING_ALLOWED: YES
+
+  # iOS-simulator test target: runs the existing Brine scenario/step + FoundryXKit
+  # unit suite (Tests/FoundryXBrineTests) on the iOS runtime — NOT just macOS via
+  # `swift test`. Hostless logic tests (no app launch): they instantiate FoundryXKit
+  # types and assert on models, so they need no test host. This is what lets us catch
+  # iOS-only regressions (FoundationModels titling, MetricKit, on-device paths) and
+  # add perf assertions that run on a chosen simulated iPhone via -destination.
+  # NB: NOT named "FoundryXBrineTests" — that's the SPM package's own test target
+  # (dragged in transitively by the `path: .` package), and two same-named modules
+  # both synthesize `Bundle.module`, colliding on fixture lookup. A distinct name
+  # keeps the resource accessor unambiguous.
+  FoundryXiOSTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/FoundryXBrineTests
+    dependencies:
+      - package: FoundryXKitPackage
+        product: FoundryXKit
+      - package: BrineSwift
+        product: BrineSwiftCore
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGNING_ALLOWED: NO
+        # Fixtures (handshake vectors, omi frames) are copied into the bundle so
+        # Bundle.module-style lookups resolve on-device like they do under SPM.
+        TARGETED_DEVICE_FAMILY: "1,2"
 
   # Widget extension: the home/lock-screen "Capture Status" widget + the capture Live
   # Activity (Dynamic Island). Shares CaptureActivityAttributes + CaptureWidgetSnapshot

@@ -1,3 +1,7 @@
+// macOS-only: reuses FoundryXDoorTests' real-door fixture (spawns the door binary
+// via Foundation `Process`), so it's gated to macOS like that file — skipped in the
+// iOS-simulator logic-test target, still runs under `swift test` on macOS.
+#if os(macOS)
 import XCTest
 import Foundation
 import BrineSwiftCore
@@ -156,3 +160,5 @@ enum CaptureSteps {
         ]
     }
 }
+
+#endif  // os(macOS)

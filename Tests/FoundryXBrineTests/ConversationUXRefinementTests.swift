@@ -80,6 +80,9 @@ final class ConversationUXRefinementTests: XCTestCase {
         let mgr = CaptureManager(target: target, baseDir: dir, source: omi, micSource: mic,
                                  finalize: { _, _ in },
                                  liveTranscriber: { factory.make() })
+        #if os(iOS)
+        mgr.micPermissionOverrideForTests = true  // sim can't drive the real permission prompt
+        #endif
 
         mgr.startMicRecording()
         mic.onState?(.streaming)
@@ -222,6 +225,9 @@ final class ConversationUXRefinementTests: XCTestCase {
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
         let mgr = CaptureManager(target: target, baseDir: dir, source: omi, micSource: mic,
                                  finalize: { _, _ in })
+        #if os(iOS)
+        mgr.micPermissionOverrideForTests = true  // sim can't drive the real permission prompt
+        #endif
 
         XCTAssertFalse(mgr.isRecordingMic)
         mgr.toggleMicRecording()                 // → record

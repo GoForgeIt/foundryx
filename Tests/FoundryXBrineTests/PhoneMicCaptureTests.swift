@@ -109,6 +109,9 @@ final class PhoneMicCaptureTests: XCTestCase {
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
         let mgr = CaptureManager(target: target, baseDir: dir, source: omi, micSource: mic,
                                  finalize: { id, _ in rec.record(id) })
+        #if os(iOS)
+        mgr.micPermissionOverrideForTests = true  // sim can't drive the real permission prompt
+        #endif
 
         XCTAssertTrue(mgr.phoneMicAvailable, "a wired mic source makes the Record control available")
         XCTAssertFalse(mgr.isRecordingMic)
@@ -159,6 +162,9 @@ final class PhoneMicCaptureTests: XCTestCase {
         let mic = TestSource()
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
         let mgr = CaptureManager(target: target, baseDir: dir, source: omi, micSource: mic)
+        #if os(iOS)
+        mgr.micPermissionOverrideForTests = true  // sim can't drive the real permission prompt
+        #endif
 
         // Pick the phone mic: the Omi is released, and startSource() must NOT start it.
         mgr.selectCaptureSource(.phoneMic)

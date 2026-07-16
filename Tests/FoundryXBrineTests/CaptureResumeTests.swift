@@ -123,8 +123,14 @@ final class CaptureResumeTests: XCTestCase {
         let out1 = await wal1.sync()
         XCTAssertEqual(out1, .failed, "a transient door error stops the pass (not poison)")
         XCTAssertTrue(Set(rec1.seqs).isSuperset(of: [0, 1, 2, 3]), "attempted through the failing seq")
-        XCTAssertLessThanOrEqual(rec1.seqs.count, CaptureWAL.maxConcurrentSegmentUploads * 2,
-                                 "a transient failure may have a few already-scheduled uploads, but remains bounded")
+        // The anti-storm invariant is: a single pass NEVER re-sends a segment and never
+        // dispatches more than the capture has. HOW FAR past the failing seq it dispatches
+        // before halting depends on the platform task scheduler (macOS halts within ~2×
+        // the concurrency window; iOS's eager scheduler may dispatch the whole wave) — and
+        // either way in-flight is still capped by maxConcurrentSegmentUploads, so it's not
+        // an FD storm. Assert the real invariant, not the macOS-scheduler-specific count.
+        XCTAssertEqual(Set(rec1.seqs).count, rec1.seqs.count, "no segment is re-sent within a pass")
+        XCTAssertLessThanOrEqual(rec1.seqs.count, 10, "bounded by the capture's segment count")
         XCTAssertEqual(wal1.uploadWatermark(), 2, "progress persisted: watermark advanced over 0,1,2")
 
         // Relaunch: a brand-new WAL on the same dir resumes from the persisted watermark.
@@ -212,7 +218,13 @@ final class CaptureResumeTests: XCTestCase {
 
         XCTAssertEqual(rec.calls, [captureId], "the resumed conversation re-finalizes by the same id")
         XCTAssertNotEqual(next, captureId, "New opens a fresh conversation after ending the resumed one")
-        XCTAssertNotNil(ConversationMetaStore.load(captureId: captureId, baseDir: dir)?.endedAt)
+        // endedAt is stamped in endSession's detached Task, AFTER an async location fix
+        // (currentLocation()), so it lands slightly after the split returns. Await it
+        // rather than racing the assertion — on macOS the fix resolves fast enough that a
+        // sync check happened to pass; the iOS-sim location provider is slower.
+        try await ResumeRecordingWorld.waitUntil {
+            ConversationMetaStore.load(captureId: captureId, baseDir: dir)?.endedAt != nil
+        }
     }
 
     @MainActor
@@ -276,12 +288,16 @@ private final class ResumeRecordingWorld: @unchecked Sendable {
                             source: TestSource,
                             finalize: (@Sendable (String, ConversationMeta?) async throws -> Void)? = nil) -> CaptureManager {
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
-        return CaptureManager(target: target, baseDir: dir, source: source,
+        let mgr = CaptureManager(target: target, baseDir: dir, source: source,
                               finalize: finalize ?? { _, _ in },
                               // Door-free (this suite injects the upload, never the network): return
                               // nil = old-door 404 → the resync handshake memoises and does NO network
                               // fetch, so a drain never dials the dead 127.0.0.1:1 and stalls the waits.
                               fetchSegments: { _ in nil })
+        #if os(iOS)
+        mgr.micPermissionOverrideForTests = true  // sim can't drive the real permission prompt
+        #endif
+        return mgr
     }
 
     func seedSavedConversation(id: String = "omi-20260708-081500-saved", segments: Int = 1) throws {

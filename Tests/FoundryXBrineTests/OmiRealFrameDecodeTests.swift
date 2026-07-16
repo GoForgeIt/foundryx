@@ -14,7 +14,7 @@ final class OmiRealFrameDecodeTests: XCTestCase {
     private struct Fixture: Decodable { let source: String; let frames_b64: [String] }
 
     private func realFrames() throws -> [Data] {
-        let url = try XCTUnwrap(Bundle.module.url(forResource: "omi_real_frames", withExtension: "json"),
+        let url = try XCTUnwrap(TestFixtureBundle.current.url(forResource: "omi_real_frames", withExtension: "json"),
                                 "omi_real_frames fixture missing from the test bundle")
         let fx = try JSONDecoder().decode(Fixture.self, from: Data(contentsOf: url))
         return fx.frames_b64.map { Data(base64Encoded: $0)! }

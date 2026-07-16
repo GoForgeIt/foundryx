@@ -10,6 +10,9 @@ struct FoundryXApp: App {
         PerfTelemetry.shared.start(
             endpoint: RemoteConfig.fromBundle()?.gatewayHTTPURL.appendingPathComponent("diag/log"))
         #if DEBUG
+        DemoSeed.installPerfLogIfRequested()  // `-PerfLog`: mirror perf spans to the unified log
+        DemoSeed.seedStressIfRequested()      // `-StressSeed <N>`: large-library perf harness
+        BenchModel.runIfRequested()           // `-BenchModel`: on-device model latency bench
         DemoSeed.seedIfRequested()   // `-MainPreview` only: seed demo cards for screen-proof
         #endif
     }

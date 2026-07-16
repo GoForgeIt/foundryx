@@ -13,7 +13,7 @@ enum RealOmiFrames {
 
     /// All real frames from the fixture, in capture order.
     static func all() -> [Data] {
-        guard let url = Bundle.module.url(forResource: "omi_real_frames", withExtension: "json"),
+        guard let url = TestFixtureBundle.current.url(forResource: "omi_real_frames", withExtension: "json"),
               let data = try? Data(contentsOf: url),
               let fx = try? JSONDecoder().decode(Fixture.self, from: data) else { return [] }
         return fx.frames_b64.compactMap { Data(base64Encoded: $0) }

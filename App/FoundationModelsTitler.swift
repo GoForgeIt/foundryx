@@ -23,14 +23,21 @@ public final class FoundationModelsTitler: LocalTitleSummary, @unchecked Sendabl
         // Bound the prompt to the model's small context; the head of a conversation
         // names it well enough.
         let bounded = String(transcript.prefix(6_000))
-        let session = LanguageModelSession()
-        let title = try await session.respond(
-            to: "Give a 3–6 word title for this conversation transcript. Reply with ONLY the title, no quotes.\n\n\(bounded)"
-        ).content.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
-        let summary = try await session.respond(
-            to: "Summarize this conversation in 1–2 plain sentences. Reply with ONLY the summary.\n\n\(bounded)"
-        ).content.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (title, summary)
+        // Time it (fm-title span) AND bound it: on-device turns have hung in the
+        // wild, and a wedged titler must not stall summaries forever — a 20s
+        // timeout surfaces it as a clean error the caller can fall back from.
+        return try await PerfHook.timed("fm-title") {
+            try await withPerfTimeout("fm-title", ms: 20_000) {
+                let session = LanguageModelSession()
+                let title = try await session.respond(
+                    to: "Give a 3–6 word title for this conversation transcript. Reply with ONLY the title, no quotes.\n\n\(bounded)"
+                ).content.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+                let summary = try await session.respond(
+                    to: "Summarize this conversation in 1–2 plain sentences. Reply with ONLY the summary.\n\n\(bounded)"
+                ).content.trimmingCharacters(in: .whitespacesAndNewlines)
+                return (title, summary)
+            }
+        }
     }
 }
 #endif

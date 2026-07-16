@@ -7,6 +7,51 @@ import Foundation
 /// with real content in the simulator and can be screenshot-verified against the
 /// prototype. No effect in a normal launch.
 enum DemoSeed {
+    /// Large-library perf harness: `-StressSeed <N>` drops N synthetic conversation
+    /// cards on disk (same stores the real pipeline uses) so a cold launch hydrates a
+    /// big timeline. Pairs with the `capture-hydrate` + `capture-list-first-paint`
+    /// perf spans to measure the exact "load-to-zero" hang class at 100/300/1000 on a
+    /// chosen simulated iPhone. No effect on a normal launch.
+    static func seedStressIfRequested() {
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: "-StressSeed"),
+              i + 1 < args.count, let n = Int(args[i + 1]), n > 0 else { return }
+        let base = CaptureWAL.documentsCaptures()
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let now = Int(Date().timeIntervalSince1970)
+        for k in 0..<n {
+            let id = "stress-\(String(format: "%05d", k))"
+            let dir = base.appendingPathComponent(id, isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            // Spread back in time so the list orders newest-first like a real library.
+            let start = UInt64(max(0, now - (k + 1) * 600))
+            ConversationMetaStore.save(
+                ConversationMeta(startedAt: start, endedAt: start + 300),
+                captureId: id, baseDir: base)
+            ConversationCardStore.save(
+                ConversationCardMeta(
+                    title: "Conversation \(k)",
+                    summary: "Synthetic stress-seed card number \(k): a realistic-length summary sentence so hydration and first-paint see representative row content.",
+                    stage: "in_lore"),
+                captureId: id, baseDir: base)
+            TranscriptCacheStore.save(
+                CachedTranscript(
+                    transcript: "This is stress-seed conversation \(k). We covered a handful of topics and agreed on the next steps and who owns what by when, with enough words to be a realistic transcript body for hydration.",
+                    title: "Conversation \(k)", summary: "",
+                    segments: [], speakers: [], fetchedAt: UInt64(max(0, now))),
+                captureId: id, baseDir: base)
+        }
+        NSLog("perf-harness: stress-seeded \(n) captures at \(base.path)")
+    }
+
+    /// `-PerfLog`: mirror every PerfHook span to the unified log (NSLog) so the
+    /// sim-perf harness can read `capture-hydrate` / `capture-list-first-paint` /
+    /// door-fetch timings from `simctl spawn log` without needing the relay sink.
+    static func installPerfLogIfRequested() {
+        guard ProcessInfo.processInfo.arguments.contains("-PerfLog") else { return }
+        PerfHook.install { name, ms in NSLog("perf-span %@ ms=%d", name, ms) }
+    }
+
     static func seedIfRequested() {
         guard ProcessInfo.processInfo.arguments.contains("-MainPreview") else { return }
         let base = CaptureWAL.documentsCaptures()

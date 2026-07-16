@@ -200,7 +200,20 @@ public final class CaptureManager: ObservableObject {
     /// in `loadExisting`). Seeded synchronously in `init`; the Capture list renders these
     /// populated rows immediately and swaps to the real WAL cards the instant off-main
     /// hydration publishes `visibleCaptures` (which clears this).
-    @Published public private(set) var listRows: [ConversationRowLite] = []
+    @Published public private(set) var listRows: [ConversationRowLite] = [] {
+        didSet {
+            // One-shot: the "load-to-zero" number nobody had — wall-time from
+            // startup to the FIRST non-empty capture list (whether it came from
+            // the warm seed or off-main hydration). Emitted once per launch.
+            if firstPaintPending, !listRows.isEmpty {
+                firstPaintPending = false
+                if let s = firstPaintSpan { PerfHook.span("capture-list-first-paint", ms: s.elapsedMs()) }
+            }
+        }
+    }
+    /// Time-to-first-row instrumentation (see `listRows.didSet`). Armed at startup.
+    private var firstPaintSpan: PerfSpan?
+    private var firstPaintPending = false
 
     /// Recompute the visible list. Hide ones that recorded NOTHING (0 segments, not
     /// streaming) — useless empty cards; keep ones with real audio, still-streaming, or a
@@ -861,6 +874,8 @@ public final class CaptureManager: ObservableObject {
             (micSource as? MicFrameSource)?.onPCM = { [liveBox] buf in liveBox.append(buf) }
         }
         #endif
+        firstPaintSpan = PerfSpan(name: "capture-list-first-paint")  // arm time-to-first-row
+        firstPaintPending = true
         seedWarmListRows()     // scan-free first-paint rows (T1 AC5) — before the off-main hydrate
         loadExisting()         // OFF-MAIN hydration; finishes via finishStartupAfterHydration
         startDrainTimer()
@@ -1079,7 +1094,16 @@ public final class CaptureManager: ObservableObject {
     /// Three-state mic permission, normalised across the iOS 17 split (`AVAudioApplication`)
     /// and the older `AVAudioSession` API.
     private enum MicPermission { case granted, denied, undetermined }
+    /// Test seam: the iOS-simulator test runner cannot drive the real
+    /// AVAudioApplication permission prompt, so mic tests (which inject a fake
+    /// source) would otherwise stall on `.undetermined`. Setting this forces the
+    /// decision so the state machine runs on iOS exactly as it does on the macOS
+    /// runner. `nil` (default) = use the real system API — production is untouched.
+    public var micPermissionOverrideForTests: Bool?
     private func micPermission() -> MicPermission {
+        if let forced = micPermissionOverrideForTests {
+            return forced ? .granted : .denied
+        }
         if #available(iOS 17.0, *) {
             switch AVAudioApplication.shared.recordPermission {
             case .granted: return .granted

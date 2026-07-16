@@ -1,3 +1,8 @@
+// macOS-only: this suite spawns the REAL door binary via Foundation `Process`,
+// which doesn't exist on iOS. Gated so the file compiles to nothing in the
+// iOS-simulator test target (pure-logic tests run there) while still running
+// under `swift test` on macOS where the door binary + Process are available.
+#if os(macOS)
 import XCTest
 import Foundation
 import BrineSwiftCore
@@ -266,3 +271,5 @@ private func parseDoorHandshake(_ s: String) -> (base: String, token: String)? {
     if let b = base, let t = token, !t.isEmpty { return (b, t) }
     return nil
 }
+
+#endif  // os(macOS)

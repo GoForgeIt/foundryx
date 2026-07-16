@@ -456,7 +456,6 @@ public final class FoundationModelsRecapSynthesizer: RecapSynthesizer, @unchecke
             return "- " + line
         }.joined(separator: "\n")
 
-        let session = LanguageModelSession()
         let prompt = """
         You are writing a quiet 1-2 sentence recap of what a personal assistant \
         did for its user this \(span). Mention ONLY what is in the list below; do \
@@ -466,8 +465,14 @@ public final class FoundationModelsRecapSynthesizer: RecapSynthesizer, @unchecke
         What happened:
         \(lines)
         """
-        return try await session.respond(to: prompt).content
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Time (recap-gen) + bound the on-device turn so a wedged model can't
+        // hang the recap forever (same guard as fm-title).
+        return try await PerfHook.timed("recap-gen") {
+            try await withPerfTimeout("recap-gen", ms: 20_000) {
+                try await LanguageModelSession().respond(to: prompt).content
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
     }
 }
 #endif

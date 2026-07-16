@@ -42,12 +42,14 @@ public actor WhisperKitSTT: LocalSTT {
     }
 
     public func transcribe(opusFrames: [Data]) async throws -> String {
-        let samples = Self.pcm16k(from: opusFrames)
-        guard !samples.isEmpty else { return "" }
-        let whisper = try await loadEngine()
-        let results = try await whisper.transcribe(audioArray: samples)
-        return results.map(\.text).joined(separator: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try await PerfHook.timed("whisper-stt") {
+            let samples = Self.pcm16k(from: opusFrames)
+            guard !samples.isEmpty else { return "" }
+            let whisper = try await self.loadEngine()
+            let results = try await whisper.transcribe(audioArray: samples)
+            return results.map(\.text).joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
     }
 
     private func loadEngine() async throws -> WhisperKit {
