@@ -605,13 +605,18 @@ public final class CaptureManager: ObservableObject {
     /// genuinely just-started capture is never mistaken for a stuck-empty one.
     public nonisolated static let stuckEmptyRecordingSecs: TimeInterval = 5 * 60
 
-    /// A transient Omi BLE disconnect within this window RESUMES the open conversation
-    /// (same captureId) instead of ending it — so a flaky link doesn't shatter one
-    /// conversation into a pile of tiny reconnect-stub fragments. A disconnect that stays
-    /// down past the window ends the conversation normally (its real boundary is preserved,
-    /// then the substance gate decides upload-vs-discard). An EXPLICIT stop (phone-mic Stop
-    /// / permission-deny) ends immediately, bypassing the grace. Tunable.
+    /// Fallback hold for a session that NEVER heard voiced audio before the disconnect —
+    /// there is no conversation to continue, so the hold ends after this short window rather
+    /// than lingering for a full silence gap. (For a session that DID hear voice, the end
+    /// boundary is real voiced SILENCE, not disconnect wall-clock — see
+    /// `shouldEndSuspendedSession`.) An EXPLICIT stop (phone-mic Stop / permission-deny) ends
+    /// immediately, bypassing the grace. Tunable.
     public nonisolated static let reconnectGraceWindow: TimeInterval = 20
+
+    /// Absolute backstop for a held (reconnect-grace) session: however the reconnect / silence
+    /// signals play out, a session held longer than this is force-closed, so a truly abandoned
+    /// conversation can never linger open forever. 4 hours.
+    public nonisolated static let suspendedSessionMaxHold: TimeInterval = 4 * 3600
 
     /// Whether a just-closed capture is a real CONVERSATION worth finalizing + uploading to
     /// Lore, or a JUNK FRAGMENT to drop locally. The Omi model: a conversation is SPEECH,
@@ -646,17 +651,52 @@ public final class CaptureManager: ObservableObject {
                                                       durationSeconds: durationSeconds)
     }
 
-    /// Whether an Omi reconnect-grace hold that began at `suspendedAt` has elapsed by `now`
-    /// (the device did not reconnect in time) and must therefore end the conversation.
-    public nonisolated static func shouldEndSuspendedSession(suspendedAt: TimeInterval,
-                                                             now: TimeInterval,
-                                                             window: TimeInterval) -> Bool {
-        now - suspendedAt >= window
+    /// Whether a held (reconnect-grace) Omi session has reached a real conversation boundary
+    /// and must end. The boundary is CONVERSATIONAL SILENCE — `silenceGap` seconds with no
+    /// VOICED audio, measured from the last voiced instant — NOT disconnect wall-clock.
+    ///
+    /// Why: a BLE disconnect (backgrounding the app, walking briefly out of range) is not
+    /// silence. The old rule ended the hold after a fixed `reconnectGraceWindow` of disconnect
+    /// wall-clock, evaluated by the main-runloop segment timer — which is SUSPENDED while the
+    /// app is backgrounded. So the entire background interval counted against the window, and
+    /// the first foreground tick split the LIVE conversation, minting a fresh capture id on the
+    /// next reconnect (the "going in/out of the app starts a new conversation" bug). Gating on
+    /// real voiced silence instead means a reconnect within `silenceGap` of the last voiced
+    /// audio finds the session STILL HELD and resumes the SAME capture id; only genuine
+    /// >= silenceGap of voiced silence (a true conversation boundary) ends it.
+    ///
+    /// All time arguments share one clock (reference-date seconds, as `lastVoicedInstant()`).
+    /// - lastVoicedAt: instant of the most recent voiced frame, or nil if no voice was ever
+    ///   heard this session.
+    /// - suspendedAt: when the hold began.
+    /// - noVoicedTimeout: fallback hold when `lastVoicedAt` is nil — nothing to continue, so
+    ///   close after the short reconnect window instead of a full silence gap.
+    /// - maxHold: absolute backstop so a truly abandoned held session always eventually closes.
+    public nonisolated static func shouldEndSuspendedSession(
+        lastVoicedAt: TimeInterval?,
+        suspendedAt: TimeInterval,
+        now: TimeInterval,
+        silenceGap: TimeInterval,
+        noVoicedTimeout: TimeInterval = reconnectGraceWindow,
+        maxHold: TimeInterval = suspendedSessionMaxHold
+    ) -> Bool {
+        // Absolute backstop: a held session never lingers open past this, whatever the signals.
+        if now - suspendedAt >= maxHold { return true }
+        guard let lastVoicedAt else {
+            // No voiced audio ever this session — there is no conversation to continue. Fall
+            // back to the short reconnect timeout rather than holding for a full silence gap.
+            return now - suspendedAt >= noVoicedTimeout
+        }
+        // The real end-of-conversation signal: >= silenceGap of VOICED silence since the last
+        // voiced instant. A disconnect gap shorter than this keeps the session held to resume.
+        return now - lastVoicedAt >= silenceGap
     }
 
     /// A held-open Omi conversation awaiting a possible reconnect (its WAL + when the
-    /// disconnect happened). Non-nil ⇒ `active` is SUSPENDED, not ended: a reconnect within
-    /// `reconnectGraceWindow` resumes it (same captureId), else the watchdog ends it.
+    /// disconnect happened, in reference-date seconds — the same clock as `lastVoicedInstant()`
+    /// so the silence-boundary check compares on one clock). Non-nil ⇒ `active` is SUSPENDED,
+    /// not ended: a reconnect before `SilenceSegmenter.defaultSilenceGap` of voiced silence
+    /// resumes it (same captureId), else `resolveReconnectGrace` ends it at the real boundary.
     private var suspendedSession: (wal: CaptureWAL, at: TimeInterval)?
 
     /// True while an Omi conversation is being HELD open awaiting a possible reconnect (a
@@ -664,17 +704,22 @@ public final class CaptureManager: ObservableObject {
     /// "reconnecting…" state; a reconnect within the window resumes the same conversation.
     public var isAwaitingReconnect: Bool { suspendedSession != nil }
 
-    /// Resolve a pending Omi reconnect-grace hold: if the device did NOT reconnect within
-    /// `reconnectGraceWindow` of the disconnect, end the held conversation now (the
-    /// substance gate then decides upload-vs-discard). No-op when nothing is held or the
-    /// window hasn't elapsed. The capture watchdog calls this each tick; tests pass an
-    /// explicit `now` to advance it deterministically.
-    public func resolveReconnectGrace(now: TimeInterval = Date().timeIntervalSince1970) {
+    /// Resolve a pending Omi reconnect-grace hold: end the held conversation only when a REAL
+    /// conversation boundary has been reached — `SilenceSegmenter.defaultSilenceGap` of voiced
+    /// silence since the last voiced instant (NOT disconnect wall-clock), a session that never
+    /// heard voice timing out, or the absolute backstop. Otherwise the hold stands so a
+    /// reconnect can resume the SAME captureId. The substance gate then decides
+    /// upload-vs-discard for an ended conversation. No-op when nothing is held or no boundary
+    /// has been reached. The capture watchdog calls this each tick; tests pass an explicit
+    /// `now` (reference-date seconds) to advance it deterministically.
+    public func resolveReconnectGrace(now: TimeInterval = Date().timeIntervalSinceReferenceDate) {
         guard let held = suspendedSession else { return }
-        guard CaptureManager.shouldEndSuspendedSession(suspendedAt: held.at, now: now,
-                                                       window: Self.reconnectGraceWindow) else { return }
+        guard CaptureManager.shouldEndSuspendedSession(lastVoicedAt: router.lastVoicedInstant(),
+                                                       suspendedAt: held.at,
+                                                       now: now,
+                                                       silenceGap: SilenceSegmenter.defaultSilenceGap) else { return }
         suspendedSession = nil
-        log?.info("capture \(held.wal.captureId): Omi reconnect grace elapsed — ending held conversation")
+        log?.info("capture \(held.wal.captureId): reconnect-grace silence boundary reached — ending held conversation")
         endSession()
     }
 
@@ -1048,8 +1093,8 @@ public final class CaptureManager: ObservableObject {
                 // Omi BLE dropped mid-conversation → HOLD it open for a brief reconnect
                 // grace so a flaky link doesn't split the conversation into fragments. The
                 // capture watchdog ends it if the device doesn't return within the window.
-                suspendedSession = (wal, Date().timeIntervalSince1970)
-                log?.info("capture \(wal.captureId): Omi disconnected — holding \(Int(Self.reconnectGraceWindow))s for reconnect")
+                suspendedSession = (wal, Date().timeIntervalSinceReferenceDate)
+                log?.info("capture \(wal.captureId): Omi disconnected — holding for reconnect (ends after \(Int(SilenceSegmenter.defaultSilenceGap))s of voiced silence)")
             }
         case .idle, .scanning:
             break

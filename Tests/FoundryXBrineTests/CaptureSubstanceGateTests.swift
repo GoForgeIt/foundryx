@@ -170,11 +170,58 @@ final class CaptureSubstanceGateTests: XCTestCase {
                       "a genuinely empty 0-segment card (no tombstone) is still discarded")
     }
 
-    func testShouldEndSuspendedSession() async {
+    /// The suspended-session (reconnect-grace) end rule is driven by CONVERSATIONAL SILENCE,
+    /// not disconnect wall-clock.
+    ///
+    /// Rationale (why this test was inverted from the old `now - suspendedAt >= 20s` window):
+    /// this decision is evaluated by the main-runloop segment timer, which is SUSPENDED while
+    /// the app is backgrounded. Under the OLD rule the whole background interval counted
+    /// against the fixed 20s window, so the first foreground tick after an app-switch ended a
+    /// still-live held conversation — and the next Omi reconnect began a FRESH capture id.
+    /// That is the "going in/out of the app starts a new conversation each time" bug. A BLE
+    /// disconnect is not conversational silence, so the hold now ends only after >= silenceGap
+    /// (120s) of REAL voiced silence measured from the last voiced instant, with a short
+    /// fallback for a hold that never heard voice and a 4h absolute backstop.
+    func testShouldEndSuspendedSessionUsesVoicedSilenceNotDisconnectWallClock() async {
+        let gap = SilenceSegmenter.defaultSilenceGap   // 120s
+        let suspendedAt: TimeInterval = 1000
+
+        // (a) The app-switch case that USED to split: disconnected 60s ago (well past the old
+        //     20s window) but voice was heard only 10s ago → NOT a silence boundary → HELD, so
+        //     a reconnect can resume the SAME captureId.
+        let now = suspendedAt + 60
+        XCTAssertFalse(CaptureManager.shouldEndSuspendedSession(
+            lastVoicedAt: now - 10, suspendedAt: suspendedAt, now: now, silenceGap: gap),
+            "recent voice (10s ago) means the disconnect is not a silence boundary — stay HELD")
+
+        // (b) A real conversation boundary: >= silenceGap since the last voiced instant → END.
+        let now2 = suspendedAt + 200
+        XCTAssertTrue(CaptureManager.shouldEndSuspendedSession(
+            lastVoicedAt: now2 - 130, suspendedAt: suspendedAt, now: now2, silenceGap: gap),
+            "130s of voiced silence (> the 120s gap) is a genuine conversation boundary → end")
+        XCTAssertTrue(CaptureManager.shouldEndSuspendedSession(
+            lastVoicedAt: now2 - gap, suspendedAt: suspendedAt, now: now2, silenceGap: gap),
+            "exactly silenceGap of voiced silence ends the held session")
+        XCTAssertFalse(CaptureManager.shouldEndSuspendedSession(
+            lastVoicedAt: now2 - (gap - 1), suspendedAt: suspendedAt, now: now2, silenceGap: gap),
+            "just under the silence gap keeps the session held")
+
+        // (c) Absolute 4h backstop: even with voice 1s ago, a session held past maxHold closes,
+        //     so a truly abandoned hold can never linger open forever.
+        let now3 = suspendedAt + CaptureManager.suspendedSessionMaxHold
+        XCTAssertTrue(CaptureManager.shouldEndSuspendedSession(
+            lastVoicedAt: now3 - 1, suspendedAt: suspendedAt, now: now3, silenceGap: gap),
+            "the 4h absolute backstop force-closes a held session regardless of recent voice")
+
+        // (d) No voiced audio EVER this session (lastVoicedAt == nil): there is nothing to
+        //     continue, so fall back to the short reconnect timeout — not a full silence gap.
         let w = CaptureManager.reconnectGraceWindow
-        XCTAssertFalse(CaptureManager.shouldEndSuspendedSession(suspendedAt: 100, now: 100 + w - 0.5, window: w))
-        XCTAssertTrue(CaptureManager.shouldEndSuspendedSession(suspendedAt: 100, now: 100 + w, window: w))
-        XCTAssertTrue(CaptureManager.shouldEndSuspendedSession(suspendedAt: 100, now: 100 + w + 60, window: w))
+        XCTAssertFalse(CaptureManager.shouldEndSuspendedSession(
+            lastVoicedAt: nil, suspendedAt: suspendedAt, now: suspendedAt + w - 0.5, silenceGap: gap),
+            "a no-voice hold is not ended before the short reconnect timeout")
+        XCTAssertTrue(CaptureManager.shouldEndSuspendedSession(
+            lastVoicedAt: nil, suspendedAt: suspendedAt, now: suspendedAt + w, silenceGap: gap),
+            "a no-voice hold ends at the short reconnect timeout (nothing to continue)")
     }
 
     // MARK: min-substance upload gate (integration)
