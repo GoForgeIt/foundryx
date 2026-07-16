@@ -611,9 +611,15 @@ private struct MainTabs: View {
         // to the instrument, and can end the conversation right here.
         .overlay(alignment: .top) {
             if RecordingPillState.visible(
-                recordingActive: manager.active != nil,
-                onCaptureTab: router.selected == .capture) {
-                RecordingPill(manager: manager) { router.selected = .capture }
+                recordingActive: manager.active != nil || manager.isRecordingMic,
+                onCaptureTab: router.selected == .capture,
+                minimized: manager.recordingScreenMinimized) {
+                RecordingPill(manager: manager) {
+                    // Re-present the full-screen surface AND keep the historical
+                    // navigate-to-capture (the recording lives on the capture tab).
+                    manager.restoreRecordingScreen()
+                    router.selected = .capture
+                }
             }
         }
         // A tapped answer notification opens the full answer surface

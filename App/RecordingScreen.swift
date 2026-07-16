@@ -21,7 +21,11 @@ import Grain
 /// agent suggestions tint forge. Built by the presenter from a REAL source — the screen
 /// renders only the rows it is handed (it never fabricates a suggestion).
 struct RecordingSuggestion: Identifiable {
-    let id = UUID()
+    /// STABLE identity — derived from the source candidate's key (its utterance), not a
+    /// fresh UUID. `recordingSuggestions` is a computed property re-evaluated on every
+    /// live-transcript word, so a per-eval UUID would give every row a new identity each
+    /// render and thrash `ForEach`/`GrainSuggestionCard` teardown-rebuild while a card is up.
+    let id: String
     let tint: GrainSuggestionTint
     let systemImage: String
     let eyebrow: String
@@ -52,6 +56,10 @@ struct RecordingScreen: View {
     var preview: RecordingPreview? = nil
     /// End the capture and dismiss (mic → stop; Omi → end the current conversation).
     var onEnd: () -> Void = {}
+    /// MINIMIZE the surface — leave the recording RUNNING and return to the app (the
+    /// persistent recording pill is the way back). Additive to End/Stop, never a
+    /// replacement.
+    var onMinimize: () -> Void = {}
 
     /// A stable fallback origin for the clock if no WAL is active yet (real recording
     /// always has an active WAL; this only guards the first frame / edge cases).
@@ -66,10 +74,18 @@ struct RecordingScreen: View {
     var body: some View {
         ZStack(alignment: .top) {
             VStack(spacing: GrainSpacing.x4) {
+                // ONE shared subtree for both layouts, so recordingMain/Title/Transcript
+                // keep a STABLE identity across the fill↔compact shift — the breathing
+                // ring + clock never rebuild when the first candidate lands. Only the top
+                // space flexes: in FILL (no task/notification) it expands so the ring
+                // cluster floats generously (prototype); in COMPACT it collapses so the
+                // content rides up and the task cards sit directly below it. The foot
+                // stays pinned at the bottom either way (prototype `margin-top:auto`).
+                Spacer(minLength: 0).frame(maxHeight: suggestions.isEmpty ? .infinity : 0)
                 recordingMain
                 recordingTitle
                 liveTranscript
-                suggestionStack
+                suggestionStack           // renders nothing when there are no candidates
                 Spacer(minLength: 0)
                 recordingFoot
             }
@@ -77,11 +93,33 @@ struct RecordingScreen: View {
             .padding(.top, 54)
             .padding(.horizontal, GrainSpacing.mobileGutter)   // 18
             .padding(.bottom, 15)
+            .animation(.easeOut(duration: 0.4), value: suggestions.isEmpty)
+
+            // Minimize — top-leading; leaves the recording RUNNING and returns to the app.
+            minimizeButton
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.top, 48)
+                .padding(.leading, GrainSpacing.mobileGutter)
 
             // 1 — Island status floats just above the ring, centered.
             islandStatus.padding(.top, 44)
         }
         .grainBackground()
+    }
+
+    /// Minimize — a chevron-down surface icon button, distinct from Stop/End. Dismisses
+    /// the cover WITHOUT stopping the recording; the persistent pill brings it back.
+    private var minimizeButton: some View {
+        Button(action: onMinimize) {
+            Image(systemName: "chevron.down")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(GrainColor.inkSecondary)
+                .frame(width: 40, height: 40)
+                .background(Circle().fill(GrainColor.surface))
+                .overlay(Circle().strokeBorder(GrainColor.hairline, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Minimize recording")
     }
 
     // MARK: 1 — island status (breathing dot · Recording · elapsed), forge tint

@@ -34,10 +34,14 @@ public enum ProvisionalLiveTitle {
     }
 }
 
-/// The recording pill's visibility: recording, and not already on the capture
-/// page (the capture page IS the instrument).
+/// The recording pill's visibility. While the full-screen recording surface is
+/// MINIMIZED the pill is the ONLY way back, so it shows on EVERY screen (including the
+/// capture tab). Otherwise the original rule holds: show only when recording away from
+/// the capture page (the capture page IS the instrument). When recording and NOT
+/// minimized the full-screen cover is up and paints over the pill regardless.
 public enum RecordingPillState {
-    public static func visible(recordingActive: Bool, onCaptureTab: Bool) -> Bool {
-        recordingActive && !onCaptureTab
+    public static func visible(recordingActive: Bool, onCaptureTab: Bool,
+                               minimized: Bool = false) -> Bool {
+        recordingActive && (minimized || !onCaptureTab)
     }
 }

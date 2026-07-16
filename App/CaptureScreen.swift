@@ -264,13 +264,14 @@ struct CaptureScreen: View {
         // computed binding goes false → SwiftUI dismisses. (Supersedes the inline strip,
         // which stays behind the cover as the pre-record "listening" surface.)
         .fullScreenCover(isPresented: Binding(
-            get: { manager.isRecordingMic || manager.active != nil },
+            get: { (manager.isRecordingMic || manager.active != nil) && !manager.recordingScreenMinimized },
             set: { _ in })) {
             RecordingScreen(
                 manager: manager,
                 target: target,
                 suggestions: recordingSuggestions,
-                onEnd: endRecording)
+                onEnd: endRecording,
+                onMinimize: { manager.minimizeRecordingScreen() })
         }
         // Multi-select MERGE: the bottom action bar rides above the list while selecting.
         .overlay(alignment: .bottom) {
@@ -309,7 +310,8 @@ struct CaptureScreen: View {
                         finalizedText: "For the launch we still need the deck updated. The relay decision matters here.",
                         volatileTail: "Foundry remind me to send Sarah the deck",
                         isComplete: false)),
-                onEnd: { deepRecording = false })
+                onEnd: { deepRecording = false },
+                onMinimize: { deepRecording = false })
         }
         .fullScreenCover(isPresented: $deepDetail) {
             // `-Capture <id>` picks which demo card's detail to open (default omi-demo-1);
@@ -416,21 +418,23 @@ struct CaptureScreen: View {
         }
     }
 
-    /// The ambient suggestions to stack on the recording screen. No lightweight live
-    /// during-recording suggestion source is wired today, so this is empty in production
-    /// (the section collapses — the screen never fabricates a suggestion). The DEV
-    /// `-Screen recording` proof seeds the prototype's two rows so the section renders.
+    /// The ambient suggestions to stack on the recording screen — mapped from the REAL
+    /// candidates the Tier-1 lane surfaced during this recording (`manager.recordingCandidates`).
+    /// The section collapses when there are none (the screen never fabricates a suggestion).
+    /// The DEV `-Screen recording` proof seeds the prototype's two rows so the section renders.
     private var recordingSuggestions: [RecordingSuggestion] {
         #if DEBUG
         let a = ProcessInfo.processInfo.arguments
         if a.contains("-Screen"), a.contains("recording") {
             return [
                 RecordingSuggestion(
+                    id: "demo-memory",
                     tint: .memory, systemImage: "sparkle", eyebrow: "From your memory",
                     title: "The relay decision",
                     body: "You chose the blind Noise relay on June 30.",
                     actionLabel: "Open", action: {}),
                 RecordingSuggestion(
+                    id: "demo-agent",
                     tint: .agent, systemImage: "bolt", eyebrow: "Request heard",
                     title: "Send Sarah the deck Friday at 9:00 AM",
                     body: "Review before anything runs.",
@@ -438,7 +442,36 @@ struct CaptureScreen: View {
             ]
         }
         #endif
-        return []
+        return manager.recordingCandidates.map(candidateSuggestion)
+    }
+
+    /// Map ONE real lane candidate to a recording-screen row. The candidate carries no
+    /// pre-routed kind (routing happens async through the door), so we use the same
+    /// on-device signal the notifier's owner gate uses: an utterance that names the
+    /// configured agent reads as an AGENT request (forge tint, "Review"); everything
+    /// else reads as a MEMORY surface (amber tint, "Open"). The action does the real
+    /// thing — hands the moment to a seeded chat (the wired RUN path) — after minimizing
+    /// the surface so the chat is visible; the row is dismissed either way.
+    private func candidateSuggestion(_ c: AmbientCandidate) -> RecordingSuggestion {
+        let agentName = UserDefaults.standard.string(forKey: AmbientPrefs.agentNameKey) ?? ""
+        let isAgent = !agentName.isEmpty
+            && (c.utterance.range(of: agentName, options: .caseInsensitive) != nil
+                || c.summary.range(of: agentName, options: .caseInsensitive) != nil)
+        let ask = c.summary.isEmpty ? "help with that" : c.summary
+        let seed = "While I was recording, this came up: “\(c.utterance)”\n\nPlease \(ask)."
+        return RecordingSuggestion(
+            id: c.utterance,   // stable identity = the candidate's dedup key
+            tint: isAgent ? .agent : .memory,
+            systemImage: isAgent ? "bolt" : "sparkle",
+            eyebrow: isAgent ? "Request heard" : "From your memory",
+            title: c.summary.isEmpty ? c.utterance : c.summary,
+            body: "“\(c.utterance)”",
+            actionLabel: isAgent ? "Review" : "Open",
+            action: {
+                manager.dismissRecordingCandidate(c)
+                manager.minimizeRecordingScreen()   // reveal the chat under the cover
+                AmbientCardBroker.shared.run(seed: seed)
+            })
     }
 
     // MARK: record CTA — the calm "Record a conversation" card (prototype :2202)

@@ -449,6 +449,17 @@ public final class CaptureManager: ObservableObject {
     public var phoneMicAvailable: Bool { micSource != nil }
     /// True while the phone mic is actively recording (drives the Record/Stop button).
     @Published public private(set) var isRecordingMic: Bool = false
+    /// Whether the user MINIMIZED the full-screen recording surface (recording keeps
+    /// running; the app becomes reachable again and the persistent pill offers the way
+    /// back). Reset to false whenever a fresh recording STARTS and whenever one is
+    /// explicitly STOPPED/ended, so a new recording always presents full-screen.
+    @Published public private(set) var recordingScreenMinimized = false
+    /// Ambient candidates surfaced by the Tier-1 lane DURING the active recording —
+    /// most-recent-first, deduped by utterance, capped small. The recording screen maps
+    /// these to its notification/task rows; cleared when the conversation ends.
+    @Published public private(set) var recordingCandidates: [AmbientCandidate] = []
+    /// How many recording candidates the surface will stack at once.
+    private static let maxRecordingCandidates = 3
     /// Why the last record-tap did nothing, or nil when the last start succeeded / none
     /// attempted. Lets the Record CTA explain a SILENT block (no mic source / permission,
     /// or an in-flight conversation) instead of tapping into a void.
@@ -1073,6 +1084,7 @@ public final class CaptureManager: ObservableObject {
     /// already-granted path share one begin.
     private func beginMicRecording(_ micSource: AudioFrameSource) {
         lastRecordBlockReason = nil   // starting cleanly — clear any prior block message
+        recordingScreenMinimized = false   // a fresh recording always presents full-screen
         isRecordingMic = true
         router.resetSegmenter()
         micSource.start()
@@ -1131,11 +1143,46 @@ public final class CaptureManager: ObservableObject {
     /// finalizes the capture through the normal path.
     public func stopMicRecording() {
         guard let micSource, isRecordingMic else { return }
+        recordingScreenMinimized = false   // explicit end — clean slate for the next recording
         micSource.stop()
         log?.info("phone mic: stop requested")
     }
 
     public func toggleMicRecording() { isRecordingMic ? stopMicRecording() : startMicRecording() }
+
+    // MARK: full-screen recording surface — minimize / restore (never stops recording)
+
+    /// MINIMIZE the full-screen recording surface: the recording keeps running, the
+    /// cover dismisses, and the rest of the app becomes reachable. The persistent
+    /// recording pill is the way back.
+    public func minimizeRecordingScreen() { recordingScreenMinimized = true }
+
+    /// RESTORE the full-screen recording surface (the pill tap) — re-present the cover
+    /// over whatever screen the user wandered to.
+    public func restoreRecordingScreen() { recordingScreenMinimized = false }
+
+    // MARK: recording-time ambient candidates (the notification/task rows)
+
+    /// Record a lane-surfaced candidate for the live recording surface: newest first,
+    /// deduped by utterance, capped. Called on the main actor from the ambient tick.
+    /// `forCapture` is the id the candidate was mined FROM — the lane's `consider()`
+    /// runs detached and slow (an on-device LLM, ~1–5s), so by the time it returns the
+    /// user may have ended the recording or the session may have rolled to a new
+    /// conversation. Drop the candidate unless it still belongs to the active capture,
+    /// so a card mined from a closed/previous conversation never appears on the next one.
+    public func noteRecordingCandidate(_ candidate: AmbientCandidate, forCapture captureId: String) {
+        guard active?.captureId == captureId else { return }
+        recordingCandidates.removeAll { $0.utterance == candidate.utterance }
+        recordingCandidates.insert(candidate, at: 0)
+        if recordingCandidates.count > Self.maxRecordingCandidates {
+            recordingCandidates = Array(recordingCandidates.prefix(Self.maxRecordingCandidates))
+        }
+    }
+
+    /// Drop a candidate the user acted on or dismissed from the live surface.
+    public func dismissRecordingCandidate(_ candidate: AmbientCandidate) {
+        recordingCandidates.removeAll { $0.utterance == candidate.utterance }
+    }
 
     // MARK: ambient session lifecycle (driven by the source, not a button)
 
@@ -1165,6 +1212,7 @@ public final class CaptureManager: ObservableObject {
                 if !isPaused { router.noteActiveNow() }   // the disconnect gap is not a silence gap
                 log?.info("capture \(active?.captureId ?? "?"): Omi reconnected within grace → resumed (no new session)")
             } else if active == nil {
+                recordingScreenMinimized = false   // a fresh ambient capture presents full-screen
                 router.resetSegmenter(); beginSession()   // fresh ambient capture
             }
         case .stopped, .failed:
@@ -1273,8 +1321,11 @@ public final class CaptureManager: ObservableObject {
         let window = liveTranscript.displayText
         guard !window.isEmpty else { return }
         let onCandidate = onAmbientCandidate
-        Task.detached(priority: .utility) {
+        Task.detached(priority: .utility) { [weak self] in
             if let candidate = await lane.consider(captureId: captureId, window: window) {
+                // Surface it on the live recording screen (notification/task rows) AND
+                // hand it to Tier 2 (door routing + local notification).
+                await self?.noteRecordingCandidate(candidate, forCapture: captureId)
                 if let onCandidate { await onCandidate(candidate) }
             }
         }
@@ -2003,6 +2054,10 @@ public final class CaptureManager: ObservableObject {
         let id = Self.newCaptureId()
         let wal = makeWAL(captureId: id)
         active = wal
+        // A fresh conversation surface starts with NO ambient rows (belt-and-suspenders
+        // with the captureId guard in noteRecordingCandidate) — a candidate from the
+        // just-closed conversation must never bleed onto this one.
+        recordingCandidates = []
         captures.insert(wal, at: 0)               // newest first (Omi-style timeline)
         // Durably stamp the conversation START (F1) — the card's start time + the
         // door's `capturedAt`. Idempotent (won't clobber an existing record). Also
@@ -2129,6 +2184,7 @@ public final class CaptureManager: ObservableObject {
     @discardableResult
     public func endCurrentConversation() -> Bool {
         guard active != nil else { return false }
+        recordingScreenMinimized = false   // explicit end — clean slate for the next recording
         splitConversation()
         return true
     }
@@ -2139,6 +2195,7 @@ public final class CaptureManager: ObservableObject {
 
     private func endSession() {
         router.setWAL(nil)
+        recordingCandidates = []   // the live surface's rows belong to the closing conversation
         guard let finished = active else {
             // No active session — still ensure any live preview is torn down.
             endLiveTranscription()
