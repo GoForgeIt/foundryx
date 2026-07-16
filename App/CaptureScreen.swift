@@ -93,11 +93,22 @@ struct ElapsedLabel: View {
     let since: Date
     /// Whether capture is currently paused — the counter freezes while true.
     var paused: Bool = false
+    /// Optional font override (defaults to the Grain `.caption` scale). The full-screen
+    /// RecordingScreen reuses this same paused-aware clock for its big ring-center time
+    /// and its small forge island time, so it needs to restyle the readout.
+    var font: Font? = nil
+    /// Optional colour override (defaults to `textMuted`).
+    var color: Color? = nil
 
     /// Total time already spent paused (accumulated across completed pause spans).
     @State private var pausedAccumulated: TimeInterval = 0
     /// When the CURRENT pause began, or nil when running.
     @State private var pauseStartedAt: Date?
+
+    @ViewBuilder private func readout(_ s: Int) -> some View {
+        let text = Text(String(format: "%d:%02d", s / 60, s % 60))
+        if let font { text.font(font) } else { text.grainTextStyle(.caption) }
+    }
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { timeline in
@@ -106,8 +117,8 @@ struct ElapsedLabel: View {
             // displayed elapsed steady; on resume it folds into pausedAccumulated.
             let livePause = pauseStartedAt.map { now.timeIntervalSince($0) } ?? 0
             let s = max(0, Int(now.timeIntervalSince(since) - pausedAccumulated - livePause))
-            Text(String(format: "%d:%02d", s / 60, s % 60))
-                .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+            readout(s)
+                .foregroundStyle(color ?? GrainColor.textMuted)
                 .monospacedDigit()
         }
         .onAppear { if paused, pauseStartedAt == nil { pauseStartedAt = Date() } }
@@ -156,7 +167,8 @@ struct CaptureScreen: View {
     var local: Bool = false
     @State private var pendingDeleteId: String?
     #if DEBUG
-    @State private var deepDetail = false   // screen-proof: `-Screen detail`
+    @State private var deepDetail = false      // screen-proof: `-Screen detail`
+    @State private var deepRecording = false   // screen-proof: `-Screen recording`
     #endif
 
     // MARK: find + organize (track 20260713T0902, features/capture-home.feature)
@@ -237,13 +249,42 @@ struct CaptureScreen: View {
             }
         }
         .grainBackground()
+        // The full-screen recording surface (prototype scene 09): present whenever the
+        // phone mic is recording OR an ambient session is active. The record CTA starts
+        // the mic → the flag flips → this presents; End/save clears the flag/session → the
+        // computed binding goes false → SwiftUI dismisses. (Supersedes the inline strip,
+        // which stays behind the cover as the pre-record "listening" surface.)
+        .fullScreenCover(isPresented: Binding(
+            get: { manager.isRecordingMic || manager.active != nil },
+            set: { _ in })) {
+            RecordingScreen(
+                manager: manager,
+                target: target,
+                suggestions: recordingSuggestions,
+                onEnd: endRecording)
+        }
         #if DEBUG
         // DEV screen-proof deep-links (real manager + target): `-Screen detail` opens a
-        // conversation's three-face detail; `-Screen recording` starts the instrument.
+        // conversation's three-face detail; `-Screen recording` presents the full
+        // RecordingScreen from a FROZEN preview (fixed clock + seeded live transcript +
+        // demo suggestions) so every section renders in the simulator without a real mic.
         .onAppear {
             let a = ProcessInfo.processInfo.arguments
             if a.contains("-Screen"), a.contains("detail") { deepDetail = true }
-            if a.contains("-Screen"), a.contains("recording") { manager.startMicRecording() }
+            if a.contains("-Screen"), a.contains("recording") { deepRecording = true }
+        }
+        .fullScreenCover(isPresented: $deepRecording) {
+            RecordingScreen(
+                manager: manager,
+                target: target,
+                suggestions: recordingSuggestions,
+                preview: RecordingPreview(
+                    since: Date().addingTimeInterval(-102),   // reads 01:42, like the prototype
+                    transcript: LiveTranscript(
+                        finalizedText: "For the launch we still need the deck updated. The relay decision matters here.",
+                        volatileTail: "Foundry remind me to send Sarah the deck",
+                        isComplete: false)),
+                onEnd: { deepRecording = false })
         }
         .fullScreenCover(isPresented: $deepDetail) {
             // `-Capture <id>` picks which demo card's detail to open (default omi-demo-1);
@@ -335,6 +376,44 @@ struct CaptureScreen: View {
         } message: {
             Text("Removes it from your phone, your computer, and your library.")
         }
+    }
+
+    // MARK: full-screen recording presentation
+
+    /// End the capture behind the full-screen RecordingScreen: a phone-mic session stops
+    /// (its `.stopped` finalizes + clears the flag); an Omi session ends the current
+    /// conversation. Either clears the binding's condition, dismissing the cover.
+    private func endRecording() {
+        if manager.isRecordingMic {
+            manager.stopMicRecording()
+        } else {
+            _ = manager.endCurrentConversation()
+        }
+    }
+
+    /// The ambient suggestions to stack on the recording screen. No lightweight live
+    /// during-recording suggestion source is wired today, so this is empty in production
+    /// (the section collapses — the screen never fabricates a suggestion). The DEV
+    /// `-Screen recording` proof seeds the prototype's two rows so the section renders.
+    private var recordingSuggestions: [RecordingSuggestion] {
+        #if DEBUG
+        let a = ProcessInfo.processInfo.arguments
+        if a.contains("-Screen"), a.contains("recording") {
+            return [
+                RecordingSuggestion(
+                    tint: .memory, systemImage: "sparkle", eyebrow: "From your memory",
+                    title: "The relay decision",
+                    body: "You chose the blind Noise relay on June 30.",
+                    actionLabel: "Open", action: {}),
+                RecordingSuggestion(
+                    tint: .agent, systemImage: "bolt", eyebrow: "Request heard",
+                    title: "Send Sarah the deck Friday at 9:00 AM",
+                    body: "Review before anything runs.",
+                    actionLabel: "Review", action: {}),
+            ]
+        }
+        #endif
+        return []
     }
 
     // MARK: record CTA — the calm "Record a conversation" card (prototype :2202)

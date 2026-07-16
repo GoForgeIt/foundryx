@@ -360,6 +360,10 @@ private struct MainTabs: View {
                 micSource: MicFrameSource(log: log),
                 liveTranscriber: LiveTranscription.defaultFactory())
         }
+        // Omi hardware button: a DOUBLE-click pauses/resumes the current recording — the
+        // same action as the on-screen Pause. Fires only if the paired Omi firmware exposes
+        // the button service (see DeviceManager.OmiUUID.buttonService).
+        dm.onButtonDoubleClick = { [weak mgr] in Task { @MainActor in mgr?.togglePause() } }
         // Ambient-intelligence Tier-1 lane (track 20260710T2030 v3): OPT-IN default-NO
         // gate over the LIVE transcript (the SpeechAnalyzer preview already streaming —
         // no re-transcription) while recording, about every 10s. Wired only where the

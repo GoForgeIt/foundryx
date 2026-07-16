@@ -120,6 +120,13 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     // AudioFrameSource — the connected device's Opus stream.
     public var onFrame: ((Data) -> Void)?
     public var onState: ((AudioSourceState) -> Void)?
+    /// Fired when the Omi hardware button is DOUBLE-clicked (wired to pause/resume the
+    /// current recording). Detected from the Omi button-trigger characteristic — see
+    /// `OmiUUID.buttonService`. Only fires if the paired firmware exposes that service.
+    public var onButtonDoubleClick: (() -> Void)?
+    /// Timestamp of the last button press, for the two-presses-within-window fallback
+    /// (used when the firmware emits per-press events rather than a typed DOUBLE_TAP).
+    private var lastButtonPressAt: Date?
 
     // UI-facing state (published on main).
     @Published public private(set) var connectionState: DeviceConnectionState = .poweredOff
@@ -378,6 +385,8 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
                 p.discoverCharacteristics([OmiUUID.audioDataChar, OmiUUID.codecChar], for: svc)
             } else if svc.uuid == OmiUUID.batteryService {
                 p.discoverCharacteristics([OmiUUID.batteryLevelChar], for: svc)
+            } else if svc.uuid == OmiUUID.buttonService {
+                p.discoverCharacteristics([OmiUUID.buttonTriggerChar], for: svc)
             }
         }
     }
@@ -397,6 +406,10 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
                 onState?(.streaming)   // triggers ambient capture
                 log?.info("Omi: subscribed to audio — ambient capture live")
             }
+            if ch.uuid == OmiUUID.buttonTriggerChar {
+                p.setNotifyValue(true, for: ch)   // hardware button → double-click pauses
+                log?.info("Omi: button service found — subscribed for double-click pause")
+            }
         }
     }
 
@@ -409,6 +422,7 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
             return
         }
         if ch.uuid == OmiUUID.codecChar { log?.info("Omi: codec=\(data.map { String($0) }.joined(separator: ","))"); return }
+        if ch.uuid == OmiUUID.buttonTriggerChar { handleButtonNotify(data); return }
         guard ch.uuid == OmiUUID.audioDataChar else { return }
         // Diagnostics: count RAW notifications (before the header filter) so a
         // "connected but silent" device is unambiguous in the logs — log the first
@@ -423,6 +437,30 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
         }
         onFrame?(data.subdata(in: headerBytes..<data.count))   // strip header → Opus frame
     }
+
+    /// Decode an Omi button-trigger notification into a double-click → `onButtonDoubleClick`.
+    /// The firmware's event encoding is UNCONFIRMED here, so this is deliberately tolerant of
+    /// both known shapes and logs the RAW payload so an on-device test reveals the real one:
+    ///  (a) a typed event byte where 2 == DOUBLE_TAP (Omi/Friend devkit `button.c`) → fire directly;
+    ///  (b) a stream of per-press events → two presses within 400 ms is a double-click.
+    /// A firmware that never sends this characteristic simply never calls this.
+    private func handleButtonNotify(_ data: Data) {
+        log?.info("Omi: button notify raw=[\(data.map { String($0) }.joined(separator: ","))]")
+        let now = Date()
+        // (a) explicit double-tap code.
+        if data.first == 2 {
+            lastButtonPressAt = nil
+            onButtonDoubleClick?()
+            return
+        }
+        // (b) press-stream fallback (single/long codes 1/3, or a bare press with no code).
+        if let last = lastButtonPressAt, now.timeIntervalSince(last) <= 0.4 {
+            lastButtonPressAt = nil
+            onButtonDoubleClick?()
+        } else {
+            lastButtonPressAt = now
+        }
+    }
 }
 
 /// Omi BLE UUIDs (firmware transport.c). Shared by DeviceManager + OmiBleSource.
@@ -435,6 +473,14 @@ public enum OmiUUID {
     /// simply never fires the read, and the level stays nil (no fake value).
     public nonisolated(unsafe) static let batteryService = CBUUID(string: "180F")
     public nonisolated(unsafe) static let batteryLevelChar = CBUUID(string: "2A19")
+    /// Omi hardware BUTTON service (Omi/Friend devkit firmware `button.c`). The button-
+    /// trigger characteristic notifies a small event byte on tap. UUIDs + the exact event
+    /// encoding are FIRMWARE-DEPENDENT and NOT confirmed in this repo — a device whose
+    /// firmware lacks this service simply never discovers it (the notify never fires and
+    /// nothing happens). The raw payload of every button notify is logged so an on-device
+    /// test reveals the real encoding, which the double-click detector can then be tuned to.
+    public nonisolated(unsafe) static let buttonService = CBUUID(string: "23BA7924-0000-1000-7450-346EAC492E92")
+    public nonisolated(unsafe) static let buttonTriggerChar = CBUUID(string: "23BA7925-0000-1000-7450-346EAC492E92")
 }
 
 #else

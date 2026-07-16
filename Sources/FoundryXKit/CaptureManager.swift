@@ -1029,12 +1029,79 @@ public final class CaptureManager: ObservableObject {
         // HELD for reconnect-grace (the user's explicit record outranks the hold —
         // onSourceState closes it and begins a fresh mic session).
         guard let micSource, !isRecordingMic, active == nil || suspendedSession != nil else { return }
+
+        // Resolve mic permission BEFORE presenting the recording surface. The old order
+        // set `isRecordingMic = true` (which presents the recording screen) and only THEN
+        // let `micSource.start()` resolve permission — so a denial flashed the recording
+        // UI up and immediately tore it down (the `.failed` path resets the flag). Now:
+        // present only once we KNOW the mic is usable; a denial surfaces the block caption
+        // and never presents. On non-iOS hosts (the test runner) permission is implicit —
+        // keep the original synchronous begin so the pipeline/tests are unchanged.
+        #if os(iOS)
+        switch micPermission() {
+        case .granted:
+            beginMicRecording(micSource)
+        case .denied:
+            lastRecordBlockReason = "Microphone access is needed — enable it in Settings"
+        case .undetermined:
+            requestMicPermission { [weak self] granted in
+                Task { @MainActor in self?.onMicPermissionResolved(granted) }
+            }
+        }
+        #else
+        beginMicRecording(micSource)
+        #endif
+    }
+
+    /// Start the mic session for real (flag → present, reset segmenter, ask the source to
+    /// start). Split out of `startMicRecording` so the permission-gated path and the
+    /// already-granted path share one begin.
+    private func beginMicRecording(_ micSource: AudioFrameSource) {
         lastRecordBlockReason = nil   // starting cleanly — clear any prior block message
         isRecordingMic = true
         router.resetSegmenter()
         micSource.start()
         log?.info("phone mic: recording requested")
     }
+
+    #if os(iOS)
+    /// The mic permission decision after a first-run prompt. Re-checks the guard (state
+    /// may have moved while the OS prompt was up) then begins, or surfaces the block.
+    private func onMicPermissionResolved(_ granted: Bool) {
+        guard let micSource, !isRecordingMic, active == nil || suspendedSession != nil else { return }
+        if granted {
+            beginMicRecording(micSource)
+        } else {
+            lastRecordBlockReason = "Microphone access is needed — enable it in Settings"
+        }
+    }
+
+    /// Three-state mic permission, normalised across the iOS 17 split (`AVAudioApplication`)
+    /// and the older `AVAudioSession` API.
+    private enum MicPermission { case granted, denied, undetermined }
+    private func micPermission() -> MicPermission {
+        if #available(iOS 17.0, *) {
+            switch AVAudioApplication.shared.recordPermission {
+            case .granted: return .granted
+            case .denied: return .denied
+            default: return .undetermined
+            }
+        } else {
+            switch AVAudioSession.sharedInstance().recordPermission {
+            case .granted: return .granted
+            case .denied: return .denied
+            default: return .undetermined
+            }
+        }
+    }
+    private func requestMicPermission(_ done: @escaping (Bool) -> Void) {
+        if #available(iOS 17.0, *) {
+            AVAudioApplication.requestRecordPermission { done($0) }
+        } else {
+            AVAudioSession.sharedInstance().requestRecordPermission { done($0) }
+        }
+    }
+    #endif
 
     /// Stop the phone-mic recording. The mic's `.stopped` state ends the session and
     /// finalizes the capture through the normal path.
