@@ -166,6 +166,12 @@ struct CaptureScreen: View {
     /// Phone-only tier: labels stay on-device ("Saved on phone", not "…to computer").
     var local: Bool = false
     @State private var pendingDeleteId: String?
+    // Multi-select MERGE (Nick's decision): a long-press on a conversation row enters
+    // multi-select and selects it; tapping more rows toggles them; a "Merge N" action folds
+    // the selected split conversations into ONE (CaptureManager.merge). Normal single-tap
+    // (open conversation) is preserved when NOT in multi-select.
+    @State private var selectionMode = false
+    @State private var selectedIds: Set<String> = []
     #if DEBUG
     @State private var deepDetail = false      // screen-proof: `-Screen detail`
     @State private var deepRecording = false   // screen-proof: `-Screen recording`
@@ -263,6 +269,11 @@ struct CaptureScreen: View {
                 suggestions: recordingSuggestions,
                 onEnd: endRecording)
         }
+        // Multi-select MERGE: the bottom action bar rides above the list while selecting.
+        .overlay(alignment: .bottom) {
+            if selectionMode { mergeActionBar.transition(.move(edge: .bottom)) }
+        }
+        .animation(.easeOut(duration: 0.2), value: selectionMode)
         #if DEBUG
         // DEV screen-proof deep-links (real manager + target): `-Screen detail` opens a
         // conversation's three-face detail; `-Screen recording` presents the full
@@ -753,44 +764,30 @@ struct CaptureScreen: View {
             .padding(.vertical, GrainSpacing.x3)
     }
 
-    /// One tappable conversation card → its transcript detail.
-    private func conversationRow(_ wal: CaptureWAL) -> some View {
+    /// One conversation row. In NORMAL mode it's a tappable card → its transcript detail,
+    /// with a LONG-PRESS entering multi-select. In MULTI-SELECT mode the same card toggles
+    /// its selection on tap and shows a Grain selection badge — navigation is suppressed so a
+    /// tap selects, not opens.
+    @ViewBuilder private func conversationRow(_ wal: CaptureWAL) -> some View {
+        if selectionMode {
+            selectableConversationRow(wal)
+        } else {
+            navigableConversationRow(wal)
+        }
+    }
+
+    /// NORMAL mode: tap opens the three-face detail; a long-press enters multi-select and
+    /// selects this row. `simultaneousGesture` keeps the tap-to-open behavior intact.
+    private func navigableConversationRow(_ wal: CaptureWAL) -> some View {
         NavigationLink {
-            // The three-face detail (track 20260713T0904): Summary / Actions /
-            // Transcript + text search; same parameters, same stores underneath.
-            ConversationFacesView(
-                target: target,
-                manager: manager,
-                captureId: wal.captureId,
-                timeRange: manager.conversationMeta(for: wal.captureId)
-                    .map { CaptureCardPresentation.timeRangeString(meta: $0, fallback: wal.status.startedAt) }
-                    ?? CaptureCardPresentation.timeRangeString(meta: nil, fallback: wal.status.startedAt),
-                place: manager.conversationMeta(for: wal.captureId)?.location?.label,
-                conversationDate: manager.conversationMeta(for: wal.captureId)
-                    .map { Date(timeIntervalSince1970: TimeInterval($0.startedAt)) }
-                    ?? wal.status.startedAt
-            )
+            conversationDetail(wal)
         } label: {
-            if let poller = manager.statusPoller(for: wal.captureId) {
-                CaptureCard(
-                    wal: wal,
-                    meta: manager.conversationMeta(for: wal.captureId),
-                    card: manager.cardMeta(for: wal.captureId),
-                    poller: poller,
-                    hasCachedTranscript: manager.hasCachedTranscript(wal.captureId),
-                    // Cache RECENT (~14d) transcripts on sight (no-op for older / already-cached).
-                    onSight: { manager.ensureRecentTranscriptCached(wal.captureId) },
-                    local: local,
-                    categoryName: categories.category(for: wal.captureId)?.name,
-                    categoryAutoFiled: categories.acceptsAutoSuggestion(for: wal.captureId),
-                    loadWaveform: { [weak manager] in
-                        WaveformThumb.profile(sizes: manager?.segmentSizes(for: wal.captureId) ?? [],
-                                              buckets: 24, seed: wal.captureId)
-                    }
-                )
-            }
+            conversationCard(wal)
         }
         .buttonStyle(.plain)
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.4).onEnded { _ in enterSelection(wal.captureId) }
+        )
         .contextMenu {
             // File under… — the user's filing always wins and is remembered.
             Menu("File under") {
@@ -805,6 +802,12 @@ struct CaptureScreen: View {
                     }
                 }
             }
+            // Merge — the discoverable entry into multi-select for folding split conversations.
+            Button {
+                enterSelection(wal.captureId)
+            } label: {
+                Label("Merge with…", systemImage: "arrow.triangle.merge")
+            }
         }
         // Auto-file where the on-device model can — only while the user hasn't.
         .task { await autoTagIfNeeded(wal.captureId) }
@@ -813,6 +816,127 @@ struct CaptureScreen: View {
                 Label("Delete", systemImage: "trash")
             }
         }
+    }
+
+    /// MULTI-SELECT mode: tapping the card toggles its selection; a Grain badge + highlight
+    /// mark the chosen rows (adaptive light + Night Shift via Grain tokens).
+    private func selectableConversationRow(_ wal: CaptureWAL) -> some View {
+        let selected = selectedIds.contains(wal.captureId)
+        return conversationCard(wal)
+            .overlay(alignment: .topTrailing) { selectionBadge(selected) }
+            .overlay(
+                RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
+                    .strokeBorder(selected ? GrainColor.forgeBlue : Color.clear, lineWidth: 2)
+            )
+            .contentShape(Rectangle())
+            .onTapGesture { toggleSelection(wal.captureId) }
+            .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
+            .accessibilityLabel(selected ? "Selected for merge" : "Tap to select for merge")
+            // Auto-file where the on-device model can — only while the user hasn't.
+            .task { await autoTagIfNeeded(wal.captureId) }
+    }
+
+    /// The conversation card content shared by both row modes (the label under the
+    /// NavigationLink, and the tappable card in multi-select).
+    @ViewBuilder private func conversationCard(_ wal: CaptureWAL) -> some View {
+        if let poller = manager.statusPoller(for: wal.captureId) {
+            CaptureCard(
+                wal: wal,
+                meta: manager.conversationMeta(for: wal.captureId),
+                card: manager.cardMeta(for: wal.captureId),
+                poller: poller,
+                hasCachedTranscript: manager.hasCachedTranscript(wal.captureId),
+                // Cache RECENT (~14d) transcripts on sight (no-op for older / already-cached).
+                onSight: { manager.ensureRecentTranscriptCached(wal.captureId) },
+                local: local,
+                categoryName: categories.category(for: wal.captureId)?.name,
+                categoryAutoFiled: categories.acceptsAutoSuggestion(for: wal.captureId),
+                loadWaveform: { [weak manager] in
+                    WaveformThumb.profile(sizes: manager?.segmentSizes(for: wal.captureId) ?? [],
+                                          buckets: 24, seed: wal.captureId)
+                }
+            )
+        }
+    }
+
+    /// The three-face detail (track 20260713T0904): Summary / Actions / Transcript + text
+    /// search; same parameters, same stores underneath.
+    private func conversationDetail(_ wal: CaptureWAL) -> some View {
+        ConversationFacesView(
+            target: target,
+            manager: manager,
+            captureId: wal.captureId,
+            timeRange: manager.conversationMeta(for: wal.captureId)
+                .map { CaptureCardPresentation.timeRangeString(meta: $0, fallback: wal.status.startedAt) }
+                ?? CaptureCardPresentation.timeRangeString(meta: nil, fallback: wal.status.startedAt),
+            place: manager.conversationMeta(for: wal.captureId)?.location?.label,
+            conversationDate: manager.conversationMeta(for: wal.captureId)
+                .map { Date(timeIntervalSince1970: TimeInterval($0.startedAt)) }
+                ?? wal.status.startedAt
+        )
+    }
+
+    /// The Grain selection badge shown on a row in multi-select: a filled Forge-Blue check
+    /// when selected, an empty ring otherwise.
+    private func selectionBadge(_ selected: Bool) -> some View {
+        ZStack {
+            Circle()
+                .fill(selected ? GrainColor.forgeBlue : GrainColor.surface)
+                .overlay(Circle().strokeBorder(
+                    selected ? GrainColor.forgeBlue : GrainColor.borderFaint, lineWidth: 1.5))
+            if selected {
+                Image(grain: .check)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(GrainColor.onAccent)
+            }
+        }
+        .frame(width: 24, height: 24)
+        .padding(GrainSpacing.x2)
+    }
+
+    // MARK: multi-select MERGE actions
+
+    /// Enter multi-select and select `captureId` (the long-pressed row).
+    private func enterSelection(_ captureId: String) {
+        selectionMode = true
+        selectedIds = [captureId]
+    }
+
+    /// Toggle a row's membership in the merge selection.
+    private func toggleSelection(_ captureId: String) {
+        if selectedIds.contains(captureId) { selectedIds.remove(captureId) }
+        else { selectedIds.insert(captureId) }
+    }
+
+    /// Leave multi-select, dropping the selection.
+    private func exitSelection() {
+        selectionMode = false
+        selectedIds = []
+    }
+
+    /// The bottom action bar shown in multi-select: "Merge N" (enabled at ≥2) + "Cancel".
+    private var mergeActionBar: some View {
+        HStack(spacing: GrainSpacing.x3) {
+            GrainButton("Cancel", variant: .ghost, size: .lg) { exitSelection() }
+            Spacer()
+            Text("\(selectedIds.count) selected")
+                .grainTextStyle(.caption)
+                .foregroundStyle(GrainColor.textMuted)
+            GrainButton("Merge \(selectedIds.count)", variant: .filled, size: .lg) {
+                let ids = Array(selectedIds)
+                exitSelection()   // snappy exit; the list refreshes when the merge lands
+                Task { _ = await manager.merge(captureIds: ids) }
+            }
+            .disabled(selectedIds.count < 2)
+            .opacity(selectedIds.count < 2 ? 0.5 : 1)
+        }
+        .padding(.horizontal, GrainSpacing.x4)
+        .padding(.vertical, GrainSpacing.x3)
+        .background(
+            GrainColor.surface
+                .overlay(GrainColor.borderFaint.frame(height: 1), alignment: .top)
+                .ignoresSafeArea(edges: .bottom)
+        )
     }
 
     /// One shot per on-screen row: if unfiled and never user-filed, ask the

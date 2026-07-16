@@ -1708,7 +1708,24 @@ public final class CaptureManager: ObservableObject {
     public func canResumeRecording(captureId: String) -> Bool {
         guard active == nil, suspendedSession == nil else { return false }
         guard !isDeleted(captureId), !isDiscarded(captureId), !isAbandoned(captureId) else { return false }
+        // A capture that is (or was, before a crash) a merge PRIMARY mid-fold carries a
+        // pinned `.folding-<source>` marker reserving a [base, base+count) seq range on
+        // disk. Resuming it would allocate new segments from the same `max + 1` and write
+        // INTO that reserved range — a later re-merge would then either skip the copy
+        // (range already "present" → source audio lost) or overwrite the resume segments
+        // (resume audio lost). Block resume until the merge finishes and clears the marker.
+        guard !hasPendingFoldMarker(captureId) else { return false }
         return hasLocalAudio(captureId)
+    }
+
+    /// True when the capture directory holds a pinned `.folding-<source>` marker — a merge
+    /// fold into this primary is in progress or was interrupted mid-flight. Such a capture
+    /// must not be resumed (a resume would collide with the reserved fold seq range). The
+    /// marker is dropped once the merge deletes the source, so this is self-clearing.
+    private func hasPendingFoldMarker(_ captureId: String) -> Bool {
+        let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        return files.contains { $0.lastPathComponent.hasPrefix(".folding-") }
     }
 
     /// Re-open an existing capture as the active conversation, appending new frames to
@@ -1748,6 +1765,214 @@ public final class CaptureManager: ObservableObject {
         else { source.start() }
         log?.info("capture \(captureId): resumed existing conversation (source=\(captureSource.rawValue))")
         return true
+    }
+
+    // MARK: merge conversations (fold split captures into ONE — phone-orchestrated WAL concat)
+
+    /// A capture that can take part in a merge RIGHT NOW: it still holds its local audio on
+    /// this phone (the phone owns the audio — a pruned capture can't contribute), and it is
+    /// not the live/suspended recording, nor deleted / discarded / abandoned. The same
+    /// local-first rule `resumeRecording` uses, so merge only ever concatenates real audio.
+    /// A capture is too old to merge once the DOOR may have retention-pruned its raw audio
+    /// (door default `FOUNDRYX_RETAIN_SECS_DEFAULT` = 7 days). Merging a pruned capture is
+    /// lossy: the phone re-uploads only the newly-folded segments, so the door's replace
+    /// re-ingests only the new audio and destroys the fuller transcript already in Lore.
+    /// Bounded conservatively BELOW 7 days so the door still holds the full audio and the
+    /// fold re-ingests losslessly. (Captures with no durable start are allowed — age
+    /// unknown; the door's own "refuse replace when an ingested segment is missing" guard is
+    /// the correctness backstop.)
+    static let mergeMaxAgeSeconds: TimeInterval = 6 * 24 * 60 * 60
+
+    private func isMergeable(_ captureId: String) -> Bool {
+        guard active?.captureId != captureId else { return false }
+        guard suspendedSession?.wal.captureId != captureId else { return false }
+        guard !isDeleted(captureId), !isDiscarded(captureId), !isAbandoned(captureId) else { return false }
+        if let start = durableStart(captureId: captureId),
+           Date().timeIntervalSince1970 - start > Self.mergeMaxAgeSeconds {
+            return false   // door may have pruned this capture's audio → merging it would be lossy
+        }
+        return hasLocalAudio(captureId)
+    }
+
+    /// The durable conversation start (unix seconds) used to ORDER a merge: meta → card →
+    /// the capture-id's embedded time (the same resolution `durableStart` uses). The
+    /// EARLIEST becomes the primary and the rest append after it, so the merged transcript
+    /// reads in time order. Falls back to 0 (sorts earliest) only for a capture with no
+    /// durable start at all — its audio still merges.
+    private func mergeStart(of captureId: String) -> TimeInterval {
+        durableStart(captureId: captureId) ?? 0
+    }
+
+    /// Merge several split captures into ONE conversation. The EARLIEST capture (by durable
+    /// start) is the PRIMARY; every other source's `seg-*.opus` audio is appended — in time
+    /// order — onto the primary's WAL (renumbered to CONTINUE its sequence), the primary is
+    /// marked pending-finalize and its grown WAL re-uploaded, so the door's ingest SWEEP
+    /// (segment-count-growth → replace path) re-ingests the fuller audio under the primary's
+    /// external id — re-transcribing into ONE conversation (the finalize POST itself is a
+    /// no-op for an already-InLore capture; the sweep does the work). Each source is deleted
+    /// (phone + door + Lore) so only the primary remains. Returns the primary id to navigate
+    /// to, or nil when there's nothing to merge (fewer than two valid, mergeable captures).
+    ///
+    /// Crash-safe + idempotent. A source's segments are COPIED (never moved) and each write
+    /// is atomic (temp + rename), so a concurrent drain never sees a torn segment and an
+    /// interruption never loses audio. A source is deleted ONLY after its whole audio is
+    /// verified on the primary, and copies happen one source at a time, so an interruption
+    /// leaves at most the in-flight source un-deleted — a re-run re-folds it to the SAME
+    /// pinned range (`.folding-<source>` marker) so it is never duplicated, and completing
+    /// twice is a no-op (folded sources carry `.deleted`).
+    ///
+    /// @MainActor-safe: the heavy WAL file work runs OFF the main actor (mirrors the
+    /// retention sweep / hydration hops); `captures` is mutated + rebuilt back on main.
+    @discardableResult
+    public func merge(captureIds: [String]) async -> String? {
+        // Resolve to distinct, mergeable captures (real local audio; not active/deleted/…).
+        var seen = Set<String>()
+        let candidates = captureIds.filter { seen.insert($0).inserted && isMergeable($0) }
+        guard candidates.count >= 2 else { return nil }   // nothing to merge — safe no-op
+
+        // PRIMARY = the earliest by durable start; the rest are sources in ascending time
+        // order, so appending them after the primary keeps the audio globally time-ordered.
+        let ordered = candidates.sorted { mergeStart(of: $0) < mergeStart(of: $1) }
+        let primaryId = ordered[0]
+        let sourceIds = Array(ordered.dropFirst())
+        let base = baseDir
+
+        var mergedAny = false
+        for sourceId in sourceIds {
+            // Copy THIS source's segments onto the primary (OFF the main actor), continuing
+            // the primary's seq. Returns true only once every segment is verified present.
+            let ok = await Task.detached(priority: .userInitiated) {
+                Self.appendSourceToPrimary(primaryId: primaryId, sourceId: sourceId, baseDir: base)
+            }.value
+            guard ok else { break }   // copy failed — stop; sources already folded stay folded
+            // The source's audio is now safely on the primary → delete the source (phone +
+            // door + Lore). Done BEFORE the next source so an interruption never re-copies a
+            // source that's already folded in.
+            deleteConversation(sourceId)
+            // Fold complete + source deleted → drop the idempotency marker. Harmless if it
+            // lingers (a deleted source is never re-folded), but keep the primary dir clean.
+            try? FileManager.default.removeItem(
+                at: base.appendingPathComponent(primaryId, isDirectory: true)
+                    .appendingPathComponent(".folding-\(sourceId)"))
+            mergedAny = true
+        }
+        guard mergedAny else { return nil }
+
+        // Rebuild the primary WAL so its in-memory seq/watermark reflect the appended
+        // segments (a stale nextSeq would let a later resume OVERWRITE merged audio), then
+        // mark it pending-finalize + drive the re-ingest. The rebuilt WAL re-scans disk:
+        // nextSeq = merged max + 1, watermark derived from the surviving `.ack` markers, so
+        // the newly appended (un-ACK'd) segments read as PENDING and get uploaded.
+        if let idx = captures.firstIndex(where: { $0.captureId == primaryId }) {
+            captures[idx] = makeWAL(captureId: primaryId)
+        }
+        retryStates[primaryId] = nil
+        finalizing.remove(primaryId)
+        markNeedsFinalize(primaryId)
+        invalidateMeta(primaryId)
+        rebuildVisibleCaptures()
+
+        // Kick the sync→finalize now (drain timer + app-foreground retry finish it if the
+        // door is down — the pending-finalize marker is durable, mirroring endSession).
+        if let primaryWal = captures.first(where: { $0.captureId == primaryId }) {
+            Task { [weak self] in
+                await primaryWal.sync()
+                await self?.tryFinalize(primaryWal)
+            }
+        }
+        log?.info("merge: folded \(sourceIds.count) source(s) into primary \(primaryId)")
+        return primaryId
+    }
+
+    /// Append ONE source capture's `seg-*.opus` onto the PRIMARY's WAL directory, renumbered
+    /// to CONTINUE the primary's sequence (so the audio stays time-ordered). Pure disk —
+    /// safe to run OFF the main actor (touches no actor state). Each segment is COPIED via an
+    /// ATOMIC write (temp + rename) so a concurrent drain never reads a torn file; on any
+    /// failure the source's partial copies are rolled back and it returns false (the caller
+    /// then leaves the source un-deleted — its audio is never lost). Returns true only when
+    /// every source segment is verified present on the primary. The fold is IDEMPOTENT: the
+    /// destination range is pinned in a durable `.folding-<source>` marker, so a crash and
+    /// retry re-copies the SAME seqs (overwrite) instead of appending a DUPLICATE span. The
+    /// `.ack` / watermark markers are intentionally NOT copied, so the appended segments read
+    /// as PENDING and the door re-uploads + re-ingests them under the primary's id.
+    nonisolated static func appendSourceToPrimary(primaryId: String,
+                                                  sourceId: String,
+                                                  baseDir: URL) -> Bool {
+        let fm = FileManager.default
+        let primaryDir = baseDir.appendingPathComponent(primaryId, isDirectory: true)
+        let sourceDir = baseDir.appendingPathComponent(sourceId, isDirectory: true)
+        // Idempotent fold. The destination range [base, base+count) for THIS source is
+        // allocated ONCE and pinned in a durable marker ("base:count") BEFORE any copy. A
+        // re-run after a crash in the copy-done / source-not-yet-deleted window reuses the
+        // SAME range and OVERWRITES it — so re-folding is a no-op, never a duplicated
+        // (double-transcribed) span. If the marker shows the whole range is already on the
+        // primary (the source was copied + verified, even if it has since been deleted),
+        // the fold is already complete → true. Each source pins its own base, so later
+        // sources still get non-overlapping ranges.
+        let marker = primaryDir.appendingPathComponent(".folding-\(sourceId)")
+        let savedFields = (try? String(contentsOf: marker, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: ":")
+        let savedBase = savedFields?.first.flatMap { UInt64($0) }
+        func rangeAllPresent(_ base: UInt64, _ count: Int) -> Bool {
+            count > 0 && (0 ..< UInt64(count)).allSatisfy {
+                fm.fileExists(atPath: primaryDir.appendingPathComponent(CaptureWAL.segName(base + $0)).path)
+            }
+        }
+        if let base = savedBase,
+           let count = savedFields.flatMap({ $0.count == 2 ? Int($0[1]) : nil }),
+           rangeAllPresent(base, count) {
+            return true   // already fully folded — idempotent re-run (even if the source is gone)
+        }
+
+        let seqs = segmentSeqsOnDisk(sourceId, baseDir: baseDir).sorted()
+        guard !seqs.isEmpty else { return false }   // no source audio to contribute
+
+        // Reuse the pinned base if present, else allocate at primary-max+1 and pin it BEFORE
+        // any copy so a crash mid-copy re-folds to the SAME seqs (no drift, no duplication).
+        let base: UInt64
+        if let saved = savedBase {
+            base = saved
+        } else {
+            base = (segmentSeqsOnDisk(primaryId, baseDir: baseDir).max().map { $0 + 1 }) ?? 0
+            try? "\(base):\(seqs.count)".write(to: marker, atomically: true, encoding: .utf8)
+        }
+
+        var written: [URL] = []
+        var seq = base
+        for srcSeq in seqs {
+            let src = sourceDir.appendingPathComponent(CaptureWAL.segName(srcSeq))
+            let dst = primaryDir.appendingPathComponent(CaptureWAL.segName(seq))
+            do {
+                let bytes = try Data(contentsOf: src)
+                try bytes.write(to: dst, options: [.atomic])   // temp + atomic rename (overwrites on retry)
+                written.append(dst)
+                seq += 1
+            } catch {
+                for u in written { try? fm.removeItem(at: u) }   // roll back this run's partial copies
+                return false                                     // marker stays → retry reuses same base
+            }
+        }
+        // Every intended segment must be present on the primary before the caller deletes
+        // the source — the "safely on the primary" gate that makes the fold loss-free.
+        guard written.allSatisfy({ fm.fileExists(atPath: $0.path) }) else {
+            for u in written { try? fm.removeItem(at: u) }
+            return false
+        }
+        return true
+    }
+
+    /// The segment sequence numbers a capture holds on disk (parsed from `seg-<seq>.opus`).
+    /// Nonisolated (pure disk) so the off-main merge copy can read it.
+    nonisolated static func segmentSeqsOnDisk(_ captureId: String, baseDir: URL) -> [UInt64] {
+        let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        return files.compactMap { url -> UInt64? in
+            guard url.pathExtension == "opus" else { return nil }
+            let name = url.deletingPathExtension().lastPathComponent   // seg-000…000
+            guard let seqStr = name.split(separator: "-").last, let seq = UInt64(seqStr) else { return nil }
+            return seq
+        }
     }
 
     private func beginSession() {
