@@ -223,6 +223,62 @@ final class CaptureFinalizeTests: XCTestCase {
         XCTAssertEqual(rec.calls, [firstCapture, firstCapture], "no retry after success")
     }
 
+    /// Captures the `endedAt` the finalize POST body carried (P2 regression).
+    final class EndCapture: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _end: UInt64??
+        var recorded: Bool { lock.lock(); defer { lock.unlock() }; return _end != nil }
+        var endedAt: UInt64? { lock.lock(); defer { lock.unlock() }; return _end ?? nil }
+        func record(_ e: UInt64?) { lock.lock(); _end = .some(e); lock.unlock() }
+    }
+
+    // P2 — a capture's recorded end must never predate its own newest audio. On 07-16 an
+    // orphan-reconcile froze endedAt +12s after start while Omi buffered catch-up audio
+    // kept landing for ~2 minutes. Finalize must ship the TRUE end (the newest on-disk
+    // segment's wall-clock), not the frozen stub end (which drove premature ingest +
+    // replace churn on the desktop).
+    func testFinalizeBumpsStaleEndToNewestSegment() async throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("foundryx-finalize-catchup-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let id = "omi-20260716-145612-catchup"
+        let cdir = dir.appendingPathComponent(id, isDirectory: true)
+        try FileManager.default.createDirectory(at: cdir, withIntermediateDirectories: true)
+
+        let start = UInt64(Date().timeIntervalSince1970) - 200   // started 200s ago
+        let staleEnd = start + 12                                 // orphan-reconcile froze it +12s
+        let newestMTime = Date(timeIntervalSince1970: Double(start) + 120)   // catch-up ran ~2 min
+
+        for seq in 0..<6 {
+            let name = String(format: "seg-%012llu", UInt64(seq))
+            try Data([1, 2, 3, 4]).write(to: cdir.appendingPathComponent("\(name).opus"))
+            try Data().write(to: cdir.appendingPathComponent("\(name).ack"))   // durably on desktop
+        }
+        for f in try FileManager.default.contentsOfDirectory(at: cdir, includingPropertiesForKeys: nil)
+            where f.pathExtension == "opus" {
+            try FileManager.default.setAttributes([.modificationDate: newestMTime], ofItemAtPath: f.path)
+        }
+        ConversationMetaStore.save(ConversationMeta(startedAt: start, endedAt: staleEnd),
+                                   captureId: id, baseDir: dir)
+        try Data().write(to: cdir.appendingPathComponent(".needs-finalize"))
+
+        let captured = EndCapture()
+        let src = TestSource()
+        let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
+        let mgr = CaptureManager(target: target, baseDir: dir, source: src,
+                                 finalize: { _, meta in captured.record(meta?.endedAt) })
+        await mgr.hydration?.value
+
+        await mgr.retryPendingFinalizes()
+
+        XCTAssertEqual(captured.endedAt, start + 120,
+                       "finalize ships the TRUE end (newest segment), not the frozen +12s stub end")
+        XCTAssertEqual(ConversationMetaStore.load(captureId: id, baseDir: dir)?.endedAt, start + 120,
+                       "the bumped end is persisted durably")
+    }
+
     private func waitUntil(timeout: TimeInterval = 3, _ cond: @MainActor () -> Bool) async throws {
         let start = Date()
         while !cond() {

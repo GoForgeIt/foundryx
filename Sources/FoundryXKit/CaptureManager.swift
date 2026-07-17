@@ -602,6 +602,13 @@ public final class CaptureManager: ObservableObject {
     /// stays O(first-screen), never O(all folders).
     public nonisolated static let warmSeedCount = 10
 
+    /// How many of the NEWEST captures the resume-candidate scan (`resumableCaptureId`)
+    /// inspects on the hot Omi `.streaming` / relaunch path. Strictly bounded so the scan
+    /// stays O(first-few) on the @MainActor — an unbounded per-segment stat storm over a
+    /// backlogged library was the watchdog-hang risk that fragmented one 07-16 meeting into
+    /// many. The conversation to resume is, by construction, among the very newest captures.
+    public nonisolated static let resumeCandidateScanLimit = 8
+
     /// Discarded junk fragments (`.discarded`) kept on disk beyond this age are pruned — the
     /// audio was never uploaded and is not shown, so retaining tens of thousands of tiny
     /// folders forever only bloats the container + slows launch enumeration. A short window
@@ -1404,7 +1411,21 @@ public final class CaptureManager: ObservableObject {
                 log?.info("capture \(active?.captureId ?? "?"): Omi reconnected within grace → resumed (no new session)")
             } else if active == nil {
                 recordingScreenMinimized = false   // a fresh ambient capture presents full-screen
-                router.resetSegmenter(); beginSession()   // fresh ambient capture
+                router.resetSegmenter()
+                // Omi-continuity (07-16 over-split fix): a reconnect or app-relaunch INSIDE
+                // the silence gap RESUMES the in-flight conversation (same capture id +
+                // continued segment sequence) instead of minting a new one — the in-memory
+                // `suspendedSession` hold dies with the app, so a watchdog kill or a
+                // >grace link gap used to fragment one meeting into many. Ambient Omi only;
+                // the `isRecordingMic` branch above owns the phone-mic path (unchanged).
+                if captureSource == .omi,
+                   let resumeId = CaptureManager.resumableCaptureId(baseDir: baseDir,
+                                                                    silenceGap: silenceGapSeconds),
+                   resumeSession(captureId: resumeId) {
+                    // resumed the same conversation — no new id minted
+                } else {
+                    beginSession()   // fresh ambient capture
+                }
             }
         case .stopped, .failed:
             if isRecordingMic {
@@ -2308,6 +2329,11 @@ public final class CaptureManager: ObservableObject {
         let startSecs = nowUnixSecs()
         ConversationMetaStore.recordStart(captureId: id, baseDir: baseDir, at: startSecs)
         invalidateMeta(id)
+        // Durable source tag (review P2): mark WHICH device owns this capture so a later
+        // Omi reconnect only ever resumes an ambient/Omi capture — never a phone-mic
+        // recording (they share the `omi-` id prefix). Atomic; best-effort.
+        try? Data(captureSource.rawValue.utf8)
+            .write(to: Self.sourceMarkerURL(id, baseDir: baseDir), options: [.atomic])
         ConversationCardStore.recordStart(captureId: id, baseDir: baseDir, startedAt: startSecs)
         invalidateSidecar(id)   // card.json may have just been created (cardExists)
         // Append-only event log (track 20260705T1100, decision #3): the durable
@@ -2329,6 +2355,64 @@ public final class CaptureManager: ObservableObject {
         pushLiveState(.start)   // start the Live Activity + refresh the home-screen widget
         startMeter()            // a live capture is ALWAYS metered, regardless of which screen is visible (Bug 2)
         log?.info("capture \(id): ambient session started (source=\(captureSource.rawValue), state=\(sourceStateLabel))")
+    }
+
+    /// Re-open an existing on-disk capture as the active conversation on a reconnect or
+    /// relaunch INSIDE the silence gap (the candidate chosen by `resumableCaptureId`).
+    /// Ambient-only — the phone-mic path never routes here (its guard stays first +
+    /// unchanged in `onSourceState`). Unlike the user-driven `resumeRecording`, the source
+    /// is ALREADY streaming (we're inside its `.streaming` callback), so we never
+    /// re-`start()` it. Continues the SAME capture id + segment sequence (CaptureWAL
+    /// derives its next seq from the highest on-disk segment), clears any half-shipped
+    /// finalize marker so a resumed session doesn't race it, and clears the stale early
+    /// `endedAt` (recordOpen) so the resumed conversation reads as open again — the
+    /// eventual real end re-stamps the true bound. Idempotent on `captures` (reuses the
+    /// hydrated WAL row rather than inserting a duplicate).
+    @discardableResult
+    private func resumeSession(captureId: String) -> Bool {
+        // Belt-and-suspenders with resumableCaptureId's selection: never resume something
+        // terminal / mid-merge / deliberately-ended, and only when there's local audio to
+        // append to. (The source gate is enforced at the call site — Omi `.streaming` only.)
+        guard !isDeleted(captureId), !isDiscarded(captureId), !isAbandoned(captureId),
+              !Self.isEndedDeliberatelyOnDisk(captureId, baseDir: baseDir),
+              !hasPendingFoldMarker(captureId), hasLocalAudio(captureId) else { return false }
+        // Stamp the session clock ONLY when there isn't one (mirrors beginSession) — a
+        // relaunch has no clock, so anchor the visible timer here; the DURABLE start in
+        // meta.json is preserved by recordOpen below (never re-stamped).
+        if recordingClock == nil {
+            recordingClock = RecordingClock(startedAt: Date(), paused: isPaused, now: Date())
+        }
+        let wal = captures.first(where: { $0.captureId == captureId }) ?? makeWAL(captureId: captureId)
+        active = wal
+        recordingCandidates = []
+        captures.removeAll { $0.captureId == captureId }   // avoid a duplicate row
+        captures.insert(wal, at: 0)                        // newest first
+        // A half-shipped finalize must not race the resumed session; drop its intent and
+        // reopen the durable meta (preserves start/location, clears the stale early end).
+        clearNeedsFinalize(captureId)
+        retryStates[captureId] = nil
+        finalizing.remove(captureId)
+        ConversationMetaStore.recordOpen(captureId: captureId, baseDir: baseDir, at: nowUnixSecs())
+        invalidateMeta(captureId)
+        invalidateSidecar(captureId)
+        CaptureEventLog.append(.captureStarted, captureId: captureId,
+                               payload: ["source": captureSource.rawValue, "resume": "reconnect"],
+                               baseDir: baseDir)
+        wal.beginStreaming()
+        router.resetLevelMeter()                  // fresh Opus decoder for the continued stream
+        #if canImport(AVFoundation)
+        router.resetPCMDecoder()
+        #endif
+        router.setExternalPCM(false)              // ambient Omi keeps the internal decode tap
+        router.setPaused(isPaused)
+        router.setWAL(wal)                        // frames now flow into this WAL — continued sequence
+        startLiveTranscription()
+        lastHeartbeatAt = 0; lastHeartbeatFrames = router.stats().count
+        pushLiveState(.start)
+        startMeter()
+        rebuildVisibleCaptures()
+        log?.info("capture \(captureId): reconnect/relaunch within silence gap → RESUMED (same id, no split)")
+        return true
     }
 
     // MARK: live on-device transcription lifecycle (Feature 1)
@@ -2451,6 +2535,12 @@ public final class CaptureManager: ObservableObject {
             router.setExternalPCM(false)
             return
         }
+        // Every endSession is a DELIBERATE boundary — a silence-gap roll, grace-expiry, an
+        // explicit mic Stop, or a manual split. Stamp the durable marker (review P2) so a
+        // later reconnect never resumes this conversation: only orphan-stamped / never-ended
+        // captures (where the app died and catch-up audio kept arriving) may be resumed.
+        try? Data().write(to: Self.endedDeliberatelyMarkerURL(finished.captureId, baseDir: baseDir),
+                          options: [.atomic])
         // Substance gate: read how much VOICED audio this capture accumulated and the
         // on-device transcript we hold RIGHT NOW (before teardown clears it).
         let voiced = router.sessionVoicedFrameCount()
@@ -2556,6 +2646,21 @@ public final class CaptureManager: ObservableObject {
         }
         finalizing.insert(id)
         defer { finalizing.remove(id) }
+        // P2 — the recorded end must never predate this capture's newest audio. Omi
+        // delivers buffered catch-up segments AFTER a BLE gap (faster than real time),
+        // which land AFTER a premature orphan-reconcile / endSession end-stamp — freezing
+        // endedAt seconds after the conversation began while the WAL still holds minutes.
+        // Bump endedAt forward to max(recorded end, newest on-disk segment mtime) so the
+        // door ingests the TRUE end, not a stale early bound (which drove premature ingest
+        // + replace churn). recordEnd overwrites the end + preserves any existing location.
+        if let mtime = CaptureManager.newestSegmentMTimeOnDisk(id, baseDir: baseDir) {
+            let newestEnd = UInt64(max(0, mtime.timeIntervalSince1970))
+            let recordedEnd = ConversationMetaStore.load(captureId: id, baseDir: baseDir)?.endedAt ?? 0
+            if newestEnd > recordedEnd {
+                ConversationMetaStore.recordEnd(captureId: id, baseDir: baseDir, at: newestEnd, location: nil)
+                invalidateMeta(id)
+            }
+        }
         // The durable conversation metadata (start/end/location) becomes the
         // finalize POST body so the door persists it + threads it into the ingest
         // envelope (F1, F9). Absent (older capture) → an empty body (still valid).
@@ -2990,6 +3095,46 @@ public final class CaptureManager: ObservableObject {
                 .appendingPathComponent(".deleted").path)
     }
 
+    /// True when the capture carries a `.discarded` tombstone marker (a sub-substance
+    /// junk fragment). The nonisolated peer of `isDiscarded` for the disk-scanning
+    /// resume-candidate selection (`resumableCaptureId`).
+    nonisolated static func isDiscardedOnDisk(_ captureId: String, baseDir: URL) -> Bool {
+        FileManager.default.fileExists(
+            atPath: baseDir.appendingPathComponent(captureId, isDirectory: true)
+                .appendingPathComponent(".discarded").path)
+    }
+
+    /// Durable per-capture source tag written at `beginSession` (`.capture-source`
+    /// containing the `CaptureSourceKind` raw value). Lets the resume-candidate scan tell
+    /// an AMBIENT/Omi capture from a phone-mic one — they share the `omi-` id prefix, so
+    /// without this an Omi reconnect could hijack (and cancel the finalize of) a mic
+    /// recording the user explicitly Stopped. `nil` = a legacy capture from before this
+    /// shipped (handled conservatively by the caller).
+    nonisolated static func sourceMarkerURL(_ captureId: String, baseDir: URL) -> URL {
+        baseDir.appendingPathComponent(captureId, isDirectory: true)
+            .appendingPathComponent(".capture-source")
+    }
+    nonisolated static func capturedSourceOnDisk(_ captureId: String, baseDir: URL) -> String? {
+        guard let data = try? Data(contentsOf: sourceMarkerURL(captureId, baseDir: baseDir)),
+              let s = String(data: data, encoding: .utf8) else { return nil }
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Durable marker written by `endSession` — the single choke point for EVERY
+    /// deliberate conversation boundary (silence-gap roll, grace-expiry, explicit mic
+    /// stop, manual split). Its ABSENCE on a capture with an `endedAt` means the end was
+    /// orphan-stamped (`reconcileOrphanedCaptures`) or the app died — the only ends a
+    /// reconnect may resume. Distinguishes "the user/segmenter ended this" from "a crash
+    /// froze it early while catch-up audio kept arriving."
+    nonisolated static func endedDeliberatelyMarkerURL(_ captureId: String, baseDir: URL) -> URL {
+        baseDir.appendingPathComponent(captureId, isDirectory: true)
+            .appendingPathComponent(".ended-deliberately")
+    }
+    nonisolated static func isEndedDeliberatelyOnDisk(_ captureId: String, baseDir: URL) -> Bool {
+        FileManager.default.fileExists(atPath: endedDeliberatelyMarkerURL(captureId, baseDir: baseDir).path)
+    }
+
     /// Age (seconds) since the conversation started, from its meta on disk (0 when absent).
     nonisolated static func conversationAgeOnDisk(_ captureId: String, baseDir: URL) -> TimeInterval {
         guard let started = ConversationMetaStore.load(captureId: captureId, baseDir: baseDir)?.startedAt,
@@ -2997,16 +3142,110 @@ public final class CaptureManager: ObservableObject {
         return max(0, Date().timeIntervalSince1970 - TimeInterval(started))
     }
 
-    /// Age (seconds) of the newest `seg-*.opus` by mtime, or nil when no segments remain.
-    nonisolated static func newestSegmentAgeOnDisk(_ captureId: String, baseDir: URL) -> TimeInterval? {
+    /// Wall-clock mtime of the newest `seg-*.opus`, or nil when no segments remain. The
+    /// TRUE tail of a capture's audio — including catch-up segments an Omi delivers after
+    /// a BLE gap (faster than real time), which land AFTER a premature orphan-reconcile /
+    /// endSession end-stamp. Both the resume-candidate scan and the finalize end-stamp
+    /// bump read this so a capture's bound never predates its own newest audio.
+    public nonisolated static func newestSegmentMTimeOnDisk(_ captureId: String, baseDir: URL) -> Date? {
         let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
         let files = (try? FileManager.default.contentsOfDirectory(
             at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-        let mtimes = files
+        return files
             .filter { $0.pathExtension == "opus" }
             .compactMap { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
-        guard let newest = mtimes.max() else { return nil }
+            .max()
+    }
+
+    /// Age (seconds) of the newest `seg-*.opus` by mtime, or nil when no segments remain.
+    nonisolated static func newestSegmentAgeOnDisk(_ captureId: String, baseDir: URL) -> TimeInterval? {
+        guard let newest = newestSegmentMTimeOnDisk(captureId, baseDir: baseDir) else { return nil }
         return Date().timeIntervalSince(newest)
+    }
+
+    /// Newest `seg-*.opus` mtime found WITHOUT statting every segment. Segment names are
+    /// zero-padded monotonic (`seg-%012llu`), so the lexicographically-greatest name is the
+    /// newest (and, since the WAL is append-only, the last-written = newest mtime): one
+    /// `resourceValues` stat on that single file. The hot resume-candidate path uses this
+    /// instead of `newestSegmentMTimeOnDisk` (which stats every segment) so a giant capture
+    /// can't storm the @MainActor on an Omi reconnect.
+    public nonisolated static func newestSegmentMTimeByName(_ captureId: String, baseDir: URL) -> Date? {
+        let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        guard let newest = names.filter({ $0.hasPrefix("seg-") && $0.hasSuffix(".opus") }).max() else { return nil }
+        let url = dir.appendingPathComponent(newest)
+        return (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+    }
+
+    /// The newest RESUMABLE capture on disk, or nil when a fresh conversation should be
+    /// minted. Omi-continuity blueprint: a reconnect or app-relaunch WITHIN the silence
+    /// gap continues the SAME conversation (same capture id) rather than fragmenting it —
+    /// the 07-16 bug split one meeting into 5+ because every relaunch/reconnect minted a
+    /// new id. Pure + disk-scanning so it works BEFORE the async hydration pass populates
+    /// `captures`, and is unit-testable from a fixture directory.
+    ///
+    /// BOUNDED (watchdog-hang fix, review P1): it runs on the @MainActor at the exact Omi
+    /// `.streaming` / relaunch instant, so — like `seedWarmListRows` after the earlier
+    /// FRONTBOARD SIGKILL — it enumerates NAMES once, sorts newest-first by the id's
+    /// embedded start time, inspects only the newest `resumeCandidateScanLimit` directories,
+    /// and per candidate stats a SINGLE file (the newest segment by name). No per-segment
+    /// stat storm. (Kept synchronous rather than hopping off-main: `onSourceState` is a
+    /// @MainActor state machine, and an async hop would race a concurrent `.stopped` /
+    /// mic-start against the resume decision — the strictly-bounded synchronous scan is the
+    /// safer choice and is cheap enough.)
+    ///
+    /// A capture qualifies only when: its newest segment is younger than the silence gap
+    /// (THE conversation boundary); it carries no terminal / in-flight marker (`.deleted`,
+    /// `.discarded`, `.abandoned`, `.folding-*`, or `.ended-deliberately`) and is not
+    /// confirmed-in-Lore; it is an AMBIENT/Omi capture (never a phone-mic recording — they
+    /// share the `omi-` id prefix, so an Omi reconnect must not hijack a mic recording the
+    /// user Stopped); and its end is orphan-stamped or absent, never a deliberate boundary.
+    /// New builds tag the source + deliberate-end on disk; a legacy untagged capture is
+    /// treated conservatively — resumable only if it never got any end (`endedAt == nil`).
+    public nonisolated static func resumableCaptureId(baseDir: URL,
+                                                      now: Date = Date(),
+                                                      silenceGap: TimeInterval) -> String? {
+        let fm = FileManager.default
+        // Enumerate NAMES once (no property prefetch), newest-first by the id's embedded
+        // start time (prefix-agnostic; ties fall back to name) — mirrors seedWarmListRows.
+        let names = ((try? fm.contentsOfDirectory(atPath: baseDir.path)) ?? [])
+            .filter { !$0.hasPrefix(".") }
+            .sorted { a, b in
+                let ta = CaptureIdTime.startedAt(fromCaptureId: a) ?? 0
+                let tb = CaptureIdTime.startedAt(fromCaptureId: b) ?? 0
+                return ta != tb ? ta > tb : a > b
+            }
+        var inspected = 0
+        for id in names {
+            if inspected >= resumeCandidateScanLimit { break }
+            let dir = baseDir.appendingPathComponent(id, isDirectory: true)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            inspected += 1   // bound the expensive work to real capture directories
+            // Newest audio younger than the silence gap? (ONE stat via the by-name shortcut)
+            guard let mtime = newestSegmentMTimeByName(id, baseDir: baseDir),
+                  now.timeIntervalSince(mtime) < silenceGap else { continue }
+            // Terminal / in-flight / deliberate-end markers are never resumed.
+            if isDeletedOnDisk(id, baseDir: baseDir) { continue }
+            if isDiscardedOnDisk(id, baseDir: baseDir) { continue }
+            if isEndedDeliberatelyOnDisk(id, baseDir: baseDir) { continue }
+            if fm.fileExists(atPath: dir.appendingPathComponent(".abandoned").path) { continue }
+            if TranscriptCacheStore.isConfirmedInLore(captureId: id, baseDir: baseDir) { continue }
+            let marks = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
+            if marks.contains(where: { $0.hasPrefix(".folding-") }) { continue }
+            // Source gate: only an AMBIENT/Omi capture may be resumed by an Omi reconnect.
+            let tag = capturedSourceOnDisk(id, baseDir: baseDir)
+            if let tag, tag != CaptureSourceKind.omi.rawValue { continue }
+            // Boundary gate: for an UNTAGGED (legacy) capture we can't tell an orphan end
+            // from a deliberate one, so resume ONLY a true orphan that never got any end.
+            // A TAGGED (new-build) capture that cleared `.ended-deliberately` above is an
+            // orphan-stamped or never-ended Omi capture → resumable.
+            if tag == nil,
+               ConversationMetaStore.load(captureId: id, baseDir: baseDir)?.endedAt != nil { continue }
+            // Newest-first ordering ⇒ the first qualifying candidate is the one to resume.
+            return id
+        }
+        return nil
     }
 
     /// Delete a capture's `seg-*.opus` + `seg-*.ack`, keeping the dir + tombstone files.

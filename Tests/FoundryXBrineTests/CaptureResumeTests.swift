@@ -248,6 +248,263 @@ final class CaptureResumeTests: XCTestCase {
         XCTAssertFalse(mgr.resumeRecording(captureId: saved), "one capture source records at a time")
         XCTAssertEqual(mgr.active?.captureId, activeId)
     }
+
+    // MARK: resume-same-id across reconnect / relaunch (07-16 over-split fix)
+
+    /// Set every `seg-*.opus` mtime of a capture, to fake how recently its audio landed —
+    /// the axis `resumableCaptureId` measures against the silence gap.
+    private func setSegmentMTimes(dir: URL, captureId: String, to date: Date) {
+        let cdir = dir.appendingPathComponent(captureId, isDirectory: true)
+        let files = (try? FileManager.default.contentsOfDirectory(at: cdir, includingPropertiesForKeys: nil)) ?? []
+        for f in files where f.pathExtension == "opus" {
+            try? FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: f.path)
+        }
+    }
+
+    /// Write the durable source tag `beginSession` stamps (new-build captures) — so a
+    /// resume candidate is recognised as an ambient/Omi (or phone-mic) capture.
+    private func tagSource(dir: URL, captureId: String, _ kind: CaptureSourceKind) throws {
+        try Data(kind.rawValue.utf8).write(to: dir.appendingPathComponent(captureId, isDirectory: true)
+            .appendingPathComponent(".capture-source"), options: [.atomic])
+    }
+
+    /// Write a bare marker file (e.g. `.ended-deliberately`) into a capture dir.
+    private func writeMarker(dir: URL, captureId: String, _ name: String) throws {
+        try Data().write(to: dir.appendingPathComponent(captureId, isDirectory: true)
+            .appendingPathComponent(name), options: [.atomic])
+    }
+
+    // The pure candidate selector: only the fresh, unmarked, in-gap capture is resumable —
+    // `.deleted`, `.discarded`, confirmed-in-Lore, `.abandoned`, and older-than-gap captures
+    // are all skipped (a stale/terminal capture must never be resumed into).
+    func testResumableCandidateSelectionSkipsTerminalStaleAndConfirmed() throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let now = Date()
+        let gap: TimeInterval = 120
+
+        func seed(_ id: String, ageSecs: TimeInterval, marker: String? = nil) throws {
+            try seedSegments(dir: dir, captureId: id, n: 1, ackedThrough: 0)
+            setSegmentMTimes(dir: dir, captureId: id, to: now.addingTimeInterval(-ageSecs))
+            if let marker {
+                try Data().write(to: dir.appendingPathComponent(id, isDirectory: true)
+                    .appendingPathComponent(marker), options: [.atomic])
+            }
+        }
+        try seed("fresh", ageSecs: 30)                        // in-gap + unmarked ⇒ THE candidate
+        try seed("stale", ageSecs: 600)                       // older than the 120s gap ⇒ a real boundary
+        try seed("deleted", ageSecs: 20, marker: ".deleted")
+        try seed("discarded", ageSecs: 20, marker: ".discarded")
+        try seed("confirmed", ageSecs: 20, marker: ".lore-confirmed")
+        try seed("abandoned", ageSecs: 20, marker: ".abandoned")
+        // Review P2 regression cases: however fresh the audio, a reconnect must never
+        // reopen a conversation the user/segmenter deliberately ended, hijack a phone-mic
+        // recording, or resume a legacy (untagged) capture that already carries an end.
+        try seed("endedDelib", ageSecs: 20)                   // deliberate boundary (endSession)
+        try tagSource(dir: dir, captureId: "endedDelib", .omi)
+        try writeMarker(dir: dir, captureId: "endedDelib", ".ended-deliberately")
+        try seed("micStopped", ageSecs: 20)                   // an explicit phone-mic recording
+        try tagSource(dir: dir, captureId: "micStopped", .phoneMic)
+        try writeMarker(dir: dir, captureId: "micStopped", ".needs-finalize")
+        try seed("legacyEnded", ageSecs: 20)                  // pre-tag capture with ANY end
+        ConversationMetaStore.save(ConversationMeta(startedAt: UInt64(now.timeIntervalSince1970) - 90,
+                                                    endedAt: UInt64(now.timeIntervalSince1970) - 25),
+                                   captureId: "legacyEnded", baseDir: dir)
+
+        XCTAssertEqual(CaptureManager.resumableCaptureId(baseDir: dir, now: now, silenceGap: gap),
+                       "fresh", "only the fresh, unmarked, in-gap capture is resumable")
+
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("fresh", isDirectory: true))
+        XCTAssertNil(CaptureManager.resumableCaptureId(baseDir: dir, now: now, silenceGap: gap),
+                     "no fresh unmarked in-gap capture → a new conversation is minted")
+    }
+
+    // The 07-16 timeline: a meeting's capture died mid-stream (iOS watchdog kill — no
+    // endSession), and Omi buffered catch-up audio kept landing under the SAME id. A
+    // reconnect/relaunch 30s after the newest segment RESUMES the same conversation (no
+    // new id); a reconnect 10 minutes after the newest segment is a real boundary and
+    // mints a NEW conversation.
+    @MainActor
+    func testReconnectWithinGapResumesSameId_relaunchAfterGapMintsNew() async throws {
+        // ——— Reconnect INSIDE the silence gap → resume the same id. ———
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let meeting = "omi-20260716-145612-meeting"
+        try seedSegments(dir: dir, captureId: meeting, n: 6, ackedThrough: 5)
+        // An orphan-reconcile froze endedAt +12s after start, but the newest catch-up
+        // segment is only ~30s old — well inside the 120s silence gap.
+        let start = UInt64(Date().timeIntervalSince1970) - 40
+        ConversationMetaStore.save(ConversationMeta(startedAt: start, endedAt: start + 12),
+                                   captureId: meeting, baseDir: dir)
+        try tagSource(dir: dir, captureId: meeting, .omi)   // a new-build ambient capture
+        setSegmentMTimes(dir: dir, captureId: meeting, to: Date().addingTimeInterval(-30))
+
+        let src = ResumeRecordingWorld.TestSource()
+        let mgr = ResumeRecordingWorld.makeManager(dir: dir, source: src)
+        mgr.setSilenceGap(120)
+        await mgr.hydration?.value
+
+        src.onState?(.streaming)   // the pendant reconnects / the app relaunches
+        try await ResumeRecordingWorld.waitUntil { mgr.active != nil }
+        XCTAssertEqual(mgr.active?.captureId, meeting,
+                       "a reconnect 30s after the newest segment RESUMES the same conversation — no split")
+        XCTAssertEqual(mgr.captures.filter { $0.captureId == meeting }.count, 1,
+                       "the resumed capture reuses its hydrated row — no duplicate")
+
+        // ——— The newest audio is 10 minutes old (past the gap) → a NEW conversation. ———
+        let dir2 = try tempDir(); defer { try? FileManager.default.removeItem(at: dir2) }
+        let earlier = "omi-20260716-133000-earlier"
+        try seedSegments(dir: dir2, captureId: earlier, n: 4, ackedThrough: 3)
+        setSegmentMTimes(dir: dir2, captureId: earlier, to: Date().addingTimeInterval(-600))
+        let base = UInt64(Date().timeIntervalSince1970)
+        ConversationMetaStore.save(ConversationMeta(startedAt: base - 700, endedAt: base - 600),
+                                   captureId: earlier, baseDir: dir2)
+
+        let src2 = ResumeRecordingWorld.TestSource()
+        let mgr2 = ResumeRecordingWorld.makeManager(dir: dir2, source: src2)
+        mgr2.setSilenceGap(120)
+        await mgr2.hydration?.value
+
+        src2.onState?(.streaming)
+        try await ResumeRecordingWorld.waitUntil { mgr2.active != nil }
+        XCTAssertNotEqual(mgr2.active?.captureId, earlier,
+                          "10 minutes after the newest segment is a real boundary — mint a NEW conversation")
+    }
+
+    // Resuming clears a half-shipped finalize marker (so it can't race the resumed
+    // session) and reopens the meta (the stale early end is cleared); the eventual real
+    // end then overwrites it and is never before the capture's own newest audio.
+    @MainActor
+    func testResumeClearsPendingFinalizeAndEndOverwritesStaleEnd() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let id = "omi-20260716-150556-fragment"
+        try seedSegments(dir: dir, captureId: id, n: 3, ackedThrough: 2)
+        setSegmentMTimes(dir: dir, captureId: id, to: Date().addingTimeInterval(-20))
+        let start = UInt64(Date().timeIntervalSince1970) - 30
+        ConversationMetaStore.save(ConversationMeta(startedAt: start, endedAt: start + 8),
+                                   captureId: id, baseDir: dir)
+        try tagSource(dir: dir, captureId: id, .omi)   // ambient capture, orphan-stamped end
+        let needsFinalize = dir.appendingPathComponent(id, isDirectory: true)
+            .appendingPathComponent(".needs-finalize")
+        try Data().write(to: needsFinalize, options: [.atomic])
+
+        let src = ResumeRecordingWorld.TestSource()
+        // A FAILING finalize so the 5s drain timer can't clear the marker out from under
+        // the assertion — only the resume path should clear it here.
+        let mgr = ResumeRecordingWorld.makeManager(dir: dir, source: src,
+                                                   finalize: { _, _ in throw DoorError.http(503) })
+        mgr.setSilenceGap(120)
+        await mgr.hydration?.value
+
+        src.onState?(.streaming)
+        try await ResumeRecordingWorld.waitUntil { mgr.active?.captureId == id }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: needsFinalize.path),
+                       "resume clears the pending-finalize marker so it can't race the resumed session")
+        XCTAssertNil(ConversationMetaStore.load(captureId: id, baseDir: dir)?.endedAt,
+                     "resuming reopens the conversation — the stale early end is cleared")
+
+        // More audio arrives, then the conversation really ends → the real end overwrites.
+        for _ in 0..<(CaptureManager.minVoicedFramesToUpload + 20) { src.onFrame?(RealOmiFrames.voiced()) }
+        mgr.active?.flushAndWait()
+        mgr.splitConversation()
+        try await ResumeRecordingWorld.waitUntil {
+            ConversationMetaStore.load(captureId: id, baseDir: dir)?.endedAt != nil
+        }
+        let end = try XCTUnwrap(ConversationMetaStore.load(captureId: id, baseDir: dir)?.endedAt)
+        XCTAssertGreaterThan(end, start + 8, "the eventual real end overwrites the stale early endedAt")
+        if let newest = CaptureManager.newestSegmentMTimeOnDisk(id, baseDir: dir) {
+            XCTAssertGreaterThanOrEqual(end + 2, UInt64(max(0, newest.timeIntervalSince1970)),
+                                        "the recorded end is not before the capture's own newest audio")
+        }
+    }
+
+    // The candidate scan is BOUNDED (review P1): among many directories it inspects only
+    // the newest few, sorts newest-first by the id's embedded start time, and picks the
+    // newest qualifying ambient capture — skipping a still-newer phone-mic recording.
+    func testResumableScanIsBoundedAndNewestFirst() throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let now = Date()
+
+        // 30 older, deliberately-ended ambient captures (noise the scan must not need to reach).
+        for i in 0..<30 {
+            let id = String(format: "omi-20260716-12%02d00-old%02d", i % 60, i)
+            try seedSegments(dir: dir, captureId: id, n: 1, ackedThrough: 0)
+            setSegmentMTimes(dir: dir, captureId: id, to: now.addingTimeInterval(-40))
+            try tagSource(dir: dir, captureId: id, .omi)
+            try writeMarker(dir: dir, captureId: id, ".ended-deliberately")
+        }
+        // The NEWEST capture is a phone-mic recording → must be skipped by the source gate.
+        let mic = "omi-20260716-150500-mic"
+        try seedSegments(dir: dir, captureId: mic, n: 1, ackedThrough: 0)
+        setSegmentMTimes(dir: dir, captureId: mic, to: now.addingTimeInterval(-10))
+        try tagSource(dir: dir, captureId: mic, .phoneMic)
+        // The next-newest is the ambient capture to resume.
+        let ambient = "omi-20260716-150400-ambient"
+        try seedSegments(dir: dir, captureId: ambient, n: 200, ackedThrough: 199)   // many segments
+        setSegmentMTimes(dir: dir, captureId: ambient, to: now.addingTimeInterval(-20))
+        try tagSource(dir: dir, captureId: ambient, .omi)
+
+        XCTAssertEqual(CaptureManager.resumableCaptureId(baseDir: dir, now: now, silenceGap: 120),
+                       ambient, "newest-first, source-gated → the newest ambient capture is resumed")
+
+        // The by-name shortcut returns the newest segment's mtime without statting all 200.
+        let mtime = try XCTUnwrap(CaptureManager.newestSegmentMTimeByName(ambient, baseDir: dir))
+        XCTAssertEqual(mtime.timeIntervalSince1970, now.addingTimeInterval(-20).timeIntervalSince1970,
+                       accuracy: 1.5, "newest-segment-by-name reads the highest-seq file's mtime")
+    }
+
+    // Source + boundary gates (review P2): a phone-mic recording is never resumed by an
+    // Omi reconnect; a deliberately-ended capture is never resumed; an orphan-stamped Omi
+    // capture IS resumed; and a legacy untagged capture is resumable only when it never
+    // got any end (endedAt == nil).
+    func testResumableCandidateSourceAndBoundaryGates() throws {
+        let now = Date()
+        func fresh(_ dir: URL, _ id: String) throws {
+            try seedSegments(dir: dir, captureId: id, n: 1, ackedThrough: 0)
+            setSegmentMTimes(dir: dir, captureId: id, to: now.addingTimeInterval(-20))
+        }
+
+        // (1) phone-mic, freshly stopped (<120s), even with an orphan-shaped state → skipped.
+        let d1 = try tempDir(); defer { try? FileManager.default.removeItem(at: d1) }
+        try fresh(d1, "omi-20260716-150000-mic")
+        try tagSource(dir: d1, captureId: "omi-20260716-150000-mic", .phoneMic)
+        XCTAssertNil(CaptureManager.resumableCaptureId(baseDir: d1, now: now, silenceGap: 120),
+                     "an Omi reconnect never resumes a phone-mic recording (shared omi- prefix)")
+
+        // (2) ambient but DELIBERATELY ended (silence roll / manual stop) → skipped.
+        let d2 = try tempDir(); defer { try? FileManager.default.removeItem(at: d2) }
+        try fresh(d2, "omi-20260716-150000-rolled")
+        try tagSource(dir: d2, captureId: "omi-20260716-150000-rolled", .omi)
+        try writeMarker(dir: d2, captureId: "omi-20260716-150000-rolled", ".ended-deliberately")
+        XCTAssertNil(CaptureManager.resumableCaptureId(baseDir: d2, now: now, silenceGap: 120),
+                     "a deliberately-ended conversation is never resumed")
+
+        // (3) ambient, ORPHAN-stamped end (endedAt set, no deliberate marker) → resumed.
+        let d3 = try tempDir(); defer { try? FileManager.default.removeItem(at: d3) }
+        let orphan = "omi-20260716-150000-orphan"
+        try fresh(d3, orphan)
+        try tagSource(dir: d3, captureId: orphan, .omi)
+        ConversationMetaStore.save(ConversationMeta(startedAt: UInt64(now.timeIntervalSince1970) - 60,
+                                                    endedAt: UInt64(now.timeIntervalSince1970) - 48),
+                                   captureId: orphan, baseDir: d3)
+        XCTAssertEqual(CaptureManager.resumableCaptureId(baseDir: d3, now: now, silenceGap: 120),
+                       orphan, "an orphan-stamped Omi capture (catch-up audio still arriving) IS resumed")
+
+        // (4) LEGACY untagged with an end set → skipped (can't tell orphan from deliberate).
+        let d4 = try tempDir(); defer { try? FileManager.default.removeItem(at: d4) }
+        let legacyEnded = "omi-20260716-150000-legacyend"
+        try fresh(d4, legacyEnded)
+        ConversationMetaStore.save(ConversationMeta(startedAt: UInt64(now.timeIntervalSince1970) - 60,
+                                                    endedAt: UInt64(now.timeIntervalSince1970) - 48),
+                                   captureId: legacyEnded, baseDir: d4)
+        XCTAssertNil(CaptureManager.resumableCaptureId(baseDir: d4, now: now, silenceGap: 120),
+                     "a legacy untagged capture with an end is treated conservatively — not resumed")
+
+        // (5) LEGACY untagged, never ended (a true orphan) → resumed.
+        let d5 = try tempDir(); defer { try? FileManager.default.removeItem(at: d5) }
+        let legacyOrphan = "omi-20260716-150000-legacyorphan"
+        try fresh(d5, legacyOrphan)
+        XCTAssertEqual(CaptureManager.resumableCaptureId(baseDir: d5, now: now, silenceGap: 120),
+                       legacyOrphan, "a legacy untagged true orphan (endedAt == nil) is resumed")
+    }
 }
 
 @MainActor
