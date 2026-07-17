@@ -747,6 +747,7 @@ private struct RecordingPill: View {
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("\(presentation.word) capture")
+                .accessibilityIdentifier("recording-pill")
             }
             .padding(.horizontal, GrainSpacing.x3)
             .padding(.vertical, GrainSpacing.x1)

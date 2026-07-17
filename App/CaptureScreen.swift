@@ -367,7 +367,11 @@ struct CaptureScreen: View {
         // headline "card shows a summary but detail says none" bug without any model call.
         // Power on the Omi only when it's still an enabled source; always drive the meter.
         .onAppear { if omiEnabled { manager.startSource() }; manager.startMeter() }
-        .onDisappear { manager.stopMeter() }
+        // Presenting the full-screen RecordingScreen cover fires THIS view's onDisappear;
+        // stopping the meter unconditionally there kills the recording ring / pill ring /
+        // Live Activity level mid-session (Bug 2). Let the manager decide — it only stops
+        // the meter when genuinely idle.
+        .onDisappear { manager.captureSurfaceDidDisappear() }
         .confirmationDialog("Delete conversation?",
                             isPresented: Binding(
                                 get: { pendingDeleteId != nil },
@@ -475,6 +479,7 @@ struct CaptureScreen: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(CaptureHomeCopy.recordTitle)
+                .accessibilityIdentifier("record-cta")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .disabled(!manager.phoneMicAvailable)

@@ -755,6 +755,7 @@ public final class CaptureManager: ObservableObject {
         recordingClock = nil   // the held session finally ends here — no new session begins
         log?.info("capture \(held.wal.captureId): reconnect-grace silence boundary reached — ending held conversation")
         endSession()
+        stopMeterIfIdle()   // ended to idle — the user may be off the capture surface (review M1)
     }
 
     /// Re-arm the drain after a fresh id_token has been obtained (the rebuilt pipeline
@@ -1370,6 +1371,7 @@ public final class CaptureManager: ObservableObject {
                 isRecordingMic = false
                 recordingClock = nil   // explicit stop → clear the session clock (no roll)
                 endSession()
+                stopMeterIfIdle()   // session ended to idle — the user may be off the capture surface
                 // A permission-denied failure is otherwise silent — surface it so the
                 // Record CTA can point the user at Settings.
                 if case .failed(let reason) = state {
@@ -1678,6 +1680,36 @@ public final class CaptureManager: ObservableObject {
         meter.levels = Array(repeating: 0, count: Self.meterBarCount)
         meter.isFlat = true
     }
+
+    /// The capture surface (CaptureScreen) DISAPPEARED — stop the meter ONLY when no
+    /// session is live. Presenting the full-screen RecordingScreen as a `fullScreenCover`
+    /// fires the PRESENTING CaptureScreen's `onDisappear`; an unconditional `stopMeter()`
+    /// there flattens the levels the instant recording begins, so the hero voice ring on
+    /// the recording surface, the pill's mini ring off the capture tab, and the Live
+    /// Activity's level (all driven by `tickMeter`) go permanently dead — every phone-mic
+    /// recording then reads as "nothing's happening" (track 20260717T0630, Bug 2). A live
+    /// capture must keep metering regardless of which screen is visible; the meter only
+    /// stops once genuinely idle. (`startMeter`/`stopMeter` are both idempotent.)
+    public func captureSurfaceDidDisappear() {
+        stopMeterIfIdle()
+    }
+
+    /// Stop the 12 Hz meter timer ONLY when no session is live. Called from the capture
+    /// surface's disappear AND from the two session-ends-to-idle boundaries (phone-mic
+    /// `.stopped`/`.failed`, reconnect-grace expiry) — a session that ends while the user
+    /// is on another tab (minimized / wandered off) otherwise leaves the timer firing
+    /// every 83 ms forever with nothing to stop it (adversarial review M1, track
+    /// 20260717T0630). NOT called inside `endSession()` itself: the silence-gap roll
+    /// (`endSession(); beginSession()`) would stop→start flap the meter on every roll.
+    private func stopMeterIfIdle() {
+        guard active == nil && !isRecordingMic else { return }
+        stopMeter()
+    }
+
+    /// Test seam (internal, reachable via `@testable import`): whether the 12 Hz meter
+    /// timer is currently running — lets the meter-lifecycle tests assert the session-aware
+    /// start/stop decisions without reaching into the private timer.
+    var meterIsRunningForTests: Bool { meterTimer != nil }
 
     private func tickMeter() {
         let peak = isPaused ? 0 : levelBuffer.drainPeak()
@@ -1989,6 +2021,7 @@ public final class CaptureManager: ObservableObject {
         startLiveTranscription()
         lastHeartbeatAt = 0; lastHeartbeatFrames = router.stats().count
         pushLiveState(.start)
+        startMeter()            // a live capture is ALWAYS metered, regardless of which screen is visible (Bug 2)
         rebuildVisibleCaptures()
         if isRecordingMic { micSource?.start() }
         else { source.start() }
@@ -2252,6 +2285,7 @@ public final class CaptureManager: ObservableObject {
         startLiveTranscription()                  // additive live preview (no-op if unwired)
         lastHeartbeatAt = 0; lastHeartbeatFrames = router.stats().count   // fresh heartbeat baseline
         pushLiveState(.start)   // start the Live Activity + refresh the home-screen widget
+        startMeter()            // a live capture is ALWAYS metered, regardless of which screen is visible (Bug 2)
         log?.info("capture \(id): ambient session started (source=\(captureSource.rawValue), state=\(sourceStateLabel))")
     }
 

@@ -107,6 +107,12 @@ struct RecordingScreen: View {
             islandStatus.padding(.top, 44)
         }
         .grainBackground()
+        // Belt-and-suspenders (Bug 2): a live capture is always metered. The manager
+        // already starts the meter at session begin, but presentation-order races (this
+        // cover appearing before the presenter's onDisappear resolves) and covers presented
+        // over a NON-capture tab (where CaptureScreen never mounted) mean the recording
+        // ring must guarantee its own meter — startMeter() is idempotent.
+        .onAppear { manager.startMeter() }
     }
 
     /// Minimize — a chevron-down surface icon button, distinct from Stop/End. Dismisses
@@ -122,6 +128,7 @@ struct RecordingScreen: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Minimize recording")
+        .accessibilityIdentifier("minimize-recording")
     }
 
     // MARK: 1 — island status (breathing dot · Recording · elapsed), forge tint
@@ -149,6 +156,9 @@ struct RecordingScreen: View {
                 VStack(spacing: 2) {
                     SessionElapsedLabel(clock: clock,
                                         font: GrainFont.sans(30, weight: .semibold), color: GrainColor.ink)
+                        // The UI proof reads THIS readout by identifier — an app-wide m:ss
+                        // text match can latch onto a seeded card's static timestamp.
+                        .accessibilityIdentifier("recording-elapsed")
                     Text("Voice ring")
                         .grainTextStyle(.caption)
                         .foregroundStyle(GrainColor.textFaint)
