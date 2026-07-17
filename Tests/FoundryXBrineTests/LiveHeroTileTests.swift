@@ -52,6 +52,24 @@ private final class LiveHeroWorld: @unchecked Sendable {
 
     var provisionalTitle: String? { ProvisionalLiveTitle.title(from: transcript) }
 
+    // The ROLLING whole-conversation title machinery (track 20260717T1015): the same
+    // context accumulator + heuristic + arbiter chain CaptureManager drives.
+    var titleCtx = RollingTitleContext()
+    var titleState: LiveTitleState?
+    var displayTail = ""             // what the OLD title derived from (bounded tail)
+
+    /// One finalized utterance lands: context + bounded display tail + a heuristic
+    /// refresh through the arbiter — the manager's per-final path in miniature.
+    func speakFinal(_ line: String) {
+        titleCtx.ingest(final: line)
+        displayTail = LiveTranscriptBuffer.boundedTail(
+            displayTail.isEmpty ? line : displayTail + " " + line)
+        if let t = WholeConversationTitle.heuristic(from: titleCtx.text) {
+            titleState = LiveTitleArbiter.merged(current: titleState, candidateText: t,
+                                                 tier: .heuristic)
+        }
+    }
+
     var pillVisible: Bool {
         RecordingPillState.visible(recordingActive: isRecordingMic || hasActiveSession,
                                    onCaptureTab: onCaptureTab, minimized: minimized)
@@ -61,6 +79,7 @@ private final class LiveHeroWorld: @unchecked Sendable {
         isRecordingMic = false; hasActiveSession = false; connected = false
         paused = false; onCaptureTab = true; minimized = false
         recorderOpen = false; ended = false; transcript = ""; meterLevel = 0
+        titleCtx = RollingTitleContext(); titleState = nil; displayTail = ""
     }
 
     /// The canonical "recording, on the capture page" starting state used by several
@@ -229,6 +248,90 @@ private enum LiveHeroSteps {
                 guard let tile = w.liveTile else { throw BrineStepError("no live tile for the connected source") }
                 guard !tile.hasRecorder else {
                     throw BrineStepError("the tile is tappable though no recorder is behind it")
+                }
+            },
+
+            // MARK: the name reflects the whole conversation (track 20260717T1015)
+
+            defineStep("I am recording and the conversation has moved through several topics") { ctx, _, _ in
+                w.startRecordingOnCapturePage()
+                w.titleCtx = RollingTitleContext(); w.titleState = nil; w.displayTail = ""
+                // It OPENS on the kitchen-renovation budget…
+                w.speakFinal("The kitchen renovation budget is the big topic today")
+                w.speakFinal("the kitchen budget has to cover cabinets counters and the island")
+                w.speakFinal("the kitchen renovation lands around forty thousand total")
+                return ctx
+            },
+            defineStep("the conversation grows well past its opening words") { ctx, _, _ in
+                // …wanders through one-off chatter far past the 80-word display tail,
+                // and ends on contractor permits.
+                for i in 0..<30 {
+                    w.speakFinal("then chatterline\(i) unrelatedword\(i) middlebit\(i) fillertoken\(i)")
+                }
+                w.speakFinal("now the contractor said the timeline depends entirely on permits")
+                w.speakFinal("the contractor wants to file the permits paperwork this week")
+                w.speakFinal("if permits slip the contractor timeline pushes into June")
+                return ctx
+            },
+            defineCheck("the provisional title reflects the whole conversation so far") { _, _, _ in
+                guard let title = w.titleState?.text.lowercased() else {
+                    throw BrineStepError("no rolling title after a long conversation")
+                }
+                // The opening topic has fully slid off the OLD source (the bounded
+                // display tail) — yet it still names the conversation.
+                guard !w.displayTail.lowercased().contains("kitchen") else {
+                    throw BrineStepError("test premise broken: the opening is still in the display tail")
+                }
+                guard title.contains("kitchen") || title.contains("budget") || title.contains("renovation") else {
+                    throw BrineStepError("the title lost the conversation's opening topic: \(title)")
+                }
+                guard title.contains("contractor") || title.contains("permits") || title.contains("timeline") else {
+                    throw BrineStepError("the title ignores where the conversation went: \(title)")
+                }
+            },
+            defineCheck("a settled title does not rewrite itself for minor wording changes") { _, _, _ in
+                let before = w.titleState
+                // One more benign line re-treading the same topics: the arbiter must
+                // hold the settled name (similar candidate → no flicker).
+                w.speakFinal("so yes the kitchen budget and the contractor permits as discussed")
+                guard w.titleState == before else {
+                    throw BrineStepError("the title jittered on a minor change: \(before?.text ?? "nil") → \(w.titleState?.text ?? "nil")")
+                }
+            },
+            defineCheck("a smarter on-device title, when one arrives, replaces the rough one") { _, _, _ in
+                w.titleState = LiveTitleArbiter.merged(current: w.titleState,
+                                                       candidateText: "Kitchen renovation planning",
+                                                       tier: .model)
+                guard w.titleState?.tier == .model, w.titleState?.text == "Kitchen renovation planning" else {
+                    throw BrineStepError("the model title did not take over: \(String(describing: w.titleState))")
+                }
+                // …and a later heuristic can never downgrade it.
+                w.speakFinal("completely different closing words about travel plans and airports")
+                guard w.titleState?.text == "Kitchen renovation planning" else {
+                    throw BrineStepError("a heuristic overwrote the model title")
+                }
+            },
+            defineCheck("the saved conversation's final title still comes from the full pipeline") { _, _, _ in
+                // The durable card law, exercised for real: the session's rolling title
+                // seeds the card as PROVISIONAL; the pipeline (Kiln) title takes over and
+                // can never be downgraded by a later provisional seed.
+                let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+                    .appendingPathComponent("brine-rolling-title-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: dir) }
+                let id = "cap-rolling-title"
+                _ = ConversationCardStore.seedProvisional(
+                    captureId: id, baseDir: dir, transcript: w.titleCtx.text,
+                    title: w.titleState?.text)
+                _ = ConversationCardStore.merge(captureId: id, baseDir: dir,
+                                                title: "Kitchen reno: budget and permits")
+                let seededAgain = ConversationCardStore.seedProvisional(
+                    captureId: id, baseDir: dir, transcript: w.titleCtx.text,
+                    title: "A provisional pretender")
+                let card = ConversationCardStore.load(captureId: id, baseDir: dir)
+                guard card?.title == "Kitchen reno: budget and permits", card?.isProvisional == false,
+                      seededAgain == false else {
+                    throw BrineStepError("the pipeline title is not authoritative: \(String(describing: card))")
                 }
             },
         ]

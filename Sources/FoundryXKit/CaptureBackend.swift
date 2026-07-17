@@ -43,6 +43,7 @@ extension CaptureManager {
                             micSource: AudioFrameSource? = nil,
                             locationProvider: ConversationLocationProviding? = nil,
                             liveTranscriber: LiveTranscriberFactory? = nil,
+                            liveTitler: LocalTitleSummary? = nil,
                             localMode: Bool = false) {
         self.init(target: target,
                   baseDir: baseDir,
@@ -57,6 +58,7 @@ extension CaptureManager {
                   },
                   locationProvider: locationProvider,
                   liveTranscriber: liveTranscriber,
+                  liveTitler: liveTitler,
                   uploadSegment: localMode ? { @Sendable _, _, _ in } : nil)
     }
 }

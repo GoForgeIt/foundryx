@@ -44,6 +44,26 @@ public final class FoundationModelsTitler: LocalTitleSummary, @unchecked Sendabl
         UsageHook.generation(kind: "title", ms: span.elapsedMs())
         return result
     }
+
+    /// The LIVE rolling-title refresh (track 20260717T1015): a SINGLE model turn —
+    /// never the summary — on the debounced mid-recording cadence. Bounded prompt,
+    /// bounded time (a wedged turn surfaces as a clean error the manager backs off
+    /// from; the heuristic title keeps the screen honest meanwhile).
+    public func liveTitle(for transcript: String) async throws -> String {
+        let bounded = String(transcript.prefix(6_000))
+        let span = PerfSpan(name: "fm-live-title")
+        let title = try await PerfHook.timed("fm-live-title") {
+            try await withPerfTimeout("fm-live-title", ms: 15_000) {
+                let session = LanguageModelSession()
+                return try await session.respond(
+                    to: "Give a 3–6 word title for this in-progress conversation transcript. Reply with ONLY the title, no quotes.\n\n\(bounded)"
+                ).content.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+            }
+        }
+        // CONTENT-FREE usage: a live title was generated. ms only.
+        UsageHook.generation(kind: "live-title", ms: span.elapsedMs())
+        return title
+    }
 }
 #endif
 

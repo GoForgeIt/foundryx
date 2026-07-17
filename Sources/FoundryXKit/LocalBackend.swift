@@ -33,6 +33,17 @@ public enum LocalBackendError: Error, Equatable {
 public protocol LocalTitleSummary: Sendable {
     var isAvailable: Bool { get }
     func titleAndSummary(for transcript: String) async throws -> (title: String, summary: String)
+    /// A TITLE-ONLY refresh for the LIVE rolling title (track 20260717T1015): called
+    /// on a debounced cadence mid-recording, so it must not pay for a summary.
+    func liveTitle(for transcript: String) async throws -> String
+}
+
+public extension LocalTitleSummary {
+    /// Default: fall back to the full call (engines that can do better override —
+    /// FoundationModelsTitler answers with a single model turn).
+    func liveTitle(for transcript: String) async throws -> String {
+        try await titleAndSummary(for: transcript).title
+    }
 }
 
 /// The phone-only brain. Stage vocabulary mirrors the door's (`transcribed` is what

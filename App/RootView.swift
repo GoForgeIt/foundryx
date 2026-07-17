@@ -380,6 +380,18 @@ private struct MainTabs: View {
         // iOS 16–25; it's additive + ephemeral (Kiln stays authoritative).
         let status = LocalBrainStatus()
         _brainStatus = StateObject(wrappedValue: status)
+        // ONE on-device titler serves both the post-recording pipeline (LocalBackend)
+        // and the LIVE rolling title's debounced refreshes (track 20260717T1015).
+        let systemTitler = makeSystemTitler()
+        // The live-transcriber factory — or, under the DEBUG `-RollingTitleDemo`
+        // proof harness, a scripted transcriber that replays a known conversation
+        // through the REAL pipeline (title heuristic + arbiter + published title).
+        var liveFactory = LiveTranscription.defaultFactory()
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-RollingTitleDemo") {
+            liveFactory = ScriptedLiveTranscriber.factory()
+        }
+        #endif
         let mgr: CaptureManager
         if local {
             // "Just my phone" (track 20260705T1100): the SAME capture pipeline, but
@@ -390,11 +402,12 @@ private struct MainTabs: View {
             localSTT = stt
             let backend = LocalBackend(baseDir: CaptureWAL.documentsCaptures(),
                                        stt: stt,
-                                       titler: makeSystemTitler())
+                                       titler: systemTitler)
             mgr = CaptureManager(
                 target: target, backend: backend, log: log, source: dm,
                 micSource: MicFrameSource(log: log),
-                liveTranscriber: LiveTranscription.defaultFactory(),
+                liveTranscriber: liveFactory,
+                liveTitler: systemTitler,
                 localMode: true)
         } else {
             localSTT = nil
@@ -403,7 +416,8 @@ private struct MainTabs: View {
                 // The phone's own mic as a second capture source (Record button when the
                 // Omi is disconnected) — flows through the identical Opus/WAL/finalize path.
                 micSource: MicFrameSource(log: log),
-                liveTranscriber: LiveTranscription.defaultFactory())
+                liveTranscriber: liveFactory,
+                liveTitler: systemTitler)
         }
         // Omi hardware button: a DOUBLE-click pauses/resumes the current recording — the
         // same action as the on-screen Pause. Fires only if the paired Omi firmware exposes

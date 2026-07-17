@@ -204,14 +204,26 @@ struct RecordingScreen: View {
 
     // MARK: 3 — recording title (fades in once enough was said)
 
+    /// The rolling live title — manager-owned (track 20260717T1015): derived from
+    /// the WHOLE conversation so far (whole-context salience heuristic + debounced
+    /// on-device model refreshes), stabilized so it doesn't jitter. The frozen DEV
+    /// preview derives one directly from its seeded transcript.
+    private var provisionalTitle: String? {
+        if let preview {
+            return WholeConversationTitle.heuristic(from: preview.transcript.displayText)
+        }
+        return manager.liveTitle
+    }
+
     @ViewBuilder private var recordingTitle: some View {
-        let title = ProvisionalLiveTitle.title(from: liveT.finalizedText)
+        let title = provisionalTitle
         VStack(alignment: .leading, spacing: 3) {
             if let title {
                 Text(title)
                     .font(GrainFont.sans(15, weight: .semibold))
                     .foregroundStyle(GrainColor.ink)
                     .lineLimit(2)
+                    .accessibilityIdentifier("recording-title")
                 Text("Title updates as you speak.")
                     .font(GrainFont.sans(9))
                     .foregroundStyle(GrainColor.textMuted)

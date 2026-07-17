@@ -1051,9 +1051,10 @@ struct CaptureScreen: View {
                                             font: GrainFont.sans(28, weight: .semibold),
                                             color: GrainColor.ink)
                     }
-                    // The provisional name, from what has actually been said — appears only
-                    // once enough was said and never rewrites itself (no layout jump).
-                    if let title = ProvisionalLiveTitle.title(from: heroLiveTranscript.finalizedText) {
+                    // The provisional name — the manager's ROLLING title, derived from the
+                    // WHOLE conversation so far (track 20260717T1015) and stabilized by the
+                    // arbiter, so it appears once enough was said and never jitters.
+                    if let title = heroProvisionalTitle {
                         Text(title)
                             .grainTextStyle(.body).foregroundStyle(GrainColor.ink).lineLimit(1)
                     }
@@ -1101,6 +1102,19 @@ struct CaptureScreen: View {
         }
         #endif
         return manager.recordingClock
+    }
+
+    /// The hero tile's provisional name — the manager's ROLLING title (the same
+    /// whole-conversation source the recording screen reads; fixed at the source,
+    /// track 20260717T1015). The DEBUG screenshot path derives one from its seeded
+    /// transcript.
+    private var heroProvisionalTitle: String? {
+        #if DEBUG
+        if capturePreviewRecording {
+            return WholeConversationTitle.heuristic(from: heroLiveTranscript.displayText)
+        }
+        #endif
+        return manager.liveTitle
     }
 
     /// The live transcript the hero tile renders — the manager's, or a seeded preview one

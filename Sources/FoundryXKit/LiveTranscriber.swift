@@ -30,11 +30,19 @@ public struct LiveTranscript: Sendable, Equatable {
     public var volatileTail: String
     /// The session has finished (conversation closed).
     public var isComplete: Bool
+    /// The WHOLE conversation to this point, bounded head+tail (see
+    /// `RollingTitleContext`) — the source the rolling live TITLE derives from
+    /// (track 20260717T1015). `finalizedText` is a display tail (last ~80 words);
+    /// this keeps the conversation's head too. Titling-only: never rendered
+    /// word-by-word (that path stays bounded by `renderedSegments(maxWords:)`).
+    public var titleContext: String
 
-    public init(finalizedText: String = "", volatileTail: String = "", isComplete: Bool = false) {
+    public init(finalizedText: String = "", volatileTail: String = "", isComplete: Bool = false,
+                titleContext: String = "") {
         self.finalizedText = finalizedText
         self.volatileTail = volatileTail
         self.isComplete = isComplete
+        self.titleContext = titleContext
     }
 
     public static let empty = LiveTranscript()
@@ -262,6 +270,9 @@ public final class SpeechAnalyzerLiveTranscriber: LiveTranscribing, @unchecked S
 
     // Accumulated display state, mutated only on the results task.
     private var finalizedText = ""
+    // The whole-conversation titling context (bounded head+tail) — accumulated
+    // alongside the bounded display tail, mutated only on the results task.
+    private var titleCtx = RollingTitleContext()
 
     public init(locale: Locale = .current,
                 vocabulary: @escaping LiveVocabularyProvider = LiveVocabulary.seedProvider()) {
@@ -317,11 +328,17 @@ public final class SpeechAnalyzerLiveTranscriber: LiveTranscribing, @unchecked S
                         // the build-89/90 stack overflow.
                         self.finalizedText = LiveTranscriptBuffer.boundedTail(
                             self.appendSentence(self.finalizedText, piece))
+                        // The titling context keeps the conversation's HEAD as well as the
+                        // tail (bounded, see RollingTitleContext) — the rolling title reads
+                        // the whole conversation, not the display tail.
+                        self.titleCtx.ingest(final: piece)
                         self.publish.yield(LiveTranscript(finalizedText: self.finalizedText,
-                                                          volatileTail: ""))
+                                                          volatileTail: "",
+                                                          titleContext: self.titleCtx.text))
                     } else {
                         self.publish.yield(LiveTranscript(finalizedText: self.finalizedText,
-                                                          volatileTail: piece))
+                                                          volatileTail: piece,
+                                                          titleContext: self.titleCtx.text))
                     }
                 }
             } catch {
@@ -353,7 +370,8 @@ public final class SpeechAnalyzerLiveTranscriber: LiveTranscribing, @unchecked S
         try? await analyzer?.finalizeAndFinishThroughEndOfInput()
         resultsTask?.cancel()
         let text = finalizedText
-        publish.yield(LiveTranscript(finalizedText: text, volatileTail: "", isComplete: true))
+        publish.yield(LiveTranscript(finalizedText: text, volatileTail: "", isComplete: true,
+                                     titleContext: titleCtx.text))
         publish.finish()
         return text
     }
@@ -402,6 +420,8 @@ public final class SFSpeechLiveTranscriber: LiveTranscribing, @unchecked Sendabl
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var finalizedText = ""
+    // Whole-conversation titling context (bounded head+tail; see RollingTitleContext).
+    private var titleCtx = RollingTitleContext()
 
     public init(locale: Locale = .current,
                 vocabulary: @escaping LiveVocabularyProvider = LiveVocabulary.seedProvider()) {
@@ -437,11 +457,17 @@ public final class SFSpeechLiveTranscriber: LiveTranscribing, @unchecked Sendabl
             let text = LiveTranscriptBuffer.boundedTail(result.bestTranscription.formattedString)
             if result.isFinal {
                 self.finalizedText = text
-                self.publish.yield(LiveTranscript(finalizedText: text, volatileTail: ""))
+                // The titling context keeps the head too: feed it the UNBOUNDED revision
+                // (RollingTitleContext bounds head+tail itself) — the rolling title reads
+                // the whole conversation, not the display tail.
+                self.titleCtx.replaceAll(result.bestTranscription.formattedString)
+                self.publish.yield(LiveTranscript(finalizedText: text, volatileTail: "",
+                                                  titleContext: self.titleCtx.text))
             } else {
                 // SFSpeech revises the WHOLE utterance each partial; render it as the
                 // volatile tail so it visibly self-corrects (the "guess then fix" feel).
-                self.publish.yield(LiveTranscript(finalizedText: self.finalizedText, volatileTail: text))
+                self.publish.yield(LiveTranscript(finalizedText: self.finalizedText, volatileTail: text,
+                                                  titleContext: self.titleCtx.text))
             }
         }
     }
@@ -454,7 +480,8 @@ public final class SFSpeechLiveTranscriber: LiveTranscribing, @unchecked Sendabl
         request?.endAudio()
         task?.finish()
         let text = finalizedText
-        publish.yield(LiveTranscript(finalizedText: text, volatileTail: "", isComplete: true))
+        publish.yield(LiveTranscript(finalizedText: text, volatileTail: "", isComplete: true,
+                                     titleContext: titleCtx.text))
         publish.finish()
         return text
     }

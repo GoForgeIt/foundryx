@@ -22,6 +22,19 @@ Feature: The recording instrument
     Then a provisional title appears from the spoken words
     And it updates in place rather than jumping the layout
 
+  # The rolling title reads the WHOLE conversation so far — not the last few
+  # seconds (track 20260717T1015). A long conversation's name reflects where it
+  # started AND where it went; a settled name never jitters on small wording
+  # changes; and the saved conversation's real title still comes from the full
+  # post-recording pipeline afterwards.
+  Scenario: the name reflects the whole conversation, not the last words
+    Given I am recording and the conversation has moved through several topics
+    When the conversation grows well past its opening words
+    Then the provisional title reflects the whole conversation so far
+    And a settled title does not rewrite itself for minor wording changes
+    And a smarter on-device title, when one arrives, replaces the rough one
+    And the saved conversation's final title still comes from the full pipeline
+
   Scenario: recording survives leaving the tab
     Given I am recording on the capture page
     When I switch to the chat tab

@@ -460,6 +460,14 @@ public final class CaptureManager: ObservableObject {
     /// Kiln). Stays `.empty` when live transcription is unavailable (older OS / no
     /// model / no factory wired), so the UI simply shows nothing extra.
     @Published public private(set) var liveTranscript: LiveTranscript = .empty
+    /// The ROLLING live title — derived from the WHOLE conversation to this point
+    /// (track 20260717T1015): a cheap whole-context salience heuristic on new
+    /// finalized words, upgraded on a debounced cadence by the on-device titler
+    /// where one is wired. Stabilized by `LiveTitleArbiter` (a settled name only
+    /// changes when meaningfully different). The ONE title both the recording
+    /// screen and the capture hero tile render. Ephemeral — the post-recording
+    /// pipeline's title stays authoritative.
+    @Published public private(set) var liveTitle: String?
     /// True while the retry/drain loop is actively trying to move local work toward
     /// the desktop (segment upload, finalize retry, or delete retry). The sync banner
     /// uses this instead of equating "unsynced bytes exist" with "a drain is in flight".
@@ -823,6 +831,22 @@ public final class CaptureManager: ObservableObject {
     private let liveBox = CurrentLiveTranscriber()
     #endif
 
+    // MARK: rolling live title (track 20260717T1015) — whole-conversation, debounced
+    /// The optional on-device titler for LIVE refreshes (nil ⇒ heuristic-only).
+    private let liveTitler: LocalTitleSummary?
+    /// The refresh cadence (injected so tests collapse the debounce).
+    private let liveTitleCadence: LiveTitleCadence
+    /// The settled title + its tier (heuristic vs model) behind `liveTitle`.
+    private var liveTitleState: LiveTitleState?
+    private var titleWordsAtLastHeuristic = 0
+    private var titleWordsAtLastModel = 0
+    private var lastModelTitleAt: Date?
+    private var modelTitleInFlight = false
+    private var modelTitleFailures = 0
+    /// Consecutive live-titler failures tolerated before the session goes
+    /// heuristic-only (on-device turns have hung in the wild).
+    private static let maxModelTitleFailures = 2
+
     /// Test seam: override the per-segment door upload for every WAL this manager
     /// builds (so the bounded-retry / backoff / abandon / re-auth paths are exercised
     /// deterministically without a live door). nil ⇒ the real door POST.
@@ -839,10 +863,14 @@ public final class CaptureManager: ObservableObject {
                 fetchSegments: (@Sendable (String) async throws -> [UInt64]?)? = nil,
                 locationProvider: ConversationLocationProviding? = nil,
                 liveTranscriber: LiveTranscriberFactory? = nil,
+                liveTitler: LocalTitleSummary? = nil,
+                liveTitleCadence: LiveTitleCadence = .default,
                 uploadSegment: (@Sendable (String, UInt64, Data) async throws -> Void)? = nil) {
         self.target = target
         self.uploadSegment = uploadSegment
         self.makeLiveTranscriber = liveTranscriber
+        self.liveTitler = liveTitler
+        self.liveTitleCadence = liveTitleCadence
         self.baseDir = baseDir ?? CaptureWAL.documentsCaptures()
         self.log = log
         self.source = source
@@ -2423,6 +2451,7 @@ public final class CaptureManager: ObservableObject {
     private func startLiveTranscription() {
         guard let make = makeLiveTranscriber, let t = make() else { return }
         liveTranscript = .empty
+        resetLiveTitle()
         liveTranscriber = t
         #if canImport(AVFoundation)
         liveBox.set(t)
@@ -2431,6 +2460,7 @@ public final class CaptureManager: ObservableObject {
             for await snap in t.transcript {
                 guard !Task.isCancelled else { break }
                 self?.liveTranscript = snap
+                self?.updateLiveTitle(with: snap)
             }
         }
         liveTranscriptTask = pump
@@ -2461,12 +2491,92 @@ public final class CaptureManager: ObservableObject {
         liveTranscriptTask?.cancel()
         liveTranscriptTask = nil
         liveTranscript = .empty
+        // Remember the session's settled live title BEFORE clearing: it seeds the
+        // provisional card (better than first-words-of-tail) until the authoritative
+        // pipeline title lands. Then clear the published title with the preview.
+        let sessionTitle = liveTitleState?.text
+        resetLiveTitle()
         if let t {
             Task { @MainActor [weak self] in
                 let settled = await t.finish()
-                if let captureId, !settled.isEmpty { self?.seedProvisionalCard(captureId, transcript: settled) }
+                if let captureId, !settled.isEmpty {
+                    self?.seedProvisionalCard(captureId, transcript: settled,
+                                              preferredTitle: sessionTitle)
+                }
             }
         }
+    }
+
+    /// Clear all rolling-title state (session begin/end).
+    private func resetLiveTitle() {
+        liveTitle = nil
+        liveTitleState = nil
+        titleWordsAtLastHeuristic = 0
+        titleWordsAtLastModel = 0
+        lastModelTitleAt = nil
+        modelTitleInFlight = false
+        modelTitleFailures = 0
+    }
+
+    /// Recompute the rolling title from the WHOLE conversation context. Runs only on
+    /// FINALIZED snapshots (finals land every few seconds — never per volatile word)
+    /// and only after enough NEW words, so the render path stays untouched between
+    /// meaningful changes. The heuristic is a single scan of the bounded context
+    /// (≤ ~5 KB); the model refresh is debounced + async (never on the main thread).
+    private func updateLiveTitle(with snap: LiveTranscript) {
+        guard snap.volatileTail.isEmpty, !snap.titleContext.isEmpty else { return }
+        let words = snap.titleContext.split(separator: " ").count
+        if liveTitleState == nil
+            || words - titleWordsAtLastHeuristic >= liveTitleCadence.heuristicMinNewWords {
+            titleWordsAtLastHeuristic = words
+            if let t = WholeConversationTitle.heuristic(from: snap.titleContext) {
+                applyTitleCandidate(t, tier: .heuristic)
+            }
+        }
+        maybeRefreshModelTitle(context: snap.titleContext, words: words)
+    }
+
+    /// A debounced on-device model refresh of the live title: at most one in flight,
+    /// ≥ `modelRefreshSeconds` apart, ≥ `modelMinNewWords` of new speech, disabled
+    /// for the session after repeated failures, skipped while paused.
+    private func maybeRefreshModelTitle(context: String, words: Int) {
+        // `isAvailable` re-checked per refresh: phones without Apple Intelligence
+        // (and the availability flipping mid-session) stay honestly heuristic-only.
+        guard let titler = liveTitler, titler.isAvailable, !modelTitleInFlight,
+              modelTitleFailures < Self.maxModelTitleFailures, !isPaused else { return }
+        guard words >= liveTitleCadence.modelMinWords,
+              words - titleWordsAtLastModel >= liveTitleCadence.modelMinNewWords else { return }
+        if let last = lastModelTitleAt,
+           Date().timeIntervalSince(last) < liveTitleCadence.modelRefreshSeconds { return }
+        modelTitleInFlight = true
+        // The session identity at launch: a conversation ROLL (split / silence gap)
+        // swaps the transcriber, and a stale completion must neither title the NEXT
+        // conversation nor disturb its fresh cadence counters.
+        let session = liveTranscriber
+        Task { @MainActor [weak self] in
+            do {
+                let title = try await titler.liveTitle(for: context)
+                guard let self, self.liveTranscriber === session else { return }
+                self.modelTitleInFlight = false
+                self.lastModelTitleAt = Date()
+                self.titleWordsAtLastModel = words
+                self.applyTitleCandidate(title, tier: .model)
+            } catch {
+                guard let self, self.liveTranscriber === session else { return }
+                self.modelTitleInFlight = false
+                self.lastModelTitleAt = Date()
+                self.modelTitleFailures += 1
+                self.log?.warn("live title refresh failed (\(self.modelTitleFailures)): \((error as NSError).localizedDescription)")
+            }
+        }
+    }
+
+    /// Route a candidate through the anti-flicker arbiter; publish only real changes.
+    private func applyTitleCandidate(_ text: String, tier: LiveTitleState.Tier) {
+        let merged = LiveTitleArbiter.merged(current: liveTitleState, candidateText: text, tier: tier)
+        guard merged != liveTitleState else { return }
+        liveTitleState = merged
+        liveTitle = merged?.text
     }
 
     /// Persist the on-device transcript as the capture's PROVISIONAL card content + a
@@ -2474,8 +2584,13 @@ public final class CaptureManager: ObservableObject {
     /// card shows it immediately. Never downgrades a card that already has authoritative
     /// Kiln content. Does NOT stamp the in-Lore/cached-transcript tombstone — provisional
     /// content must not read as "Ready".
-    private func seedProvisionalCard(_ captureId: String, transcript: String) {
-        let title = ProvisionalTitle.from(transcript: transcript)
+    private func seedProvisionalCard(_ captureId: String, transcript: String,
+                                     preferredTitle: String? = nil) {
+        // Prefer the session's settled ROLLING title (whole-conversation, possibly
+        // model-tier) over first-words-of-transcript; the authoritative pipeline
+        // title still replaces either when it lands.
+        let preferred = preferredTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = (preferred?.isEmpty == false) ? preferred! : ProvisionalTitle.from(transcript: transcript)
         let changed = ConversationCardStore.seedProvisional(
             captureId: captureId, baseDir: baseDir, transcript: transcript, title: title)
         if changed {
@@ -2575,7 +2690,8 @@ public final class CaptureManager: ObservableObject {
         // on-device transcript as PROVISIONAL content so the card shows readable text the
         // INSTANT it's stopped — resilient to slow/failed Kiln transcription (Feature 1).
         let finishedId = finished.captureId
-        seedProvisionalCard(finishedId, transcript: onDeviceNow)
+        seedProvisionalCard(finishedId, transcript: onDeviceNow,
+                            preferredTitle: liveTitleState?.text)
         endLiveTranscription(seedInto: finishedId)   // stop + (async) refine the seed
         router.setExternalPCM(false)                 // clear the mic's direct-PCM tap mode
         finished.finish()
