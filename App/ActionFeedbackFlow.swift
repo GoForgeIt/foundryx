@@ -123,6 +123,9 @@ import Grain
         case .rejected: AmbientCardBroker.rejected(seed: utterance)
         case .refined: AmbientCardBroker.refined(seed: utterance)
         }
+        // CONTENT-FREE usage: ship ONLY the feedback KIND token. The utterance + the
+        // free-text comment stay on-phone (they must NEVER leave the device).
+        UsageHook.action(kind.rawValue)
         onChanged()
     }
 }
