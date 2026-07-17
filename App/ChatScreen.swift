@@ -17,11 +17,13 @@ struct ChatScreen: View {
     @ObservedObject var log: DoorLog
 
     @State private var input = ""
-    /// The pending Actions-face prefill: which conversation it seeded and the
+    /// The pending Actions-face prefill: which conversation it seeded, the
     /// outcome-log seed to record as a `run` when (and only when) the user
-    /// actually sends that turn IN that conversation. Nil runSeed rows
-    /// (answer/user actions) never set this — they must not log a `run`.
-    @State private var prefillRun: (chatId: String, seed: String)?
+    /// actually sends that turn IN that conversation, and the link keys for
+    /// the action↔chat association (EXT2). Nil runSeed rows (answer/user
+    /// actions) never log a `run` and never link.
+    @State private var prefillRun: (chatId: String, runSeed: String,
+                                    captureId: String?, utterance: String?)?
     @State private var sessionId = ""
     @State private var streaming = false
     @State private var showingChats = false
@@ -71,7 +73,7 @@ struct ChatScreen: View {
         .grainBackground()
         .onAppear {
             hydrateActive(); Task { await loadModels() }
-            consumeAmbientSeed(); consumeAmbientPrefill()
+            consumeAmbientSeed(); consumeAmbientPrefill(); consumeOpenChat()
             // A completed tool-using turn is an agent run — remember it in the
             // activity ledger (features/ambient-answer-loop.feature).
             model.onRunCompleted = { activities in
@@ -102,6 +104,8 @@ struct ChatScreen: View {
         .onReceive(AmbientCardBroker.shared.$pendingSeed) { _ in consumeAmbientSeed() }
         // An Actions-face "Act on it in chat" — prefills the composer, no auto-send.
         .onReceive(AmbientCardBroker.shared.$pendingPrefill) { _ in consumeAmbientPrefill() }
+        // An already-acted action's "Continue in chat →" (EXT2).
+        .onReceive(AmbientCardBroker.shared.$pendingOpenChatId) { _ in consumeOpenChat() }
         .sheet(isPresented: $showingChats) {
             ChatListSheet(store: store) { showingChats = false }
         }
@@ -128,7 +132,13 @@ struct ChatScreen: View {
     private func consumeAmbientSeed() {
         guard !streaming, let seed = AmbientCardBroker.shared.pendingSeed else { return }
         AmbientCardBroker.shared.pendingSeed = nil
-        let convo = store.newConversation()
+        // An accepted card's chat is conversation-born (EXT3): action origin,
+        // with the source capture + its category when the call site knew it.
+        let captureId = AmbientCardBroker.shared.pendingSeedCaptureId
+        AmbientCardBroker.shared.pendingSeedCaptureId = nil
+        let convo = store.newConversation(origin: .action(
+            captureId: captureId,
+            category: captureId.flatMap { ActionFeedbackFlow.categoryName(for: $0) }))
         store.select(convo.id)
         hydrateActive()
         input = seed
@@ -136,18 +146,32 @@ struct ChatScreen: View {
     }
 
     /// Pre-fill the composer with an Actions-face seed WITHOUT sending — the
-    /// user acts on it conversationally (edit, then send). The `run` outcome is
-    /// logged only when the seeded turn actually goes out (see `send()`).
+    /// user acts on it conversationally (edit, then send). The `run` outcome +
+    /// action↔chat link land only when the seeded turn actually goes out (see
+    /// `send()`). The minted conversation carries its provenance (EXT3).
     private func consumeAmbientPrefill() {
         guard !streaming, let seed = AmbientCardBroker.shared.pendingPrefill else { return }
         AmbientCardBroker.shared.pendingPrefill = nil
-        let runSeed = AmbientCardBroker.shared.pendingPrefillRunSeed
-        AmbientCardBroker.shared.pendingPrefillRunSeed = nil
-        let convo = store.newConversation()
+        let ctx = AmbientCardBroker.shared.pendingPrefillContext
+        AmbientCardBroker.shared.pendingPrefillContext = nil
+        let convo = store.newConversation(origin: .action(
+            captureId: ctx?.captureId, actionKey: ctx?.utterance,
+            category: ctx?.category))
         store.select(convo.id)
         hydrateActive()
         input = seed
-        prefillRun = runSeed.map { (chatId: convo.id, seed: $0) }
+        prefillRun = ctx?.runSeed.map {
+            (chatId: convo.id, runSeed: $0,
+             captureId: ctx?.captureId, utterance: ctx?.utterance)
+        }
+    }
+
+    /// EXT2 — "Continue in chat →" on an already-acted action: select ITS chat.
+    private func consumeOpenChat() {
+        guard let id = AmbientCardBroker.shared.pendingOpenChatId else { return }
+        AmbientCardBroker.shared.pendingOpenChatId = nil
+        store.select(id)
+        hydrateActive()
     }
 
     // MARK: header — chats drawer · model picker · new chat
@@ -197,9 +221,17 @@ struct ChatScreen: View {
         // it's actually SENT (not when it was merely prefilled) — logged with
         // the utterance seed so the join resolves even after edits, and ONLY
         // when the send happens in the conversation the prefill seeded (a send
-        // in another chat is not acting on the action).
+        // in another chat is not acting on the action). The same moment writes
+        // the durable action↔chat link (EXT2) so the action leads back here.
         if let run = prefillRun {
-            if run.chatId == active.id { AmbientCardBroker.prefillSent(seed: run.seed) }
+            if run.chatId == active.id {
+                AmbientCardBroker.prefillSent(seed: run.runSeed)
+                if let captureId = run.captureId, let utterance = run.utterance {
+                    ActionChatLinkStore.link(captureId: captureId, utterance: utterance,
+                                             chatId: run.chatId,
+                                             baseDir: CaptureWAL.documentsCaptures())
+                }
+            }
             prefillRun = nil
         }
         let text = input; input = ""; streaming = true
@@ -282,38 +314,41 @@ private struct ChatListSheet: View {
     @ObservedObject var store: ChatConversationStore
     var onDismiss: () -> Void
 
+    /// EXT3 — provenance + category pills (the capture list's chip idiom) and,
+    /// under "From conversations", grouping by source conversation. All the
+    /// filter/group logic is ChatListOrganizer (kit, tested); this renders it.
+    @State private var provenance: ChatListOrganizer.Provenance = .all
+    @State private var categoryFilter: String?
+
+    private var filtered: [ChatConversationStore.Conversation] {
+        ChatListOrganizer.filter(store.conversations,
+                                 provenance: provenance, category: categoryFilter)
+    }
+
     var body: some View {
         NavigationStack {
             List {
-                ForEach(store.conversations) { convo in
-                    Button {
-                        store.select(convo.id)
-                        onDismiss()
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-                                Text(convo.title.isEmpty ? "New chat" : convo.title)
-                                    .grainTextStyle(.body)
-                                    .foregroundStyle(GrainColor.ink)
-                                    .lineLimit(1)
-                                Text(Self.subtitle(convo))
-                                    .grainTextStyle(.caption)
-                                    .foregroundStyle(GrainColor.textFaint)
-                                    .lineLimit(1)
-                            }
-                            Spacer()
-                            if convo.id == store.activeId {
-                                Image(systemName: "checkmark").foregroundStyle(GrainColor.sage)
-                            }
+                if provenance == .fromConversations {
+                    ForEach(Array(ChatListOrganizer.groupedBySource(filtered).enumerated()),
+                            id: \.offset) { _, group in
+                        Section {
+                            ForEach(group.conversations) { convo in chatRow(convo) }
+                                .onDelete { idx in
+                                    delete(idx.map { group.conversations[$0].id })
+                                }
+                        } header: {
+                            Text(Self.sourceHeader(group.captureId))
+                                .grainTextStyle(.caption)
+                                .foregroundStyle(GrainColor.textFaint)
                         }
                     }
-                    .accessibilityIdentifier("chat-row")
-                }
-                .onDelete { idx in
-                    idx.map { store.conversations[$0].id }.forEach { store.delete($0) }
+                } else {
+                    ForEach(filtered) { convo in chatRow(convo) }
+                        .onDelete { idx in delete(idx.map { filtered[$0].id }) }
                 }
             }
             .navigationTitle("Chats")
+            .safeAreaInset(edge: .top) { filterBar }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("New") { store.newConversation(); onDismiss() }
@@ -323,6 +358,104 @@ private struct ChatListSheet: View {
                 }
             }
         }
+    }
+
+    // MARK: rows
+
+    private func chatRow(_ convo: ChatConversationStore.Conversation) -> some View {
+        Button {
+            store.select(convo.id)
+            onDismiss()
+        } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                    Text(convo.title.isEmpty ? "New chat" : convo.title)
+                        .grainTextStyle(.body)
+                        .foregroundStyle(GrainColor.ink)
+                        .lineLimit(1)
+                    HStack(spacing: GrainSpacing.x1) {
+                        if convo.isFromConversation {
+                            Text("From a conversation" +
+                                 (convo.origin?.category.map { " · \($0)" } ?? ""))
+                                .grainTextStyle(.caption)
+                                .foregroundStyle(GrainColor.forgeBlue)
+                        }
+                        Text(Self.subtitle(convo))
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(GrainColor.textFaint)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer()
+                if convo.id == store.activeId {
+                    Image(systemName: "checkmark").foregroundStyle(GrainColor.sage)
+                }
+            }
+        }
+        .accessibilityIdentifier("chat-row")
+    }
+
+    private func delete(_ ids: [String]) {
+        for id in ids {
+            store.delete(id)
+            // A deleted chat must never be routed back to (EXT2 honesty).
+            ActionChatLinkStore.removeLinks(toChatId: id,
+                                            baseDir: CaptureWAL.documentsCaptures())
+        }
+    }
+
+    // MARK: filter pills
+
+    /// Provenance pills always; category pills only when any chat carries one.
+    private var filterBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: GrainSpacing.x2) {
+                ForEach(ChatListOrganizer.Provenance.allCases, id: \.self) { p in
+                    pill(p.rawValue, selected: provenance == p) {
+                        provenance = p
+                    }
+                }
+                let categories = ChatListOrganizer.categories(of: store.conversations)
+                if !categories.isEmpty {
+                    Rectangle().fill(GrainColor.borderHairline)
+                        .frame(width: 1, height: 16)
+                    ForEach(categories, id: \.self) { name in
+                        pill(name, selected: categoryFilter == name) {
+                            categoryFilter = categoryFilter == name ? nil : name
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, GrainSpacing.x4)
+            .padding(.vertical, GrainSpacing.x2)
+        }
+        .background(.bar)
+        .accessibilityIdentifier("chat-filter-bar")
+    }
+
+    private func pill(_ label: String, selected: Bool,
+                      action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .grainTextStyle(.caption)
+                .foregroundStyle(selected ? GrainColor.surface : GrainColor.textMuted)
+                .padding(.horizontal, GrainSpacing.x3)
+                .padding(.vertical, GrainSpacing.x1)
+                .background(Capsule().fill(selected ? GrainColor.forgeBlue : GrainColor.surfaceElevated))
+                .overlay(Capsule().strokeBorder(GrainColor.border, lineWidth: selected ? 0 : 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("chat-filter-\(label)")
+    }
+
+    /// The section header for a source group: the conversation's title when the
+    /// card store still has it; chats whose source is unknown (accepted cards
+    /// mid-recording) share one honest header.
+    private static func sourceHeader(_ captureId: String?) -> String {
+        guard let captureId else { return "From a conversation" }
+        let title = ConversationCardStore.load(
+            captureId: captureId, baseDir: CaptureWAL.documentsCaptures())?.title
+        return title?.isEmpty == false ? title! : "A conversation"
     }
 
     private static func subtitle(_ convo: ChatConversationStore.Conversation) -> String {

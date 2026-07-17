@@ -553,48 +553,13 @@ struct ConversationFacesView: View {
 
     // MARK: action options (track 20260715T1500 addendum)
 
-    /// The options sheet for a tapped action row: act on it in chat (composer
-    /// prefill), refine (note the spotter learns from), not-an-action (reject,
-    /// optional comment). Reject/refine exist only for rows the SPOTTER
-    /// surfaced — they are its labeled training signal.
+    /// The options sheet for a tapped action row — built by the SHARED
+    /// ActionFeedbackFlow (EXT1: one component across every action surface):
+    /// continue-in-chat (linked), act-in-chat (prefill), refine, not-an-action.
     private func actionOptionsSheet(_ row: ConversationActionsPresentation.Row) -> some View {
-        // Act-in-chat exists only where a composer actually exists to prefill:
-        // the computer tier always has one; the phone tier hides its composer
-        // behind the Apple Intelligence gate — offering the option there would
-        // strand the user on the upgrade prompt with an invisible seed.
-        let chatCanCompose = !local || makeSystemChatModel() != nil
-        return ActionOptionsSheet(
-            row: row,
-            onAct: (chatCanCompose ? row.seed : nil).map { seed in
-                { AmbientCardBroker.shared.prefillChat(seed: seed, runSeed: row.runSeed) }
-            },
-            onReject: row.utterance.map { utterance in
-                { comment in recordFeedback(.rejected, row: row,
-                                            utterance: utterance, comment: comment) }
-            },
-            onRefine: row.utterance.map { utterance in
-                { comment in recordFeedback(.refined, row: row,
-                                            utterance: utterance, comment: comment) }
-            })
-    }
-
-    /// Persist one piece of action feedback: the full record (utterance +
-    /// comment) into the on-phone `action-feedback.jsonl` the spotter's
-    /// training loop reads, and the outcome WORD into `ambient-cards.jsonl` so
-    /// the row's state resolves and the label ships over the redacted
-    /// ambient-signal channel (comments never leave the phone).
-    private func recordFeedback(_ kind: ActionFeedbackRecord.Kind,
-                                row: ConversationActionsPresentation.Row,
-                                utterance: String, comment: String) {
-        ActionFeedbackStore.append(
-            ActionFeedbackRecord(captureId: captureId, utterance: utterance,
-                                 summary: row.label, kind: kind, comment: comment),
-            baseDir: CaptureWAL.documentsCaptures())
-        switch kind {
-        case .rejected: AmbientCardBroker.rejected(seed: utterance)
-        case .refined: AmbientCardBroker.refined(seed: utterance)
+        ActionFeedbackFlow.sheet(row: row, captureId: captureId, local: local) {
+            loadFaceData()
         }
-        loadFaceData()
     }
 
     /// The Actions-face icon keys on the action's TYPE (`row.kind`), not its state:
@@ -630,23 +595,15 @@ struct ConversationFacesView: View {
     }
 
     /// Build both presentation faces for THIS conversation from the intelligence
-    /// lane's logs + the per-capture user-action store. Read-only joins over the
-    /// REAL builders the brine step-defs assert on.
+    /// lane's logs + the per-capture user-action store, via the SHARED
+    /// ActionFeedbackFlow builder (one join across all surfaces). Read-only.
     private func loadFaceData() {
         let decisionLog = AmbientPrefs.decisionLogURL()
-        let decisions = AmbientLane.readDecisions(at: decisionLog)
-        let outcomes = ConversationActions.readOutcomes(
-            at: ActivityStore.cardsLogURL(besides: decisionLog))
         let answers = ConversationAnswerLog.answers(
             at: ActivityStore.answersLogURL(besides: decisionLog), captureId: captureId)
-        let userActions = UserActionStore.load(
-            captureId: captureId, baseDir: CaptureWAL.documentsCaptures())
-        let feedback = ActionFeedbackStore.load(
-            captureId: captureId, baseDir: CaptureWAL.documentsCaptures())
         linkedAnswer = answers.first
-        actions = ConversationActionsPresentation.build(
-            captureId: captureId, decisions: decisions, outcomes: outcomes,
-            answers: answers, userActions: userActions, feedback: feedback)
+        actions = ConversationActionsPresentation(
+            rows: ActionFeedbackFlow.rows(captureId: captureId))
     }
 
     // MARK: - Transcript face

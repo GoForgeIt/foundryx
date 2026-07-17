@@ -71,8 +71,8 @@ struct LocalChatScreen: View {
         // act-in-chat on this tier; this is defense in depth).
         guard engine != nil, let seed = AmbientCardBroker.shared.pendingPrefill else { return }
         AmbientCardBroker.shared.pendingPrefill = nil
-        prefillSeed = AmbientCardBroker.shared.pendingPrefillRunSeed
-        AmbientCardBroker.shared.pendingPrefillRunSeed = nil
+        prefillSeed = AmbientCardBroker.shared.pendingPrefillContext?.runSeed
+        AmbientCardBroker.shared.pendingPrefillContext = nil
         input = seed
     }
 

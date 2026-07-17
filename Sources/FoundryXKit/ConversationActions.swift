@@ -97,6 +97,13 @@ public enum ConversationActions {
     /// The card-outcome log's filename (lives next to the capture WAL files).
     public static let outcomeLogFilename = "ambient-cards.jsonl"
 
+    /// THE one utterance truncation every join in the pipeline shares — the
+    /// outcome join here, the chat-link key, and the chat-origin action key.
+    /// (Seeds are clipped to 300 in the log; 200 always fits inside.)
+    public static func utteranceKey(_ utterance: String) -> String {
+        String(utterance.prefix(200))
+    }
+
     /// The action cards for ONE conversation: its candidate decisions (deduped —
     /// the same moment re-surfaced across growing windows folds into one card,
     /// keeping its first surfacing time), each joined to its latest logged
@@ -131,7 +138,7 @@ public enum ConversationActions {
     ) -> ActionOutcome {
         // Seeds are clipped to 300 chars in the log — clip the key the same way
         // so a long utterance still matches its truncated seed.
-        let key = String(utterance.prefix(200))
+        let key = ConversationActions.utteranceKey(utterance)
         guard let hit = records.last(where: {
             $0.outcome != "refined" && $0.seed.contains(key)
         }) else {

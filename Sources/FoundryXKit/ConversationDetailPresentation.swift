@@ -154,12 +154,16 @@ public struct ConversationActionsPresentation: Equatable, Sendable {
         /// was accepted, and a fabricated `run` would poison the router's
         /// true-positive signal and the Activity ledger.
         public let runSeed: String?
+        /// The chat this action was already acted on in (EXT2) — the options
+        /// sheet then offers "Continue in chat →" instead of a fresh prefill.
+        /// Nil when never acted on (or the linked chat was deleted).
+        public let linkedChatId: String?
         /// True when the item is finished.
         public var done: Bool { state == .completed }
 
         public init(id: String, label: String, meta: String?, kind: Kind, state: State,
                     utterance: String? = nil, note: String? = nil, seed: String? = nil,
-                    runSeed: String? = nil) {
+                    runSeed: String? = nil, linkedChatId: String? = nil) {
             self.id = id
             self.label = label
             self.meta = meta
@@ -169,6 +173,7 @@ public struct ConversationActionsPresentation: Equatable, Sendable {
             self.note = note
             self.seed = seed
             self.runSeed = runSeed
+            self.linkedChatId = linkedChatId
         }
     }
 
@@ -188,7 +193,8 @@ public struct ConversationActionsPresentation: Equatable, Sendable {
                              outcomes: [CardOutcomeRecord],
                              answers: [LinkedConversationAnswer],
                              userActions: [UserConversationAction],
-                             feedback: [ActionFeedbackRecord] = []) -> Self {
+                             feedback: [ActionFeedbackRecord] = [],
+                             chatLinks: [String: String] = [:]) -> Self {
         var rows: [Row] = []
         for card in ConversationActions.cards(
             for: captureId, decisions: decisions, outcomes: outcomes) {
@@ -202,7 +208,8 @@ public struct ConversationActionsPresentation: Equatable, Sendable {
                 note: ActionFeedbackStore.latestRefinement(
                     forUtterance: card.utterance, in: feedback),
                 seed: chatSeed(utterance: card.utterance, summary: card.summary),
-                runSeed: card.utterance))
+                runSeed: card.utterance,
+                linkedChatId: chatLinks[ConversationActions.utteranceKey(card.utterance)]))
         }
         for (i, answer) in answers.enumerated() {
             rows.append(Row(id: "answer-\(i)", label: "Answer found",

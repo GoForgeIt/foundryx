@@ -544,7 +544,8 @@ private struct MainTabs: View {
                 ActivityView(
                     decisionLogURL: AmbientPrefs.decisionLogURL(),
                     recapPool: manager.recapConversationPool(),
-                    onOpenChat: { seed in AmbientCardBroker.shared.run(seed: seed) }
+                    onOpenChat: { seed in AmbientCardBroker.shared.run(seed: seed) },
+                    local: local
                 )
                 .toolbar {
                     NavigationLink("Stats") { StatsView(summary: manager.statsSummary) }
@@ -612,8 +613,18 @@ private struct MainTabs: View {
         .onReceive(AmbientCardBroker.shared.$pendingPrefill) { seed in
             if seed != nil { router.selected = .chat }
         }
+        // An already-acted action's "Continue in chat →" (EXT2).
+        .onReceive(AmbientCardBroker.shared.$pendingOpenChatId) { id in
+            if id != nil { router.selected = .chat }
+        }
         .onAppear {
             syncOmiConnection()
+            // EXT2: let action↔chat links validate against the LIVE chat store
+            // (dead links are pruned at render, never routed to). Weak — the
+            // hook must not outlive a re-mounted tab tree's store.
+            AmbientCardBroker.shared.isChatAlive = { [weak chats] id in
+                chats?.conversation(id) != nil
+            }
             #if DEBUG
             // Screen-proof: land on the Settings tab on launch so it can be screenshot.
             if ProcessInfo.processInfo.arguments.contains("-OpenSettings") { router.selected = .settings }

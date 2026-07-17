@@ -12,6 +12,15 @@ final class ActionsProofUITests: XCTestCase {
         continueAfterFailure = false
     }
 
+    private func waitGone(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if !element.exists { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        }
+        return !element.exists
+    }
+
     private func shoot(_ app: XCUIApplication, _ name: String) {
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = name
@@ -24,7 +33,7 @@ final class ActionsProofUITests: XCTestCase {
         // -RemoteChat mounts the computer-tier chat surface so the composer
         // prefill is visible in the simulator (the phone-tier surface hides its
         // composer behind the Apple Intelligence gate).
-        app.launchArguments = ["-MainPreview", "-RemoteChat"]
+        app.launchArguments = ["-MainPreview", "-RemoteChat", "-FreshActionState"]
         app.launch()
 
         // 1. Open the demo conversation that carries seeded action candidates.
@@ -87,5 +96,87 @@ final class ActionsProofUITests: XCTestCase {
                         || prefilledField.waitForExistence(timeout: 5),
                       "chat composer is prefilled with the action's context")
         shoot(app, "05-chat-prefill")
+    }
+
+    /// EXT1-3 proof: the Activity page opens the same options sheet; a SENT
+    /// act-in-chat turn links the action to its chat ("Continue in chat →"
+    /// routes back); the chat list organizes by provenance with the source
+    /// grouping. Runs on a fresh install (the runner uninstalls first).
+    func testExtensionFlows() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-MainPreview", "-RemoteChat", "-FreshActionState"]
+        app.launch()
+
+        // 1. Activity page — an action entry opens the SAME options sheet.
+        app.buttons["Activity"].firstMatch.tap()
+        let actEntry = app.buttons.matching(
+            NSPredicate(format: "label CONTAINS 'Act on this'")).firstMatch
+        XCTAssertTrue(actEntry.waitForExistence(timeout: 10),
+                      "activity page shows an actionable entry")
+        actEntry.tap()
+        // The Activity page's first load is heavy (on-device recap synthesis)
+        // — give the sheet time.
+        XCTAssertTrue(app.buttons["act-in-chat"].firstMatch.waitForExistence(timeout: 20),
+                      "activity entry opens the shared options sheet")
+        XCTAssertTrue(app.buttons["not-an-action"].firstMatch.exists)
+        shoot(app, "06-activity-options")
+        // Dismiss the sheet by tapping the dimmed area above it.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)).tap()
+        XCTAssertTrue(waitGone(app.buttons["act-in-chat"].firstMatch, timeout: 5),
+                      "options sheet dismisses")
+
+        // 2. Act on an action from the detail face and actually SEND the turn.
+        app.buttons["Capture"].firstMatch.tap()
+        let card = app.staticTexts["Launch deck and relay numbers"].firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 15), "demo conversation card")
+        card.tap()
+        let actionsFace = app.buttons["face-actions"].firstMatch
+        XCTAssertTrue(actionsFace.waitForExistence(timeout: 10))
+        actionsFace.tap()
+        let surfacedRows = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH 'action-row-surfaced'"))
+        if !surfacedRows.firstMatch.waitForExistence(timeout: 4) { actionsFace.tap() }
+        XCTAssertTrue(surfacedRows.firstMatch.waitForExistence(timeout: 10))
+        surfacedRows.element(boundBy: 0).tap()
+        let act = app.buttons["act-in-chat"].firstMatch
+        XCTAssertTrue(act.waitForExistence(timeout: 5))
+        act.tap()
+        let composer = app.textViews.matching(
+            NSPredicate(format: "value CONTAINS 'this came up'")).firstMatch
+        let composerField = app.textFields.matching(
+            NSPredicate(format: "value CONTAINS 'this came up'")).firstMatch
+        XCTAssertTrue(composer.waitForExistence(timeout: 10)
+                        || composerField.waitForExistence(timeout: 5))
+        app.buttons["Send"].firstMatch.tap()   // the send logs run + links the chat
+
+        // 3. Back on the Actions face, the acted action now continues in ITS chat.
+        app.buttons["Capture"].firstMatch.tap()
+        XCTAssertTrue(surfacedRows.firstMatch.waitForExistence(timeout: 10),
+                      "detail face still open on the capture tab")
+        surfacedRows.element(boundBy: 0).tap()
+        let cont = app.buttons["continue-in-chat"].firstMatch
+        XCTAssertTrue(cont.waitForExistence(timeout: 5),
+                      "an acted action offers Continue in chat")
+        XCTAssertFalse(app.buttons["act-in-chat"].firstMatch.exists,
+                       "no fresh-prefill option once linked")
+        shoot(app, "07-continue-in-chat")
+        cont.tap()
+
+        // 4. Continue lands on the chat tab, on the linked conversation.
+        let chatTab = app.buttons["Chat"].firstMatch
+        XCTAssertTrue(app.buttons["open-chats"].firstMatch.waitForExistence(timeout: 10),
+                      "landed on the chat surface")
+        _ = chatTab
+        shoot(app, "08-linked-chat")
+
+        // 5. The chat list organizes by provenance + groups under the source.
+        app.buttons["open-chats"].firstMatch.tap()
+        let fromPill = app.buttons["chat-filter-From conversations"].firstMatch
+        XCTAssertTrue(fromPill.waitForExistence(timeout: 5), "provenance pills render")
+        fromPill.tap()
+        XCTAssertTrue(app.staticTexts["Launch deck and relay numbers"].firstMatch
+            .waitForExistence(timeout: 5),
+            "conversation-born chats group under their source conversation")
+        shoot(app, "09-chat-list-organization")
     }
 }

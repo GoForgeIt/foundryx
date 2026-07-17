@@ -27,7 +27,12 @@ final class AmbientCardBroker: ObservableObject {
     /// Installed by RootView: navigate to the chat tab.
     var onNavigate: (() -> Void)?
 
-    func run(seed: String) {
+    /// The accepted card's source conversation, when the call site knows it —
+    /// the seeded chat's origin then carries the captureId (EXT3).
+    var pendingSeedCaptureId: String?
+
+    func run(seed: String, captureId: String? = nil) {
+        pendingSeedCaptureId = captureId
         pendingSeed = seed
         onNavigate?()
         Self.logOutcome("run", seed: seed)
@@ -38,14 +43,36 @@ final class AmbientCardBroker: ObservableObject {
     /// edits before sending, and the `run` outcome is logged only when the
     /// seeded turn is ACTUALLY sent (`prefillSent`) — never on mere navigation.
     @Published var pendingPrefill: String?
-    /// The outcome-log seed the SENT prefill records as a `run` — nil for rows
-    /// that must never log one (answer/user rows: no nudge was accepted, and a
-    /// fabricated `run` would poison the router signal + Activity ledger).
-    var pendingPrefillRunSeed: String?
 
-    func prefillChat(seed: String, runSeed: String?) {
-        pendingPrefillRunSeed = runSeed
+    /// What the SENT prefill turn should record (EXT2/EXT3): the run outcome
+    /// seed (nil for answer/user rows — they must never log a `run`), the
+    /// action↔chat link keys, and the chat's provenance at creation.
+    struct PrefillContext {
+        /// Log `run` with this seed on actual send — nil ⇒ never log one.
+        let runSeed: String?
+        /// Link + origin keys (the source conversation and the acted utterance).
+        let captureId: String?
+        let utterance: String?
+        /// The source conversation's category NAME at prefill time.
+        let category: String?
+    }
+    var pendingPrefillContext: PrefillContext?
+
+    func prefillChat(seed: String, context: PrefillContext) {
+        pendingPrefillContext = context
         pendingPrefill = seed
+        onNavigate?()
+    }
+
+    /// EXT2 — an action that already has a chat routes BACK to it. ChatScreen
+    /// consumes (selects the conversation); RootView lands on the chat tab.
+    @Published var pendingOpenChatId: String?
+    /// Installed by RootView against the live ChatConversationStore: is this
+    /// chat id still alive? Used to lazily prune dead action↔chat links.
+    var isChatAlive: ((String) -> Bool)?
+
+    func continueChat(id: String) {
+        pendingOpenChatId = id
         onNavigate?()
     }
 

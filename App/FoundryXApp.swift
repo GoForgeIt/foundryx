@@ -13,6 +13,7 @@ struct FoundryXApp: App {
         DemoSeed.installPerfLogIfRequested()  // `-PerfLog`: mirror perf spans to the unified log
         DemoSeed.seedStressIfRequested()      // `-StressSeed <N>`: large-library perf harness
         BenchModel.runIfRequested()           // `-BenchModel`: on-device model latency bench
+        DemoSeed.resetActionStateIfRequested() // `-FreshActionState`: deterministic UI-proof state
         DemoSeed.seedIfRequested()   // `-MainPreview` only: seed demo cards for screen-proof
         #endif
     }

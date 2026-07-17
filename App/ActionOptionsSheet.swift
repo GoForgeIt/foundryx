@@ -19,6 +19,9 @@ import Grain
 
 struct ActionOptionsSheet: View {
     let row: ConversationActionsPresentation.Row
+    /// EXT2 — the action already has a live chat: route back to it. When
+    /// installed, it REPLACES the fresh act-in-chat option.
+    var onContinue: (() -> Void)? = nil
     /// Send the row's seed to chat. Installed only when the row has one.
     let onAct: (() -> Void)?
     /// Reject with an optional comment (surfaced rows only).
@@ -74,11 +77,19 @@ struct ActionOptionsSheet: View {
         VStack(spacing: GrainSpacing.x2) {
             // Nothing offerable (a hand-added action on a phone tier whose chat
             // can't compose) — say so honestly instead of a dead, empty sheet.
-            if onAct == nil && onReject == nil && onRefine == nil {
+            if onContinue == nil && onAct == nil && onReject == nil && onRefine == nil {
                 Text("Nothing to do here yet — chat isn't available on this phone.")
                     .grainTextStyle(.caption)
                     .foregroundStyle(GrainColor.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            if onContinue != nil {
+                GrainButton("Continue in chat →", variant: .filled, size: .regular) {
+                    onContinue?()
+                    dismiss()
+                }
+                .frame(maxWidth: .infinity)
+                .accessibilityIdentifier("continue-in-chat")
             }
             if onAct != nil {
                 GrainButton("Act on it in chat", variant: .filled, size: .regular) {

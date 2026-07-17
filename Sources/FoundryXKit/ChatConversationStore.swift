@@ -28,6 +28,38 @@ public final class ChatConversationStore: ObservableObject {
         }
     }
 
+    /// Where a chat came from (track 20260715T1500 EXT3): tagged at creation so
+    /// the list can be organized by provenance. All fields optional-shaped so
+    /// pre-provenance persisted chats keep decoding (nil ⇒ started by the user).
+    public struct ChatOrigin: Codable, Equatable, Sendable {
+        /// "action" (born from a surfaced action / accepted ambient card) or
+        /// "manual" (the user started it).
+        public let kind: String
+        /// The source conversation, when known.
+        public let captureId: String?
+        /// The action's utterance join key (clipped to 200, like every other
+        /// join in the pipeline).
+        public let actionKey: String?
+        /// The source conversation's category NAME at creation (e.g. Personal).
+        public let category: String?
+
+        public init(kind: String, captureId: String? = nil,
+                    actionKey: String? = nil, category: String? = nil) {
+            self.kind = kind
+            self.captureId = captureId
+            self.actionKey = actionKey
+            self.category = category
+        }
+
+        public static let manual = ChatOrigin(kind: "manual")
+        public static func action(captureId: String? = nil, actionKey: String? = nil,
+                                  category: String? = nil) -> ChatOrigin {
+            ChatOrigin(kind: "action", captureId: captureId,
+                       actionKey: actionKey.map(ConversationActions.utteranceKey),
+                       category: category)
+        }
+    }
+
     /// A single chat thread. `id` is the kiln-session `chat_id`. `modelTargetId` is the
     /// chosen Kiln target (nil ⇒ "Auto (router)").
     public struct Conversation: Identifiable, Codable, Equatable, Sendable {
@@ -37,19 +69,28 @@ public final class ChatConversationStore: ObservableObject {
         public var modelTargetId: String?
         public var createdAt: Date
         public var updatedAt: Date
+        /// Provenance (EXT3). Optional so legacy persisted chats decode; nil
+        /// reads as "started by me".
+        public var origin: ChatOrigin?
+
+        /// True when this chat was born from a conversation's surfaced action
+        /// (or an accepted ambient card) rather than started by hand.
+        public var isFromConversation: Bool { origin?.kind == "action" }
 
         public init(id: String = UUID().uuidString,
                     title: String = "New chat",
                     messages: [StoredMessage] = [],
                     modelTargetId: String? = nil,
                     createdAt: Date = Date(),
-                    updatedAt: Date = Date()) {
+                    updatedAt: Date = Date(),
+                    origin: ChatOrigin? = nil) {
             self.id = id
             self.title = title
             self.messages = messages
             self.modelTargetId = modelTargetId
             self.createdAt = createdAt
             self.updatedAt = updatedAt
+            self.origin = origin
         }
     }
 
@@ -101,10 +142,11 @@ public final class ChatConversationStore: ObservableObject {
     /// Mint a brand-new conversation, make it active, return it. Its id is a fresh UUID —
     /// distinct from every existing conversation AND from the legacy "ios" id (AC1).
     @discardableResult
-    public func newConversation(modelTargetId: String? = nil) -> Conversation {
+    public func newConversation(modelTargetId: String? = nil,
+                                origin: ChatOrigin = .manual) -> Conversation {
         // Inherit the previous active chat's model so a "new chat" keeps the user's pick.
         let inherited = modelTargetId ?? active?.modelTargetId
-        let convo = Conversation(modelTargetId: inherited)
+        let convo = Conversation(modelTargetId: inherited, origin: origin)
         conversations.insert(convo, at: 0)
         activeId = convo.id
         persist()
@@ -158,11 +200,21 @@ public final class ChatConversationStore: ObservableObject {
     /// place the (chat_id, requested_target) contract is assembled.
     public func chatRequest(text: String, for id: String) -> ChatRequest {
         let convo = conversation(id)
+        // Provenance rides the FIRST turn only (session-open semantics, EXT3),
+        // and only for conversation-born chats — absence means manual, so a
+        // hand-started chat ships the same six-field body it always did. The
+        // door's ChatReq is serde-tolerant: old desktops ignore the fields; a
+        // desktop that learns them can tag the kiln session at open.
+        let shipOrigin = (convo?.messages.isEmpty ?? true)
+            && convo?.isFromConversation == true
         return ChatRequest(message: text,
                            platform: platform,
                            chatId: id,
                            org: org,
-                           requestedTarget: convo?.modelTargetId)
+                           requestedTarget: convo?.modelTargetId,
+                           origin: shipOrigin ? convo?.origin?.kind : nil,
+                           originCaptureId: shipOrigin ? convo?.origin?.captureId : nil,
+                           originCategory: shipOrigin ? convo?.origin?.category : nil)
     }
 
     // MARK: - Helpers
@@ -218,6 +270,75 @@ public final class ChatConversationStore: ObservableObject {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         return base.appendingPathComponent("FoundryX/chat-conversations.json")
+    }
+}
+
+// MARK: - List organization (EXT3)
+
+/// Pure provenance/category filtering + source grouping over the chat list —
+/// what ChatListSheet renders. Kit-level so the Brine step-defs drive the real
+/// logic the UI uses.
+public enum ChatListOrganizer {
+    public enum Provenance: String, CaseIterable, Sendable {
+        case all = "All"
+        case fromConversations = "From conversations"
+        case startedByMe = "Started by me"
+    }
+
+    /// Apply the provenance pill + (optional) category pill. A nil category
+    /// means no category filter. Legacy chats (nil origin) read as started-by-me.
+    public static func filter(_ conversations: [ChatConversationStore.Conversation],
+                              provenance: Provenance,
+                              category: String? = nil) -> [ChatConversationStore.Conversation] {
+        conversations.filter { convo in
+            switch provenance {
+            case .all: break
+            case .fromConversations: guard convo.isFromConversation else { return false }
+            case .startedByMe: guard !convo.isFromConversation else { return false }
+            }
+            if let category {
+                guard convo.origin?.category == category else { return false }
+            }
+            return true
+        }
+    }
+
+    /// The distinct source categories present (for the category pills), sorted.
+    public static func categories(
+        of conversations: [ChatConversationStore.Conversation]
+    ) -> [String] {
+        Set(conversations.compactMap { $0.origin?.category }).sorted()
+    }
+
+    /// One section of the source-grouped list: the source conversation (nil =
+    /// no known source — accepted-card chats and hand-started ones) + its chats.
+    public struct SourceGroup: Equatable, Sendable {
+        public let captureId: String?
+        public let conversations: [ChatConversationStore.Conversation]
+    }
+
+    /// Group conversation-born chats under their source conversation, keeping
+    /// the list's most-recently-updated order both across and inside groups.
+    /// Chats without a known source share one trailing nil-group.
+    public static func groupedBySource(
+        _ conversations: [ChatConversationStore.Conversation]
+    ) -> [SourceGroup] {
+        var order: [String] = []
+        var byCapture: [String: [ChatConversationStore.Conversation]] = [:]
+        var unsourced: [ChatConversationStore.Conversation] = []
+        for convo in conversations {
+            if let cid = convo.origin?.captureId, convo.isFromConversation {
+                if byCapture[cid] == nil { order.append(cid) }
+                byCapture[cid, default: []].append(convo)
+            } else {
+                unsourced.append(convo)
+            }
+        }
+        var groups = order.map { SourceGroup(captureId: $0, conversations: byCapture[$0] ?? []) }
+        if !unsourced.isEmpty {
+            groups.append(SourceGroup(captureId: nil, conversations: unsourced))
+        }
+        return groups
     }
 }
 

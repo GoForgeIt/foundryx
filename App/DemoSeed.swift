@@ -52,6 +52,20 @@ enum DemoSeed {
         PerfHook.install { name, ms in NSLog("perf-span %@ ms=%d", name, ms) }
     }
 
+    /// `-FreshActionState` (UI-proof determinism): wipe the action pipeline's
+    /// mutable stores + the chat list so every proof run starts from the same
+    /// state regardless of what an earlier test in the same install did. Runs
+    /// BEFORE any store is constructed (app init). No effect in normal launches.
+    static func resetActionStateIfRequested() {
+        guard ProcessInfo.processInfo.arguments.contains("-FreshActionState") else { return }
+        let base = CaptureWAL.documentsCaptures()
+        for name in ["ambient-cards.jsonl", "action-feedback.jsonl",
+                     ActionChatLinkStore.filename] {
+            try? FileManager.default.removeItem(at: base.appendingPathComponent(name))
+        }
+        try? FileManager.default.removeItem(at: ChatConversationStore.defaultStorageURL())
+    }
+
     static func seedIfRequested() {
         guard ProcessInfo.processInfo.arguments.contains("-MainPreview") else { return }
         let base = CaptureWAL.documentsCaptures()

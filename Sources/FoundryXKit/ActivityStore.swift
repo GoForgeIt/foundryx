@@ -61,15 +61,28 @@ public struct ActivityEntry: Equatable, Sendable, Identifiable {
     /// The user's own rating word ("helpful"), when they gave one.
     public let rating: String?
     public let source: Source
+    /// The surfaced candidate's raw utterance — the ACTION JOIN KEY (EXT1):
+    /// present only on decision-line entries that carried a candidate, which is
+    /// exactly the set of entries the Activity page can offer action options
+    /// on. Card-outcome entries (accepted/dismissed) have no utterance — only a
+    /// seed — and honestly offer none.
+    public let utterance: String?
 
     public init(id: String, ts: UInt64, kind: Kind, detail: String?,
-                rating: String?, source: Source) {
+                rating: String?, source: Source, utterance: String? = nil) {
         self.id = id
         self.ts = ts
         self.kind = kind
         self.detail = detail
         self.rating = rating
         self.source = source
+        self.utterance = utterance
+    }
+
+    /// The capture this entry can act against (nil ⇒ no action options).
+    public var actionCaptureId: String? {
+        guard utterance != nil, case .conversation(let cid) = source else { return nil }
+        return cid
     }
 }
 
@@ -390,6 +403,7 @@ public enum ActivityStore {
             kind: kind,
             detail: raw.answer ?? summary ?? utterance ?? raw.seed,
             rating: raw.rating,
-            source: source)
+            source: source,
+            utterance: utterance)
     }
 }

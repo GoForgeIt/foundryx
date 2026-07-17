@@ -46,21 +46,34 @@ public struct ChatRequest: Encodable, Sendable {
     public let org: String
     public let sensitivity: String?
     public let requestedTarget: String?
+    /// Chat provenance (EXT3, track 20260715T1500): "action" | "manual". The
+    /// door's ChatReq is serde-tolerant, so an old desktop ignores these; a
+    /// desktop that learns them can organize kiln sessions like the phone does.
+    public let origin: String?
+    public let originCaptureId: String?
+    public let originCategory: String?
 
     public init(message: String, platform: String, chatId: String, org: String,
-                sensitivity: String? = nil, requestedTarget: String? = nil) {
+                sensitivity: String? = nil, requestedTarget: String? = nil,
+                origin: String? = nil, originCaptureId: String? = nil,
+                originCategory: String? = nil) {
         self.message = message
         self.platform = platform
         self.chatId = chatId
         self.org = org
         self.sensitivity = sensitivity
         self.requestedTarget = requestedTarget
+        self.origin = origin
+        self.originCaptureId = originCaptureId
+        self.originCategory = originCategory
     }
 
     enum CodingKeys: String, CodingKey {
-        case message, platform, org, sensitivity
+        case message, platform, org, sensitivity, origin
         case chatId = "chat_id"
         case requestedTarget = "requested_target"
+        case originCaptureId = "origin_capture_id"
+        case originCategory = "origin_category"
     }
 }
 

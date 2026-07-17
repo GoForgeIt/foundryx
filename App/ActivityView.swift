@@ -28,6 +28,8 @@ struct ActivityView: View {
     /// Absent handlers render the entry without a link — honestly, not broken.
     var onOpenConversation: ((String) -> Void)? = nil
     var onOpenChat: ((String) -> Void)? = nil
+    /// Phone-only tier (gates the options sheet's act-in-chat, EXT1).
+    var local: Bool = false
 
     /// The living conversation recaps (prototype "13 Activity"). Rebuilds the DAILY
     /// recap on the conversation-finished event; refreshes weekly on demand. Lives
@@ -43,16 +45,27 @@ struct ActivityView: View {
     /// (and unless) the on-device model replaces it.
     @State private var recapTexts: [String: String] = [:]
 
+    /// The Activity entry whose action options sheet is open (EXT1: same
+    /// shared sheet as the detail's Actions face).
+    private struct ActionSelection: Identifiable {
+        let row: ConversationActionsPresentation.Row
+        let captureId: String
+        var id: String { row.id }
+    }
+    @State private var actionSelection: ActionSelection?
+
     init(decisionLogURL: URL,
          synthesizer: RecapSynthesizer? = makeSystemRecapSynthesizer(),
          recapPool: [RecapConversation] = [],
          recapComposer: RecapComposer? = makeSystemRecapComposer(),
          onOpenConversation: ((String) -> Void)? = nil,
-         onOpenChat: ((String) -> Void)? = nil) {
+         onOpenChat: ((String) -> Void)? = nil,
+         local: Bool = false) {
         self.decisionLogURL = decisionLogURL
         self.synthesizer = synthesizer
         self.onOpenConversation = onOpenConversation
         self.onOpenChat = onOpenChat
+        self.local = local
         _recap = StateObject(wrappedValue:
             ActivityRecapModel(poolProvider: { recapPool }, composer: recapComposer,
                                cacheBaseDir: CaptureWAL.documentsCaptures()))
@@ -88,6 +101,11 @@ struct ActivityView: View {
         .grainBackground()
         .navigationTitle("Activity")
         .navigationBarTitleDisplayMode(.inline)
+        // EXT1: the SAME action options sheet the detail's Actions face opens.
+        .sheet(item: $actionSelection) { sel in
+            ActionFeedbackFlow.sheet(row: sel.row, captureId: sel.captureId,
+                                     local: local) { reload() }
+        }
         .onAppear { reload() }
         // Build both recaps on appear; the model then rebuilds the DAILY recap live
         // whenever a conversation finishes processing (the finished event, B3).
@@ -180,9 +198,20 @@ struct ActivityView: View {
     // MARK: - Ledger rows
 
     private func entryRow(_ entry: ActivityEntry) -> some View {
-        let linkable = linkAction(for: entry) != nil
+        // An entry that IS a surfaced action (a decision-line entry carrying its
+        // utterance + conversation) opens the shared options sheet (EXT1);
+        // card-outcome entries honestly keep only their source link — they
+        // carry no utterance, so feedback could never join back to the action.
+        let actionable = entry.actionCaptureId != nil
+        let linkable = actionable || linkAction(for: entry) != nil
         return Button {
-            linkAction(for: entry)?()
+            if let captureId = entry.actionCaptureId, let utterance = entry.utterance,
+               let row = ActionFeedbackFlow.row(forUtterance: utterance,
+                                                captureId: captureId) {
+                actionSelection = ActionSelection(row: row, captureId: captureId)
+            } else {
+                linkAction(for: entry)?()
+            }
         } label: {
             HStack(alignment: .top, spacing: GrainSpacing.x3) {
                 ZStack {
@@ -216,7 +245,7 @@ struct ActivityView: View {
                             .multilineTextAlignment(.leading)
                     }
                     if linkable {
-                        Text(sourceLabel(for: entry.source))
+                        Text(actionable ? "Act on this" : sourceLabel(for: entry.source))
                             .grainTextStyle(.caption)
                             .foregroundStyle(GrainColor.forgeBlue)
                     }
