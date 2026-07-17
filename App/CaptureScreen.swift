@@ -73,19 +73,6 @@ struct RecordingRingView: View {
     }
 }
 
-/// The instrument's caption — a human state only (the ring already shows the
-/// level). The old frames/bytes diagnostics were build telemetry; they live in
-/// the logs now, never on a consumer surface.
-struct MeterCaption: View {
-    let paused: Bool
-    let isRecordingMic: Bool
-
-    var body: some View {
-        Text(MeterCaptionText.caption(paused: paused, isRecordingMic: isRecordingMic))
-            .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-    }
-}
-
 /// The session-owned ticking elapsed readout (1 Hz), monospaced so it never wobbles.
 /// STATELESS — it holds NO `@State`: it derives its value from a `RecordingClock` the
 /// manager owns (`clock.elapsed(now:)`, which already excludes paused spans), so a view
@@ -161,6 +148,21 @@ struct CaptureScreen: View {
     #if DEBUG
     @State private var deepDetail = false      // screen-proof: `-Screen detail`
     @State private var deepRecording = false   // screen-proof: `-Screen recording`
+    /// screen-proof: `-CaptureHome recording` → the Capture tab's LIVE HERO TILE (not the
+    /// full-screen recorder), seeded with a ring + elapsed + transcript, no real mic.
+    /// Derived DIRECTLY from the launch args on every render — NOT @State. Under
+    /// `-MainPreview` the phone-tier model-download banner (`brainSetupBanner`) toggles a
+    /// sibling ABOVE CaptureScreen in its VStack, churning CaptureScreen's structural
+    /// identity and resetting any @State to its initial `false` — which silently dropped
+    /// the forced tile back to the plain CTA. Reading the args each render is immune.
+    private var capturePreviewRecording: Bool {
+        let a = ProcessInfo.processInfo.arguments
+        return a.contains("-CaptureHome") && a.contains("recording")
+    }
+    /// screen-proof: the paused variant (`-CaptureHome recording paused`).
+    private var capturePreviewPaused: Bool {
+        ProcessInfo.processInfo.arguments.contains("paused")
+    }
     #endif
 
     // MARK: find + organize (track 20260713T0902, features/capture-home.feature)
@@ -201,26 +203,13 @@ struct CaptureScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            // Live transcript ABOVE the voice-recording animation (Feature 4): a tight
-            // 1-clear + 1-fading window that slides up and dissolves under the header.
-            // Ephemeral, on-device preview; Kiln's transcript remains authoritative.
-            if isShowingCapture {
-                // The instrument (track 20260713T0903): the SAME ring from welcome +
-                // enrollment, now recording — pause left, ring + ticking elapsed right,
-                // provisional title from what has actually been said.
-                recordingInstrument
-                if !manager.liveTranscript.isEmpty {
-                    LiveTranscriptTicker(transcript: manager.liveTranscript)
-                        .padding(.horizontal, GrainSpacing.x4)
-                        .padding(.top, GrainSpacing.x2)
-                }
-            }
             syncBar
-            // The calm "Record a conversation" CTA card (prototype 08 Capture home) —
-            // hidden while the live instrument is up (recording IS the surface then).
-            if !isShowingCapture {
-                recordCTA
-            }
+            // The hero slot (track 20260717T0600): not recording → the calm "Record a
+            // conversation" CTA; recording (or a connected source) → a FULL-HERO-SIZE live
+            // recording tile — the big ring, the elapsed time from the session's start, the
+            // live words — and the whole tile opens the recorder. The old compact strip that
+            // crammed the big ring into a small row is gone; the hero slot IS the live tile.
+            heroSlotView
             if manager.visibleCaptures.isEmpty {
                 if manager.listRows.isEmpty {
                     // Keep the header search affordance honest even before the first
@@ -281,6 +270,12 @@ struct CaptureScreen: View {
             let a = ProcessInfo.processInfo.arguments
             if a.contains("-Screen"), a.contains("detail") { deepDetail = true }
             if a.contains("-Screen"), a.contains("recording") { deepRecording = true }
+            // The live HERO tile on the Capture tab (NOT the full-screen recorder) is forced
+            // statelessly from the launch args in `heroSlot` — no seeding needed: the tile
+            // renders its ring + fixed elapsed + seeded transcript from the forced slot. We
+            // deliberately do NOT seed an active session here, so the redundant minimized
+            // RecordingPill (RootView) stays out of the clean hero screenshot. Tap-through to
+            // the real recorder is exercised by real recordings, not this static preview.
         }
         .fullScreenCover(isPresented: $deepRecording) {
             RecordingScreen(
@@ -995,38 +990,126 @@ struct CaptureScreen: View {
         categories.assign(captureId: captureId, to: cat.id, byUser: false)
     }
 
-    // MARK: the recording instrument (track 20260713T0903)
+    // MARK: hero slot — record CTA, or the live recording tile (track 20260717T0600)
 
-    /// Pause left · provisional title center · ring + ticking elapsed right.
-    /// The ring subview observes ONLY manager.meter (12 Hz) — its tick never
-    /// invalidates this screen's body (same law the old MeterStrip obeyed).
-    private var recordingInstrument: some View {
-        VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-            HStack(spacing: GrainSpacing.x3) {
-                if manager.active != nil || manager.isRecordingMic {
-                    GrainButton(manager.isPaused ? "Resume" : "Pause",
-                                variant: manager.isPaused ? .filled : .tonal, size: .sm) {
-                        manager.togglePause()
+    /// The Capture tab's hero: the calm record CTA when idle, a full-hero-size live tile
+    /// while recording (or a source is connected). ONE slot — the compact instrument strip
+    /// that used to cram the big ring into a small row (track 20260713T0903) is gone.
+    @ViewBuilder private var heroSlotView: some View {
+        switch heroSlot {
+        case .recordCTA:
+            recordCTA
+        case .liveTile(let tile):
+            liveHeroTile(tile)
+        }
+    }
+
+    /// Which tile the hero slot shows — the pure, tested `LiveHeroPresentation` decision.
+    /// The DEBUG `-CaptureHome recording` seed forces the live tile so the simulator can
+    /// screenshot it without a real mic.
+    private var heroSlot: LiveHeroPresentation.Slot {
+        #if DEBUG
+        if capturePreviewRecording {
+            return .liveTile(.init(showsElapsed: true, hasRecorder: true, paused: capturePreviewPaused))
+        }
+        #endif
+        return LiveHeroPresentation.slot(
+            isShowingCapture: isShowingCapture,
+            hasActiveSession: manager.active != nil,
+            isRecordingMic: manager.isRecordingMic,
+            isPaused: manager.isPaused)
+    }
+
+    /// The full-hero-size live recording tile — the hero slot itself while recording. Reads
+    /// as the same card family as `GrainRecordCTA` at the same visual weight: the hero-scale
+    /// voice ring on the left, the live readout (status · elapsed · provisional title) on the
+    /// right, the live transcript below, Pause/Resume in reach. The whole tile is tappable →
+    /// opens the full recording screen (`restoreRecordingScreen` clears `minimized`, so the
+    /// `fullScreenCover` binding presents it). The ring observes ONLY `manager.meter`, so its
+    /// 12 Hz tick never invalidates the conversation list (the isolation law the old strip
+    /// obeyed). A connected source with no active WAL degrades: ring + status, no elapsed,
+    /// not tappable.
+    private func liveHeroTile(_ tile: LiveHeroPresentation.LiveTile) -> some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x3) {
+            HStack(spacing: GrainSpacing.cardPad) {
+                RecordingRingView(meter: manager.meter, paused: tile.paused)
+                    .frame(width: 84, height: 84)
+                VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                    Text(MeterCaptionText.caption(paused: tile.paused,
+                                                  isRecordingMic: manager.isRecordingMic))
+                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                    // Elapsed from the SESSION-OWNED RecordingClock (track 20260717T0630's
+                    // law): manager-owned, pause-aware, survives minimize/restore and
+                    // internal conversation rolls — no view-local timer, no view @State.
+                    if tile.showsElapsed {
+                        SessionElapsedLabel(clock: heroClock,
+                                            font: GrainFont.sans(28, weight: .semibold),
+                                            color: GrainColor.ink)
+                    }
+                    // The provisional name, from what has actually been said — appears only
+                    // once enough was said and never rewrites itself (no layout jump).
+                    if let title = ProvisionalLiveTitle.title(from: heroLiveTranscript.finalizedText) {
+                        Text(title)
+                            .grainTextStyle(.body).foregroundStyle(GrainColor.ink).lineLimit(1)
                     }
                 }
-                Spacer()
-                if manager.active != nil {
-                    SessionElapsedLabel(clock: manager.recordingClock)
+                Spacer(minLength: 0)
+                if tile.hasRecorder {
+                    GrainButton(tile.paused ? "Resume" : "Pause",
+                                variant: tile.paused ? .filled : .tonal, size: .sm) {
+                        manager.togglePause()
+                    }
+                    .accessibilityIdentifier("live-hero-pause")
                 }
-                RecordingRingView(meter: manager.meter, paused: manager.isPaused)
-                    .frame(width: 34, height: 34)
             }
-            // The provisional name, from what has actually been said — appears
-            // only once enough was said, and never rewrites itself (no layout jump).
-            if let title = ProvisionalLiveTitle.title(from: manager.liveTranscript.finalizedText) {
-                Text(title)
-                    .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-                    .lineLimit(1)
+            if !heroLiveTranscript.isEmpty {
+                LiveTranscriptTicker(transcript: heroLiveTranscript)
             }
-            MeterCaption(paused: manager.isPaused, isRecordingMic: manager.isRecordingMic)
         }
+        .padding(GrainSpacing.cardPad)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
+                .fill(GrainColor.surface))
+        .overlay(
+            RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
+                .strokeBorder(GrainColor.borderFaint, lineWidth: 1))
+        .contentShape(Rectangle())
+        // Tapping opens the full recording screen (only when a recorder is behind the tile;
+        // a connected-idle source has none). Pause's own Button consumes its taps.
+        .onTapGesture { if tile.hasRecorder { manager.restoreRecordingScreen() } }
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(tile.hasRecorder ? .isButton : [])
+        .accessibilityLabel(tile.hasRecorder ? "Live recording, tap to open" : "Listening")
         .padding(.horizontal, GrainSpacing.x4)
         .padding(.top, GrainSpacing.x2)
+    }
+
+    /// The clock behind the live tile's elapsed readout: the manager-owned session
+    /// clock (the single elapsed-time truth). The DEBUG preview derives a fixed-offset
+    /// clock so the screenshot reads a non-zero time.
+    private var heroClock: RecordingClock? {
+        #if DEBUG
+        if capturePreviewRecording {
+            return RecordingClock(startedAt: Date().addingTimeInterval(-102),  // reads 01:42
+                                  paused: capturePreviewPaused)
+        }
+        #endif
+        return manager.recordingClock
+    }
+
+    /// The live transcript the hero tile renders — the manager's, or a seeded preview one
+    /// under the DEBUG `-CaptureHome recording` screenshot path.
+    private var heroLiveTranscript: LiveTranscript {
+        #if DEBUG
+        if capturePreviewRecording {
+            return LiveTranscript(
+                finalizedText: "For the launch we still need the deck updated. The relay decision matters here.",
+                volatileTail: "Foundry remind me to send Sarah the deck",
+                isComplete: false)
+        }
+        #endif
+        return manager.liveTranscript
     }
 
     // MARK: header — ambient control when connected, else the auto-connect status + the

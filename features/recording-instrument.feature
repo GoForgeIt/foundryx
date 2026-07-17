@@ -34,3 +34,39 @@ Feature: The recording instrument
     Given I am recording and away from the capture page
     When I end the recording from the pill
     Then the conversation finalizes normally
+
+  # The recording hero tile IS the live tile (track 20260717T0600). While recording,
+  # the hero slot itself becomes a full-size live tile — the big ring, the elapsed time
+  # from the session's start, the live words — and the whole tile opens the recorder.
+  # The old cramped compact strip is gone.
+
+  Scenario: the record hero becomes the live recording tile
+    Given I am recording on the capture page
+    Then the record hero shows the live recording tile
+    And the live tile shows the recording ring at hero size
+    And the live tile shows the elapsed time from the session start
+    And the live tile shows the live words being spoken
+    When I tap the live tile
+    Then the full recording screen opens
+
+  Scenario: not recording shows the record call to action
+    Given I am not recording and no source is connected
+    Then the record hero shows the "Record a conversation" call to action
+    And the live recording tile is not shown
+
+  Scenario: the cramped compact strip is gone
+    Given I am recording on the capture page
+    Then the record hero shows the live recording tile
+    And the compact recording strip never appears
+
+  Scenario: a paused recording still reads as the live tile
+    Given I am recording on the capture page
+    When I pause the recording
+    Then the live tile still shows, marked paused
+    And the elapsed time is still shown
+
+  Scenario: a connected source with no conversation yet still gets the live slot
+    Given a source is connected with no active conversation
+    Then the record hero shows the live recording tile
+    And the live tile shows no elapsed time
+    And the live tile is not tappable to open the recorder
