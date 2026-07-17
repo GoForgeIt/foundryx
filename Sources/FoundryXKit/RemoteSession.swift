@@ -99,6 +99,12 @@ public final class RemoteSession: ObservableObject {
         email = nil
         relay = nil
         status = remote == nil ? .unconfigured : .signedOut
+        // A signed-out phone must not keep an ambient-recording BLE link (or its
+        // standing pending reconnect) alive — the shared DeviceManager would
+        // otherwise persist past the UI teardown and keep capturing/reconnecting
+        // (including background state-restoration relaunches). Suspend, never
+        // forget: the pairing is kept, and the next sign-in re-arms hands-free.
+        DeviceManager.sharedExisting()?.suspend()
     }
 
     /// Mint a fresh id_token and resolve the designated host into a RelayConfig.

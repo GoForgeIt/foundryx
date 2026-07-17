@@ -29,6 +29,11 @@ final class FrameRouter: @unchecked Sendable {
     private let lock = NSLock()
     private var wal: CaptureWAL?
     private var paused = false
+    /// Frames routed while NO session WAL is wired yet (the main-actor hop between
+    /// `.streaming` and beginSession/resumeSession, or a session roll). Bounded;
+    /// drained into the next `setWAL`. Lock-guarded.
+    private var preSessionHold: [Data] = []
+    private static let preSessionHoldMax = 6_000   // ~60s of Omi audio
     private let segmenter: SilenceSegmenter
     private let clock: () -> TimeInterval
     // True decoded-amplitude RMS level meter (replaces the byte-size proxy). Stateful
@@ -85,6 +90,17 @@ final class FrameRouter: @unchecked Sendable {
         lock.lock()
         wal = w
         if w != nil { sessionVoicedFrames = 0; lastVoicedAt = nil }   // fresh session → reset tallies
+        // Drain any frames that arrived BEFORE the session's WAL was wired (the
+        // @MainActor hop between the source's `.streaming` and beginSession/
+        // resumeSession). Without this, early frames — including offline-cache gap
+        // audio recovered on reconnect, which the device is then told to ADVANCE
+        // past — were silently dropped. Drained UNDER the lock (appendFrame is a
+        // cheap async enqueue onto the WAL's own queue) so they are enqueued ahead
+        // of every subsequently routed frame — order preserved.
+        if let w {
+            for f in preSessionHold { w.appendFrame(f) }
+            preSessionHold.removeAll()
+        }
         lock.unlock()
     }
     /// Voiced frames captured for the current session (drives the min-substance upload gate).
@@ -139,6 +155,12 @@ final class FrameRouter: @unchecked Sendable {
             lastBytes = frame.count
         }
         let target = isPaused ? nil : wal
+        // No session WAL yet (pre-session window)? HOLD the frame instead of
+        // dropping it — setWAL drains in order. Bounded: past the cap the newest
+        // frames are dropped (the hold's contiguous head is the audio that matters).
+        if !isPaused, wal == nil, preSessionHold.count < Self.preSessionHoldMax {
+            preSessionHold.append(frame)
+        }
         var level: Float = 0
         var event: SegmentEvent?
         if !isPaused {
@@ -3628,7 +3650,9 @@ public final class CaptureManager: ObservableObject {
         }
     }
 
-    static func newCaptureId() -> String {
+    // nonisolated: pure (formatter + UUID) — also minted off-main by the
+    // background-restoration spool (OmiRestorationSpool).
+    nonisolated static func newCaptureId() -> String {
         let f = DateFormatter()
         f.dateFormat = "yyyyMMdd-HHmmss"
         f.timeZone = TimeZone(identifier: "UTC")

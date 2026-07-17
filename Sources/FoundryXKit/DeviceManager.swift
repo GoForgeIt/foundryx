@@ -152,6 +152,90 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     private var peripheral: CBPeripheral?
     private let headerBytes = 3   // Omi packet header [seq:2][index:1]
     private var audioNotifs = 0   // diagnostics: raw audio-char notifications seen (bleQueue only)
+
+    // MARK: state restoration + always-reconnect
+
+    /// CBCentralManagerOptionRestoreIdentifierKey — with the bluetooth-central
+    /// background mode, iOS RELAUNCHES the app in the background when a pending
+    /// connect completes after the app was terminated, delivering the peripheral
+    /// back through `willRestoreState`. The AppDelegate re-creates this manager
+    /// (same identifier) on such a launch — see FoundryXAppDelegate.
+    public static let restoreIdentifier = "foundryx.omi.central"
+
+    /// A peripheral handed back by `willRestoreState`, held until the central
+    /// reports poweredOn (nothing may be issued before that). bleQueue only.
+    private var restoredPeripheral: CBPeripheral?
+
+    /// The last state handed to `onState` — so a late-attaching consumer (the real
+    /// CaptureManager taking over from the restoration spool) can be replayed the
+    /// current truth instead of waiting for the next transition. Lock-guarded:
+    /// emissions come from BOTH the bleQueue (CB callbacks) and the main thread
+    /// (suspend/forget/disconnect).
+    private let lastStateLock = NSLock()
+    private var lastSourceState: AudioSourceState?
+
+    private func emitSourceState(_ s: AudioSourceState) {
+        lastStateLock.lock(); lastSourceState = s; lastStateLock.unlock()
+        onState?(s)
+    }
+
+    /// Re-emit the current source state to the (possibly just-reassigned) `onState`
+    /// consumer. Used at CaptureManager takeover after a background restoration
+    /// launch: the Omi may ALREADY be streaming, and without a replay the new
+    /// consumer would never see `.streaming` and never open a session.
+    public func replayState() {
+        bleQueue.async { [weak self] in
+            guard let self else { return }
+            self.lastStateLock.lock()
+            let s = self.lastSourceState
+            self.lastStateLock.unlock()
+            if let s { self.onState?(s) }
+        }
+    }
+
+    // MARK: shared instance (restoration + app share ONE central)
+
+    private static let sharedLock = NSLock()
+    private nonisolated(unsafe) static var sharedInstance: DeviceManager?   // sharedLock-guarded
+
+    /// The process-wide DeviceManager. Two creation paths must converge on ONE
+    /// instance (two centrals with the same restore identifier are undefined):
+    /// the AppDelegate's bluetooth-restoration bootstrap and the UI's MainTabs.
+    /// First caller's log wins (both wire the same remote diag sink).
+    public static func shared(log: DoorLog? = nil) -> DeviceManager {
+        sharedLock.lock(); defer { sharedLock.unlock() }
+        if let s = sharedInstance { return s }
+        let s = DeviceManager(log: log)
+        sharedInstance = s
+        return s
+    }
+
+    /// The shared instance IF one was ever created — never creates. For lifecycle
+    /// hooks (sign-out suspend) that must not conjure a central just to stop it.
+    public static func sharedExisting() -> DeviceManager? {
+        sharedLock.lock(); defer { sharedLock.unlock() }
+        return sharedInstance
+    }
+
+    // MARK: offline-cache (ring) sync state — bleQueue only
+
+    private var audioChar: CBCharacteristic?
+    private var storageDataChar: CBCharacteristic?
+    private var storageControlChar: CBCharacteristic?
+    private var gapSync: OmiOfflineSyncEngine?
+    /// True from connect until the storage-sync decision resolves (service absent,
+    /// unsupported, finished, failed). While true, LIVE audio frames are held so
+    /// recovered gap audio lands in the WAL first — recorded order.
+    private var gapSyncHolding = false
+    private var liveHold: [Data] = []
+    /// ~5 min of Omi audio at ~100 pkts/s — beyond this, release order rather than memory.
+    private let liveHoldMaxFrames = 30_000
+    /// One-shot deadlines (NOT poll loops): sync must decide/progress or release.
+    private let gapSyncDecisionTimeout: TimeInterval = 10
+    private let gapSyncStallTimeout: TimeInterval = 8
+    private let gapSyncOverallBudget: TimeInterval = 180
+    /// Bumped whenever a sync window opens/closes so stale one-shot deadlines no-op.
+    private var gapSyncGeneration: UInt64 = 0
     /// When false the link is USER-SUSPENDED (the Omi was toggled OFF on the device
     /// page): we drop it AND stop auto-reconnecting until re-enabled, so a disabled Omi
     /// truly leaves the capture surface instead of silently reconnecting itself. The
@@ -177,7 +261,15 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     public func start() {
         autoConnect = true
         guard let c = central else {
+            // Restore identifier ⇒ iOS relaunches us in the background when a pending
+            // connect completes even after the app was killed (willRestoreState path).
+            // iOS-only: macOS (the @ble-hardware test host) has no CB state restoration.
+            #if os(iOS)
+            central = CBCentralManager(delegate: self, queue: bleQueue,
+                                       options: [CBCentralManagerOptionRestoreIdentifierKey: Self.restoreIdentifier])
+            #else
             central = CBCentralManager(delegate: self, queue: bleQueue)
+            #endif
             return   // the connect flow resumes once the central reports .poweredOn
         }
         guard c.state == .poweredOn else { return }
@@ -205,7 +297,7 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
         peripheral = nil
         setDiscovered([])
         setState(.idle)
-        onState?(.stopped)
+        emitSourceState(.stopped)
     }
 
     // MARK: connect UI API
@@ -256,13 +348,13 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
         UserDefaults.standard.removeObject(forKey: Self.savedDateKey)
         DispatchQueue.main.async { self.saved = nil }
         setState(.idle)
-        onState?(.stopped)
+        emitSourceState(.stopped)
     }
 
     /// Drop the current link but keep the saved device (so we auto-reconnect).
     public func disconnect() {
         if let p = peripheral { central?.cancelPeripheralConnection(p) }
-        onState?(.stopped)
+        emitSourceState(.stopped)
     }
 
     // MARK: internals
@@ -272,6 +364,9 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     private func bind(_ p: CBPeripheral) { peripheral = p; p.delegate = self }
 
     private func autoReconnect() {
+        // Already linked (or a pending connect is standing)? Leave it alone — a
+        // second connect() on top of a restored pending connect is redundant.
+        if let p = peripheral, p.state == .connected || p.state == .connecting { return }
         guard let c = central,
               let idStr = UserDefaults.standard.string(forKey: Self.savedKey),
               let id = UUID(uuidString: idStr),
@@ -282,6 +377,118 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
         bind(p)
         setState(.connecting(p.name ?? "Omi"))
         c.connect(p, options: nil)
+    }
+
+    // MARK: offline-cache (ring) sync plumbing — bleQueue only
+
+    /// Open the live-audio order hold. Runs from didConnect (and the restored-
+    /// connected path) BEFORE service discovery, so no live frame can slip ahead of
+    /// recovered gap audio. A one-shot decision deadline releases the hold if the
+    /// storage service / subscription never materializes.
+    private func beginGapSyncWindow() {
+        gapSyncHolding = true
+        liveHold.removeAll()
+        let generationAtStart = gapSyncGeneration
+        bleQueue.asyncAfter(deadline: .now() + gapSyncDecisionTimeout) { [weak self] in
+            guard let self, self.gapSyncGeneration == generationAtStart, self.gapSyncHolding,
+                  self.gapSync == nil else { return }
+            self.log?.warn("Omi: storage sync never started within \(Int(self.gapSyncDecisionTimeout))s — releasing live audio")
+            self.endGapSyncWindow(flush: true)
+        }
+    }
+
+    /// Close the hold: optionally flush the held live frames (in arrival order)
+    /// into the normal frame path, and drop the engine.
+    private func endGapSyncWindow(flush: Bool) {
+        gapSyncGeneration &+= 1
+        gapSync = nil
+        gapSyncHolding = false
+        guard flush, !liveHold.isEmpty else { liveHold.removeAll(); return }
+        let held = liveHold
+        liveHold.removeAll()
+        for f in held { onFrame?(f) }
+    }
+
+    /// Begin the ring sync once BOTH storage characteristics are known AND the data
+    /// characteristic's subscription is live. Idempotent.
+    private func maybeBeginGapSync(_ p: CBPeripheral) {
+        guard gapSyncHolding, gapSync == nil,
+              let dataChar = storageDataChar, dataChar.isNotifying,
+              storageControlChar != nil else { return }
+        let engine = OmiOfflineSyncEngine()
+        gapSync = engine
+        engine.emit = { [weak self, weak p] cmd in
+            guard let self, let p else { return }
+            self.executeGapSyncCommand(cmd, on: p)
+        }
+        engine.emitFrame = { [weak self] frame in self?.onFrame?(frame) }
+        engine.finished = { [weak self] outcome in self?.gapSyncFinished(outcome) }
+        log?.info("Omi: storage service live — checking offline cache")
+        engine.begin()
+        scheduleGapSyncStallCheck()
+        // Overall budget: past this, release live audio regardless (one-shot).
+        let generationAtStart = gapSyncGeneration
+        bleQueue.asyncAfter(deadline: .now() + gapSyncOverallBudget) { [weak self] in
+            guard let self, self.gapSyncGeneration == generationAtStart else { return }
+            self.gapSync?.budgetExhausted()
+        }
+    }
+
+    private func executeGapSyncCommand(_ cmd: OmiOfflineSyncEngine.Command, on p: CBPeripheral) {
+        switch cmd {
+        case .readStatus:
+            guard let ch = storageControlChar else { gapSync?.statusResult(nil); return }
+            p.readValue(for: ch)
+        case .requestInfo:
+            writeStorage(OmiRingProtocol.infoCommand, to: p)
+        case .read(let startSeq):
+            log?.info("Omi: pulling offline cache from seq \(startSeq)")
+            writeStorage(OmiRingProtocol.readCommand(startSeq: startSeq), to: p)
+        case .advance(let seq):
+            log?.info("Omi: advancing device read pointer to \(seq)")
+            writeStorage(OmiRingProtocol.advanceCommand(newReadSeq: seq), to: p)
+        case .stopTransfer:
+            writeStorage(OmiRingProtocol.stopCommand, to: p)
+        }
+    }
+
+    private func writeStorage(_ data: Data, to p: CBPeripheral) {
+        guard let ch = storageDataChar else { return }
+        p.writeValue(data, for: ch, type: .withResponse)
+    }
+
+    private func gapSyncFinished(_ outcome: OmiOfflineSyncEngine.Outcome) {
+        switch outcome {
+        case .nothingToSync:
+            log?.info("Omi: offline cache empty — nothing to sync")
+        case .unsupportedProtocol(let why):
+            log?.info("Omi: offline cache protocol unsupported (\(why)) — skipping sync")
+        case .synced(let records, let frames):
+            log?.info("Omi: offline cache synced — \(records) records, \(frames) frames recovered")
+        case .aborted(let records, let frames, let reason):
+            log?.warn("Omi: offline sync aborted (\(reason)) — kept \(records) records / \(frames) frames; advanced only over consumed")
+        case .failed(let why):
+            log?.warn("Omi: offline sync failed (\(why)) — device keeps its unread cache for next reconnect")
+        }
+        endGapSyncWindow(flush: true)
+    }
+
+    /// Bump-and-check stall watchdog — COALESCED: at most one deferred check is in
+    /// flight at a time (a large sync delivers ~100 notifications/s; scheduling one
+    /// per event would pile up hundreds of pending no-op closures). When the check
+    /// fires: activity moved → re-arm; no activity → stalled.
+    private var stallCheckPending = false   // bleQueue only
+
+    private func scheduleGapSyncStallCheck() {
+        guard let engine = gapSync, engine.isActive, !stallCheckPending else { return }
+        stallCheckPending = true
+        let seen = engine.activityGeneration
+        bleQueue.asyncAfter(deadline: .now() + gapSyncStallTimeout) { [weak self] in
+            guard let self else { return }
+            self.stallCheckPending = false
+            guard let g = self.gapSync, g === engine, g.isActive else { return }
+            if g.activityGeneration == seen { g.stalled() } else { self.scheduleGapSyncStallCheck() }
+        }
     }
 
     // main-thread published mutations
@@ -320,12 +527,60 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
 }
 
 extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
+    /// CB state restoration: iOS relaunched us (in the background) because an event
+    /// fired for this central — typically the standing pending connect completing as
+    /// the Omi came back into range. Reclaim the peripheral NOW; act on it only once
+    /// the central reports poweredOn (nothing may be issued before that).
+    public func centralManager(_ c: CBCentralManager, willRestoreState dict: [String: Any]) {
+        let restored = (dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral]) ?? []
+        let savedId = Self.loadSaved()?.id
+        guard let p = restored.first(where: { $0.identifier == savedId }) ?? restored.first else { return }
+        log?.info("Omi: willRestoreState — reclaimed \(p.name ?? "?") (state \(p.state.rawValue))")
+        p.delegate = self
+        restoredPeripheral = p
+    }
+
     public func centralManagerDidUpdateState(_ c: CBCentralManager) {
         switch c.state {
-        case .poweredOn: if autoConnect { autoReconnect() }
+        case .poweredOn:
+            if let p = restoredPeripheral {
+                restoredPeripheral = nil
+                handleRestoredPeripheral(p, central: c)
+            } else if autoConnect {
+                autoReconnect()
+            }
         case .unauthorized, .poweredOff, .unsupported:
-            setState(.poweredOff); onState?(.failed("bluetooth unavailable"))
+            setState(.poweredOff); emitSourceState(.failed("bluetooth unavailable"))
         default: break
+        }
+    }
+
+    /// Act on the peripheral `willRestoreState` handed back, per the pure policy.
+    private func handleRestoredPeripheral(_ p: CBPeripheral, central c: CBCentralManager) {
+        let restoredState: OmiReconnectPolicy.RestoredPeripheralState
+        switch p.state {
+        case .connected: restoredState = .connected
+        case .connecting: restoredState = .connecting
+        default: restoredState = .disconnected
+        }
+        switch OmiReconnectPolicy.onRestore(state: restoredState, autoConnect: autoConnect) {
+        case .discoverServices:
+            log?.info("Omi: restored CONNECTED \(p.name ?? "?") — rediscovering services")
+            bind(p)
+            setState(.connecting(p.name ?? "Omi"))
+            beginGapSyncWindow()
+            p.discoverServices([OmiUUID.audioService, OmiUUID.batteryService, OmiUUID.storageService])
+        case .waitForPendingConnect:
+            log?.info("Omi: restored PENDING connect to \(p.name ?? "?") — waiting for it to complete")
+            bind(p)
+            setState(.connecting(p.name ?? "Omi"))
+        case .reissuePendingConnect:
+            log?.info("Omi: restored DISCONNECTED \(p.name ?? "?") — re-arming pending connect")
+            bind(p)
+            setState(.disconnected)
+            c.connect(p, options: nil)
+        case .stayDown:
+            setState(.idle)
         }
     }
 
@@ -358,28 +613,63 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
     private func markConnectingName(_ name: String) { setState(.connecting(name)) }
 
     public func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) {
-        log?.info("Omi: connected \(p.name ?? "?") — discovering audio service")
-        // Discover the audio service AND the standard battery service — the battery
-        // read is best-effort (a device without it just never reports a level).
-        p.discoverServices([OmiUUID.audioService, OmiUUID.batteryService])
+        log?.info("Omi: connected \(p.name ?? "?") — discovering audio + storage services")
+        // Discover the audio service, the standard battery service (best-effort), and
+        // the Omi STORAGE service — if present, gap audio recorded while disconnected
+        // is pulled BEFORE live audio is released (recorded order). The gap-sync hold
+        // opens now so no live frame can slip ahead of recovered audio.
+        beginGapSyncWindow()
+        p.discoverServices([OmiUUID.audioService, OmiUUID.batteryService, OmiUUID.storageService])
     }
 
     public func centralManager(_ c: CBCentralManager, didFailToConnect p: CBPeripheral, error: Error?) {
-        setState(.disconnected); onState?(.failed("connect failed: \(error?.localizedDescription ?? "?")"))
+        emitSourceState(.failed("connect failed: \(error?.localizedDescription ?? "?")"))
+        // A failed ATTEMPT is not a dead end (previously it was: one failed handshake
+        // and the Omi never came back until the app was foregrounded). Retry shortly —
+        // failure implies the device is in range, so this is rare and event-driven.
+        switch OmiReconnectPolicy.onFailToConnect(autoConnect: autoConnect) {
+        case .stayDown:
+            setState(.idle)
+        case .retryAfterDelay(let delay):
+            setState(.disconnected)
+            log?.warn("Omi: connect attempt failed (\(error?.localizedDescription ?? "?")) — retrying in \(Int(delay))s")
+            bleQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.autoConnect, let c = self.central, c.state == .poweredOn else { return }
+                guard p.state != .connected && p.state != .connecting else { return }
+                self.bind(p)
+                c.connect(p, options: nil)
+            }
+        }
     }
 
     public func centralManager(_ c: CBCentralManager, didDisconnectPeripheral p: CBPeripheral, error: Error?) {
         setBatteryLevel(nil)          // the level is stale once the link drops
-        onState?(.stopped)            // ends the ambient capture session
+        // Settle any in-flight gap sync FIRST so held live audio is released (in
+        // order) into the session before `.stopped` ends it.
+        gapSync?.linkDropped()
+        endGapSyncWindow(flush: true)
+        audioChar = nil; storageDataChar = nil; storageControlChar = nil
+        emitSourceState(.stopped)            // ends the ambient capture session
         // A USER-suspended link (Omi toggled off) must stay down — don't fight the
         // toggle with an auto-reconnect. A transient drop (in/out of range) re-arms it.
-        guard autoConnect else { setState(.idle); return }
-        log?.warn("Omi: disconnected (\(error?.localizedDescription ?? "clean")) — auto-reconnecting")
-        setState(.disconnected)
-        autoReconnect()               // come back when it's in range
+        switch OmiReconnectPolicy.onDisconnect(autoConnect: autoConnect) {
+        case .stayDown:
+            setState(.idle)
+        case .reissuePendingConnect:
+            // THE iOS-correct always-reconnect: re-issue connect() on the SAME
+            // peripheral object. A pending connect has NO timeout — it completes
+            // whenever the Omi returns to range, including in the background, and
+            // (with state restoration) even if iOS kills the app meanwhile. No scan
+            // loop, no polling — CB wakes us.
+            log?.warn("Omi: disconnected (\(error?.localizedDescription ?? "clean")) — pending reconnect armed")
+            setState(.disconnected)
+            bind(p)
+            c.connect(p, options: nil)
+        }
     }
 
     public func peripheral(_ p: CBPeripheral, didDiscoverServices error: Error?) {
+        var hasStorage = false
         for svc in p.services ?? [] {
             if svc.uuid == OmiUUID.audioService {
                 p.discoverCharacteristics([OmiUUID.audioDataChar, OmiUUID.codecChar], for: svc)
@@ -387,7 +677,14 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
                 p.discoverCharacteristics([OmiUUID.batteryLevelChar], for: svc)
             } else if svc.uuid == OmiUUID.buttonService {
                 p.discoverCharacteristics([OmiUUID.buttonTriggerChar], for: svc)
+            } else if svc.uuid == OmiUUID.storageService {
+                hasStorage = true
+                p.discoverCharacteristics([OmiUUID.storageDataChar, OmiUUID.storageControlChar], for: svc)
             }
+        }
+        if !hasStorage {
+            log?.info("Omi: no storage service — offline cache sync unavailable, live only")
+            endGapSyncWindow(flush: true)
         }
     }
 
@@ -400,21 +697,53 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
                 log?.info("Omi: battery service found — reading level")
             }
             if ch.uuid == OmiUUID.audioDataChar {
+                audioChar = ch
                 p.setNotifyValue(true, for: ch)
                 markConnected(p.identifier, name: p.name ?? "Omi")
                 setState(.connected(p.name ?? "Omi"))
-                onState?(.streaming)   // triggers ambient capture
+                emitSourceState(.streaming)   // triggers ambient capture
                 log?.info("Omi: subscribed to audio — ambient capture live")
             }
             if ch.uuid == OmiUUID.buttonTriggerChar {
                 p.setNotifyValue(true, for: ch)   // hardware button → double-click pauses
                 log?.info("Omi: button service found — subscribed for double-click pause")
             }
+            if ch.uuid == OmiUUID.storageControlChar { storageControlChar = ch }
+            if ch.uuid == OmiUUID.storageDataChar {
+                storageDataChar = ch
+                p.setNotifyValue(true, for: ch)   // ring notifications (info/data/done/ack)
+            }
+        }
+        maybeBeginGapSync(p)
+    }
+
+    /// Storage-char notify state settles here — begin the ring sync once the data
+    /// characteristic is actually subscribed (writes before that are dropped by CB).
+    public func peripheral(_ p: CBPeripheral, didUpdateNotificationStateFor ch: CBCharacteristic, error: Error?) {
+        if ch.uuid == OmiUUID.storageDataChar {
+            if let error {
+                log?.warn("Omi: storage subscribe failed (\(error.localizedDescription)) — skipping offline sync")
+                endGapSyncWindow(flush: true)
+                return
+            }
+            maybeBeginGapSync(p)
         }
     }
 
     public func peripheral(_ p: CBPeripheral, didUpdateValueFor ch: CBCharacteristic, error: Error?) {
         if let error { log?.warn("Omi: didUpdateValue error: \(error.localizedDescription)") }
+        // Storage CONTROL char: the ring-status read result (or a read failure).
+        if ch.uuid == OmiUUID.storageControlChar {
+            gapSync?.statusResult(error == nil ? ch.value : nil)
+            scheduleGapSyncStallCheck()
+            return
+        }
+        // Storage DATA char: ring notifications (info / read-begin / data / done / ack).
+        if ch.uuid == OmiUUID.storageDataChar {
+            if let data = ch.value, error == nil { gapSync?.notification(data) }
+            scheduleGapSyncStallCheck()
+            return
+        }
         guard let data = ch.value else { log?.warn("Omi: notify with nil value"); return }
         if ch.uuid == OmiUUID.batteryLevelChar {
             // Battery Level is a single byte, 0…100 (Bluetooth SIG 0x2A19).
@@ -435,7 +764,18 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
             if audioNotifs <= 5 { log?.warn("Omi: runt audio notif \(data.count)B (≤ header) — dropped") }
             return
         }
-        onFrame?(data.subdata(in: headerBytes..<data.count))   // strip header → Opus frame
+        let frame = data.subdata(in: headerBytes..<data.count)   // strip header → Opus frame
+        if gapSyncHolding {
+            // Recovered gap audio must land FIRST (recorded order): hold live frames
+            // until the offline sync settles, bounded so memory can't run away.
+            liveHold.append(frame)
+            if liveHold.count >= liveHoldMaxFrames {
+                log?.warn("Omi: live-hold cap reached during offline sync — releasing order hold")
+                if let g = gapSync, g.isActive { g.budgetExhausted() } else { endGapSyncWindow(flush: true) }
+            }
+            return
+        }
+        onFrame?(frame)
     }
 
     /// Decode an Omi button-trigger notification into a double-click → `onButtonDoubleClick`.
@@ -481,13 +821,37 @@ public enum OmiUUID {
     /// test reveals the real encoding, which the double-click detector can then be tuned to.
     public nonisolated(unsafe) static let buttonService = CBUUID(string: "23BA7924-0000-1000-7450-346EAC492E92")
     public nonisolated(unsafe) static let buttonTriggerChar = CBUUID(string: "23BA7925-0000-1000-7450-346EAC492E92")
+    /// Omi onboard-STORAGE service (firmware storage.c; UUIDs verified against the
+    /// vendored omi repo — app models.dart + desktop DeviceUUIDs.swift). The DATA
+    /// characteristic (…81) takes ring COMMANDS (write) and notifies ring
+    /// info/data/done/ack; the CONTROL characteristic (…82) is the plain status
+    /// read (16B LE on ring firmware 3.0.20+). A device without the service simply
+    /// never syncs its offline cache — live streaming is unaffected.
+    public nonisolated(unsafe) static let storageService = CBUUID(string: "30295780-4301-EABD-2904-2849ADFEAE43")
+    public nonisolated(unsafe) static let storageDataChar = CBUUID(string: "30295781-4301-EABD-2904-2849ADFEAE43")
+    public nonisolated(unsafe) static let storageControlChar = CBUUID(string: "30295782-4301-EABD-2904-2849ADFEAE43")
 }
 
 #else
 // Non-CoreBluetooth host (macOS test runner): a no-op manager so the app + tests compile.
 public final class DeviceManager: ObservableObject, AudioFrameSource, @unchecked Sendable {
+    public static let restoreIdentifier = "foundryx.omi.central"
+    private static let sharedLock = NSLock()
+    private nonisolated(unsafe) static var sharedInstance: DeviceManager?   // sharedLock-guarded
+    public static func shared(log: DoorLog? = nil) -> DeviceManager {
+        sharedLock.lock(); defer { sharedLock.unlock() }
+        if let s = sharedInstance { return s }
+        let s = DeviceManager(log: log)
+        sharedInstance = s
+        return s
+    }
+    public static func sharedExisting() -> DeviceManager? {
+        sharedLock.lock(); defer { sharedLock.unlock() }
+        return sharedInstance
+    }
     public var onFrame: ((Data) -> Void)?
     public var onState: ((AudioSourceState) -> Void)?
+    public func replayState() {}
     @Published public private(set) var connectionState: DeviceConnectionState = .poweredOff
     @Published public private(set) var discovered: [DiscoveredDevice] = []
     @Published public private(set) var saved: SavedOmi?

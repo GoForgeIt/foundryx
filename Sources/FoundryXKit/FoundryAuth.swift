@@ -188,6 +188,13 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
 
     public func signOut() { AuthStore.clear() }
     public var signedInEmail: String? { AuthStore.load()?.email }
+    /// Lock-screen-safe "is anyone signed in?" — the UserDefaults mirror first (the
+    /// keychain is unreadable while the device is locked, exactly when a bluetooth
+    /// background relaunch needs the answer), keychain as the fallback for installs
+    /// that signed in before the mirror existed.
+    public static var hasPersistedSignIn: Bool {
+        UserDefaults.standard.bool(forKey: AuthStore.signedInMirrorKey) || AuthStore.load() != nil
+    }
     /// Display name when the provider surfaced one (Apple: first auth only).
     public var signedInName: String? { AuthStore.load()?.name }
 
@@ -349,6 +356,13 @@ final class AuthPresenter: NSObject, ASWebAuthenticationPresentationContextProvi
 enum AuthStore {
     private static let service = "com.goforgeit.foundryx.auth"
     private static let account = "identity"
+    /// UserDefaults MIRROR of "someone is signed in" — no secret, just a boolean.
+    /// Needed because the keychain item is unreadable while the device is LOCKED,
+    /// and the bluetooth-central background relaunch (state restoration) must
+    /// decide whether recording is authorized exactly then (phone in pocket).
+    /// Self-healing for pre-existing installs: any successful keychain load also
+    /// stamps it.
+    static let signedInMirrorKey = "foundryx.auth.signed-in"
 
     static func save(_ id: AuthIdentity) {
         guard let data = try? JSONEncoder().encode(id) else { return }
@@ -358,6 +372,7 @@ enum AuthStore {
         SecItemDelete(base as CFDictionary)
         var add = base; add[kSecValueData as String] = data
         SecItemAdd(add as CFDictionary, nil)
+        UserDefaults.standard.set(true, forKey: signedInMirrorKey)
     }
     static func load() -> AuthIdentity? {
         let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
@@ -367,13 +382,16 @@ enum AuthStore {
         var item: CFTypeRef?
         guard SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess,
               let d = item as? Data else { return nil }
-        return try? JSONDecoder().decode(AuthIdentity.self, from: d)
+        guard let id = try? JSONDecoder().decode(AuthIdentity.self, from: d) else { return nil }
+        UserDefaults.standard.set(true, forKey: signedInMirrorKey)   // heal the mirror
+        return id
     }
     static func clear() {
         let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrService as String: service,
                                     kSecAttrAccount as String: account]
         SecItemDelete(base as CFDictionary)
+        UserDefaults.standard.set(false, forKey: signedInMirrorKey)
     }
 }
 

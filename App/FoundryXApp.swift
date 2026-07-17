@@ -2,6 +2,11 @@ import SwiftUI
 
 @main
 struct FoundryXApp: App {
+    /// CB state-restoration bootstrap: when iOS relaunches us in the background
+    /// because the Omi's pending connect completed, the delegate re-adopts the BLE
+    /// link + spools audio BEFORE any UI exists (see FoundryXAppDelegate).
+    @UIApplicationDelegateAdaptor(FoundryXAppDelegate.self) private var appDelegate
+
     #if DEBUG
     /// Cold-launch reference instant (≈ process start; App.init runs alongside
     /// PerfTelemetry.markProcessStart). Used ONLY to mirror the first-draw span to the

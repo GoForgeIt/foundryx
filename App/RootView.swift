@@ -371,7 +371,13 @@ private struct MainTabs: View {
         // Ship the phone's BLE/audio/capture/chat log to the relay diag sink so
         // it's observable server-side (no copying logs off the device).
         log.setRemoteSink(RemoteConfig.fromBundle()?.gatewayHTTPURL.appendingPathComponent("diag/log"))
-        let dm = DeviceManager(log: log)
+        // The SHARED DeviceManager: a background bluetooth-restoration launch may
+        // already own the BLE link (FoundryXAppDelegate) — two centrals with one
+        // restore identifier are undefined, so the UI adopts the same instance. Any
+        // restoration spool flushes + detaches BEFORE CaptureManager takes the
+        // frame/state callbacks; resume-same-id then continues its capture.
+        let dm = DeviceManager.shared(log: log)
+        FoundryXAppDelegate.handOffRestorationToApp()
         _log = StateObject(wrappedValue: log)
         _device = StateObject(wrappedValue: dm)
         _battery = StateObject(wrappedValue: BatteryMonitor())
@@ -557,6 +563,11 @@ private struct MainTabs: View {
             if category == .omi { dm?.setEnabled(on) }
         }
         _sources = StateObject(wrappedValue: reg)
+        // After a background-restoration launch the Omi may ALREADY be `.streaming`;
+        // the freshly-wired CaptureManager would otherwise never see that transition
+        // and never open a session. Replaying the current source state closes the
+        // handover (a no-op on ordinary launches — nothing has been emitted yet).
+        dm.replayState()
     }
 
     var body: some View {
