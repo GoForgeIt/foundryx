@@ -64,6 +64,13 @@ struct SpeakerTranscriptSection: View {
     /// True while a recording is active — the tag sheet disables voice-sample playback.
     var isRecording: Bool = false
 
+    /// Per-slot confirm phases — the tap-to-outcome state machine every inline
+    /// "Confirm: <name>" affordance renders (in-flight / confirmed / failed).
+    /// OWNED BY THE PARENT detail (not this view): the detail swaps between this
+    /// section and the Grain rows on search-toggle, and an in-flight/failed phase
+    /// must survive that swap (adversarial review P2/#4).
+    @ObservedObject var confirmController: SpeakerConfirmController
+
     @State private var tagging: CaptureSpeaker?
 
     var body: some View {
@@ -84,6 +91,7 @@ struct SpeakerTranscriptSection: View {
                     transcript: transcript,
                     onTapSpeaker: { tagging = transcript.speaker(for: turn.slot) },
                     onConfirmInferred: { await confirmInferred(slot: turn.slot) },
+                    confirmPhase: confirmController.phase(for: turn.slot),
                     highlightRanges: searchMatches.filter { $0.row == index }.map(\.range),
                     currentRange: currentMatch.flatMap { $0.row == index ? $0.range : nil }
                 )
@@ -106,21 +114,75 @@ struct SpeakerTranscriptSection: View {
         }
     }
 
-    /// Bare confirm of an inferred match (the inline "Confirm" affordance) — confirms
-    /// the slot's existing inferred speaker without renaming.
+    /// Bare confirm of an inferred match (the inline "Confirm" affordance) — the
+    /// controller runs the durable, deadline-bounded flow and drives the phase the
+    /// affordance renders: in-flight within one frame → confirmed check, or an honest
+    /// failure + retry. The intent stays queued on failure (ships on a later drain).
     private func confirmInferred(slot: String) async {
-        let base = CaptureWAL.documentsCaptures()
-        let capId = captureId
-        // Durable first, but OFF the main actor — the queue's file read+rewrite must never
-        // hang the tap. Await so the intent is on disk before the door call.
-        await Task.detached { SpeakerConfirmQueue.enqueue(captureId: capId, slot: slot, baseDir: base) }.value
-        if let outcome = try? await DoorClient(target: target).confirmSpeaker(captureId: captureId, slot: slot) {
-            await Task.detached { SpeakerConfirmQueue.remove(captureId: capId, slot: slot, baseDir: base) }.value
-            onConfirmed(outcome)   // optimistic: show the confirmed name instantly
+        await confirmController.confirm(
+            captureId: captureId, slot: slot,
+            ship: ConfirmShip.make(target: target, captureId: captureId, slot: slot),
+            onConfirmed: onConfirmed,   // optimistic: show the confirmed name instantly
+            onChanged: onChanged)       // authoritative reconcile off the tap path
+    }
+}
+
+// MARK: - shared confirm plumbing (inline affordances)
+
+/// The inline confirm affordance, rendered from its phase — ONE control shared by the
+/// legacy attributed rows and the Grain rows so the states can never drift:
+///   idle      → "Confirm: <name>" + "Not them"
+///   inFlight  → spinner + "Confirming <name>…" (the tap responded within a frame)
+///   confirmed → a brief check "Confirmed <name>" (the label itself flips in place)
+///   failed    → the honest failure copy + Retry (when retrying can help) + "Not them"
+struct InlineConfirmControls: View {
+    let phase: SpeakerConfirmPhase
+    let name: String
+    let onConfirm: () -> Void
+    let onNotThem: () -> Void
+
+    var body: some View {
+        Group {
+            switch phase {
+            case .idle:
+                HStack(spacing: GrainSpacing.x2) {
+                    GrainButton("Confirm: \(name)", variant: .tonal, size: .sm, action: onConfirm)
+                    GrainButton("Not them", variant: .text, size: .sm, action: onNotThem)
+                }
+            case .inFlight:
+                HStack(spacing: GrainSpacing.x2) {
+                    ProgressView().controlSize(.small)
+                    Text("Confirming \(name)…")
+                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                }
+                .frame(minHeight: GrainSpacing.x8)
+                .accessibilityIdentifier("confirm-inflight")
+            case .confirmed:
+                HStack(spacing: GrainSpacing.x2) {
+                    Image(grain: .check).foregroundStyle(GrainColor.sage)
+                    Text("Confirmed \(name)")
+                        .grainTextStyle(.caption).fontWeight(.semibold)
+                        .foregroundStyle(GrainColor.sage)
+                }
+                .frame(minHeight: GrainSpacing.x8)
+                .accessibilityIdentifier("confirm-success")
+            case .failed(let failure):
+                let copy = SpeakerConfirmPresentation.failureCopy(failure)
+                VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+                    Text(copy.message)
+                        .grainTextStyle(.caption).foregroundStyle(GrainColor.amber)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: GrainSpacing.x2) {
+                        if copy.retryable {
+                            GrainButton("Retry", variant: .tonal, size: .sm, action: onConfirm)
+                        }
+                        GrainButton("Not them", variant: .text, size: .sm, action: onNotThem)
+                    }
+                }
+                .accessibilityIdentifier("confirm-failed")
+            }
         }
-        // Reconcile the authoritative content in the background — don't hold the tap on a
-        // full captureContent re-fetch round-trip.
-        Task { await onChanged() }
+        .animation(.easeInOut(duration: 0.15), value: phase)
     }
 }
 
@@ -131,6 +193,9 @@ struct SpeakerTurnRow: View {
     let transcript: SpeakerTranscript
     let onTapSpeaker: () -> Void
     let onConfirmInferred: () async -> Void
+    /// This slot's confirm lifecycle (in-flight / confirmed / failed) — drives the
+    /// inline affordance so a tap always answers within a frame.
+    var confirmPhase: SpeakerConfirmPhase = .idle
     /// Search-match character ranges within `turn.text` (empty = no search).
     var highlightRanges: [Range<Int>] = []
     /// The current match's range, when it lives in this turn.
@@ -176,13 +241,21 @@ struct SpeakerTurnRow: View {
                 .padding(.leading, GrainSpacing.x4)
 
             // Inline confirm affordance for an inferred match — confirm or "not them".
+            // Also rendered while a phase is still resolving/lingering (e.g. the brief
+            // "Confirmed" check after the optimistic flip made the speaker confirmed).
             if speaker.isInferred, let name = speaker.name {
-                HStack(spacing: GrainSpacing.x2) {
-                    GrainButton("Confirm: \(name)", variant: .tonal, size: .sm) {
-                        Task { await onConfirmInferred() }
-                    }
-                    GrainButton("Not them", variant: .text, size: .sm, action: onTapSpeaker)
-                }
+                InlineConfirmControls(
+                    phase: confirmPhase,
+                    name: name,
+                    onConfirm: { Task { await onConfirmInferred() } },
+                    onNotThem: onTapSpeaker)
+                .padding(.leading, GrainSpacing.x4)
+            } else if confirmPhase != .idle {
+                InlineConfirmControls(
+                    phase: confirmPhase,
+                    name: speaker.name ?? label,
+                    onConfirm: { Task { await onConfirmInferred() } },
+                    onNotThem: onTapSpeaker)
                 .padding(.leading, GrainSpacing.x4)
             }
         }
@@ -269,6 +342,17 @@ struct SpeakerTagSheet: View {
     @State private var error: String?
     @State private var offer: ConfirmOutcome?
     @State private var applied = false
+    /// Which affordance is in flight — its button becomes a spinner row within one
+    /// frame of the tap (never a dead, merely-disabled button).
+    private enum PendingAction { case confirmInferred, saveName }
+    @State private var pendingAction: PendingAction?
+    /// Success flash: shown briefly before the sheet dismisses ITSELF (the "did it
+    /// work?" beat Nick asked for), only when there's no apply-to-past offer to show.
+    @State private var flashConfirmedName: String?
+    /// False after an auth-expired failure: an immediate retry CANNOT succeed until
+    /// re-auth, so the primary buttons yield to a Close (the queued change ships after
+    /// the user reconnects). Mirrors InlineConfirmControls' retryable gate.
+    @State private var lastFailureRetryable = true
 
     /// Voice-sample playback: idle → loading → playing; a `failure` carries the honest
     /// outcome (pruned audio vs unreachable computer vs a real failure). Sheet-local —
@@ -287,11 +371,17 @@ struct SpeakerTagSheet: View {
                     offerSection(offer)
                 } else if applied {
                     appliedSection
+                } else if let confirmedName = flashConfirmedName {
+                    confirmedFlashSection(confirmedName)
                 } else {
                     editSection
                 }
                 if let error {
-                    Text(error).grainTextStyle(.caption).foregroundStyle(GrainColor.dangerRed)
+                    // Honest failure: the change is durably queued on the phone; the
+                    // primary button doubles as the retry. Amber (kept-safe), not a
+                    // scary red — nothing was lost.
+                    Text(error).grainTextStyle(.caption).foregroundStyle(GrainColor.amber)
+                        .accessibilityIdentifier("sheet-confirm-error")
                 }
             }
             .padding(GrainSpacing.x4)
@@ -318,10 +408,14 @@ struct SpeakerTagSheet: View {
         if speaker.isInferred, let inferred = speaker.name {
             Text(scoreCaption(inferred))
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-            GrainButton("Confirm \(inferred)", variant: .filled, size: .regular) {
-                Task { await confirm(name: nil) }   // bare confirm of the inferred match
+            if pendingAction == .confirmInferred {
+                sheetInFlightRow("Confirming \(inferred)…")
+            } else if lastFailureRetryable {
+                GrainButton("Confirm \(inferred)", variant: .filled, size: .regular) {
+                    Task { await confirm(name: nil) }   // bare confirm of the inferred match
+                }
+                .disabled(busy)
             }
-            .disabled(busy)
             Divider().background(GrainColor.borderHairline)
             Text("Not them? Name this speaker instead:")
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
@@ -337,13 +431,43 @@ struct SpeakerTagSheet: View {
         Text("Type a new name to create a person, or an existing person's name to assign this voice to them.")
             .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
 
-        GrainButton(saveTitle, variant: .filled, size: .regular) {
-            Task { await confirm(name: name.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        if pendingAction == .saveName {
+            sheetInFlightRow("Saving…")
+        } else if lastFailureRetryable {
+            GrainButton(saveTitle, variant: .filled, size: .regular) {
+                Task { await confirm(name: name.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            }
+            .disabled(busy || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } else {
+            // Sign-in expired: a retry can't succeed until re-auth — no dead buttons.
+            // The change is safely queued; it ships once the user reconnects.
+            GrainButton("Close", variant: .outlined, size: .regular) { dismiss() }
         }
-        .disabled(busy || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 
     private var saveTitle: String { speaker.isConfirmed ? "Save changes" : "Save name" }
+
+    /// The in-flight beat: the tapped button becomes a spinner row within one frame.
+    private func sheetInFlightRow(_ label: String) -> some View {
+        HStack(spacing: GrainSpacing.x2) {
+            ProgressView().controlSize(.small)
+            Text(label).grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
+        }
+        .frame(minHeight: GrainSpacing.x8)
+        .accessibilityIdentifier("sheet-confirm-inflight")
+    }
+
+    /// The success flash shown just before the sheet dismisses itself.
+    @ViewBuilder private func confirmedFlashSection(_ confirmedName: String) -> some View {
+        HStack(spacing: GrainSpacing.x2) {
+            Image(grain: .check).foregroundStyle(GrainColor.sage)
+            Text("Confirmed \(confirmedName)")
+                .grainTextStyle(.title).foregroundStyle(GrainColor.ink)
+        }
+        .accessibilityIdentifier("sheet-confirm-success")
+        Text("This voice will be recognized in future conversations.")
+            .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+    }
 
     // ── "Hear this voice" ────────────────────────────────────────────────────
 
@@ -473,11 +597,15 @@ struct SpeakerTagSheet: View {
         let n = outcome.offeredCaptures.count
         Text("This voice also matches \(n) past \(n == 1 ? "conversation" : "conversations"). Apply \(outcome.speakerName) to \(n == 1 ? "it" : "them")?")
             .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-        HStack(spacing: GrainSpacing.x2) {
-            GrainButton("Apply to \(n)", variant: .filled, size: .regular) {
-                Task { await applyOffer(outcome) }
-            }.disabled(busy)
-            GrainButton("Not now", variant: .text, size: .regular) { dismiss() }
+        if busy {
+            sheetInFlightRow("Applying…")
+        } else {
+            HStack(spacing: GrainSpacing.x2) {
+                GrainButton("Apply to \(n)", variant: .filled, size: .regular) {
+                    Task { await applyOffer(outcome) }
+                }
+                GrainButton("Not now", variant: .text, size: .regular) { dismiss() }
+            }
         }
     }
 
@@ -497,39 +625,47 @@ struct SpeakerTagSheet: View {
 
     /// Confirm/correct: `name == nil` is a bare confirm of the inferred match; a
     /// non-empty name confirms for that name (merge-or-create).
+    ///
+    /// Feedback contract (track 20260717T0900): the tapped button becomes a spinner
+    /// within one frame; success flashes a confirmed check then the sheet dismisses
+    /// ITSELF; failure keeps the sheet OPEN with the honest error (the change is
+    /// durably queued either way — the old code dismissed silently on failure, which
+    /// read exactly like success while nothing visibly happened).
     private func confirm(name: String?) async {
+        guard !busy else { return }   // re-entrancy: one round trip at a time
         busy = true; error = nil
-        defer { busy = false }
-        // Durable FIRST: record the intent to disk so a hub blip can never lose it — but
-        // OFF the main actor so the queue's file read+rewrite never hangs the sheet. Await
-        // so the intent is on disk before the door call (a crash between them must not lose it).
-        let base = CaptureWAL.documentsCaptures()
-        let capId = captureId
-        let slot = speaker.slot
-        await Task.detached { SpeakerConfirmQueue.enqueue(captureId: capId, slot: slot, name: name, baseDir: base) }.value
-        do {
-            let outcome = try await DoorClient(target: target)
-                .confirmSpeaker(captureId: captureId, slot: speaker.slot, name: name)
-            await Task.detached { SpeakerConfirmQueue.remove(captureId: capId, slot: slot, baseDir: base) }.value  // shipped → dequeue
-            onConfirmed(outcome)   // optimistic: flip this slot to confirmed instantly
-            if outcome.offeredCaptures.isEmpty {
-                // Nothing more the user must see → dismiss IMMEDIATELY; reconcile the
-                // authoritative content in the background (was: await a full re-fetch
-                // round-trip BEFORE dismissing — the painfully slow "confirm" UX).
-                dismiss()
-                Task { await onChanged() }
-            } else {
-                // The offer sheet needs the confirmed state on screen — reconcile first,
-                // then surface the apply-to-past-conversations offer.
-                await onChanged()
-                offer = outcome
+        pendingAction = (name == nil) ? .confirmInferred : .saveName
+        defer { busy = false; pendingAction = nil }
+        let result = await SpeakerConfirmFlow.run(
+            captureId: captureId, slot: speaker.slot, name: name,
+            baseDir: CaptureWAL.documentsCaptures(),
+            ship: ConfirmShip.make(target: target, captureId: captureId,
+                                   slot: speaker.slot, name: name))
+        switch SpeakerConfirmPresentation.sheetReaction(result) {
+        case .dismiss:
+            if case .success(let outcome) = result {
+                onConfirmed(outcome)   // optimistic: flip this slot to confirmed instantly
+                Task { await onChanged() }   // authoritative reconcile off the tap path
+                // A brief confirmed beat so the success is SEEN, then close self.
+                let shown = outcome.speakerName.isEmpty
+                    ? (name ?? speaker.name ?? displayLabel) : outcome.speakerName
+                flashConfirmedName = shown
+                try? await Task.sleep(nanoseconds: 600_000_000)
             }
-        } catch {
-            // Hub unreachable: the confirm stays QUEUED and ships on the next drain —
-            // don't lose it, and don't freeze the user behind a scary error. Close now,
-            // reconcile in the background.
             dismiss()
-            Task { await onChanged() }
+        case .showOffer(let outcome):
+            onConfirmed(outcome)
+            // The offer needs the confirmed state on screen — reconcile first, then
+            // surface the apply-to-past-conversations offer.
+            await onChanged()
+            offer = outcome
+        case .stayOpen(let failure):
+            // The intent is QUEUED on the phone (ships on a later drain) — say so
+            // honestly. A retryable failure leaves the primary button as the retry;
+            // auth-expired swaps it for Close (retrying can't help until re-auth).
+            let copy = SpeakerConfirmPresentation.failureCopy(failure)
+            error = copy.message
+            lastFailureRetryable = copy.retryable
         }
     }
 

@@ -89,6 +89,13 @@ struct ConversationFacesView: View {
     /// The action row whose options sheet is open (track 20260715T1500 addendum).
     @State private var selectedAction: ConversationActionsPresentation.Row?
 
+    // MARK: speaker-confirm phases (track 20260717T0900)
+    /// ONE per-slot confirm state machine for this conversation, shared by BOTH
+    /// transcript row surfaces (Grain rows + the search-active attributed rows) so an
+    /// in-flight spinner or a sticky failure survives toggling search.
+    @StateObject private var confirmController =
+        SpeakerConfirmController(baseDir: CaptureWAL.documentsCaptures())
+
     // MARK: transcript search
     @State private var query = ""
     @State private var search = TranscriptSearchState(matches: [])
@@ -659,7 +666,8 @@ struct ConversationFacesView: View {
                             transcript: diarized,
                             onChanged: { await fetchFromDoor() },
                             onConfirmed: { outcome in applyConfirmedSpeaker(outcome) },
-                            isRecording: isRecordingActive
+                            isRecording: isRecordingActive,
+                            confirmController: confirmController
                         )
                     } else {
                         // GrainSpeakerRow intentionally accepts plain words. Keep the
@@ -673,7 +681,8 @@ struct ConversationFacesView: View {
                             onConfirmed: { outcome in applyConfirmedSpeaker(outcome) },
                             searchMatches: search.matches,
                             currentMatch: search.current,
-                            isRecording: isRecordingActive
+                            isRecording: isRecordingActive,
+                            confirmController: confirmController
                         )
                     }
                 } else {
@@ -1268,6 +1277,11 @@ private struct GrainSpeakerTranscriptRows: View {
     /// True while a recording is active — the tag sheet disables voice-sample playback.
     var isRecording: Bool = false
 
+    /// Per-slot confirm phases — same state machine as SpeakerTranscriptSection.
+    /// OWNED BY THE PARENT detail so an in-flight/failed phase survives the
+    /// search-toggle swap between the two row surfaces (adversarial review P2/#4).
+    @ObservedObject var confirmController: SpeakerConfirmController
+
     @State private var tagging: CaptureSpeaker?
 
     var body: some View {
@@ -1316,15 +1330,24 @@ private struct GrainSpeakerTranscriptRows: View {
             .accessibilityAddTraits(.isButton)
             .accessibilityAction(named: "Edit speaker") { tagging = speaker }
 
+            // The inline confirm affordance renders from its phase (in-flight /
+            // confirmed / failed) — same shared control as the legacy rows, so a tap
+            // ALWAYS answers within a frame. Kept visible while a transient phase
+            // lingers (the brief "Confirmed" check after the optimistic flip).
             if speaker.isInferred, let name = speaker.name {
-                HStack(spacing: GrainSpacing.x2) {
-                    GrainButton("Confirm: \(name)", variant: .tonal, size: .sm) {
-                        Task { await confirmInferred(slot: turn.slot) }
-                    }
-                    GrainButton("Not them", variant: .text, size: .sm) {
-                        tagging = speaker
-                    }
-                }
+                InlineConfirmControls(
+                    phase: confirmController.phase(for: turn.slot),
+                    name: name,
+                    onConfirm: { Task { await confirmInferred(slot: turn.slot) } },
+                    onNotThem: { tagging = speaker })
+                .padding(.leading, GrainSpacing.x4)
+                .padding(.bottom, GrainSpacing.x2)
+            } else if confirmController.phase(for: turn.slot) != .idle {
+                InlineConfirmControls(
+                    phase: confirmController.phase(for: turn.slot),
+                    name: speaker.name ?? transcript.displayLabel(for: turn.slot),
+                    onConfirm: { Task { await confirmInferred(slot: turn.slot) } },
+                    onNotThem: { tagging = speaker })
                 .padding(.leading, GrainSpacing.x4)
                 .padding(.bottom, GrainSpacing.x2)
             }
@@ -1355,20 +1378,15 @@ private struct GrainSpeakerTranscriptRows: View {
         return parts.joined(separator: " · ")
     }
 
+    /// The controller runs the durable, deadline-bounded confirm flow and drives the
+    /// phase the affordance renders — in-flight within one frame, then a confirmed
+    /// check or an honest failure + retry. The intent stays queued on failure.
     private func confirmInferred(slot: String) async {
-        let base = CaptureWAL.documentsCaptures()
-        let capId = captureId
-        // Durable first, but OFF the main actor — the queue's file read+rewrite must never
-        // hang the tap. Await so the intent is on disk before the door call (a crash between
-        // them must not lose it).
-        await Task.detached { SpeakerConfirmQueue.enqueue(captureId: capId, slot: slot, baseDir: base) }.value
-        if let outcome = try? await DoorClient(target: target).confirmSpeaker(captureId: captureId, slot: slot) {
-            await Task.detached { SpeakerConfirmQueue.remove(captureId: capId, slot: slot, baseDir: base) }.value
-            onConfirmed(outcome)   // optimistic: show the confirmed name instantly
-        }
-        // Reconcile the authoritative content in the background — don't hold the tap on a
-        // full captureContent re-fetch round-trip.
-        Task { await onChanged() }
+        await confirmController.confirm(
+            captureId: captureId, slot: slot,
+            ship: ConfirmShip.make(target: target, captureId: captureId, slot: slot),
+            onConfirmed: onConfirmed,   // optimistic: show the confirmed name instantly
+            onChanged: onChanged)       // authoritative reconcile off the tap path
     }
 }
 

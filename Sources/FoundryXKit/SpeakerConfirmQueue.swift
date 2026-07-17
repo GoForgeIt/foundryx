@@ -30,8 +30,20 @@ public enum SpeakerConfirmQueue {
         baseDir.appendingPathComponent("speaker-confirms.jsonl")
     }
 
+    /// Serializes every read-modify-write cycle on the queue file. The interactive
+    /// confirm flow and the 5s drain routinely run on DIFFERENT executors
+    /// (`Task.detached`) against the same file — without this, an interleaved
+    /// read→filter→rewrite could silently drop another writer's intent (a rename
+    /// vanishing from the durable queue). `.atomic` only prevents torn files, not
+    /// lost updates. (Adversarial review P2/#3, track 20260717T0900.)
+    private static let ioQueue = DispatchQueue(label: "foundryx.speaker-confirm-queue")
+
     /// The pending confirms (oldest first). Malformed lines are skipped, never fatal.
     public static func pending(baseDir: URL) -> [Entry] {
+        ioQueue.sync { pendingLocked(baseDir: baseDir) }
+    }
+
+    private static func pendingLocked(baseDir: URL) -> [Entry] {
         guard let text = try? String(contentsOf: url(baseDir: baseDir), encoding: .utf8) else { return [] }
         return text.split(separator: "\n").compactMap { line in
             guard let data = line.data(using: .utf8) else { return nil }
@@ -43,9 +55,12 @@ public enum SpeakerConfirmQueue {
     public static func enqueue(captureId: String, slot: String, name: String? = nil,
                                speakerId: String? = nil, baseDir: URL,
                                now: UInt64 = UInt64(max(0, Date().timeIntervalSince1970))) {
-        var entries = pending(baseDir: baseDir).filter { !($0.captureId == captureId && $0.slot == slot) }
-        entries.append(Entry(captureId: captureId, slot: slot, name: name, speakerId: speakerId, ts: now))
-        write(entries, baseDir: baseDir)
+        ioQueue.sync {
+            var entries = pendingLocked(baseDir: baseDir)
+                .filter { !($0.captureId == captureId && $0.slot == slot) }
+            entries.append(Entry(captureId: captureId, slot: slot, name: name, speakerId: speakerId, ts: now))
+            write(entries, baseDir: baseDir)
+        }
         UsageHook.generation(kind: "speaker_confirm")   // content-free: a count, never the name
     }
 
@@ -57,27 +72,34 @@ public enum SpeakerConfirmQueue {
                                   baseDir: URL,
                                   now: UInt64 = UInt64(max(0, Date().timeIntervalSince1970))) {
         guard !entries.isEmpty else { return }
-        let incoming = Set(entries.map(Self.key))
-        var kept = pending(baseDir: baseDir).filter { !incoming.contains(key($0.captureId, $0.slot)) }
-        for e in entries {
-            kept.append(Entry(captureId: e.captureId, slot: e.slot, name: nil, speakerId: e.speakerId, ts: now))
+        ioQueue.sync {
+            let incoming = Set(entries.map(Self.key))
+            var kept = pendingLocked(baseDir: baseDir).filter { !incoming.contains(key($0.captureId, $0.slot)) }
+            for e in entries {
+                kept.append(Entry(captureId: e.captureId, slot: e.slot, name: nil, speakerId: e.speakerId, ts: now))
+            }
+            write(kept, baseDir: baseDir)
         }
-        write(kept, baseDir: baseDir)
     }
 
     /// Drop the queued intent for a slot (called once it has shipped).
     public static func remove(captureId: String, slot: String, baseDir: URL) {
-        let remaining = pending(baseDir: baseDir).filter { !($0.captureId == captureId && $0.slot == slot) }
-        write(remaining, baseDir: baseDir)
+        ioQueue.sync {
+            let remaining = pendingLocked(baseDir: baseDir)
+                .filter { !($0.captureId == captureId && $0.slot == slot) }
+            write(remaining, baseDir: baseDir)
+        }
     }
 
     /// Drop MANY queued intents in ONE read + ONE atomic write (the batch counterpart to
     /// `remove` — for a bulk apply whose confirms all shipped). Keys not present are ignored.
     public static func removeAll(_ keys: [(captureId: String, slot: String)], baseDir: URL) {
         guard !keys.isEmpty else { return }
-        let drop = Set(keys.map { key($0.captureId, $0.slot) })
-        let remaining = pending(baseDir: baseDir).filter { !drop.contains(key($0.captureId, $0.slot)) }
-        write(remaining, baseDir: baseDir)
+        ioQueue.sync {
+            let drop = Set(keys.map { key($0.captureId, $0.slot) })
+            let remaining = pendingLocked(baseDir: baseDir).filter { !drop.contains(key($0.captureId, $0.slot)) }
+            write(remaining, baseDir: baseDir)
+        }
     }
 
     /// A collision-safe dedupe key for a (captureId, slot) pair (control-char separator
