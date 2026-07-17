@@ -314,6 +314,24 @@ public struct SpeakerTranscript: Sendable, Equatable {
         return (longest.0, min(longest.1, longest.0 + maxDurationMs))
     }
 
+    /// The playable ms window for the SPECIFIC turn the user TAPPED — the exact piece of
+    /// the conversation they were looking at. "Hear this voice" opened from a transcript
+    /// turn plays THIS clip, not the slot's globally-longest utterance somewhere else in
+    /// the conversation, so the sample matches the line the user selected. Starts at the
+    /// turn's earliest timestamped segment and is capped at `maxDurationMs` so the fetched
+    /// slice stays small; a turn is one speaker's consecutive segments, so the whole span
+    /// is that speaker's own audio. `nil` when the turn carries no timestamps (the sheet
+    /// then falls back to the slot's representative sample). Pure (no UI/network) so it's
+    /// unit-testable.
+    public func voiceSampleWindow(
+        forTurn turn: SpeakerTurn, maxDurationMs: Int = 10_000
+    ) -> (startMs: Int, endMs: Int)? {
+        let starts = turn.segments.compactMap(\.startMs)
+        let ends = turn.segments.compactMap(\.endMs)
+        guard let start = starts.min(), let end = ends.max(), end > start else { return nil }
+        return (start, min(end, start + maxDurationMs))
+    }
+
     /// Slots that carry an UNCONFIRMED inferred match — the backlog the "review
     /// speakers" affordance works through (tentative labels awaiting confirm/reject).
     public var inferredSlots: [String] {

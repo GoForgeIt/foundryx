@@ -16,10 +16,24 @@ Feature: Hearing a conversation's audio, honestly
   "Hear this voice" are off, with a line that says why — the app will not steal the audio
   route out from under a live recording.
 
+  Listen plays the WHOLE conversation, start to finish — not a snippet. While it plays,
+  the row is a real transport: a scrubber you can drag to any point and an "elapsed / total"
+  readout, so you always know how far into the conversation you are.
+
   Scenario: listening to an ambient capture you don't remember
     Given a recorded conversation whose audio is available on the computer
     When I tap "Listen"
     Then the audio loads and then plays
+
+  Scenario: playing the whole conversation shows how far in you are
+    Given playback is 12 seconds into a 245 second recording
+    Then the elapsed readout reads "0:12 / 4:05"
+    And the scrubber is filled to that position
+
+  Scenario: the elapsed readout never runs past the end
+    Given playback is 400 seconds into a 245 second recording
+    Then the elapsed readout reads "4:05 / 4:05"
+    And the scrubber is filled to the end
 
   Scenario: the recording's audio was pruned from the computer
     Given a recorded conversation whose audio has been pruned from the computer

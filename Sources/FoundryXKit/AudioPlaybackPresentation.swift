@@ -65,6 +65,35 @@ public enum AudioPlaybackPresentation {
         return .failed
     }
 
+    // ── Whole-conversation player progress ──────────────────────────────────────
+    // The "Listen" control plays the ENTIRE capture start-to-finish; while it plays it
+    // shows how far in you are. These pure formatters pin the scrubber's elapsed readout
+    // and fill so the SwiftUI row (which owns the AVAudioPlayer clock) can't drift.
+
+    /// A compact "m:ss" clock label for one time value (an elapsed position or a total
+    /// duration). NaN / negative / infinite inputs clamp to "0:00"; sub-second is floored.
+    public static func clock(_ seconds: Double) -> String {
+        let total = (seconds.isFinite && seconds > 0) ? Int(seconds) : 0
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
+    /// The whole-conversation player's elapsed readout — "elapsed / total"
+    /// (e.g. "0:12 / 4:05"). The elapsed side never runs past the total.
+    public static func elapsed(currentSeconds: Double, durationSeconds: Double) -> String {
+        let dur = (durationSeconds.isFinite && durationSeconds > 0) ? durationSeconds : 0
+        let cur = min(max(currentSeconds.isFinite ? currentSeconds : 0, 0), dur)
+        return "\(clock(cur)) / \(clock(dur))"
+    }
+
+    /// The 0…1 fill for the scrubber. 0 when the duration is unknown/zero; clamped so a
+    /// late clock tick past `duration` can't overshoot the track.
+    public static func progressFraction(currentSeconds: Double, durationSeconds: Double) -> Double {
+        let dur = (durationSeconds.isFinite && durationSeconds > 0) ? durationSeconds : 0
+        guard dur > 0 else { return 0 }
+        let cur = min(max(currentSeconds.isFinite ? currentSeconds : 0, 0), dur)
+        return cur / dur
+    }
+
     /// The copy for an outcome — the exact human lines the rows render.
     public static func copy(for outcome: Outcome) -> Copy {
         switch outcome {

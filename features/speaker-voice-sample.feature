@@ -1,24 +1,28 @@
 Feature: Hear a speaker's voice while naming them
 
   Naming a speaker requires knowing WHO they are — and the only ground truth is their
-  voice. The speaker tag sheet offers "Hear this voice": it plays a short sample of
-  THAT speaker's own audio (their longest utterance in this conversation), fetched as
-  a small clip — never the whole recording — so the user can listen, recognize the
-  person, and type their name in one motion. A speaker whose segments carry no
-  timestamps simply doesn't offer playback (never a broken button).
+  voice. Tapping a line in the transcript opens the tag sheet with "Hear this voice": it
+  plays a short clip of THAT line — the exact piece of the conversation the user was
+  looking at — fetched as a small windowed slice, never the whole recording. (Earlier it
+  always played the speaker's globally-longest utterance somewhere else in the
+  conversation, so it "didn't play the selected piece" — b232.) When the sheet is opened
+  WITHOUT a specific line (the "review speakers" jump), it falls back to a representative
+  sample: that speaker's longest, most recognizable utterance. A speaker whose segments
+  carry no timestamps simply doesn't offer playback (never a broken button).
 
-  Scenario: hearing a speaker's voice sample from the tag sheet
+  Scenario: hearing the exact line you tapped
     Given a recorded conversation with diarized speakers
-    And speaker "Speaker 2" has timestamped utterances
-    When I open the tag sheet for "Speaker 2"
+    When I tap the line "short bit from speaker two" to tag its speaker
     And I tap "Hear this voice"
-    Then a short audio sample of "Speaker 2" plays
+    Then the sample plays that exact line's audio
     And the sample covers only that speaker's own speaking time
+    And the sample is not that speaker's longest utterance
 
-  Scenario: the sample picks the speaker's longest utterance
-    Given a recorded conversation where "Speaker 1" spoke three times
-    When I tap "Hear this voice" for "Speaker 1"
-    Then the sample played is "Speaker 1"'s longest utterance
+  Scenario: reviewing a speaker without tapping a line plays a representative sample
+    Given a recorded conversation with diarized speakers
+    When I review "Speaker 2" without tapping a specific line
+    And I tap "Hear this voice"
+    Then the sample played is "Speaker 2"'s longest utterance
 
   Scenario: playback stops when the tag sheet closes
     Given a voice sample for "Speaker 2" is playing

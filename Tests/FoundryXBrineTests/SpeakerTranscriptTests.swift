@@ -76,6 +76,69 @@ final class SpeakerTranscriptTests: XCTestCase {
         XCTAssertNil(t.voiceSampleWindow(for: "speaker_9"), "unknown slot → nil")
     }
 
+    // MARK: - tapped-turn voice-sample window (BUG b232 — play the SELECTED piece)
+
+    /// The tag sheet opened from a tapped transcript line must play THAT line's clip —
+    /// not the slot's globally-longest utterance elsewhere in the conversation.
+    func testVoiceSampleWindowForTurnPlaysTheTappedLineNotTheLongest() {
+        let t = SpeakerTranscript(
+            speakers: [],
+            segments: [
+                TranscriptSegment(seq: 0, startMs: 0, endMs: 2_000, text: "hi", speaker: "speaker_0"),
+                TranscriptSegment(seq: 1, startMs: 5_000, endMs: 7_000, text: "short bit", speaker: "speaker_1"),
+                TranscriptSegment(seq: 2, startMs: 8_000, endMs: 9_000, text: "ok", speaker: "speaker_0"),
+                TranscriptSegment(seq: 3, startMs: 10_000, endMs: 18_000, text: "the long bit", speaker: "speaker_1"),
+            ])
+        // speaker_1's SHORT first line is a separate turn from its long later line.
+        let shortTurn = t.turns.first { $0.slot == "speaker_1" && $0.text == "short bit" }!
+        let tapped = t.voiceSampleWindow(forTurn: shortTurn)
+        XCTAssertEqual(tapped?.startMs, 5_000, "the tapped line's own start")
+        XCTAssertEqual(tapped?.endMs, 7_000, "the tapped line's own end")
+        // The old behavior would have played the slot's LONGEST utterance (10000–18000).
+        let longest = t.voiceSampleWindow(for: "speaker_1")
+        XCTAssertEqual(longest?.startMs, 10_000)
+        XCTAssertNotEqual(tapped?.startMs, longest?.startMs,
+                          "the tapped clip is the selected line, not the longest utterance")
+    }
+
+    /// A tapped turn is capped like the slot sample so a long monologue line stays small.
+    func testVoiceSampleWindowForTurnIsCapped() {
+        let t = SpeakerTranscript(
+            speakers: [],
+            segments: [
+                TranscriptSegment(seq: 0, startMs: 4_000, endMs: 90_000, text: "a monologue", speaker: "speaker_1"),
+            ])
+        let turn = t.turns.first { $0.slot == "speaker_1" }!
+        let win = t.voiceSampleWindow(forTurn: turn, maxDurationMs: 10_000)
+        XCTAssertEqual(win?.startMs, 4_000)
+        XCTAssertEqual(win?.endMs, 14_000, "a long tapped line samples only its first 10s")
+    }
+
+    /// A multi-segment turn spans its earliest start → latest end (all one speaker).
+    func testVoiceSampleWindowForTurnSpansTheWholeTurn() {
+        let t = SpeakerTranscript(
+            speakers: [],
+            segments: [
+                TranscriptSegment(seq: 0, startMs: 2_000, endMs: 2_500, text: "well", speaker: "speaker_0"),
+                TranscriptSegment(seq: 1, startMs: 2_600, endMs: 4_000, text: "you see", speaker: "speaker_0"),
+                TranscriptSegment(seq: 2, startMs: 9_000, endMs: 9_500, text: "hi", speaker: "speaker_1"),
+            ])
+        let turn = t.turns.first { $0.slot == "speaker_0" }!
+        let win = t.voiceSampleWindow(forTurn: turn)
+        XCTAssertEqual(win?.startMs, 2_000, "earliest segment start")
+        XCTAssertEqual(win?.endMs, 4_000, "latest segment end (within the cap)")
+    }
+
+    /// A turn whose segments carry no usable timing offers no tapped-clip (the sheet
+    /// falls back to the slot's representative sample — never a broken button).
+    func testVoiceSampleWindowForTurnNilWithoutTimestamps() {
+        let t = SpeakerTranscript(
+            speakers: [],
+            segments: [TranscriptSegment(seq: 0, text: "untimed", speaker: "speaker_0")])
+        let turn = t.turns.first { $0.slot == "speaker_0" }!
+        XCTAssertNil(t.voiceSampleWindow(forTurn: turn))
+    }
+
     // MARK: - segment → speaker turn grouping
 
     func testConsecutiveSameSpeakerFoldIntoOneTurn() {

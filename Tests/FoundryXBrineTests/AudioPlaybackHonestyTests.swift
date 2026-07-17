@@ -93,9 +93,15 @@ private final class PlaybackWorld: @unchecked Sendable {
     var presentedText: String?          // the exact copy the row would show (title[/subtitle])
     var disabledReason: String?
 
+    // Whole-conversation scrubber (GAP b232): the elapsed readout + fill the playing row
+    // renders, from the pure formatter the SwiftUI transport consumes.
+    var elapsedReadout: String?
+    var scrubberFraction: Double?
+
     func reset() {
         mode = .available; isRecording = false
         played = false; outcome = nil; presentedText = nil; disabledReason = nil
+        elapsedReadout = nil; scrubberFraction = nil
     }
 
     func session() -> URLSession {
@@ -152,6 +158,15 @@ private enum PlaybackSteps {
             },
             defineStep("no recording is in progress") { ctx, _, _ in
                 w.reset(); w.isRecording = false; return ctx
+            },
+            defineStep("playback is {int} seconds into a {int} second recording") { ctx, p, _ in
+                w.reset()
+                let cur = Double(try p.requireInt(0))
+                let dur = Double(try p.requireInt(1))
+                // The exact readout + fill the playing row shows, from the pure formatter.
+                w.elapsedReadout = AudioPlaybackPresentation.elapsed(currentSeconds: cur, durationSeconds: dur)
+                w.scrubberFraction = AudioPlaybackPresentation.progressFraction(currentSeconds: cur, durationSeconds: dur)
+                return ctx
             },
             defineStep("I tap {string}") { ctx, p, _ in
                 _ = try p.requireString(0)   // "Listen"
@@ -222,6 +237,25 @@ private enum PlaybackSteps {
             defineCheck("playback is allowed") { _, _, _ in
                 guard w.disabledReason == nil else {
                     throw BrineStepError("expected playback allowed, but it was disabled: \(w.disabledReason!)")
+                }
+            },
+            defineCheck("the elapsed readout reads {string}") { _, p, _ in
+                let expected = try p.requireString(0)
+                guard w.elapsedReadout == expected else {
+                    throw BrineStepError("elapsed readout '\(w.elapsedReadout ?? "nil")' != '\(expected)'")
+                }
+            },
+            defineCheck("the scrubber is filled to that position") { _, _, _ in
+                // 12s / 245s ≈ 0.04898 — a real, in-range fill (not 0, not full).
+                guard let f = w.scrubberFraction, f > 0, f < 1,
+                      abs(f - 12.0 / 245.0) < 1e-9 else {
+                    throw BrineStepError("scrubber fraction \(String(describing: w.scrubberFraction)) is not 12/245")
+                }
+            },
+            defineCheck("the scrubber is filled to the end") { _, _, _ in
+                // A clock tick past the end clamps to a full (never overshooting) track.
+                guard let f = w.scrubberFraction, f == 1 else {
+                    throw BrineStepError("expected the scrubber clamped to 1.0, got \(String(describing: w.scrubberFraction))")
                 }
             },
         ]

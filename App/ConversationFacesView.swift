@@ -126,6 +126,14 @@ struct ConversationFacesView: View {
     @State private var audioState: AudioState = .idle
     @State private var player: AVAudioPlayer?
     @State private var playbackOwnsSession = false
+    /// Whole-conversation scrubber (GAP b232 "play the WHOLE conversation"): how far into
+    /// the capture playback is, its total length, and whether the user is dragging the
+    /// scrubber (the clock stops writing `playbackElapsed` while they drag so it doesn't
+    /// fight the drag). Driven by a lightweight polling task on the AVAudioPlayer clock.
+    @State private var playbackElapsed: Double = 0
+    @State private var playbackDuration: Double = 0
+    @State private var scrubbing = false
+    @State private var clockTask: Task<Void, Never>?
 
     private enum AudioState: Equatable { case idle, loading, playing, failure(AudioPlaybackPresentation.Outcome) }
 
@@ -379,10 +387,10 @@ struct ConversationFacesView: View {
 
     private var summaryFace: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x4) {
-            HStack {
-                listenRow
-                Spacer(minLength: 0)
-            }
+            // `listenRow` directly (no wrapping HStack + trailing Spacer): the idle
+            // "Listen" button keeps its intrinsic size, and the PLAYING transport's
+            // scrubber fills the row instead of fighting a Spacer for the width.
+            listenRow
             VStack(alignment: .leading, spacing: GrainSpacing.x3) {
                 summaryNarrative
                 if !summaryBullets.isEmpty {
@@ -1002,7 +1010,7 @@ struct ConversationFacesView: View {
         // honest reason (never start new playback that would fight the mic). An already
         // playing clip is left to finish (the session guard prevents category theft).
         if case .playing = audioState {
-            GrainButton("Stop", variant: .text, size: .sm) { stopPlayback() }
+            playingControls
         } else if let reason = AudioPlaybackPresentation.playbackDisabledReason(isRecording: isRecordingActive) {
             Text(reason).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
         } else {
@@ -1012,10 +1020,35 @@ struct ConversationFacesView: View {
             case .loading:
                 Text("Loading audio…").grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
             case .playing:
-                GrainButton("Stop", variant: .text, size: .sm) { stopPlayback() }
+                playingControls
             case .failure(let outcome):
                 audioFailureLabel(outcome)
             }
+        }
+    }
+
+    /// The WHOLE-conversation player, playing: Stop + a scrubber you can drag to any point
+    /// + an "elapsed / total" readout. Fills the row so it reads as a real transport, not
+    /// a bare Stop button (GAP b232 — "play/listen to the WHOLE conversation").
+    @ViewBuilder private var playingControls: some View {
+        HStack(spacing: GrainSpacing.x2) {
+            GrainButton("Stop", variant: .text, size: .sm) { stopPlayback() }
+            Slider(
+                value: $playbackElapsed,
+                in: 0...max(playbackDuration, 1),
+                onEditingChanged: { editing in
+                    scrubbing = editing
+                    if !editing { player?.currentTime = playbackElapsed }   // seek on release
+                }
+            )
+            .tint(GrainColor.forgeBlue)
+            .accessibilityIdentifier("listen-scrubber")
+            Text(AudioPlaybackPresentation.elapsed(
+                currentSeconds: playbackElapsed, durationSeconds: playbackDuration))
+                .grainTextStyle(.caption)
+                .foregroundStyle(GrainColor.textMuted)
+                .monospacedDigit()
+                .accessibilityIdentifier("listen-elapsed")
         }
     }
 
@@ -1362,11 +1395,11 @@ struct ConversationFacesView: View {
             let p = try AVAudioPlayer(data: wav!)
             player = p
             p.play()
+            playbackDuration = p.duration
+            playbackElapsed = 0
+            scrubbing = false
             audioState = .playing
-            Task {
-                try? await Task.sleep(nanoseconds: UInt64((p.duration + 0.3) * 1_000_000_000))
-                if player === p, !p.isPlaying { stopPlayback() }
-            }
+            startPlaybackClock(p)
         } catch {
             PlaybackSession.end(changed: playbackOwnsSession)
             playbackOwnsSession = false
@@ -1374,9 +1407,44 @@ struct ConversationFacesView: View {
         }
     }
 
+    /// Poll the AVAudioPlayer clock into `playbackElapsed` so the scrubber tracks
+    /// playback. One task per playback; cancelled by `stopPlayback`.
+    ///
+    /// Stopping is careful about WHY the player isn't playing (P2/P3 review):
+    ///  • `started` gate — we only ever act on `!isPlaying` AFTER we've seen it playing,
+    ///    so a `play()` that hasn't engaged within the first tick never false-stops at t=0.
+    ///  • reached-the-end vs interrupted — at natural end `currentTime` sits at (or resets
+    ///    to 0 past) the duration, so we tear down and return to idle. A `!isPlaying` with
+    ///    the clock parked MID-clip is an audio-session interruption (a call, Siri, a route
+    ///    change) — we do NOT tear a minutes-long playback down and lose the user's place;
+    ///    we leave the transport frozen (the user can Stop) and end the poll.
+    private func startPlaybackClock(_ p: AVAudioPlayer) {
+        clockTask?.cancel()
+        clockTask = Task {
+            var started = false
+            while !Task.isCancelled, player === p {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard !Task.isCancelled, player === p else { return }
+                if p.isPlaying { started = true }
+                if scrubbing { continue }   // the drag owns the value while the user scrubs
+                playbackElapsed = min(p.currentTime, p.duration)
+                if started, !p.isPlaying {
+                    let reachedEnd = p.currentTime >= p.duration - 0.3 || p.currentTime < 0.1
+                    if reachedEnd { stopPlayback() }   // else: interrupted — leave it frozen
+                    return
+                }
+            }
+        }
+    }
+
     private func stopPlayback() {
+        clockTask?.cancel()
+        clockTask = nil
         player?.stop()
         player = nil
+        playbackElapsed = 0
+        playbackDuration = 0
+        scrubbing = false
         if case .playing = audioState { audioState = .idle }
         PlaybackSession.end(changed: playbackOwnsSession)
         playbackOwnsSession = false
@@ -1449,14 +1517,16 @@ private struct GrainSpeakerTranscriptRows: View {
     /// (review P2#2).
     @Binding var sheetPresenting: Bool
 
-    @State private var tagging: CaptureSpeaker?
+    @State private var tagging: SpeakerTagTarget?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if transcript.hasUnconfirmedInferred {
                 ReviewSpeakersBanner(count: transcript.inferredSlots.count) {
+                    // No specific turn tapped ⇒ the sheet uses the slot's representative
+                    // (longest) sample.
                     if let slot = transcript.inferredSlots.first {
-                        tagging = transcript.speaker(for: slot)
+                        tagging = SpeakerTagTarget(speaker: transcript.speaker(for: slot))
                     }
                 }
                 .padding(.bottom, GrainSpacing.x3)
@@ -1467,13 +1537,15 @@ private struct GrainSpeakerTranscriptRows: View {
                     .id(turn.id)
             }
         }
-        .sheet(item: $tagging) { speaker in
+        .sheet(item: $tagging) { tagTarget in
             SpeakerTagSheet(
                 target: target,
                 captureId: captureId,
-                speaker: speaker,
-                displayLabel: transcript.displayLabel(for: speaker.slot),
-                sampleWindow: transcript.voiceSampleWindow(for: speaker.slot),
+                speaker: tagTarget.speaker,
+                displayLabel: transcript.displayLabel(for: tagTarget.speaker.slot),
+                // The tapped turn's clip; fall back to the slot's representative sample
+                // when opened without a specific turn (the review-speakers jump).
+                sampleWindow: tagTarget.sampleWindow ?? transcript.voiceSampleWindow(for: tagTarget.speaker.slot),
                 onChanged: { await onChanged() },
                 onConfirmed: onConfirmed,
                 isRecording: isRecording
@@ -1486,6 +1558,10 @@ private struct GrainSpeakerTranscriptRows: View {
     private func speakerRow(_ turn: SpeakerTurn) -> some View {
         let speaker = transcript.speaker(for: turn.slot)
         let pendingSync = syncModel.isPending(turn.slot)
+        // Opening the tag sheet from THIS row plays THIS turn's own clip (the selected
+        // piece), not the slot's longest utterance elsewhere in the conversation.
+        let tapTarget = SpeakerTagTarget(
+            speaker: speaker, sampleWindow: transcript.voiceSampleWindow(forTurn: turn))
         return VStack(alignment: .leading, spacing: GrainSpacing.x1) {
             HStack(alignment: .top, spacing: GrainSpacing.x1) {
                 GrainSpeakerRow(
@@ -1506,9 +1582,9 @@ private struct GrainSpeakerTranscriptRows: View {
             .opacity((speaker.isInferred && speaker.revealedName != nil) ? 0.6 : 1)
             .textSelection(.enabled)
             .contentShape(Rectangle())
-            .onTapGesture { tagging = speaker }
+            .onTapGesture { tagging = tapTarget }
             .accessibilityAddTraits(.isButton)
-            .accessibilityAction(named: "Edit speaker") { tagging = speaker }
+            .accessibilityAction(named: "Edit speaker") { tagging = tapTarget }
 
             if let notice = syncModel.notices[turn.slot] {
                 Text(notice)
@@ -1529,7 +1605,7 @@ private struct GrainSpeakerTranscriptRows: View {
                     phase: confirmController.phase(for: turn.slot),
                     name: name,
                     onConfirm: { Task { await confirmInferred(slot: turn.slot) } },
-                    onNotThem: { tagging = speaker })
+                    onNotThem: { tagging = tapTarget })
                 .padding(.leading, GrainSpacing.x4)
                 .padding(.bottom, GrainSpacing.x2)
             } else if confirmController.phase(for: turn.slot) != .idle {
@@ -1537,7 +1613,7 @@ private struct GrainSpeakerTranscriptRows: View {
                     phase: confirmController.phase(for: turn.slot),
                     name: speaker.revealedName ?? transcript.displayLabel(for: turn.slot),
                     onConfirm: { Task { await confirmInferred(slot: turn.slot) } },
-                    onNotThem: { tagging = speaker })
+                    onNotThem: { tagging = tapTarget })
                 .padding(.leading, GrainSpacing.x4)
                 .padding(.bottom, GrainSpacing.x2)
             }

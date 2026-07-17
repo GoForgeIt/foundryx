@@ -4,11 +4,13 @@ import BrineSwiftCore
 @testable import FoundryXKit
 
 /// Drives `features/speaker-voice-sample.feature` against REAL seams:
-///  • `SpeakerTranscript.voiceSampleWindow(for:)` — the LONGEST-utterance clip window
-///    (nil without timestamps ⇒ no "Hear this voice" control).
+///  • `SpeakerTranscript.voiceSampleWindow(forTurn:)` — the TAPPED line's own clip (b232:
+///    the sample must play the SELECTED piece, not the slot's globally-longest utterance).
+///  • `SpeakerTranscript.voiceSampleWindow(for:)` — the representative (longest) clip used
+///    when the sheet is opened WITHOUT a specific line (the review-speakers jump).
 ///  • `DoorClient.captureAudio(captureId:startMs:endMs:)` — the windowed clip fetch,
 ///    exercised over a URLProtocol stub (200 ⇒ sample plays; 404 ⇒ pruned/unavailable),
-///    proving the fetch is scoped to ONLY that speaker's own speaking time.
+///    proving the fetch is scoped to ONLY that clip's window.
 ///  • `SpeakerConfirmQueue.enqueue` + `SpeakerTranscript.displayLabel` — naming applies.
 ///
 /// GAP: the "playback stops when the tag sheet closes" scenario is NOT executed — there
@@ -68,7 +70,13 @@ private final class VoiceSampleWorld: @unchecked Sendable {
     var audioAvailable = true
     var openLabel: String?
     var heardLabel: String?
+
+    // The clip selected by the last tap/review, and the slot it belongs to — what the
+    // Then steps assert against (window, ownership, longest-vs-tapped).
+    var pendingWindow: (startMs: Int, endMs: Int)?
     var selectedWindow: (startMs: Int, endMs: Int)?
+    var selectedSlot: String?
+
     var sampleData: Data?
     var lastRequestPath: String?
     var dir: URL
@@ -81,8 +89,28 @@ private final class VoiceSampleWorld: @unchecked Sendable {
 
     func reset() {
         transcript = nil; renamed = nil; audioAvailable = true
-        openLabel = nil; heardLabel = nil; selectedWindow = nil
+        openLabel = nil; heardLabel = nil
+        pendingWindow = nil; selectedWindow = nil; selectedSlot = nil
         sampleData = nil; lastRequestPath = nil
+    }
+
+    /// The two-speaker seed where "Speaker 2" (speaker_1) speaks TWICE: a short first line
+    /// and a much longer later line, split by a speaker_0 turn — so a tapped line differs
+    /// from the slot's longest utterance.
+    func seedDiarized() {
+        transcript = SpeakerTranscript(
+            speakers: [
+                CaptureSpeaker(slot: "speaker_0", status: .anonymous),
+                CaptureSpeaker(slot: "speaker_1", status: .anonymous),
+            ],
+            segments: [
+                TranscriptSegment(seq: 0, startMs: 0, endMs: 2_000, text: "hey there", speaker: "speaker_0"),
+                TranscriptSegment(seq: 1, startMs: 5_000, endMs: 7_000,
+                                  text: "short bit from speaker two", speaker: "speaker_1"),
+                TranscriptSegment(seq: 2, startMs: 8_000, endMs: 9_000, text: "mm hm", speaker: "speaker_0"),
+                TranscriptSegment(seq: 3, startMs: 10_000, endMs: 18_000,
+                                  text: "the much longer second bit from speaker two", speaker: "speaker_1"),
+            ])
     }
 
     /// "Speaker N" → the slot Nth in first-spoken order (what displayLabel shows).
@@ -101,17 +129,24 @@ private final class VoiceSampleWorld: @unchecked Sendable {
         throw BrineStepError("no timestamped (sampleable) slot")
     }
 
+    /// The turn whose text matches a tapped line.
+    func turn(forLineText text: String) throws -> SpeakerTurn {
+        guard let t = transcript else { throw BrineStepError("no transcript seeded") }
+        if let exact = t.turns.first(where: { $0.text == text }) { return exact }
+        if let fuzzy = t.turns.first(where: { $0.text.contains(text) }) { return fuzzy }
+        throw BrineStepError("no transcript line matching '\(text)' (lines: \(t.turns.map(\.text)))")
+    }
+
     func session() -> URLSession {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.protocolClasses = [StubURLProtocol.self]
         return URLSession(configuration: cfg)
     }
 
-    /// Fetch the windowed clip for `slot` through the real DoorClient over the stub.
-    func fetchSample(slot: String) async throws {
-        guard let t = transcript else { throw BrineStepError("no transcript seeded") }
-        let window = t.voiceSampleWindow(for: slot)
+    /// Fetch the given windowed clip through the real DoorClient over the stub.
+    func fetchSample(window: (startMs: Int, endMs: Int)?, slot: String?) async throws {
         selectedWindow = window
+        selectedSlot = slot
         StubURLProtocol.reset()
         let avail = audioAvailable
         StubURLProtocol.handler = { [weak self] req in
@@ -128,6 +163,11 @@ private final class VoiceSampleWorld: @unchecked Sendable {
             sampleData = nil
         }
     }
+
+    /// The slot-representative fetch (a tap with no specific line — pruned/first-speaker).
+    func fetchSample(slot: String) async throws {
+        try await fetchSample(window: transcript?.voiceSampleWindow(for: slot), slot: slot)
+    }
 }
 
 private enum VoiceSampleSteps {
@@ -135,38 +175,7 @@ private enum VoiceSampleSteps {
         [
             defineStep("a recorded conversation with diarized speakers") { ctx, _, _ in
                 w.reset()
-                w.transcript = SpeakerTranscript(
-                    speakers: [
-                        CaptureSpeaker(slot: "speaker_0", status: .anonymous),
-                        CaptureSpeaker(slot: "speaker_1", status: .anonymous),
-                    ],
-                    segments: [
-                        TranscriptSegment(seq: 0, startMs: 0, endMs: 2_000, text: "hi", speaker: "speaker_0"),
-                        TranscriptSegment(seq: 1, startMs: 5_000, endMs: 13_000,
-                                          text: "this is the longer one", speaker: "speaker_1"),
-                        TranscriptSegment(seq: 2, startMs: 14_000, endMs: 15_000, text: "ok", speaker: "speaker_0"),
-                    ])
-                return ctx
-            },
-            defineStep("speaker {string} has timestamped utterances") { ctx, p, _ in
-                let label = try p.requireString(0)
-                let slot = try w.slot(forLabel: label)
-                guard w.transcript?.voiceSampleWindow(for: slot) != nil else {
-                    throw BrineStepError("\(label) has no timestamped utterance")
-                }
-                return ctx
-            },
-            defineStep("a recorded conversation where {string} spoke three times") { ctx, p, _ in
-                w.reset()
-                _ = try p.requireString(0)   // "Speaker 1" → the only (first-spoken) slot
-                w.transcript = SpeakerTranscript(
-                    speakers: [CaptureSpeaker(slot: "speaker_0", status: .anonymous)],
-                    segments: [
-                        TranscriptSegment(seq: 0, startMs: 0, endMs: 1_000, text: "one", speaker: "speaker_0"),
-                        TranscriptSegment(seq: 1, startMs: 2_000, endMs: 9_000,
-                                          text: "the long middle turn", speaker: "speaker_0"),
-                        TranscriptSegment(seq: 2, startMs: 10_000, endMs: 11_000, text: "three", speaker: "speaker_0"),
-                    ])
+                w.seedDiarized()
                 return ctx
             },
             defineStep("a recorded conversation where {string} has no utterance timestamps") { ctx, p, _ in
@@ -195,19 +204,30 @@ private enum VoiceSampleSteps {
             defineStep("I just heard {string}'s voice sample") { ctx, p, _ in
                 w.reset()
                 w.heardLabel = try p.requireString(0)
-                w.transcript = SpeakerTranscript(
-                    speakers: [
-                        CaptureSpeaker(slot: "speaker_0", status: .anonymous),
-                        CaptureSpeaker(slot: "speaker_1", status: .anonymous),
-                    ],
-                    segments: [
-                        TranscriptSegment(seq: 0, startMs: 0, endMs: 2_000, text: "hi", speaker: "speaker_0"),
-                        TranscriptSegment(seq: 1, startMs: 5_000, endMs: 12_000,
-                                          text: "the sample", speaker: "speaker_1"),
-                    ])
+                w.seedDiarized()
                 let slot = try w.slot(forLabel: w.heardLabel!)
                 try await w.fetchSample(slot: slot)
                 guard w.sampleData != nil else { throw BrineStepError("sample did not play") }
+                return ctx
+            },
+            // ── the SELECTED piece: tap a specific line ─────────────────────────────
+            defineStep("I tap the line {string} to tag its speaker") { ctx, p, _ in
+                let text = try p.requireString(0)
+                guard let t = w.transcript else { throw BrineStepError("no transcript seeded") }
+                let turn = try w.turn(forLineText: text)
+                w.pendingWindow = t.voiceSampleWindow(forTurn: turn)
+                w.selectedSlot = turn.slot
+                w.openLabel = nil
+                return ctx
+            },
+            // ── the review jump: open the sheet with no specific line ───────────────
+            defineStep("I review {string} without tapping a specific line") { ctx, p, _ in
+                let label = try p.requireString(0)
+                guard let t = w.transcript else { throw BrineStepError("no transcript seeded") }
+                let slot = try w.slot(forLabel: label)
+                w.pendingWindow = t.voiceSampleWindow(for: slot)   // representative fallback
+                w.selectedSlot = slot
+                w.openLabel = label
                 return ctx
             },
             defineStep("I open the tag sheet for {string}") { ctx, p, _ in
@@ -216,14 +236,7 @@ private enum VoiceSampleSteps {
             },
             defineStep("I tap {string}") { ctx, p, _ in
                 _ = try p.requireString(0)   // "Hear this voice"
-                guard let label = w.openLabel else { throw BrineStepError("no open tag sheet") }
-                try await w.fetchSample(slot: try w.slot(forLabel: label))
-                return ctx
-            },
-            defineStep("I tap {string} for {string}") { ctx, p, _ in
-                _ = try p.requireString(0)   // "Hear this voice"
-                let label = try p.requireString(1)
-                try await w.fetchSample(slot: try w.slot(forLabel: label))
+                try await w.fetchSample(window: w.pendingWindow, slot: w.selectedSlot)
                 return ctx
             },
             defineStep("I tap {string} for a speaker") { ctx, p, _ in
@@ -244,35 +257,46 @@ private enum VoiceSampleSteps {
                 w.renamed = SpeakerTranscript(speakers: speakers, segments: t.segments)
                 return ctx
             },
-            defineCheck("a short audio sample of {string} plays") { _, p, _ in
-                _ = try p.requireString(0)
-                guard let data = w.sampleData, !data.isEmpty, w.selectedWindow != nil else {
-                    throw BrineStepError("no audio sample played")
+            // ── checks ──────────────────────────────────────────────────────────────
+            defineCheck("the sample plays that exact line's audio") { _, _, _ in
+                guard let win = w.selectedWindow, let pending = w.pendingWindow,
+                      win.startMs == pending.startMs, win.endMs == pending.endMs else {
+                    throw BrineStepError("the fetched window is not the tapped line's clip")
+                }
+                guard let data = w.sampleData, !data.isEmpty else {
+                    throw BrineStepError("no audio played for the tapped line")
+                }
+                guard let path = w.lastRequestPath,
+                      path.contains("start_ms=\(win.startMs)"), path.contains("end_ms=\(win.endMs)") else {
+                    throw BrineStepError("fetch was not scoped to the tapped line: \(w.lastRequestPath ?? "nil")")
                 }
             },
             defineCheck("the sample covers only that speaker's own speaking time") { _, _, _ in
-                guard let win = w.selectedWindow, let t = w.transcript, let label = w.openLabel else {
+                guard let win = w.selectedWindow, let t = w.transcript, let slot = w.selectedSlot else {
                     throw BrineStepError("no sample window")
                 }
-                let slot = try w.slot(forLabel: label)
-                // The window is derived from THIS slot's own segments (never the whole recording),
-                // and the fetch was scoped to that window over the wire.
                 let owns = t.segments.contains {
                     $0.speaker == slot && ($0.startMs ?? -1) <= win.startMs && ($0.endMs ?? -1) >= win.startMs
                 }
                 guard owns else { throw BrineStepError("window \(win) is not within \(slot)'s speaking time") }
-                guard let path = w.lastRequestPath,
-                      path.contains("start_ms=\(win.startMs)"), path.contains("end_ms=\(win.endMs)") else {
-                    throw BrineStepError("fetch was not scoped to the speaker's window: \(w.lastRequestPath ?? "nil")")
+            },
+            defineCheck("the sample is not that speaker's longest utterance") { _, _, _ in
+                guard let win = w.selectedWindow, let t = w.transcript, let slot = w.selectedSlot else {
+                    throw BrineStepError("no sample window")
+                }
+                let longest = t.voiceSampleWindow(for: slot)
+                guard win.startMs != longest?.startMs || win.endMs != longest?.endMs else {
+                    throw BrineStepError("the tapped clip \(win) IS the longest utterance — the bug is back")
                 }
             },
             defineCheck("the sample played is {string}'s longest utterance") { _, p, _ in
                 let label = try p.requireString(0)
                 let slot = try w.slot(forLabel: label)
-                guard let win = w.selectedWindow else { throw BrineStepError("no sample window") }
-                // Longest speaker_0 utterance is seq 1 (2000–9000).
-                guard win.startMs == 2_000, win.endMs == 9_000 else {
-                    throw BrineStepError("expected the longest utterance (2000–9000), got \(win) for \(slot)")
+                guard let win = w.selectedWindow, let expected = w.transcript?.voiceSampleWindow(for: slot) else {
+                    throw BrineStepError("no sample window")
+                }
+                guard win.startMs == expected.startMs, win.endMs == expected.endMs else {
+                    throw BrineStepError("expected \(slot)'s longest utterance \(expected), got \(win)")
                 }
             },
             defineCheck("there is no {string} control") { _, p, _ in

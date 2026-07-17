@@ -80,15 +80,17 @@ struct SpeakerTranscriptSection: View {
     /// (review P2#2). Owned by the parent so it survives the search-toggle surface swap.
     @Binding var sheetPresenting: Bool
 
-    @State private var tagging: CaptureSpeaker?
+    @State private var tagging: SpeakerTagTarget?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if transcript.hasUnconfirmedInferred {
                 ReviewSpeakersBanner(count: transcript.inferredSlots.count) {
-                    // Jump straight into the first tentative speaker to review it.
+                    // Jump straight into the first tentative speaker to review it. No
+                    // specific turn was tapped ⇒ the sheet uses the slot's representative
+                    // (longest) sample.
                     if let slot = transcript.inferredSlots.first {
-                        tagging = transcript.speaker(for: slot)
+                        tagging = SpeakerTagTarget(speaker: transcript.speaker(for: slot))
                     }
                 }
                 .padding(.bottom, GrainSpacing.x3)
@@ -98,7 +100,13 @@ struct SpeakerTranscriptSection: View {
                 SpeakerTurnRow(
                     turn: turn,
                     transcript: transcript,
-                    onTapSpeaker: { tagging = transcript.speaker(for: turn.slot) },
+                    // Play the TAPPED turn's own clip (the selected piece), not the
+                    // slot's longest utterance elsewhere in the conversation.
+                    onTapSpeaker: {
+                        tagging = SpeakerTagTarget(
+                            speaker: transcript.speaker(for: turn.slot),
+                            sampleWindow: transcript.voiceSampleWindow(forTurn: turn))
+                    },
                     onConfirmInferred: { await confirmInferred(slot: turn.slot) },
                     confirmPhase: confirmController.phase(for: turn.slot),
                     isPendingSync: syncModel.isPending(turn.slot),
@@ -111,13 +119,15 @@ struct SpeakerTranscriptSection: View {
                 .id(turn.id)
             }
         }
-        .sheet(item: $tagging) { speaker in
+        .sheet(item: $tagging) { tagTarget in
             SpeakerTagSheet(
                 target: target,
                 captureId: captureId,
-                speaker: speaker,
-                displayLabel: transcript.displayLabel(for: speaker.slot),
-                sampleWindow: transcript.voiceSampleWindow(for: speaker.slot),
+                speaker: tagTarget.speaker,
+                displayLabel: transcript.displayLabel(for: tagTarget.speaker.slot),
+                // The tapped turn's clip; fall back to the slot's representative sample
+                // when opened without a specific turn (the review-speakers jump).
+                sampleWindow: tagTarget.sampleWindow ?? transcript.voiceSampleWindow(for: tagTarget.speaker.slot),
                 onChanged: { await onChanged() },
                 onConfirmed: onConfirmed,
                 isRecording: isRecording
@@ -353,6 +363,23 @@ private actor ConfirmOutcomeBox {
 
 // MARK: - Tag / confirm / correct sheet
 
+/// What the tag sheet is opened FOR: the speaker slot to name, plus the EXACT clip
+/// "Hear this voice" should play. Opened from a tapped transcript turn ⇒ `sampleWindow`
+/// is THAT turn's clip — the piece the user was looking at (BUG b232: the sample used to
+/// always play the slot's globally-longest utterance, so it "didn't play the selected
+/// piece"). Opened WITHOUT a specific turn (the review-speakers jump) ⇒ `sampleWindow`
+/// is nil and the sheet falls back to the slot's representative (longest) sample. A fresh
+/// `id` per open so tapping a different turn of the SAME speaker re-presents the new clip.
+struct SpeakerTagTarget: Identifiable {
+    let speaker: CaptureSpeaker
+    let sampleWindow: (startMs: Int, endMs: Int)?
+    let id = UUID()
+    init(speaker: CaptureSpeaker, sampleWindow: (startMs: Int, endMs: Int)? = nil) {
+        self.speaker = speaker
+        self.sampleWindow = sampleWindow
+    }
+}
+
 /// Tag / confirm / correct a speaker slot. The flows (all through Lore's confirm state
 /// machine via the door):
 ///   • Confirm <name>   — bare confirm of an inferred match (enables recognition).
@@ -527,6 +554,14 @@ struct SpeakerTagSheet: View {
                 GrainButton("▶ Hear this voice", variant: .outlined, size: .regular) {
                     Task { await playVoiceSample() }
                 }
+                #if DEBUG
+                // Proof hook (b232): expose the EXACT clip window this sheet will fetch so
+                // the simulator proof can assert the tapped line's clip is selected — not
+                // the slot's longest utterance. DEBUG-only; never in a shipped build.
+                .accessibilityIdentifier(sampleWindow.map {
+                    "hear-voice-window-\($0.startMs)-\($0.endMs)"
+                } ?? "hear-voice-window-none")
+                #endif
             case .loading:
                 HStack(spacing: GrainSpacing.x2) {
                     ProgressView().controlSize(.small)
