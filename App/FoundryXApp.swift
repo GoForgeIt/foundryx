@@ -2,7 +2,19 @@ import SwiftUI
 
 @main
 struct FoundryXApp: App {
+    #if DEBUG
+    /// Cold-launch reference instant (≈ process start; App.init runs alongside
+    /// PerfTelemetry.markProcessStart). Used ONLY to mirror the first-draw span to the
+    /// `-PerfLog` console so the sim-perf harness can read a `perf-span first-draw ms=N`
+    /// line — the shipping first-draw span goes to the relay sink, which the simulator
+    /// has no endpoint for. DEBUG-only, opt-in by launch arg; never in a Release build.
+    static let launchStart = DispatchTime.now()
+    #endif
+
     init() {
+        #if DEBUG
+        _ = Self.launchStart   // force the reference instant at init (≈ process start)
+        #endif
         // Start the cold-launch clock as early as possible, and wire perf
         // telemetry (MetricKit + our own spans) to the diagnostics endpoint so
         // launch/hang data flows across the fleet, not one .ips at a time.
@@ -25,7 +37,17 @@ struct FoundryXApp: App {
         WindowGroup {
             RootView()
                 // Time-to-first-draw: the first real UI on screen.
-                .onAppear { PerfTelemetry.shared.markFirstDraw() }
+                .onAppear {
+                    PerfTelemetry.shared.markFirstDraw()
+                    #if DEBUG
+                    // Mirror first-draw to the `-PerfLog` console (sim-perf grep format)
+                    // so the large-library launch cost is measurable in the simulator.
+                    if ProcessInfo.processInfo.arguments.contains("-PerfLog") {
+                        let ns = DispatchTime.now().uptimeNanoseconds &- Self.launchStart.uptimeNanoseconds
+                        NSLog("perf-span first-draw ms=%d", Int(ns / 1_000_000))
+                    }
+                    #endif
+                }
         }
     }
 }

@@ -338,6 +338,15 @@ private struct MainTabs: View {
     /// on entry rather than on the first finalize.
     private let localSTT: WhisperKitSTT?
 
+    /// First-frame deferral (TARGET 2 — launch first-frame cost). The TabView otherwise
+    /// builds ALL four tab roots up front; only the Capture tab is on screen at launch,
+    /// so Activity/Chat/Settings (each an N-scaling body over the same library) are dead
+    /// weight on the critical path. This flips true right AFTER first draw (a `.task`),
+    /// at which point the other tabs build off the critical path. A tab is ALSO built the
+    /// instant it becomes `router.selected`, so a deep link / notification / intent that
+    /// routes straight to a tab before the flag flips still renders it immediately.
+    @State private var deferredTabsReady = false
+
     init(target: DoorTarget, remote: RemoteSession, brains: BrainStore, local: Bool,
          vaultFunnel: VaultFunnelModel, accountDeletion: AccountDeletionModel,
          showingAccount: Binding<Bool>) {
@@ -553,14 +562,20 @@ private struct MainTabs: View {
             // Activity is FIRST-CLASS (§6): the same destination CaptureScreen
             // used to bury behind a NavigationLink, one tap from anywhere.
             NavigationStack {
-                ActivityView(
-                    decisionLogURL: AmbientPrefs.decisionLogURL(),
-                    recapPool: manager.recapConversationPool(),
-                    onOpenChat: { seed in AmbientCardBroker.shared.run(seed: seed) },
-                    local: local
-                )
-                .toolbar {
-                    NavigationLink("Stats") { StatsView(summary: manager.statsSummary) }
+                // Deferred off the first-frame path (TARGET 2); still builds the instant
+                // Activity is selected (deep link / intent), so routing is unaffected.
+                if deferredTabsReady || router.selected == .activity {
+                    ActivityView(
+                        decisionLogURL: AmbientPrefs.decisionLogURL(),
+                        recapPool: manager.recapConversationPool(),
+                        onOpenChat: { seed in AmbientCardBroker.shared.run(seed: seed) },
+                        local: local
+                    )
+                    .toolbar {
+                        NavigationLink("Stats") { StatsView(summary: manager.statsSummary) }
+                    }
+                } else {
+                    Color.clear
                 }
             }
             .tabItem { Label(AppTab.activity.label, systemImage: AppTab.activity.systemImage) }
@@ -568,10 +583,14 @@ private struct MainTabs: View {
 
             NavigationStack {
                 Group {
-                    if local {
-                        LocalChatScreen(baseDir: CaptureWAL.documentsCaptures(), remote: remote)
+                    if deferredTabsReady || router.selected == .chat {
+                        if local {
+                            LocalChatScreen(baseDir: CaptureWAL.documentsCaptures(), remote: remote)
+                        } else {
+                            ChatScreen(target: target, store: chats, log: log)
+                        }
                     } else {
-                        ChatScreen(target: target, store: chats, log: log)
+                        Color.clear
                     }
                 }
                 .navigationTitle("FoundryX")
@@ -585,15 +604,23 @@ private struct MainTabs: View {
             // home, not a competing Device tab) — connection STATUS stays glanceable on
             // the Capture home.
             NavigationStack {
-                SettingsScreen(brains: brains, remote: remote,
-                               device: device, manager: manager, sources: sources,
-                               vaultFunnel: vaultFunnel, accountDeletion: accountDeletion)
-                    .navigationTitle(SettingsSheetPresentation.title)
-                    .navigationBarTitleDisplayMode(.inline)
+                if deferredTabsReady || router.selected == .settings {
+                    SettingsScreen(brains: brains, remote: remote,
+                                   device: device, manager: manager, sources: sources,
+                                   vaultFunnel: vaultFunnel, accountDeletion: accountDeletion)
+                        .navigationTitle(SettingsSheetPresentation.title)
+                        .navigationBarTitleDisplayMode(.inline)
+                } else {
+                    Color.clear
+                }
             }
             .tabItem { Label(AppTab.settings.label, systemImage: AppTab.settings.systemImage) }
             .tag(TabRouter.Tab.settings)
         }
+        // Flip the deferral flag right AFTER first draw so Activity/Chat/Settings build
+        // off the launch critical path (TARGET 2). `.task` runs post-appearance; a tab
+        // selected before this fires still builds via the per-tab `router.selected` gate.
+        .task { deferredTabsReady = true }
         // The Action Button's "Ask me" chooser (Phase 5, decision #4).
         .confirmationDialog("FoundryX", isPresented: $router.showActionChooser) {
             Button("Start recording") {
