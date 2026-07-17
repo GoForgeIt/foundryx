@@ -3584,7 +3584,8 @@ public final class CaptureManager: ObservableObject {
                 }
                 #endif
                 return try await client.confirmSpeaker(captureId: e.captureId, slot: e.slot,
-                                                       speakerId: e.speakerId, name: e.name)
+                                                       speakerId: e.speakerId, name: e.name,
+                                                       entityId: e.entityId)
             },
             onSynced: { e, outcome in
                 await Task.detached {

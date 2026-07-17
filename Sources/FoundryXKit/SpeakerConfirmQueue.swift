@@ -19,10 +19,17 @@ public enum SpeakerConfirmQueue {
         public let slot: String
         public let name: String?
         public let speakerId: String?
+        /// The chosen EXISTING durable person's key (the "pick an existing person" bind,
+        /// track 20260717T1700). Durable so an OFFLINE pick still ships its entity binding
+        /// when the drain retries — never falls back to a name-only, dupe-prone confirm.
+        /// Optional, so entries written before this field decode fine (nil).
+        public let entityId: String?
         public let ts: UInt64
-        public init(captureId: String, slot: String, name: String?, speakerId: String?, ts: UInt64) {
+        public init(captureId: String, slot: String, name: String?, speakerId: String?,
+                    entityId: String? = nil, ts: UInt64) {
             self.captureId = captureId; self.slot = slot
-            self.name = name; self.speakerId = speakerId; self.ts = ts
+            self.name = name; self.speakerId = speakerId
+            self.entityId = entityId; self.ts = ts
         }
     }
 
@@ -85,13 +92,14 @@ public enum SpeakerConfirmQueue {
     /// old in-flight ship's ACK must not dequeue a newer rename — see `remove(…ifTsMatches:)`).
     @discardableResult
     public static func enqueue(captureId: String, slot: String, name: String? = nil,
-                               speakerId: String? = nil, baseDir: URL,
+                               speakerId: String? = nil, entityId: String? = nil, baseDir: URL,
                                now: UInt64? = nil) -> UInt64 {
         let ts = now ?? mintTs()
         ioQueue.sync {
             var entries = pendingLocked(baseDir: baseDir)
                 .filter { !($0.captureId == captureId && $0.slot == slot) }
-            entries.append(Entry(captureId: captureId, slot: slot, name: name, speakerId: speakerId, ts: ts))
+            entries.append(Entry(captureId: captureId, slot: slot, name: name,
+                                 speakerId: speakerId, entityId: entityId, ts: ts))
             write(entries, baseDir: baseDir)
         }
         postChanged([captureId])

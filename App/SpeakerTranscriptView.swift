@@ -404,16 +404,31 @@ struct SpeakerTagSheet: View {
     /// never fight the mic for the audio session). Defaults false so non-recording call
     /// sites are unchanged.
     var isRecording: Bool = false
+    /// The capture's space — a hard identity separator (entity-dedup Decision 8). The pick
+    /// list is scoped to it so a confirm never binds/merges across spaces. The phone has no
+    /// per-capture space model yet, so this defaults to the FoundryX "personal" space; a
+    /// future caller can pass the capture's real space without touching either call site.
+    var space: String = "personal"
 
     @Environment(\.dismiss) private var dismiss
-    @State private var name: String = ""
+    /// The single text field's value — the pick-list search query AND, when nothing
+    /// matches, the create-new / offline name. Starts EMPTY: the voiceprint hint
+    /// pre-selects nothing, so we never seed it with the inferred guess.
+    @State private var query: String = ""
+    /// The existing durable people to pick from (track 20260717T1700). Fetched on open,
+    /// scoped to `space`; a confirm binds one of these by `entityId` instead of minting a dupe.
+    @State private var persons: [KnownPerson] = []
+    /// Directory load state: `loaded` shows the pick-list; `offline` degrades to typing a
+    /// name (the door is unreachable — the local-first save still lands and syncs later).
+    private enum PersonsLoad: Equatable { case loading, loaded, offline }
+    @State private var personsLoad: PersonsLoad = .loading
     @State private var busy = false
     @State private var offer: ConfirmOutcome?
     @State private var applied = false
     /// Which affordance is in flight — its button becomes a spinner row within one
     /// frame of the tap (never a dead, merely-disabled button). The local save lands
     /// almost immediately (durable enqueue), so this is a brief "Saving…" beat.
-    private enum PendingAction { case confirmInferred, saveName }
+    private enum PendingAction { case confirmInferred, saveName, pickPerson }
     @State private var pendingAction: PendingAction?
     /// Success flash: "Saved <name>" shown briefly before the sheet dismisses ITSELF (the
     /// "did it work?" beat Nick asked for) — local-first, so it never claims the Mac
@@ -446,7 +461,7 @@ struct SpeakerTagSheet: View {
             }
             .padding(GrainSpacing.x4)
         }
-        .onAppear { name = speaker.name ?? "" }
+        .task { await loadPersons() }
         .onDisappear {
             samplePlayer?.stop()
             samplePlayer = nil
@@ -455,7 +470,11 @@ struct SpeakerTagSheet: View {
         }
     }
 
-    // The main edit surface: confirm an inferred match and/or name the speaker.
+    // The main edit surface: confirm an inferred match, or PICK an existing person to bind
+    // (dedup at entry) — with create-new only as the fallback. The old free-text "type a
+    // name" field minted a duplicate person on every variant spelling; here the human-confirm
+    // authority CHOOSES an existing durable person (binding its opaque entityId) instead
+    // (track 20260717T1700, entity-dedup finding).
     @ViewBuilder private var editSection: some View {
         Text(displayLabel).grainTextStyle(.title).foregroundStyle(GrainColor.ink)
 
@@ -465,9 +484,9 @@ struct SpeakerTagSheet: View {
             voiceSampleRow
         }
 
-        // Only a STRONG inferred match (revealedName != nil) offers "Confirm <name>".
-        // A weak inferred slot reveals no name and falls through to the tag flow below,
-        // presenting exactly like an anonymous speaker (no name leak, name field only).
+        // Only a STRONG inferred match (revealedName != nil) offers a bare "Confirm <name>"
+        // (binds the slot's known speakerId). A weak inferred slot reveals no name and falls
+        // straight to the pick-list below, presenting exactly like an anonymous speaker.
         if speaker.isInferred, let inferred = speaker.revealedName {
             Text(scoreCaption(inferred))
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
@@ -480,31 +499,184 @@ struct SpeakerTagSheet: View {
                 .disabled(busy)
             }
             Divider().background(GrainColor.borderHairline)
-            Text("Not them? Name this speaker instead:")
+            Text("Not them? Choose who it is:")
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
         } else if speaker.isAnonymous || speaker.isInferred {
             Text("This voice isn't named yet. Who is it?")
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
         } else {
-            Text("Rename or reassign this speaker.")
+            Text("Reassign this speaker to a person.")
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
         }
 
-        GrainTextField("Name", text: $name, label: "Speaker name")
-        Text("Type a new name to create a person, or an existing person's name to assign this voice to them.")
-            .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-
-        if pendingAction == .saveName {
-            sheetInFlightRow("Saving…")
-        } else {
-            GrainButton(saveTitle, variant: .filled, size: .regular) {
-                Task { await confirm(name: name.trimmingCharacters(in: .whitespacesAndNewlines)) }
-            }
-            .disabled(busy || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        // PICK-FIRST when the computer is reachable; degrade to typing a name when it isn't.
+        switch personsLoad {
+        case .offline:            offlineNameSurface
+        case .loading, .loaded:   pickPersonSurface
         }
     }
 
     private var saveTitle: String { speaker.isConfirmed ? "Save changes" : "Save name" }
+
+    // MARK: pick-first surface
+
+    /// The searchable pick-list of EXISTING people (track 20260717T1700). Typing
+    /// filters/autocompletes ("Do you mean Nick Rinard?"); the voiceprint-hinted person is
+    /// floated to the top and annotated "likely" — but PRE-SELECTS NOTHING (human authority).
+    /// Tapping a person binds their `entityId`; "Create new person" appears only as the
+    /// fallback when the typed name matches nobody.
+    @ViewBuilder private var pickPersonSurface: some View {
+        GrainTextField("Search people or add a name", text: $query, label: "Find a person")
+            .accessibilityIdentifier("person-search")
+
+        if pendingAction == .pickPerson || pendingAction == .saveName {
+            sheetInFlightRow("Saving…")
+        } else if personsLoad == .loading {
+            sheetInFlightRow("Finding your people…")
+        } else {
+            let hint = PersonPicker.hintEntityId(inferredName: speaker.revealedName, in: persons)
+            let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            let matches = trimmed.isEmpty
+                ? PersonPicker.ordered(persons: persons, hintEntityId: hint)   // hinted first
+                : PersonPicker.filter(query, in: persons)                       // autocomplete
+
+            if persons.isEmpty {
+                Text("No saved people yet — type a name to add the first one.")
+                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            } else if matches.isEmpty {
+                Text("No match — create the person below.")
+                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            }
+
+            if !matches.isEmpty {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(matches) { person in
+                            personRow(person, isLikely: person.entityId == hint)
+                            Rectangle().fill(GrainColor.borderHairline).frame(height: 1)
+                        }
+                    }
+                }
+                .frame(maxHeight: 240)
+            }
+
+            // Create-new is the EXCEPTION — only when the typed name matches no one.
+            if PersonPicker.showCreateNew(query: query, in: persons) {
+                createNewRow(trimmed)
+            }
+        }
+    }
+
+    /// One pick-list row for an existing person — tapping BINDS them by `entityId`. The
+    /// voiceprint-hinted person carries a gentle "likely" note (the hint), never a selection.
+    private func personRow(_ person: KnownPerson, isLikely: Bool) -> some View {
+        Button {
+            Task { await confirmPicked(person) }
+        } label: {
+            HStack(spacing: GrainSpacing.x3) {
+                GrainAvatar(initials: personInitials(person.displayName), size: .sm,
+                            tint: isLikely ? GrainColor.forgeBlue : GrainColor.sage)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(person.displayName)
+                        .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                    if isLikely {
+                        Text("likely — matches this voice")
+                            .grainTextStyle(.caption).foregroundStyle(GrainColor.forgeBlue)
+                            .accessibilityIdentifier("person-likely-\(person.entityId)")
+                    } else if let sub = personSubtitle(person) {
+                        Text(sub).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                    }
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            }
+            .padding(.vertical, GrainSpacing.x3)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
+        .accessibilityIdentifier("person-row-\(person.entityId)")
+    }
+
+    /// The create-new FALLBACK row — creates a brand-new person by the typed name (name-only,
+    /// no entityId). Shown only when nothing matched, so it never competes with a pick.
+    private func createNewRow(_ typed: String) -> some View {
+        Button {
+            Task { await confirm(name: typed) }
+        } label: {
+            HStack(spacing: GrainSpacing.x3) {
+                Image(systemName: "person.crop.circle.badge.plus")
+                    .foregroundStyle(GrainColor.sage)
+                Text("Create new person: \(typed)")
+                    .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                Spacer()
+            }
+            .padding(.vertical, GrainSpacing.x3)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
+        .accessibilityIdentifier("person-create-new")
+    }
+
+    /// Offline degrade: the computer is unreachable, so we can't offer a pick-list — fall
+    /// back to typing a name. The local-first save still lands instantly and syncs when the
+    /// computer is reachable again (never the "couldn't connect" error).
+    @ViewBuilder private var offlineNameSurface: some View {
+        GrainTextField("Name", text: $query, label: "Speaker name")
+            .accessibilityIdentifier("person-offline-name")
+        Text("Can't reach your computer — type a name and it saves here, syncing when you reconnect.")
+            .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+        if pendingAction == .saveName {
+            sheetInFlightRow("Saving…")
+        } else {
+            GrainButton(saveTitle, variant: .filled, size: .regular) {
+                Task { await confirm(name: query.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            }
+            .disabled(busy || query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
+
+    private func personInitials(_ name: String) -> String {
+        let letters = name.split(separator: " ").prefix(2).compactMap { $0.first }.map(String.init)
+        let s = letters.joined()
+        return s.isEmpty ? "?" : s.uppercased()
+    }
+
+    /// A subtle subtitle for a non-hinted row — the person's other known spellings, so a
+    /// user recognizes "Nick" is the same entity as "Nicholas".
+    private func personSubtitle(_ person: KnownPerson) -> String? {
+        guard !person.aliases.isEmpty else { return nil }
+        return "also " + person.aliases.prefix(2).joined(separator: ", ")
+    }
+
+    /// Fetch the existing people for the pick-list, scoped to the capture's `space`. A
+    /// door 404 (old desktop without the route) yields an empty list — still a usable
+    /// type-to-create surface; a transport failure / unreachable computer degrades to the
+    /// offline name field. DEBUG `-PersonsProof` substitutes deterministic data for the
+    /// simulator proof (precedent: `-ConfirmProof`).
+    private func loadPersons() async {
+        #if DEBUG
+        if let seeded = PersonProof.seeded() { persons = seeded; personsLoad = .loaded; return }
+        if PersonProof.forceOffline { personsLoad = .offline; return }
+        #endif
+        // Race the fetch against a wall-clock deadline: a HUNG relay leg (the b230
+        // lost-response class — the mux turn resolves only on a reply/disconnect, no
+        // timeout) would otherwise strand the sheet on "Finding your people…" forever with
+        // no offline degrade. A nil result (unreachable OR deadline) → the type-a-name
+        // fallback, so the offline promise holds even when the relay silently hangs.
+        let target = self.target, space = self.space
+        let fetched = await PersonDirectoryFetch.withDeadline(12) {
+            try? await DoorClient(target: target).persons(space: space)
+        }
+        if let fetched {
+            persons = fetched
+            personsLoad = .loaded
+        } else {
+            personsLoad = .offline
+        }
+    }
 
     /// The in-flight beat: the tapped button becomes a spinner row within one frame.
     private func sheetInFlightRow(_ label: String) -> some View {
@@ -703,33 +875,58 @@ struct SpeakerTagSheet: View {
     /// -network offer flow). A rare rejection / auth-expiry is handled globally (the drain's
     /// re-auth seam, a gentle in-conversation revert) — never an error dialog here.
     private func confirm(name: String?) async {
-        guard !busy else { return }   // re-entrancy: one save at a time
-        busy = true
-        pendingAction = (name == nil) ? .confirmInferred : .saveName
-        let base = CaptureWAL.documentsCaptures()
-        let slot = speaker.slot
         // P1 (review): a TYPED name is name-only — never ride the slot's old speakerId,
         // because Lore's confirm resolves speakerId OVER name and would silently confirm
         // the OLD speaker (poisoning the durable queue + reverting the typed name on ACK).
         // A bare confirm (no typed name) still ships the known speakerId. ONE decision,
         // shared with the tests, so the sheet and its coverage can't drift.
         let intent = SpeakerConfirmIntent.make(typedName: name, speaker: speaker)
-        let shipName = intent.name
-        let speakerId = intent.speakerId
+        let action: PendingAction =
+            (name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            ? .confirmInferred : .saveName
+        await performConfirm(name: intent.name, speakerId: intent.speakerId,
+                             entityId: nil, action: action)
+    }
+
+    /// PICK an existing durable person (track 20260717T1700): bind this slot to that
+    /// person's `entityId` — dedup at the point of entry. Ships the person's display name
+    /// too (for the label), never the slot's stale speakerId.
+    private func confirmPicked(_ person: KnownPerson) async {
+        let intent = SpeakerConfirmIntent.pick(person: person)
+        await performConfirm(name: intent.name, speakerId: intent.speakerId,
+                             entityId: intent.entityId, action: .pickPerson)
+    }
+
+    /// The ONE local-first confirm body every path funnels through (bare confirm / pick an
+    /// existing person / create-new). `entityId` binds an existing person when a pick, else
+    /// nil. See `confirm(name:)` for the full local-first contract.
+    private func performConfirm(name shipName: String?, speakerId: String?,
+                                entityId: String?, action: PendingAction) async {
+        guard !busy else { return }   // re-entrancy: one save at a time
+        busy = true
+        pendingAction = action
+        let base = CaptureWAL.documentsCaptures()
+        let slot = speaker.slot
 
         // Durable FIRST, OFF the main actor. The returned ts guards the background ship's
-        // later dequeue against a newer rename.
+        // later dequeue against a newer rename. `entityId` is durable so an OFFLINE pick
+        // still ships its bind when the drain retries.
         let ts = await Task.detached {
             SpeakerConfirmQueue.enqueue(captureId: captureId, slot: slot,
-                                        name: shipName, speakerId: speakerId, baseDir: base)
+                                        name: shipName, speakerId: speakerId,
+                                        entityId: entityId, baseDir: base)
         }.value
 
-        // Instant LOCAL success — flip this slot to confirmed and flash "Saved <name>".
+        // Instant LOCAL success — flip this slot to confirmed and flash "Saved <name>". The
+        // optimistic speakerId is the slot's real speakerId (bare confirm) or empty for a
+        // pick/create — NEVER the entity_id aliased as a speakerId (a type confusion the
+        // synced-notification reconcile would otherwise briefly expose). The name drives the
+        // label; the real speakerId/entityId land on the ACK write-through.
         let shown = (shipName?.isEmpty == false) ? shipName!
             : (speaker.name ?? displayLabel)
         onConfirmed(ConfirmOutcome(captureId: captureId, slotLabel: slot, status: "confirmed",
-                                   speakerId: speakerId ?? "", speakerName: shipName ?? "",
-                                   offeredCaptures: []))
+                                   speakerId: speakerId ?? "",
+                                   speakerName: shipName ?? "", offeredCaptures: []))
         pendingAction = nil
         busy = false
         flashConfirmedName = shown
@@ -737,7 +934,8 @@ struct SpeakerTagSheet: View {
         // Background sync — does its own ts-guarded dequeue, write-through, and posts the
         // synced/rejected notification. Runs independently of the sheet's lifetime.
         let ship = ConfirmShip.make(target: target, captureId: captureId,
-                                    slot: slot, name: shipName, speakerId: speakerId)
+                                    slot: slot, name: shipName, speakerId: speakerId,
+                                    entityId: entityId)
         let outcomeBox = ConfirmOutcomeBox()
         Task {
             let outcome = await SpeakerConfirmFlow.backgroundShip(
@@ -812,3 +1010,63 @@ struct SpeakerTagSheet: View {
         applied = true
     }
 }
+
+/// Races an async fetch against a wall-clock deadline WITHOUT a task group — a group can't
+/// return until its children finish, so a non-cancellable relay hang would defeat a
+/// group-based race (the exact reason SpeakerConfirmFlow.withDeadline is unstructured). On
+/// deadline the caller resumes with nil and the orphaned fetch is cancelled best-effort;
+/// its late result is discarded. Used so the pick-list degrades to offline on a hung relay.
+enum PersonDirectoryFetch {
+    static func withDeadline(_ seconds: Double,
+                             _ op: @escaping @Sendable () async -> [KnownPerson]?) async -> [KnownPerson]? {
+        let gate = ResumeOnce()
+        return await withCheckedContinuation { (cont: CheckedContinuation<[KnownPerson]?, Never>) in
+            let work = Task { let r = await op(); await gate.resume(cont, r) }
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(max(0.05, seconds) * 1_000_000_000))
+                await gate.resume(cont, nil)
+                work.cancel()
+            }
+        }
+    }
+
+    /// Single-resume gate — whichever of fetch/deadline finishes first wins; the loser is
+    /// discarded (never a double resume).
+    private actor ResumeOnce {
+        private var done = false
+        func resume(_ cont: CheckedContinuation<[KnownPerson]?, Never>, _ value: [KnownPerson]?) {
+            guard !done else { return }
+            done = true
+            cont.resume(returning: value)
+        }
+    }
+}
+
+#if DEBUG
+/// Simulator-proof seam for the pick-list (`-PersonsProof <mode>`), mirroring
+/// `-ConfirmProof` / `-AudioProof`. Substitutes deterministic person data (or forces the
+/// offline degrade) so `SpeakerAttributionProofUITests`-style proofs can screenshot the
+/// pick-first flow without a live door. NEVER active outside DEBUG.
+///   • `seeded`  — a small deterministic directory (Nick Rinard w/ "Nick"/"Nicholas"
+///                 aliases, Greg Rinard, Dana Lee, Priya Patel) so the proof shows the
+///                 pick-list, autocomplete, and the voiceprint hint.
+///   • `offline` — the fetch is treated as unreachable (the type-a-name degrade proof).
+enum PersonProof {
+    static var mode: String? {
+        let a = ProcessInfo.processInfo.arguments
+        if let i = a.firstIndex(of: "-PersonsProof"), i + 1 < a.count { return a[i + 1] }
+        return nil
+    }
+    static var forceOffline: Bool { mode == "offline" }
+    static func seeded() -> [KnownPerson]? {
+        guard mode == "seeded" else { return nil }
+        return [
+            KnownPerson(entityId: "e-nick", displayName: "Nick Rinard",
+                        aliases: ["Nick", "Nicholas"], lastSeenMs: 9_000),
+            KnownPerson(entityId: "e-dana", displayName: "Dana Lee", lastSeenMs: 7_500),
+            KnownPerson(entityId: "e-greg", displayName: "Greg Rinard", lastSeenMs: 6_000),
+            KnownPerson(entityId: "e-priya", displayName: "Priya Patel", lastSeenMs: 4_000),
+        ]
+    }
+}
+#endif

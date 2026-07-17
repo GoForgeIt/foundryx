@@ -65,6 +65,17 @@ public enum SpeakerConfirmIntent {
         }
         return (nil, speaker.confirmedSpeakerId ?? speaker.inferredSpeakerId)   // bare confirm
     }
+
+    /// PICK an existing durable person (track 20260717T1700): bind the slot to that
+    /// person's opaque `entityId` — the dedup-at-entry authority. Ships the person's
+    /// display name too (so the local overlay renders it and the door has a label), but
+    /// NEVER the slot's old speakerId (Lore resolves speakerId over name/entity; riding the
+    /// stale id would confirm the wrong record). `entityId` is the durable person key the
+    /// backend links `speaker.entity_id` from — a chosen existing entity, never a mint.
+    public static func pick(person: KnownPerson)
+        -> (name: String?, speakerId: String?, entityId: String?) {
+        (person.displayName, nil, person.entityId)
+    }
 }
 
 /// The decision to surface the late (post-sheet-dismissal) propagation offer banner —
@@ -310,7 +321,8 @@ public enum ConfirmShip {
     }
 
     public static func make(target: DoorTarget, captureId: String, slot: String,
-                            name: String? = nil, speakerId: String? = nil)
+                            name: String? = nil, speakerId: String? = nil,
+                            entityId: String? = nil)
         -> @Sendable () async throws -> ConfirmOutcome {
         #if DEBUG
         if let mode = proofMode {
@@ -322,14 +334,16 @@ public enum ConfirmShip {
                     throw DoorError.transport("confirm-proof")
                 }
                 return ConfirmOutcome(captureId: captureId, slotLabel: slot,
-                                      status: "confirmed", speakerId: "proof-speaker",
+                                      status: "confirmed",
+                                      speakerId: entityId ?? "proof-speaker",
                                       speakerName: resolved, offeredCaptures: [])
             }
         }
         #endif
         return {
             try await DoorClient(target: target).confirmSpeaker(
-                captureId: captureId, slot: slot, speakerId: speakerId, name: name)
+                captureId: captureId, slot: slot, speakerId: speakerId, name: name,
+                entityId: entityId)
         }
     }
 }

@@ -1054,6 +1054,9 @@ public final class DoorClient: @unchecked Sendable {
 
     /// Confirm or correct a capture's speaker SLOT (door forwards Lore's
     /// `POST /api/admin/captures/:id/speakers/:slot/confirm`). The state machine:
+    ///   * `entityId`   → bind the slot to an EXISTING durable person (the "pick an
+    ///                    existing name" path — dedup at entry, track 20260717T1700),
+    ///                    shipped alongside that person's `name`.
     ///   * `speakerId`  → confirm the slot for that EXISTING speaker (assign).
     ///   * `name`       → confirm/correct for a speaker by name, CREATING if new
     ///                    (rename + brand-new-speaker paths).
@@ -1062,12 +1065,24 @@ public final class DoorClient: @unchecked Sendable {
     /// reply's `offeredCaptures` is the "apply to N past conversations?" offer.
     /// Relay-aware: rides the interactive tunnel (a user-facing write), like the
     /// transcript fetch.
-    public func confirmSpeaker(captureId: String, slot: String,
-                               speakerId: String? = nil,
-                               name: String? = nil) async throws -> ConfirmOutcome {
+    /// The confirm POST body, factored out so the (speakerId / name / entityId) shape is
+    /// pure + unit-testable. `entityId` (track 20260717T1700) is the "pick an existing
+    /// person" bind — the authoritative durable-person key chosen from the pick-list, so a
+    /// confirm attaches this voice to an EXISTING entity instead of minting a dupe (the
+    /// sibling backend wires `speaker.entity_id` from it). Empty/nil values are omitted.
+    static func confirmBody(speakerId: String?, name: String?, entityId: String?) -> [String: String] {
         var bodyObj: [String: String] = [:]
         if let speakerId, !speakerId.isEmpty { bodyObj["speakerId"] = speakerId }
         if let name, !name.isEmpty { bodyObj["name"] = name }
+        if let entityId, !entityId.isEmpty { bodyObj["entityId"] = entityId }
+        return bodyObj
+    }
+
+    public func confirmSpeaker(captureId: String, slot: String,
+                               speakerId: String? = nil,
+                               name: String? = nil,
+                               entityId: String? = nil) async throws -> ConfirmOutcome {
+        let bodyObj = DoorClient.confirmBody(speakerId: speakerId, name: name, entityId: entityId)
         let body = try JSONSerialization.data(withJSONObject: bodyObj)
         let path = "/foundryx/capture/\(captureId)/speakers/\(slot)/confirm"
 
@@ -1209,5 +1224,68 @@ public final class DoorClient: @unchecked Sendable {
         if http.statusCode == 404 { return [] }
         guard http.statusCode == 200 else { throw DoorError.http(http.statusCode) }
         return (try? JSONDecoder().decode(ModelsResponse.self, from: data))?.models ?? []
+    }
+
+    /// Fetch the EXISTING durable people for the "pick an existing person" tag flow
+    /// (`GET /foundryx/persons?space=<space>`, track 20260717T1700). The door proxies
+    /// Lore's person entities (scoped to the capture's space — a hard identity separator),
+    /// so the phone can offer them as a searchable pick-list and a confirm binds an
+    /// existing `entityId` instead of a mistyped duplicate. Relay-aware like `models()`;
+    /// bearer-gated.
+    ///
+    /// GRACEFUL by contract: returns `[]` (never throws) on a 404 — an OLD desktop door
+    /// that doesn't expose the route yet (the sibling backend adds it) — so the sheet
+    /// simply degrades to typing a name. Transport / 401 / 5xx THROW so the caller treats
+    /// it as "computer unreachable" and degrades to type-a-name too. The reply is accepted
+    /// as EITHER a bare `[{…}]` array or a `{persons:[…]}` envelope, so it survives whichever
+    /// shape the backend ships.
+    public func persons(space: String = "personal") async throws -> [KnownPerson] {
+        try await PerfHook.timed("door-persons") { try await self.personsUncounted(space: space) }
+    }
+
+    private func personsUncounted(space: String) async throws -> [KnownPerson] {
+        let sp = space.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "personal"
+        let path = "/foundryx/persons?space=\(sp)"
+        if let relay = target.relay?.interactive() {
+            let resp = try await RelayHTTP.roundTrip(
+                relay: relay, bearer: target.bearer, method: "GET",
+                path: path, session: session, log: log, useMux: target.useMux)
+            if resp.status == 401 { throw DoorError.unauthorized }
+            if resp.status == 404 { return [] }
+            guard resp.status == 200 else { throw DoorError.http(resp.status) }
+            return DoorClient.decodePersons(resp.body)
+        }
+        let s = target.baseURL.absoluteString
+        let base = s.hasSuffix("/") ? String(s.dropLast()) : s
+        guard let url = URL(string: "\(base)\(path)") else {
+            throw DoorError.transport("bad persons url")
+        }
+        var r = URLRequest(url: url)
+        r.httpMethod = "GET"
+        r.setValue("Bearer \(target.bearer)", forHTTPHeaderField: "Authorization")
+        r.timeoutInterval = 15
+        let (data, response) = try await session.data(for: r)
+        guard let http = response as? HTTPURLResponse else {
+            throw DoorError.transport("non-HTTP response")
+        }
+        if http.statusCode == 401 { throw DoorError.unauthorized }
+        if http.statusCode == 404 { return [] }
+        guard http.statusCode == 200 else { throw DoorError.http(http.statusCode) }
+        return DoorClient.decodePersons(data)
+    }
+
+    /// Decode the persons reply as EITHER a bare `[{…}]` array (the documented contract)
+    /// or a `{persons:[…]}` envelope (mirroring the other door proxies). Neither shape
+    /// throwing keeps a shape drift from blanking the pick-list mid-tag.
+    static func decodePersons(_ data: Data) -> [KnownPerson] {
+        let raw: [KnownPerson]
+        if let arr = try? JSONDecoder().decode([KnownPerson].self, from: data) { raw = arr }
+        else if let env = try? JSONDecoder().decode(PersonsResponse.self, from: data) { raw = env.persons }
+        else { return [] }
+        // Drop unusable rows: a missing `entity_id` (→ empty) would make a "pick" a silent
+        // name-only confirm (dedup defeated) and collide as a `ForEach`/accessibility id. A
+        // person with no display name has nothing to render. Both are contract violations —
+        // tolerate them by dropping, never by surfacing an un-bindable row.
+        return raw.filter { !$0.entityId.isEmpty && !$0.displayName.isEmpty }
     }
 }
