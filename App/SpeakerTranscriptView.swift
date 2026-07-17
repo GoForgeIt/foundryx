@@ -237,14 +237,19 @@ struct SpeakerTurnRow: View {
                 turn.text, ranges: highlightRanges, current: currentRange))
                 .grainTextStyle(.body)
                 .foregroundStyle(GrainColor.ink)
-                .opacity(speaker.isInferred ? 0.6 : 1.0)
+                // Ghost only a STRONG (name-revealing) tentative match; a weak slot
+                // presents at full weight like an anonymous speaker.
+                .opacity((speaker.isInferred && speaker.revealedName != nil) ? 0.6 : 1.0)
                 .textSelection(.enabled)
                 .padding(.leading, GrainSpacing.x4)
 
             // Inline confirm affordance for an inferred match — confirm or "not them".
             // Also rendered while a phase is still resolving/lingering (e.g. the brief
             // "Confirmed" check after the optimistic flip made the speaker confirmed).
-            if speaker.isInferred, let name = speaker.name {
+            // Only a STRONG inferred match offers an inline "Confirm <name>"; a weak
+            // slot reveals no name (revealedName == nil) and presents like an anonymous
+            // one — the tap-to-tag path is its affordance.
+            if speaker.isInferred, let name = speaker.revealedName {
                 InlineConfirmControls(
                     phase: confirmPhase,
                     name: name,
@@ -254,7 +259,7 @@ struct SpeakerTurnRow: View {
             } else if confirmPhase != .idle {
                 InlineConfirmControls(
                     phase: confirmPhase,
-                    name: speaker.name ?? label,
+                    name: speaker.revealedName ?? label,
                     onConfirm: { Task { await onConfirmInferred() } },
                     onNotThem: onTapSpeaker)
                 .padding(.leading, GrainSpacing.x4)
@@ -405,7 +410,10 @@ struct SpeakerTagSheet: View {
             voiceSampleRow
         }
 
-        if speaker.isInferred, let inferred = speaker.name {
+        // Only a STRONG inferred match (revealedName != nil) offers "Confirm <name>".
+        // A weak inferred slot reveals no name and falls through to the tag flow below,
+        // presenting exactly like an anonymous speaker (no name leak, name field only).
+        if speaker.isInferred, let inferred = speaker.revealedName {
             Text(scoreCaption(inferred))
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
             if pendingAction == .confirmInferred {
@@ -419,7 +427,7 @@ struct SpeakerTagSheet: View {
             Divider().background(GrainColor.borderHairline)
             Text("Not them? Name this speaker instead:")
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-        } else if speaker.isAnonymous {
+        } else if speaker.isAnonymous || speaker.isInferred {
             Text("This voice isn't named yet. Who is it?")
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
         } else {

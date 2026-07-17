@@ -143,6 +143,23 @@ public struct CaptureSpeaker: Codable, Sendable, Equatable, Identifiable {
     public var isConfirmed: Bool { status == .confirmed }
     public var isAnonymous: Bool { status == .anonymous }
 
+    /// The name to REVEAL for this slot under the honesty gate — the SINGLE decision
+    /// every name-bearing surface (transcript label, inline "Confirm <name>" affordance,
+    /// the tag-sheet button) must consult so a low-cosine guess never leaks anywhere:
+    ///   • confirmed — always revealed (the user vouched for it).
+    ///   • inferred  — revealed ONLY at STRONG evidence (`SpeakerConfidence.tier`); a
+    ///                 weak or scoreless inferred match reveals nothing, so the slot
+    ///                 presents exactly like an anonymous one (tap-to-tag, no name).
+    ///   • anonymous — nothing to reveal.
+    public var revealedName: String? {
+        guard let name, !name.isEmpty else { return nil }
+        switch status {
+        case .confirmed: return name
+        case .inferred:  return SpeakerConfidence.tier(for: inferScore) == .strong ? name : nil
+        case .anonymous: return nil
+        }
+    }
+
     enum CodingKeys: String, CodingKey {
         case slot, status, name, inferScore, inferredSpeakerId, confirmedSpeakerId
     }
@@ -268,24 +285,12 @@ public struct SpeakerTranscript: Sendable, Equatable {
         orderedSlots.firstIndex(of: slot) ?? orderedSlots.count
     }
 
-    /// The label to show for a slot: the confirmed/inferred name when present, else
-    /// "Speaker N". Anonymous + inferred-without-name both fall back to the number.
-    ///
-    /// Honesty gate: an `inferred` slot only renders its name at STRONG evidence. A
-    /// weakly-matched voice (raw cosine below `SpeakerConfidence.strongFloor`, or no
-    /// score at all) falls back to "Speaker N" so a low-confidence guess never leaks a
-    /// name into any rendering (this label is also what `plainText` copies out). A
-    /// `confirmed` slot always shows its name — the user vouched for it.
+    /// The label to show for a slot: the revealed confirmed/inferred name (see
+    /// `CaptureSpeaker.revealedName` — the one honesty gate), else "Speaker N". A weak or
+    /// scoreless inferred match reveals nothing, so it renders as the number here and in
+    /// `plainText` (the copy path), never leaking a low-cosine guess.
     public func displayLabel(for slot: String) -> String {
-        let sp = speaker(for: slot)
-        if let name = sp.name, !name.isEmpty, sp.status != .anonymous {
-            if sp.status == .inferred,
-               SpeakerConfidence.tier(for: sp.inferScore) == .weak {
-                return "Speaker \(displayNumber(for: slot))"
-            }
-            return name
-        }
-        return "Speaker \(displayNumber(for: slot))"
+        speaker(for: slot).revealedName ?? "Speaker \(displayNumber(for: slot))"
     }
 
     /// The ms window of `slot`'s LONGEST timestamped utterance — the clip that

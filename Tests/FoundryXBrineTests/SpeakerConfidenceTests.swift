@@ -87,6 +87,34 @@ final class SpeakerConfidenceTests: XCTestCase {
                        "a strong match still surfaces the tentative name")
     }
 
+    // MARK: - revealedName: the one gate every name-bearing surface consults
+
+    func testRevealedNameIsNilForWeakInferred() {
+        let sp = CaptureSpeaker(slot: "s", status: .inferred, name: "Govinda", inferScore: 0.78)
+        XCTAssertNil(sp.revealedName, "a weak inferred name is never revealed — no affordance")
+    }
+
+    func testRevealedNameIsNilForScorelessInferred() {
+        let sp = CaptureSpeaker(slot: "s", status: .inferred, name: "Govinda", inferScore: nil)
+        XCTAssertNil(sp.revealedName)
+    }
+
+    func testRevealedNameShowsStrongInferred() {
+        let sp = CaptureSpeaker(slot: "s", status: .inferred, name: "Govinda", inferScore: 0.93)
+        XCTAssertEqual(sp.revealedName, "Govinda")
+    }
+
+    func testRevealedNameAlwaysShowsConfirmedEvenLowScore() {
+        let sp = CaptureSpeaker(slot: "s", status: .confirmed, name: "Govinda", inferScore: 0.10)
+        XCTAssertEqual(sp.revealedName, "Govinda", "a confirmed name is user-vouched — always revealed")
+    }
+
+    func testRevealedNameIsNilForAnonymous() {
+        XCTAssertNil(CaptureSpeaker(slot: "s", status: .anonymous).revealedName)
+        // Even a stray name on an anonymous slot is not revealed.
+        XCTAssertNil(CaptureSpeaker(slot: "s", status: .anonymous, name: "Ghost").revealedName)
+    }
+
     func testConfirmedSlotAlwaysRendersTheNameEvenWithLowScore() {
         // A confirmed slot is user-vouched; its label is never gated on a cosine.
         let t = SpeakerTranscript(

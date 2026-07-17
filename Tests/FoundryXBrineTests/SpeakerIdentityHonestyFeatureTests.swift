@@ -26,19 +26,35 @@ private final class IdentityHonestyWorld: @unchecked Sendable {
     var transcript: SpeakerTranscript?
 
     /// Every string the transcript/sheet actually renders for the tentative slot — the
-    /// surfaces a percentage or a leaked name could hide in.
+    /// surfaces a percentage or a leaked name could hide in. Each is DERIVED THROUGH the
+    /// centralized gate (`CaptureSpeaker.revealedName`) exactly as the views now build
+    /// it, so "the guessed name is not shown anywhere" genuinely constrains the two
+    /// confirm affordances that previously leaked it.
     func renderedStrings() -> [String] {
         guard let t = transcript else { return [] }
         var out: [String] = []
+        let sp = t.speaker(for: slot)
         out.append(t.displayLabel(for: slot))          // transcript face + copy label
         out.append(t.plainText)                          // paste-ready transcript
-        let sp = t.speaker(for: slot)
-        // The inline hint only renders for a STRONG match (weak → hidden).
-        if sp.isInferred, SpeakerConfidence.tier(for: sp.inferScore) == .strong {
+
+        // The inline hint only renders for a STRONG (name-revealing) match.
+        if sp.isInferred, sp.revealedName != nil {
             out.append(SpeakerConfidence.inlineStrongHint)
         }
-        // The tag-sheet caption is always rendered for an inferred slot.
-        out.append(SpeakerConfidence.sheetCopy(name: sp.name, score: sp.inferScore))
+        // Inline "Confirm <name>" affordance (SpeakerTurnRow) — only when a name is
+        // revealed; weak → no affordance at all.
+        if sp.isInferred, let name = sp.revealedName {
+            out.append("Confirm \(name)")
+            out.append("Confirming \(name)…")
+        }
+        // Tag-sheet: the caption + the confirm button, both gated on the revealed name.
+        if sp.isInferred, let name = sp.revealedName {
+            out.append(SpeakerConfidence.sheetCopy(name: name, score: sp.inferScore))
+            out.append("Confirm \(name)")
+        } else {
+            // Weak/anonymous take the tag flow — no name-bearing string.
+            out.append("This voice isn't named yet. Who is it?")
+        }
         return out
     }
 
