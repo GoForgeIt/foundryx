@@ -226,6 +226,7 @@ struct ChatScreen: View {
         if let run = prefillRun {
             if run.chatId == active.id {
                 AmbientCardBroker.prefillSent(seed: run.runSeed)
+                UsageHook.action("run")   // content-free: acted on a surfaced action (no seed text)
                 if let captureId = run.captureId, let utterance = run.utterance {
                     ActionChatLinkStore.link(captureId: captureId, utterance: utterance,
                                              chatId: run.chatId,

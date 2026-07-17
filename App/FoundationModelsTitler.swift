@@ -26,7 +26,8 @@ public final class FoundationModelsTitler: LocalTitleSummary, @unchecked Sendabl
         // Time it (fm-title span) AND bound it: on-device turns have hung in the
         // wild, and a wedged titler must not stall summaries forever — a 20s
         // timeout surfaces it as a clean error the caller can fall back from.
-        return try await PerfHook.timed("fm-title") {
+        let span = PerfSpan(name: "fm-title")
+        let result = try await PerfHook.timed("fm-title") {
             try await withPerfTimeout("fm-title", ms: 20_000) {
                 let session = LanguageModelSession()
                 let title = try await session.respond(
@@ -38,6 +39,10 @@ public final class FoundationModelsTitler: LocalTitleSummary, @unchecked Sendabl
                 return (title, summary)
             }
         }
+        // CONTENT-FREE usage: a title/summary was generated. ms only — never the
+        // transcript, the title, or the summary text.
+        UsageHook.generation(kind: "title", ms: span.elapsedMs())
+        return result
     }
 }
 #endif

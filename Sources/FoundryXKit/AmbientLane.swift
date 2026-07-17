@@ -205,6 +205,12 @@ public actor AmbientLane {
             if let candidate = try await gate.evaluate(window: trimmed) {
                 log(captureId: captureId, outcome: .candidate, windowChars: trimmed.count,
                     candidate: candidate, skipReason: nil, started: started)
+                // CONTENT-FREE usage: an ambient candidate was generated. ms + the window
+                // SIZE (a count) only — NEVER the window text or the candidate's utterance.
+                let ms = Int((DispatchTime.now().uptimeNanoseconds
+                              &- started.uptimeNanoseconds) / 1_000_000)
+                UsageHook.generation(kind: "ambient_candidate", ms: ms,
+                                     extraNums: ["window_chars": Double(trimmed.count)])
                 return candidate
             }
             log(captureId: captureId, outcome: .gatedNo, windowChars: trimmed.count,

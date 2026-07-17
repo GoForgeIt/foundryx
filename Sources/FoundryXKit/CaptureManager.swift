@@ -1329,6 +1329,7 @@ public final class CaptureManager: ObservableObject {
     /// Drop a candidate the user acted on or dismissed from the live surface.
     public func dismissRecordingCandidate(_ candidate: AmbientCandidate) {
         recordingCandidates.removeAll { $0.utterance == candidate.utterance }
+        UsageHook.action("dismissed")   // content-free: the enum outcome, never the candidate text
     }
 
     // MARK: ambient session lifecycle (driven by the source, not a button)
@@ -2379,9 +2380,18 @@ public final class CaptureManager: ObservableObject {
         let voiced = router.sessionVoicedFrameCount()
         let onDeviceNow = liveTranscript.displayText
         let duration = max(0, Date().timeIntervalSince1970 - startTime(of: finished))
-        if !CaptureManager.hasUploadSubstance(voicedFrames: voiced,
-                                              onDeviceTranscript: onDeviceNow,
-                                              durationSeconds: duration) {
+        let kept = CaptureManager.hasUploadSubstance(voicedFrames: voiced,
+                                                     onDeviceTranscript: onDeviceNow,
+                                                     durationSeconds: duration)
+        // CONTENT-FREE usage: a recording session + a conversation boundary closed.
+        // Counts + durations + the source/kept enum ONLY — never the transcript
+        // (`onDeviceNow`), the title, or any speaker name.
+        let sourceToken = captureSource == .omi ? "omi" : "mic"
+        UsageHook.session(kind: "recording", source: sourceToken,
+                          durationSec: Int(duration), kept: kept)
+        UsageHook.conversation(kind: "ended", durationSec: Int(duration),
+                               segmentCount: finished.status.totalSegments)
+        if !kept {
             // JUNK FRAGMENT — drop it LOCALLY. Never seed a card, never mark it
             // pending-finalize, never POST it to the door. The bytes stay on disk under a
             // durable `.discarded` marker (nothing deleted); drain + visibility both skip it.

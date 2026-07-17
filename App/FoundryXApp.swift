@@ -9,6 +9,9 @@ struct FoundryXApp: App {
         PerfTelemetry.shared.markProcessStart()
         PerfTelemetry.shared.start(
             endpoint: RemoteConfig.fromBundle()?.gatewayHTTPURL.appendingPathComponent("diag/log"))
+        // The content-free product-usage sink is wired to the Foundry DOOR (bearer-gated)
+        // once sign-in resolves the target — see RootView's setUsageTarget call. It is
+        // delivered THROUGH Foundry (the door appends it to the local telemetry rollup).
         #if DEBUG
         DemoSeed.installPerfLogIfRequested()  // `-PerfLog`: mirror perf spans to the unified log
         DemoSeed.seedStressIfRequested()      // `-StressSeed <N>`: large-library perf harness

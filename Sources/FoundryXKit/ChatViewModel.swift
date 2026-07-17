@@ -180,6 +180,13 @@ public final class ChatViewModel: ObservableObject {
             if assistantText.isEmpty { thinkingMs = ms }
         case .timing(let r, let t, let g, let total, let n):
             lastTiming = TurnTiming(routeMs: r, ttftMs: t, genMs: g, totalMs: total, tokens: n)
+            // CONTENT-FREE usage: a chat/Kiln turn completed. The routing target_id is a
+            // controlled token (e.g. "local-qwen3-8b"); route is local/cloud; the rest are
+            // timings + a token COUNT — never the prompt or the response text.
+            let routed = messages.last(where: { $0.role == "assistant" })?.routedVia
+            let route = routed == nil ? "unknown" : (routed!.hasPrefix("local") ? "local" : "cloud")
+            UsageHook.chat(model: routed ?? "unknown", route: route,
+                           ms: total, ttftMs: t, genMs: g, tokenCount: n)
         case .toolCall(let callId, let name, let args):
             // The agent invoked a tool — open a running row in the inline trace. If we
             // somehow saw this id already (retransmit), refresh it in place.

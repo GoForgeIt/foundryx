@@ -150,6 +150,7 @@ public final class ChatConversationStore: ObservableObject {
         conversations.insert(convo, at: 0)
         activeId = convo.id
         persist()
+        UsageHook.action("chat_convo_new")   // content-free: a count, no title/text
         return convo
     }
 
@@ -164,6 +165,7 @@ public final class ChatConversationStore: ObservableObject {
     /// list would empty), and re-points `activeId` if the active one was removed.
     public func delete(_ id: String) {
         conversations.removeAll { $0.id == id }
+        UsageHook.action("chat_convo_delete")   // content-free: a count, no title/text
         if conversations.isEmpty {
             let seed = Conversation()
             conversations = [seed]

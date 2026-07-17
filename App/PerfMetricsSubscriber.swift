@@ -27,6 +27,9 @@ final class PerfTelemetry: NSObject, @unchecked Sendable {
     static let shared = PerfTelemetry()
 
     private(set) var sink: PerfSink?
+    /// The content-free PRODUCT-USAGE sink — a sibling of `sink`, shipping to the
+    /// door's `telemetry/usage` endpoint (usage-telemetry.feature). Independent wire.
+    private(set) var usageSink: UsageSink?
     private var launchSpan: PerfSpan?
     private var flushTimer: Timer?
 
@@ -35,18 +38,28 @@ final class PerfTelemetry: NSObject, @unchecked Sendable {
         if launchSpan == nil { launchSpan = PerfSpan(name: "cold-launch") }
     }
 
-    /// Wire the sink to the diagnostics endpoint and subscribe to MetricKit.
-    /// Idempotent. Endpoint resolves from the same RemoteConfig the DoorLog uses.
-    func start(endpoint: URL?) {
+    /// Wire the perf sink to the diagnostics endpoint and subscribe to MetricKit; the
+    /// SIBLING usage sink is constructed here too but points at the bearer-gated FOUNDRY
+    /// DOOR (`POST /foundryx/telemetry/usage`, capture base) — its `DoorTarget` is set
+    /// later via `setUsageTarget` once sign-in resolves it. Idempotent. The `perfEndpoint`
+    /// resolves from the same RemoteConfig the DoorLog uses.
+    func start(endpoint perfEndpoint: URL?) {
         guard sink == nil else { return }
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
         let installId = Self.anonymousInstallId()
         let ctx = PerfContext(build: build, installId: installId)
-        let sink = PerfSink(endpoint: endpoint, ctx: ctx)
+        let sink = PerfSink(endpoint: perfEndpoint, ctx: ctx)
         self.sink = sink
 
-        // A low-rate backstop flush so batched (non-slow) spans still trickle out.
-        let t = Timer(timeInterval: 20, repeats: true) { _ in sink.flush() }
+        // The usage sink is a SIBLING: same build + anonymous install id, but the FOUNDRY
+        // DOOR (bearer-gated capture base) and a content-free JSON wire. Content-free by
+        // construction (UsageHook's typed emitters + UsageDiag.token never let free text
+        // out). No target until sign-in — set via setUsageTarget.
+        let usageSink = UsageSink(ctx: UsageContext(build: build, installId: installId))
+        self.usageSink = usageSink
+
+        // A low-rate backstop flush so batched (non-slow) spans + usage events trickle out.
+        let t = Timer(timeInterval: 20, repeats: true) { _ in sink.flush(); usageSink.flush() }
         RunLoop.main.add(t, forMode: .common)
         flushTimer = t
         // Flush on background so nothing is stranded when the app is suspended.
@@ -59,11 +72,20 @@ final class PerfTelemetry: NSObject, @unchecked Sendable {
         // Let kit code (CaptureManager hydration, drain) report spans through us
         // without importing MetricKit/UIKit.
         PerfHook.install { [weak sink] name, ms in sink?.span(name, ms: ms) }
+        // …and let kit code (CaptureManager, ChatViewModel, AmbientLane, …) report
+        // content-free usage events through the SAME kind of bridge.
+        UsageHook.install { [weak usageSink] kind, cats, nums in
+            usageSink?.emit(kind, cats: cats, nums: nums)
+        }
 
         #if canImport(MetricKit)
         MXMetricManager.shared.add(self)
         #endif
     }
+
+    /// Point the usage sink at the resolved door (post sign-in) so content-free product
+    /// usage reaches `POST /foundryx/telemetry/usage`. Re-callable when the bearer refreshes.
+    func setUsageTarget(_ target: DoorTarget?) { usageSink?.setTarget(target) }
 
     /// Report time-to-first-draw once the first real UI is on screen.
     func markFirstDraw() {
@@ -84,7 +106,7 @@ final class PerfTelemetry: NSObject, @unchecked Sendable {
     /// Record an already-measured span (for async work timed by the caller).
     func record(_ name: String, ms: Int) { sink?.span(name, ms: ms) }
 
-    @objc private func onBackground() { sink?.flush() }
+    @objc private func onBackground() { sink?.flush(); usageSink?.flush() }
 
     /// A stable per-install anonymous id (identifierForVendor's first 8 hex).
     /// Not PII: rotates on full uninstall, never identifies the person.

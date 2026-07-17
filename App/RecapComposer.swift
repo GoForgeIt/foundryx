@@ -19,6 +19,13 @@ final class FoundationModelsRecapComposer: RecapComposer, @unchecked Sendable {
     func compose(_ conversations: [RecapConversation],
                  span: RecapSpan) async -> (narrative: String, insights: [String])? {
         guard isAvailable, !conversations.isEmpty else { return nil }
+        // CONTENT-FREE usage: time the recap generation. ms + the conversation COUNT
+        // only — never the titles, summaries, narrative, or insight text.
+        let genSpan = PerfSpan(name: "recap")
+        defer {
+            UsageHook.generation(kind: "recap", ms: genSpan.elapsedMs(),
+                                 extraNums: ["conversation_count": Double(conversations.count)])
+        }
         // Feed the model ONLY the real titles + summaries (bounded), and instruct
         // it to draw strictly from them.
         let material = conversations.prefix(40).map { c -> String in

@@ -46,6 +46,7 @@ public enum SpeakerConfirmQueue {
         var entries = pending(baseDir: baseDir).filter { !($0.captureId == captureId && $0.slot == slot) }
         entries.append(Entry(captureId: captureId, slot: slot, name: name, speakerId: speakerId, ts: now))
         write(entries, baseDir: baseDir)
+        UsageHook.generation(kind: "speaker_confirm")   // content-free: a count, never the name
     }
 
     /// Durably record MANY intents in ONE read + ONE atomic write (latest-wins per slot,

@@ -160,6 +160,11 @@ struct RootView: View {
                         // re-auth) rebuilds the tabs (+ their clients) so every door request
                         // uses the fresh id_token — never a stale, expired one.
                         .id((target.relay?.tunnelId ?? "remote") + "#" + target.bearer.suffix(12))
+                        // Point the content-free usage sink at THIS resolved door (base +
+                        // fresh bearer) so product-usage reaches POST /foundryx/telemetry/usage.
+                        // The `.id` above re-mounts on a bearer refresh, so this re-fires with
+                        // the fresh target.
+                        .onAppear { PerfTelemetry.shared.setUsageTarget(target) }
                         .sheet(isPresented: $showingAccount) {
                             SignInView(remote: remote) { showingAccount = false }
                         }
@@ -601,6 +606,9 @@ private struct MainTabs: View {
         // correct — so toggling the Omi off actually hands off + drops it, and a transient
         // reconnect is reflected — regardless of which tab is visible.
         .onChange(of: device.connectionState) { _ in syncOmiConnection() }
+        // CONTENT-FREE usage: which surface the user is on. The tab's rawValue is already
+        // a safe enum token (capture/activity/chat/settings) — never any content.
+        .onChange(of: router.selected) { tab in UsageHook.page(tab.rawValue) }
         // Land on the chat tab whenever the card broker carries a seed (an accepted
         // card's [Run]) OR a composer prefill (the Actions face's "Act on it in
         // chat"). Driven off the PUBLISHED values against the live @StateObject
