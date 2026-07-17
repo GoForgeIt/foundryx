@@ -113,6 +113,10 @@ public struct ConversationActionsPresentation: Equatable, Sendable {
     public static let emptyStateText = "Nothing surfaced from this conversation yet."
     /// The add affordance's label.
     public static let addActionLabel = "Add an action"
+    /// The collapsed group holding actions OTHER people said (features/
+    /// action-speaker-attribution.feature): detected, kept, one tap away — but
+    /// out of the main list, which is yours.
+    public static let othersGroupLabel = "Heard from others"
 
     public struct Row: Equatable, Sendable, Identifiable {
         /// Where the row came from — drives the icon, never shown as text.
@@ -158,12 +162,16 @@ public struct ConversationActionsPresentation: Equatable, Sendable {
         /// sheet then offers "Continue in chat →" instead of a fresh prefill.
         /// Nil when never acted on (or the linked chat was deleted).
         public let linkedChatId: String?
+        /// WHO said it (surfaced rows only; nil on answer/user rows, where
+        /// attribution is meaningless and no line renders).
+        public let attribution: ActionAttribution?
         /// True when the item is finished.
         public var done: Bool { state == .completed }
 
         public init(id: String, label: String, meta: String?, kind: Kind, state: State,
                     utterance: String? = nil, note: String? = nil, seed: String? = nil,
-                    runSeed: String? = nil, linkedChatId: String? = nil) {
+                    runSeed: String? = nil, linkedChatId: String? = nil,
+                    attribution: ActionAttribution? = nil) {
             self.id = id
             self.label = label
             self.meta = meta
@@ -174,34 +182,52 @@ public struct ConversationActionsPresentation: Equatable, Sendable {
             self.seed = seed
             self.runSeed = runSeed
             self.linkedChatId = linkedChatId
+            self.attribution = attribution
         }
     }
 
+    /// The MAIN list: what you said (plus pending/unclear — nothing hidden
+    /// without evidence), delivered answers, and your own added actions.
     public let rows: [Row]
-    public var isEmpty: Bool { rows.isEmpty }
+    /// The collapsed "Heard from others" group: actions with POSITIVE evidence
+    /// someone else said them (empty when the "Actions from others" toggle puts
+    /// everyone inline).
+    public let othersRows: [Row]
+    public var isEmpty: Bool { rows.isEmpty && othersRows.isEmpty }
 
-    public init(rows: [Row]) {
+    public init(rows: [Row], othersRows: [Row] = []) {
         self.rows = rows
+        self.othersRows = othersRows
     }
 
     /// Build the face from everything that ACTUALLY surfaced for this capture:
     /// ambient candidates joined to their outcomes (ConversationActions), the
     /// delivered answers linked to it, the user's own added actions, and the
     /// user's feedback on the surfaced items (rejections + refinement notes).
+    ///
+    /// `transcript` (the diarized transcript, once it has landed) attributes
+    /// each surfaced row to WHO said it; others-uttered rows re-file into
+    /// `othersRows` unless the "Actions from others" toggle (`othersInline`)
+    /// is on or the user promoted them (`promotions`).
     public static func build(captureId: String,
                              decisions: [AmbientDecision],
                              outcomes: [CardOutcomeRecord],
                              answers: [LinkedConversationAnswer],
                              userActions: [UserConversationAction],
                              feedback: [ActionFeedbackRecord] = [],
-                             chatLinks: [String: String] = [:]) -> Self {
+                             chatLinks: [String: String] = [:],
+                             transcript: SpeakerTranscript? = nil,
+                             othersInline: Bool = false,
+                             promotions: Set<String> = []) -> Self {
         var rows: [Row] = []
+        var othersRows: [Row] = []
         for card in ConversationActions.cards(
-            for: captureId, decisions: decisions, outcomes: outcomes) {
+            for: captureId, decisions: decisions, outcomes: outcomes,
+            transcript: transcript) {
             let label = card.summary.isEmpty ? card.utterance : card.summary
             let meta = (!card.summary.isEmpty && card.utterance != card.summary)
                 ? "\u{201C}\(card.utterance)\u{201D}" : nil
-            rows.append(Row(
+            let row = Row(
                 id: "surfaced-\(card.id)", label: label, meta: meta,
                 kind: .surfaced, state: state(of: card.outcome),
                 utterance: card.utterance,
@@ -209,7 +235,17 @@ public struct ConversationActionsPresentation: Equatable, Sendable {
                     forUtterance: card.utterance, in: feedback),
                 seed: chatSeed(utterance: card.utterance, summary: card.summary),
                 runSeed: card.utterance,
-                linkedChatId: chatLinks[ConversationActions.utteranceKey(card.utterance)]))
+                linkedChatId: chatLinks[ConversationActions.utteranceKey(card.utterance)],
+                attribution: card.attribution)
+            let promoted = promotions.contains(ActionPromotionStore.key(
+                captureId: captureId, utterance: card.utterance))
+            if ActionSurfacePolicy.belongsInOthersGroup(
+                attribution: card.attribution, othersInline: othersInline,
+                promoted: promoted) {
+                othersRows.append(row)
+            } else {
+                rows.append(row)
+            }
         }
         for (i, answer) in answers.enumerated() {
             rows.append(Row(id: "answer-\(i)", label: "Answer found",
@@ -223,7 +259,7 @@ public struct ConversationActionsPresentation: Equatable, Sendable {
                             state: action.done ? .completed : .open,
                             seed: userActionSeed(title: action.title)))
         }
-        return Self(rows: rows)
+        return Self(rows: rows, othersRows: othersRows)
     }
 
     /// The act-in-chat prefill for a surfaced moment — the SAME template the

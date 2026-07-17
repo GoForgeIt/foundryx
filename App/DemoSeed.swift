@@ -115,7 +115,7 @@ enum DemoSeed {
         guard ProcessInfo.processInfo.arguments.contains("-FreshActionState") else { return }
         let base = CaptureWAL.documentsCaptures()
         for name in ["ambient-cards.jsonl", "action-feedback.jsonl",
-                     ActionChatLinkStore.filename] {
+                     ActionChatLinkStore.filename, ActionPromotionStore.filename] {
             try? FileManager.default.removeItem(at: base.appendingPathComponent(name))
         }
         try? FileManager.default.removeItem(at: ChatConversationStore.defaultStorageURL())
@@ -176,6 +176,33 @@ enum DemoSeed {
                         slot: "speaker_1", status: .inferred, name: "Nick",
                         inferScore: 0.88, inferredSpeakerId: "demo-nick"),
                     CaptureSpeaker(slot: "speaker_2", status: .anonymous),
+                ]
+            } else if id == "omi-demo-1" {
+                // Speaker-attribution proof (features/action-speaker-attribution
+                // .feature): the seeded action candidates below are spoken by ME
+                // (two) and by Sarah (one), so the Actions face shows "You said"
+                // rows plus a collapsed "Heard from others (1)" group.
+                segments = [
+                    TranscriptSegment(
+                        seq: 0, startMs: 0, endMs: 9_400,
+                        text: "Okay, the deck is nearly there. Remind me to send Sarah the numbers section tonight.",
+                        speaker: "speaker_0"),
+                    TranscriptSegment(
+                        seq: 1, startMs: 9_900, endMs: 16_300,
+                        text: "Sounds good. I'll get the venue booked by Friday for the launch.",
+                        speaker: "speaker_1"),
+                    TranscriptSegment(
+                        seq: 2, startMs: 17_000, endMs: 24_200,
+                        text: "We should get the relay figures into the deck before Thursday.",
+                        speaker: "speaker_0"),
+                ]
+                speakers = [
+                    CaptureSpeaker(
+                        slot: "speaker_0", status: .confirmed, name: "Nick Rinard (me)",
+                        confirmedSpeakerId: "demo-owner"),
+                    CaptureSpeaker(
+                        slot: "speaker_1", status: .confirmed, name: "Sarah",
+                        confirmedSpeakerId: "demo-sarah"),
                 ]
             } else {
                 segments = []
@@ -248,7 +275,10 @@ enum DemoSeed {
         // (ambient-decisions.jsonl), so the detail's Actions face renders real-
         // shaped rows in the simulator. Idempotent: skipped once present.
         let decisionLog = base.appendingPathComponent("ambient-decisions.jsonl")
-        let seedMark = "send Sarah the numbers section"
+        // The venue line is the NEWEST seed — using it as the mark upgrades an
+        // install seeded by an older build (candidate cards dedupe by utterance,
+        // so re-appending the first two is harmless).
+        let seedMark = "venue booked by Friday"
         let existing = (try? String(contentsOf: decisionLog, encoding: .utf8)) ?? ""
         if !existing.contains(seedMark) {
             let candidates: [(UInt64, String, String)] = [
@@ -258,6 +288,11 @@ enum DemoSeed {
                 (UInt64(max(0, now - 3_460)),
                  "We should get the relay figures into the deck before Thursday",
                  "Add the relay figures to the launch deck before Thursday"),
+                // Spoken by SARAH in the diarized transcript above — the
+                // "Heard from others" proof row.
+                (UInt64(max(0, now - 3_420)),
+                 "I'll get the venue booked by Friday for the launch",
+                 "Book the venue for the launch by Friday"),
             ]
             for (ts, utterance, summary) in candidates {
                 let line = (try? JSONSerialization.data(withJSONObject: [

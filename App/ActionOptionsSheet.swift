@@ -28,6 +28,9 @@ struct ActionOptionsSheet: View {
     let onReject: ((String) -> Void)?
     /// Refine with a comment (surfaced rows only).
     let onRefine: ((String) -> Void)?
+    /// Promote a "Heard from others" action into the main list. Installed only
+    /// when the row was opened from that group.
+    var onPromote: (() -> Void)? = nil
 
     private enum Mode { case options, reject, refine }
     @State private var mode: Mode = .options
@@ -64,6 +67,11 @@ struct ActionOptionsSheet: View {
                 .fontWeight(.semibold)
                 .foregroundStyle(GrainColor.ink)
                 .fixedSize(horizontal: false, vertical: true)
+            if let attribution = row.attribution {
+                Text(attribution.displayText)
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.forgeBlue)
+            }
             if let meta = row.meta, !meta.isEmpty {
                 Text(meta)
                     .grainTextStyle(.caption)
@@ -77,7 +85,8 @@ struct ActionOptionsSheet: View {
         VStack(spacing: GrainSpacing.x2) {
             // Nothing offerable (a hand-added action on a phone tier whose chat
             // can't compose) — say so honestly instead of a dead, empty sheet.
-            if onContinue == nil && onAct == nil && onReject == nil && onRefine == nil {
+            if onContinue == nil && onAct == nil && onReject == nil && onRefine == nil
+                && onPromote == nil {
                 Text("Nothing to do here yet — chat isn't available on this phone.")
                     .grainTextStyle(.caption)
                     .foregroundStyle(GrainColor.textMuted)
@@ -98,6 +107,15 @@ struct ActionOptionsSheet: View {
                 }
                 .frame(maxWidth: .infinity)
                 .accessibilityIdentifier("act-in-chat")
+            }
+            if onPromote != nil {
+                // A "Heard from others" action the user claims as their own.
+                GrainButton("Move to my actions", variant: .outlined, size: .regular) {
+                    onPromote?()
+                    dismiss()
+                }
+                .frame(maxWidth: .infinity)
+                .accessibilityIdentifier("promote-action")
             }
             if onRefine != nil {
                 GrainButton("Refine this action", variant: .outlined, size: .regular) {

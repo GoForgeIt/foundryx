@@ -251,6 +251,13 @@ struct ActivityView: View {
                             .fixedSize(horizontal: false, vertical: true)
                             .multilineTextAlignment(.leading)
                     }
+                    // WHO said the surfaced action (resolved against the
+                    // conversation's diarized transcript at reload).
+                    if let attribution = actionRows[entry.id]?.attribution {
+                        Text(attribution.displayText)
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(GrainColor.forgeBlue)
+                    }
                     if linkable {
                         Text(actionable ? "Act on this" : sourceLabel(for: entry.source))
                             .grainTextStyle(.caption)

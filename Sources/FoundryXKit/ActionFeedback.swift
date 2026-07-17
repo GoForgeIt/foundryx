@@ -40,16 +40,27 @@ public struct ActionFeedbackRecord: Codable, Equatable, Sendable {
     /// The user's words: why it's not an action / what it should have been.
     /// Empty is allowed for `rejected` (a rejection needs no essay).
     public let comment: String
+    /// WHO said the action, as attributed at feedback time (ActionAttribution
+    /// wire word: pending | owner | other | unclear) — so the router learns the
+    /// owner/other distinction. Absent on records written before attribution
+    /// existed.
+    public let speaker: String?
+    /// The diarized speaker name, when one was known ("Sarah"). On-phone raw
+    /// text like the utterance — never ships.
+    public let speakerName: String?
 
     public init(ts: UInt64 = UInt64(max(0, Date().timeIntervalSince1970)),
                 captureId: String, utterance: String, summary: String,
-                kind: Kind, comment: String) {
+                kind: Kind, comment: String,
+                speaker: String? = nil, speakerName: String? = nil) {
         self.ts = ts
         self.captureId = captureId
         self.utterance = utterance
         self.summary = summary
         self.kind = kind
         self.comment = comment
+        self.speaker = speaker
+        self.speakerName = speakerName
     }
 }
 

@@ -88,6 +88,11 @@ struct ConversationFacesView: View {
     @State private var newActionTitle = ""
     /// The action row whose options sheet is open (track 20260715T1500 addendum).
     @State private var selectedAction: ConversationActionsPresentation.Row?
+    /// True when `selectedAction` was tapped inside the "Heard from others"
+    /// group — its sheet then also offers "Move to my actions".
+    @State private var selectedFromOthers = false
+    /// Whether the collapsed "Heard from others" group is expanded.
+    @State private var othersExpanded = false
 
     // MARK: speaker-confirm phases (track 20260717T0900)
     /// ONE per-slot confirm state machine for this conversation, shared by BOTH
@@ -468,12 +473,22 @@ struct ConversationFacesView: View {
                     .padding(.vertical, GrainSpacing.x3)
                     .accessibilityIdentifier("actions-empty-state")
             } else {
-                VStack(spacing: 0) {
-                    Rectangle().fill(GrainColor.borderFaint).frame(height: 1)
-                    ForEach(actions.rows) { row in
-                        actionRow(row)
+                if actions.rows.isEmpty {
+                    // Everything surfaced was said by OTHERS — say so instead of
+                    // rendering an empty bordered block above the group.
+                    Text("Nothing you said surfaced as an action.")
+                        .grainTextStyle(.body)
+                        .foregroundStyle(GrainColor.textMuted)
+                        .padding(.vertical, GrainSpacing.x3)
+                } else {
+                    VStack(spacing: 0) {
+                        Rectangle().fill(GrainColor.borderFaint).frame(height: 1)
+                        ForEach(actions.rows) { row in
+                            actionRow(row)
+                        }
                     }
                 }
+                heardFromOthersGroup
             }
             addActionControl
         }
@@ -482,10 +497,46 @@ struct ConversationFacesView: View {
         }
     }
 
-    private func actionRow(_ row: ConversationActionsPresentation.Row) -> some View {
+    /// The collapsed "Heard from others" group (features/
+    /// action-speaker-attribution.feature): actions OTHER people said —
+    /// detected and kept, one tap away, out of the main list. Absent when
+    /// empty (or when the "Actions from others" setting puts everyone inline).
+    @ViewBuilder private var heardFromOthersGroup: some View {
+        if !actions.othersRows.isEmpty {
+            VStack(spacing: 0) {
+                Button {
+                    withAnimation { othersExpanded.toggle() }
+                } label: {
+                    HStack(spacing: GrainSpacing.x2) {
+                        Text("\(ConversationActionsPresentation.othersGroupLabel) (\(actions.othersRows.count))")
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(GrainColor.textMuted)
+                        Spacer()
+                        Image(systemName: othersExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 12))
+                            .foregroundStyle(GrainColor.textFaint)
+                    }
+                    .padding(.vertical, GrainSpacing.x3)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("heard-from-others")
+                if othersExpanded {
+                    Rectangle().fill(GrainColor.borderFaint).frame(height: 1)
+                    ForEach(actions.othersRows) { row in
+                        actionRow(row, fromOthers: true)
+                    }
+                }
+            }
+        }
+    }
+
+    private func actionRow(_ row: ConversationActionsPresentation.Row,
+                           fromOthers: Bool = false) -> some View {
         // Tapping ANY action row opens its options sheet — act on it in chat,
         // refine it, or mark it "Not an action" (track 20260715T1500 addendum).
         Button {
+            selectedFromOthers = fromOthers
             selectedAction = row
         } label: {
             HStack(alignment: .top, spacing: GrainSpacing.x3) {
@@ -504,6 +555,13 @@ struct ConversationFacesView: View {
                         .fontWeight(.semibold)
                         .foregroundStyle(GrainColor.ink)
                         .multilineTextAlignment(.leading)
+                    // WHO said it — "You said" / "<name> said" / "Unknown
+                    // speaker" / the honest pending/unclear words.
+                    if let attribution = row.attribution {
+                        Text(attribution.displayText)
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(GrainColor.forgeBlue)
+                    }
                     if let meta = row.meta, !meta.isEmpty {
                         Text(meta)
                             .grainTextStyle(.caption)
@@ -581,7 +639,8 @@ struct ConversationFacesView: View {
     /// ActionFeedbackFlow (EXT1: one component across every action surface):
     /// continue-in-chat (linked), act-in-chat (prefill), refine, not-an-action.
     private func actionOptionsSheet(_ row: ConversationActionsPresentation.Row) -> some View {
-        ActionFeedbackFlow.sheet(row: row, captureId: captureId, local: local) {
+        ActionFeedbackFlow.sheet(row: row, captureId: captureId, local: local,
+                                 inOthersGroup: selectedFromOthers) {
             loadFaceData()
         }
     }
@@ -626,8 +685,10 @@ struct ConversationFacesView: View {
         let answers = ConversationAnswerLog.answers(
             at: ActivityStore.answersLogURL(besides: decisionLog), captureId: captureId)
         linkedAnswer = answers.first
-        actions = ConversationActionsPresentation(
-            rows: ActionFeedbackFlow.rows(captureId: captureId))
+        // Attribution prefers the in-memory diarized transcript (fresher than
+        // disk mid-fetch); the shared builder falls back to the cache.
+        actions = ActionFeedbackFlow.presentation(captureId: captureId,
+                                                  transcript: diarizedTranscript)
     }
 
     // MARK: - Transcript face
@@ -1041,6 +1102,10 @@ struct ConversationFacesView: View {
         }
         loading = false
         refreshSearchAfterContentChange()
+        // Diarization may have just LANDED (or refreshed) — re-resolve WHO said
+        // each surfaced action so others-uttered ones re-file out of the main
+        // list now, not on the next open (the attribution reconcile).
+        loadFaceData()
         // Door content may have just landed a transcript with no summary (AC2).
         maybeSynthesizeSummary()
         if content?.summarizing == true, (content?.title ?? "").isEmpty {
@@ -1050,6 +1115,7 @@ struct ConversationFacesView: View {
                     content = refreshed
                     cacheIfReady(refreshed)
                     refreshSearchAfterContentChange()
+                    loadFaceData()
                 }
             }
         }
@@ -1117,6 +1183,9 @@ struct ConversationFacesView: View {
                 segments: cc.segments, speakers: confirm(cc.speakers),
                 paragraphs: cc.paragraphs, fetchedAt: cc.fetchedAt)
         }
+        // A confirm can newly identify the OWNER (or name another speaker) —
+        // re-attribute the surfaced actions against the updated slots.
+        loadFaceData()
     }
 
     /// Adapt a `ConfirmOutcome` to the optimistic slot update above. Called from the

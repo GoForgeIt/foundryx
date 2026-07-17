@@ -31,6 +31,9 @@ struct SettingsScreen: View {
     @State private var agentName =
         UserDefaults.standard.string(forKey: AmbientPrefs.agentNameKey) ?? ""
     @State private var fullContextGrading = AmbientPrefs.fullContextGrading()
+    /// Intelligent Action: surface OTHER people's action lines inline (ON) vs
+    /// collect them under "Heard from others" (OFF, the owner-first default).
+    @State private var othersInline = ActionSurfacePolicy.othersInline()
     /// The in-app performance overlay toggle (track 20260717T0600 T3). DEFAULT OFF;
     /// flipping it takes effect live (the overlay model reads the pref per line).
     @State private var perfOverlayEnabled = DiagPrefs.perfOverlayEnabled()
@@ -160,6 +163,20 @@ struct SettingsScreen: View {
                             }
                     }
                     Text("Say this name in a conversation to ask your agent for something. Only offered — nothing runs without your confirmation.")
+                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+
+                    // Owner-first action surfacing (features/
+                    // action-speaker-attribution.feature): default OFF = only
+                    // what YOU said becomes an action automatically.
+                    Toggle("Actions from others", isOn: $othersInline)
+                        .onChange(of: othersInline) { on in
+                            UserDefaults.standard.set(
+                                on, forKey: ActionSurfacePolicy.othersInlineKey)
+                        }
+                        .accessibilityIdentifier("actions-from-others")
+                    Text(othersInline
+                         ? "Everyone's action lines surface in your list, each labeled with who said it."
+                         : "Off. Only what you say becomes an action automatically. What others say collects under “Heard from others,” where you can promote it.")
                         .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
 
                     VStack(alignment: .leading, spacing: GrainSpacing.x1) {

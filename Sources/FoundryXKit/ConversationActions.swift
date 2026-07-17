@@ -80,16 +80,21 @@ public struct ConversationActionCard: Equatable, Sendable, Identifiable {
     /// The gate's one-line summary of what could be done.
     public let summary: String
     public let outcome: ActionOutcome
+    /// WHO said it — resolved against the diarized transcript at build time
+    /// (`.pending` until diarization lands; see ActionAttribution).
+    public let attribution: ActionAttribution
 
     public var id: String { "\(ts)-\(utterance.prefix(60))" }
 
     public init(captureId: String, ts: UInt64, utterance: String,
-                summary: String, outcome: ActionOutcome) {
+                summary: String, outcome: ActionOutcome,
+                attribution: ActionAttribution = .pending) {
         self.captureId = captureId
         self.ts = ts
         self.utterance = utterance
         self.summary = summary
         self.outcome = outcome
+        self.attribution = attribution
     }
 }
 
@@ -107,11 +112,14 @@ public enum ConversationActions {
     /// The action cards for ONE conversation: its candidate decisions (deduped —
     /// the same moment re-surfaced across growing windows folds into one card,
     /// keeping its first surfacing time), each joined to its latest logged
-    /// outcome. Gated-no / skipped windows never produce a card.
+    /// outcome and attributed against the diarized transcript (when it has
+    /// landed — `.pending` otherwise). Gated-no / skipped windows never produce
+    /// a card.
     public static func cards(
         for captureId: String,
         decisions: [AmbientDecision],
-        outcomes: [CardOutcomeRecord]
+        outcomes: [CardOutcomeRecord],
+        transcript: SpeakerTranscript? = nil
     ) -> [ConversationActionCard] {
         var seen = Set<String>()
         var cards: [ConversationActionCard] = []
@@ -123,7 +131,9 @@ public enum ConversationActions {
             cards.append(ConversationActionCard(
                 captureId: captureId, ts: d.ts,
                 utterance: c.utterance, summary: c.summary,
-                outcome: outcome(forUtterance: c.utterance, in: outcomes)))
+                outcome: outcome(forUtterance: c.utterance, in: outcomes),
+                attribution: ActionAttributionResolver.resolve(
+                    utterance: c.utterance, transcript: transcript)))
         }
         return cards
     }

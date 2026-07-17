@@ -18,9 +18,13 @@ import Grain
 
     /// Build the shared options sheet for one action row. `onChanged` fires
     /// after any persisted change so the surface can reload its rows.
+    /// `inOthersGroup` marks a row opened from the collapsed "Heard from
+    /// others" group — the sheet then also offers promoting it into the main
+    /// list (features/action-speaker-attribution.feature).
     static func sheet(row: ConversationActionsPresentation.Row,
                       captureId: String,
                       local: Bool,
+                      inOthersGroup: Bool = false,
                       onChanged: @escaping () -> Void) -> ActionOptionsSheet {
         // Act-in-chat exists only where a composer actually exists to prefill:
         // the computer tier always has one; the phone tier hides its composer
@@ -65,6 +69,16 @@ import Grain
                 { comment in record(.refined, row: row, captureId: captureId,
                                     utterance: utterance, comment: comment,
                                     onChanged: onChanged) }
+            },
+            onPromote: (inOthersGroup ? row.utterance : nil).map { utterance in
+                {
+                    ActionPromotionStore.promote(
+                        captureId: captureId, utterance: utterance,
+                        baseDir: CaptureWAL.documentsCaptures())
+                    // CONTENT-FREE usage: the outcome word only, never the text.
+                    UsageHook.action("promoted")
+                    onChanged()
+                }
             })
     }
 
@@ -80,12 +94,26 @@ import Grain
         }
     }
 
-    /// Every action row for a capture, joined across all the stores (decisions,
-    /// outcomes, answers, user actions, feedback, chat links). THE one builder
-    /// call both surfaces share.
-    static func rows(captureId: String) -> [ConversationActionsPresentation.Row] {
+    /// The full Actions-face presentation for a capture, joined across all the
+    /// stores (decisions, outcomes, answers, user actions, feedback, chat
+    /// links) and attributed against the LOCALLY CACHED diarized transcript —
+    /// so the moment diarization lands (any surface caches /content), a rebuild
+    /// re-files others-uttered actions into the collapsed group. THE one
+    /// builder call every action surface shares.
+    /// `transcript` overrides the disk cache when the caller already holds a
+    /// FRESHER diarized transcript in memory (the open detail view mid-fetch).
+    static func presentation(captureId: String,
+                             transcript: SpeakerTranscript? = nil)
+    -> ConversationActionsPresentation {
         let base = CaptureWAL.documentsCaptures()
         let decisionLog = AmbientPrefs.decisionLogURL()
+        let transcript: SpeakerTranscript? = transcript ?? {
+            guard let cached = TranscriptCacheStore.load(captureId: captureId,
+                                                         baseDir: base),
+                  !cached.segments.isEmpty else { return nil }
+            return SpeakerTranscript(speakers: cached.speakers,
+                                     segments: cached.segments)
+        }()
         return ConversationActionsPresentation.build(
             captureId: captureId,
             decisions: AmbientLane.readDecisions(at: decisionLog),
@@ -95,8 +123,18 @@ import Grain
                 at: ActivityStore.answersLogURL(besides: decisionLog), captureId: captureId),
             userActions: UserActionStore.load(captureId: captureId, baseDir: base),
             feedback: ActionFeedbackStore.load(captureId: captureId, baseDir: base),
-            chatLinks: ActionChatLinkStore.links(captureId: captureId, baseDir: base)
-        ).rows
+            chatLinks: ActionChatLinkStore.links(captureId: captureId, baseDir: base),
+            transcript: transcript,
+            othersInline: ActionSurfacePolicy.othersInline(),
+            promotions: ActionPromotionStore.promoted(baseDir: base)
+        )
+    }
+
+    /// Every action row for a capture — main list AND the "Heard from others"
+    /// group — for surfaces that JOIN by utterance (the Activity ledger).
+    static func rows(captureId: String) -> [ConversationActionsPresentation.Row] {
+        let p = presentation(captureId: captureId)
+        return p.rows + p.othersRows
     }
 
     /// The source conversation's category NAME right now (chat provenance).
@@ -117,7 +155,9 @@ import Grain
                                onChanged: @escaping () -> Void) {
         ActionFeedbackStore.append(
             ActionFeedbackRecord(captureId: captureId, utterance: utterance,
-                                 summary: row.label, kind: kind, comment: comment),
+                                 summary: row.label, kind: kind, comment: comment,
+                                 speaker: row.attribution?.wire,
+                                 speakerName: row.attribution?.speakerName),
             baseDir: CaptureWAL.documentsCaptures())
         switch kind {
         case .rejected: AmbientCardBroker.rejected(seed: utterance)
