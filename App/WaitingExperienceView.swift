@@ -101,3 +101,62 @@ struct WaitingExperienceView: View {
             .animation(reduceMotion ? nil : GrainMotion.slow, value: text)
     }
 }
+
+// MARK: - DEV-only screenshot proof harness (`-Screen waiting <kind>`)
+
+/// A launch-arg-driven single-state proof surface (WS-C), mirroring the app's other
+/// `-Screen` screenshot harnesses. No manager/network — renders one honest-wait state
+/// full-screen on the Grain background so the simulator can capture it. No effect in a
+/// normal launch (only reachable behind the `-Screen waiting` argument in RootView).
+struct WaitingExperienceProof: View {
+    let kind: WaitKind
+
+    private var model: WaitingExperienceModel {
+        switch kind {
+        case .recap:
+            return WaitingExperienceModel(kind: .recap, onDevice: true,
+                                          stats: WaitingLibraryStats(conversationCount: 1284))
+        case .title:
+            return WaitingExperienceModel(kind: .title, onDevice: true)
+        case .transcription:
+            return WaitingExperienceModel(kind: .transcription, onDevice: true)
+        case .doorFetch:
+            return WaitingExperienceModel(kind: .doorFetch, onDevice: false)
+        case .sync:
+            return WaitingExperienceModel(kind: .sync, onDevice: false,
+                                          progress: .determinate(done: 214, total: 1210),
+                                          stats: WaitingLibraryStats(conversationCount: 1284,
+                                                                     segmentsOnComputer: 9021))
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: GrainSpacing.x6) {
+            Spacer()
+            WaitingExperienceView(model: model)
+            if kind == .sync {
+                // Also show the compact banner form used in the capture screen.
+                WaitingExperienceView(model: model, compact: true)
+                    .padding(GrainSpacing.x4)
+                    .background(GrainColor.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: GrainRadius.card, style: .continuous))
+            }
+            Spacer()
+        }
+        .padding(GrainSpacing.x4)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .grainBackground()
+    }
+
+    /// Parse the kind that follows the `waiting` token, defaulting to recap.
+    static func kind(from args: [String]) -> WaitKind {
+        guard let i = args.firstIndex(of: "waiting"), i + 1 < args.count else { return .recap }
+        switch args[i + 1] {
+        case "title": return .title
+        case "transcription": return .transcription
+        case "door", "doorFetch": return .doorFetch
+        case "sync": return .sync
+        default: return .recap
+        }
+    }
+}

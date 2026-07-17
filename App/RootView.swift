@@ -119,6 +119,13 @@ struct RootView: View {
                 """)
             return AnyView(AnswerSurfaceView(answer: demo, onDone: {}))
         }
+        // DEV-only: `-Screen waiting <kind>` mounts one honest-wait state (WS-C) for
+        // screenshot-verification — kind ∈ recap|title|transcription|door|sync.
+        if ProcessInfo.processInfo.arguments.contains("-Screen"),
+           ProcessInfo.processInfo.arguments.contains("waiting") {
+            return AnyView(WaitingExperienceProof(
+                kind: WaitingExperienceProof.kind(from: ProcessInfo.processInfo.arguments)))
+        }
         // The welcome front door leads until the user enters (enterApp); an
         // opted-out user short-circuits inside RootGate — no gate of any kind.
         let dest = RootGate.destination(signedIn: remote.email != nil,
