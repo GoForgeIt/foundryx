@@ -453,7 +453,9 @@ struct CaptureScreen: View {
             action: {
                 manager.dismissRecordingCandidate(c)
                 manager.minimizeRecordingScreen()   // reveal the chat under the cover
-                AmbientCardBroker.shared.run(seed: seed)
+                // The live recording IS the source conversation (EXT3 provenance).
+                AmbientCardBroker.shared.run(seed: seed,
+                                             captureId: manager.active?.captureId)
             })
     }
 

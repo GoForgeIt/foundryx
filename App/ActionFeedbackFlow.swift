@@ -70,10 +70,13 @@ import Grain
 
     /// The action row for ONE surfaced utterance, rebuilt from the pipeline's
     /// stores — how the Activity page joins a ledger entry back to its action.
+    /// Joins by THE shared utterance truncation (like every other pipeline
+    /// join), so a >200-char utterance still resolves.
     static func row(forUtterance utterance: String,
                     captureId: String) -> ConversationActionsPresentation.Row? {
-        rows(captureId: captureId).first {
-            $0.utterance == utterance
+        let key = ConversationActions.utteranceKey(utterance)
+        return rows(captureId: captureId).first {
+            $0.utterance.map(ConversationActions.utteranceKey) == key
         }
     }
 

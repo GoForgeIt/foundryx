@@ -48,7 +48,12 @@ final class AmbientNotificationPresenter: NSObject, UNUserNotificationCenterDele
                     text: answerText)
                 Task { @MainActor in AmbientCardBroker.shared.showAnswer(answer) }
             } else if let seed {
-                Task { @MainActor in AmbientCardBroker.shared.run(seed: seed) }
+                // The payload carries the source conversation — the seeded
+                // chat's provenance keeps it (EXT3).
+                let captureId = info["captureId"] as? String
+                Task { @MainActor in
+                    AmbientCardBroker.shared.run(seed: seed, captureId: captureId)
+                }
             }
         case AmbientNotifier.dismissAction, UNNotificationDismissActionIdentifier:
             if let seed { AmbientCardBroker.dismissed(seed: seed) }

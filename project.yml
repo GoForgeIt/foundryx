@@ -207,6 +207,22 @@ targets:
           CODE_SIGNING_ALLOWED: YES
 
 schemes:
+  # The app's own scheme — explicit because DECLARING any scheme below stops
+  # xcodegen auto-generating per-target schemes, and the build/perf/ship
+  # scripts (`sim-perf.sh`, `ship-ios.sh`, CI) all call `-scheme FoundryX`.
+  FoundryX:
+    build:
+      targets:
+        FoundryX: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+    test:
+      config: Debug
+      targets:
+        - FoundryXiOSTests
+
   # The simulator interaction-proof scheme: builds the app + UI tests and runs
   # the XCUITest proof flows (screenshots attach to the .xcresult).
   FoundryXUIProof:

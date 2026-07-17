@@ -53,6 +53,10 @@ struct ActivityView: View {
         var id: String { row.id }
     }
     @State private var actionSelection: ActionSelection?
+    /// The RESOLVED action row per actionable ledger entry (entry.id → row),
+    /// rebuilt on every reload — so "Act on this" renders only when the tap
+    /// will actually resolve (never a labeled dead tap; review finding).
+    @State private var actionRows: [String: ConversationActionsPresentation.Row] = [:]
 
     init(decisionLogURL: URL,
          synthesizer: RecapSynthesizer? = makeSystemRecapSynthesizer(),
@@ -199,15 +203,14 @@ struct ActivityView: View {
 
     private func entryRow(_ entry: ActivityEntry) -> some View {
         // An entry that IS a surfaced action (a decision-line entry carrying its
-        // utterance + conversation) opens the shared options sheet (EXT1);
-        // card-outcome entries honestly keep only their source link — they
-        // carry no utterance, so feedback could never join back to the action.
-        let actionable = entry.actionCaptureId != nil
+        // utterance + conversation, RESOLVED against the rebuilt rows at reload)
+        // opens the shared options sheet (EXT1); card-outcome entries honestly
+        // keep only their source link — they carry no utterance, so feedback
+        // could never join back to the action.
+        let actionable = actionRows[entry.id] != nil
         let linkable = actionable || linkAction(for: entry) != nil
         return Button {
-            if let captureId = entry.actionCaptureId, let utterance = entry.utterance,
-               let row = ActionFeedbackFlow.row(forUtterance: utterance,
-                                                captureId: captureId) {
+            if let row = actionRows[entry.id], let captureId = entry.actionCaptureId {
                 actionSelection = ActionSelection(row: row, captureId: captureId)
             } else {
                 linkAction(for: entry)?()
@@ -401,6 +404,24 @@ struct ActivityView: View {
             cardsLogURL: ActivityStore.cardsLogURL(besides: decisionLogURL),
             answersLogURL: ActivityStore.answersLogURL(besides: decisionLogURL))
         allEntries = entries
+        // Resolve each actionable entry's row ONCE per reload (shared builder,
+        // per-capture memo) — the affordance renders only where the tap resolves.
+        var resolved: [String: ConversationActionsPresentation.Row] = [:]
+        var rowsByCapture: [String: [ConversationActionsPresentation.Row]] = [:]
+        for entry in entries {
+            guard let captureId = entry.actionCaptureId,
+                  let utterance = entry.utterance else { continue }
+            let rows = rowsByCapture[captureId]
+                ?? ActionFeedbackFlow.rows(captureId: captureId)
+            rowsByCapture[captureId] = rows
+            let key = ConversationActions.utteranceKey(utterance)
+            if let row = rows.first(where: {
+                $0.utterance.map(ConversationActions.utteranceKey) == key
+            }) {
+                resolved[entry.id] = row
+            }
+        }
+        actionRows = resolved
         days = ActivityStore.days(entries: entries)
         measures = ActivityStore.measures(entries: entries)
         // The weekly rollup: only the CURRENT week, only when it has content.
