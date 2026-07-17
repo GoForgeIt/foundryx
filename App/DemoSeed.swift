@@ -16,9 +16,16 @@ enum DemoSeed {
         let args = ProcessInfo.processInfo.arguments
         guard let i = args.firstIndex(of: "-StressSeed"),
               i + 1 < args.count, let n = Int(args[i + 1]), n > 0 else { return }
+        // `-StressSegs <avgPerCapture>` (default 0 → unchanged): also seed realistic segment
+        // files + partial .ack markers so the harness can exercise the launch WARM stat-storm
+        // class (capture-status-warm) — the old seed wrote card/meta/transcript but ZERO
+        // segments, so sim-perf could never see it (warm 89ms in sim vs 180s on device).
+        var segAvg = 0
+        if let j = args.firstIndex(of: "-StressSegs"), j + 1 < args.count { segAvg = Int(args[j + 1]) ?? 0 }
         let base = CaptureWAL.documentsCaptures()
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let now = Int(Date().timeIntervalSince1970)
+        var totalSegs = 0
         for k in 0..<n {
             let id = "stress-\(String(format: "%05d", k))"
             let dir = base.appendingPathComponent(id, isDirectory: true)
@@ -40,8 +47,42 @@ enum DemoSeed {
                     title: "Conversation \(k)", summary: "",
                     segments: [], speakers: [], fetchedAt: UInt64(max(0, now))),
                 captureId: id, baseDir: base)
+            if segAvg > 0 { totalSegs += seedSegments(dir: dir, index: k, count: n, avg: segAvg) }
         }
-        NSLog("perf-harness: stress-seeded \(n) captures at \(base.path)")
+        NSLog("perf-harness: stress-seeded \(n) captures (\(totalSegs) segment files, avg \(segAvg)/capture) at \(base.path)")
+    }
+
+    /// Seed one capture's WAL segment files (`seg-<seq>.opus`) + a partial contiguous `.ack`
+    /// prefix, mirroring a real backlogged library: a SKEWED distribution where ~1 in 20
+    /// captures is a heavy backlogged conversation (1000–4000 segments) and the rest are light.
+    /// The total across the library tracks `avg × count` (e.g. N=128 avg≈156 → ~20k). Returns
+    /// the number of segment files written. Content is a tiny fixed payload — the warm scan
+    /// stats the file SIZE + `.ack` presence, it never decodes the frames.
+    private static func seedSegments(dir: URL, index k: Int, count n: Int, avg: Int) -> Int {
+        let fm = FileManager.default
+        // A few heavy captures hold most of the backlog; the rest are short.
+        let isHeavy = (k % 20 == 0)
+        let segCount: Int
+        if isHeavy {
+            // 1000…4000, deterministic per index so runs are reproducible.
+            segCount = 1000 + ((k * 37) % 3001)
+        } else {
+            // Light: a small spread anchored on the requested average so -StressSegs scales it.
+            segCount = max(3, (avg / 4) + (k % 11))
+        }
+        // ACK a contiguous prefix (~70%) so the watermark derives realistically and a pending
+        // tail remains — exactly the partial-sync state a real launch re-derives.
+        let ackThrough = (segCount * 7) / 10
+        let body = CaptureWAL.encodeSegment([Data([0xDE, 0xAD, 0xBE, 0xEF])])   // tiny fixed frame
+        for seq in 0..<segCount {
+            let name = String(format: "seg-%012llu", UInt64(seq))
+            let segURL = dir.appendingPathComponent("\(name).opus")
+            try? body.write(to: segURL)
+            if seq < ackThrough {
+                try? Data().write(to: dir.appendingPathComponent("\(name).ack"))
+            }
+        }
+        return segCount
     }
 
     /// `-PerfLog`: mirror every PerfHook span to the unified log (NSLog) so the
