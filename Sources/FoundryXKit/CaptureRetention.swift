@@ -126,6 +126,42 @@ public enum TranscriptCacheStore {
                                payload: ["source": "authoritative"], baseDir: baseDir)
     }
 
+    /// Write-through a confirmed speaker into the on-disk cached transcript (local-first
+    /// track 20260717T1600) — so once the queued confirm has shipped and its pending
+    /// overlay is gone, the name still renders WITHOUT waiting for a door re-fetch (no
+    /// revert flicker on relaunch). Flips the slot to `.confirmed` (same semantics as the
+    /// pending overlay / `applyConfirmedSpeaker`), appending a speaker record if the slot
+    /// had none. No-op when no cache exists (nothing to write through). Writes directly
+    /// (no `.lore-confirmed` re-stamp / event-log append — that's the fetch path's job).
+    /// Off the main actor.
+    public static func confirmSpeaker(captureId: String, slot: String, name: String?,
+                                      speakerId: String?, baseDir: URL) {
+        guard let cached = load(captureId: captureId, baseDir: baseDir) else { return }
+        var speakers = cached.speakers
+        if let i = speakers.firstIndex(where: { $0.slot == slot }) {
+            let sp = speakers[i]
+            speakers[i] = CaptureSpeaker(
+                slot: sp.slot, status: .confirmed,
+                name: (name?.isEmpty == false) ? name : sp.name,
+                inferScore: sp.inferScore,
+                inferredSpeakerId: sp.inferredSpeakerId,
+                confirmedSpeakerId: (speakerId?.isEmpty == false) ? speakerId : sp.confirmedSpeakerId)
+        } else {
+            speakers.append(CaptureSpeaker(
+                slot: slot, status: .confirmed,
+                name: (name?.isEmpty == false) ? name : nil,
+                inferScore: nil, inferredSpeakerId: nil,
+                confirmedSpeakerId: (speakerId?.isEmpty == false) ? speakerId : nil))
+        }
+        let merged = CachedTranscript(
+            transcript: cached.transcript, title: cached.title, summary: cached.summary,
+            segments: cached.segments, speakers: speakers, paragraphs: cached.paragraphs,
+            fetchedAt: cached.fetchedAt)
+        if let data = try? JSONEncoder().encode(merged) {
+            try? data.write(to: transcriptURL(captureId: captureId, baseDir: baseDir), options: [.atomic])
+        }
+    }
+
     /// True once a transcript has been cached for this capture (the readable tombstone).
     public static func hasCachedTranscript(captureId: String, baseDir: URL) -> Bool {
         FileManager.default.fileExists(atPath: transcriptURL(captureId: captureId, baseDir: baseDir).path)

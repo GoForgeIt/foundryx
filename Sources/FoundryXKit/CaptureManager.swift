@@ -3403,20 +3403,67 @@ public final class CaptureManager: ObservableObject {
         Self.newestSegmentAgeOnDisk(captureId, baseDir: baseDir)
     }
 
+    #if DEBUG
+    /// -ConfirmProof offline-then-ack pacing: returns false on the first drain (keep the
+    /// change PENDING so the glyph is observable), true afterwards (ACK → glyph clears).
+    private nonisolated(unsafe) static var proofDrainCount = 0
+    private static let proofDrainLock = NSLock()
+    private static func proofDrainAdvance() -> Bool {
+        proofDrainLock.lock(); defer { proofDrainLock.unlock() }
+        proofDrainCount += 1
+        return proofDrainCount > 1
+    }
+    #endif
+
     /// Ship any speaker-name confirms that couldn't reach the hub when the user made them
     /// (durable + offline-safe — mirrors the finalize/delete retry ethos). Stops on the
     /// first transport failure (hub still down) to avoid hammering; resumes next drain.
     public func retryPendingSpeakerConfirms() async {
         // The queue is a full-file read+rewrite; the shared drain keeps it OFF the main
-        // actor so a drain never hangs the UI. On a 401 (expired sign-in) the drain
-        // fires the SAME re-auth seam the segment uploads use instead of silently
-        // 401-looping every 5s forever (observed 2026-07-17, ExpiredSignature).
+        // actor so a drain never hangs the UI. LOCAL-FIRST (track 20260717T1600): on a
+        // successful ACK the drain reconciles the canonical name/id into the cached
+        // transcript (write-through) and posts the synced notification so the pending
+        // glyph clears and any propagation offer surfaces; on a 4xx rejection it drops the
+        // intent and posts the gentle revert; on a 401 it fires the SAME re-auth seam the
+        // segment uploads use instead of silently 401-looping forever (observed
+        // 2026-07-17, ExpiredSignature).
         let client = DoorClient(target: target)
+        let base = baseDir
+        #if DEBUG
+        // -ConfirmProof offline-then-ack: the INTERACTIVE ship fails transport (instant
+        // local save + glyph); the DRAIN then succeeds so the simulator can watch the glyph
+        // clear on the ACK. The FIRST drain after launch is skipped so the pending glyph is
+        // reliably observable for a full ~5s cycle before the ACK clears it (otherwise a
+        // drain firing right after the tap could clear it before it's seen). Never active
+        // outside DEBUG.
+        let proofAck = ConfirmShip.proofMode == "offline-then-ack" && Self.proofDrainAdvance()
+        #endif
         await SpeakerConfirmFlow.drainPending(
-            baseDir: baseDir,
+            baseDir: base,
             ship: { e in
-                _ = try await client.confirmSpeaker(captureId: e.captureId, slot: e.slot,
-                                                    speakerId: e.speakerId, name: e.name)
+                #if DEBUG
+                if proofAck {
+                    return ConfirmOutcome(captureId: e.captureId, slotLabel: e.slot,
+                                          status: "confirmed",
+                                          speakerId: e.speakerId ?? "proof-speaker",
+                                          speakerName: e.name ?? "Nick", offeredCaptures: [])
+                }
+                #endif
+                return try await client.confirmSpeaker(captureId: e.captureId, slot: e.slot,
+                                                       speakerId: e.speakerId, name: e.name)
+            },
+            onSynced: { e, outcome in
+                await Task.detached {
+                    TranscriptCacheStore.confirmSpeaker(
+                        captureId: e.captureId, slot: e.slot,
+                        name: outcome.speakerName.isEmpty ? e.name : outcome.speakerName,
+                        speakerId: outcome.speakerId.isEmpty ? e.speakerId : outcome.speakerId,
+                        baseDir: base)
+                }.value
+                await SpeakerConfirmSync.postSynced(outcome)
+            },
+            onRejected: { e in
+                await SpeakerConfirmSync.postRejected(captureId: e.captureId, slot: e.slot, name: e.name)
             },
             onAuthExpired: { [weak self] in self?.handleUploadAuthExpired() })
     }

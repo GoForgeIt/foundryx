@@ -101,6 +101,19 @@ struct ConversationFacesView: View {
     @StateObject private var confirmController =
         SpeakerConfirmController(baseDir: CaptureWAL.documentsCaptures())
 
+    // MARK: speaker sync state (local-first track 20260717T1600)
+    /// Per-conversation sync state: which slots have a still-pending (un-synced) confirm
+    /// (drives the subtle glyph + the pending overlay on the rendered transcript) and any
+    /// transient revert notice. Bound to this capture in `.onAppear`.
+    @StateObject private var syncModel = SpeakerSyncModel()
+    /// A late propagation offer that ACK'd after the tag sheet dismissed — surfaced
+    /// non-modally in the open conversation (Section H). Nil when there's nothing to offer.
+    @State private var lateOffer: ConfirmOutcome?
+    /// True while a tag sheet (either row surface) is presenting. When it is, the ACK's
+    /// propagation offer is the SHEET's to surface (its flash window) — so the parent
+    /// suppresses the late banner to avoid double-surfacing the same offer (review P2#2).
+    @State private var tagSheetPresenting = false
+
     // MARK: transcript search
     @State private var query = ""
     @State private var search = TranscriptSearchState(matches: [])
@@ -167,11 +180,20 @@ struct ConversationFacesView: View {
     }
 
     private var diarizedTranscript: SpeakerTranscript? {
-        if let diarized = content?.diarized, diarized.hasSegments { return diarized }
-        if let cached, !cached.segments.isEmpty {
-            return SpeakerTranscript(speakers: cached.speakers, segments: cached.segments)
+        let base: SpeakerTranscript?
+        if let diarized = content?.diarized, diarized.hasSegments {
+            base = diarized
+        } else if let cached, !cached.segments.isEmpty {
+            base = SpeakerTranscript(speakers: cached.speakers, segments: cached.segments)
+        } else {
+            base = nil
         }
-        return nil
+        guard let base else { return nil }
+        // LOCAL-FIRST render truth (track 20260717T1600): overlay the still-pending confirms
+        // so a just-saved name shows immediately, survives relaunch, and isn't clobbered by
+        // a stale door re-fetch — until the Mac ACKs (then the queue entry, and the overlay,
+        // are gone and the written-through cache carries the name).
+        return syncModel.pending.isEmpty ? base : base.applyingPendingConfirms(syncModel.pending)
     }
 
     /// The rows the transcript search runs over: speaker turns when diarized,
@@ -243,7 +265,27 @@ struct ConversationFacesView: View {
         }
         .refreshable { await fetchFromDoor() }
         .task { await initialLoad() }
-        .onAppear { loadFaceData() }
+        .onAppear {
+            loadFaceData()
+            syncModel.bind(captureId: captureId, baseDir: CaptureWAL.documentsCaptures())
+        }
+        // The Mac ACK'd a queued confirm: adopt the canonical name/id and, if it matched
+        // past conversations, surface the apply offer non-modally (local-first Section H).
+        .onReceive(NotificationCenter.default.publisher(for: .foundryxSpeakerConfirmSynced)) { note in
+            guard let outcome = note.userInfo?["outcome"] as? ConfirmOutcome,
+                  outcome.captureId == captureId else { return }
+            applyConfirmedSpeaker(outcome)
+            if SpeakerLateOffer.shouldSurface(offeredCount: outcome.offeredCaptures.count,
+                                              sheetPresenting: tagSheetPresenting) {
+                lateOffer = outcome
+            }
+        }
+        // The Mac rejected a queued confirm (rare 4xx): reconcile to server truth. The
+        // gentle revert notice is shown by the row (driven by the sync model).
+        .onReceive(NotificationCenter.default.publisher(for: .foundryxSpeakerConfirmRejected)) { note in
+            guard (note.userInfo?["captureId"] as? String) == captureId else { return }
+            Task { await fetchFromDoor() }
+        }
         #if DEBUG
         // Deterministic screen-proof of the Listen row states without a live door:
         //   -AudioProof loading      → the "Loading audio…" state
@@ -720,6 +762,9 @@ struct ConversationFacesView: View {
                     .accessibilityIdentifier("copy-transcript")
                 }
                 if let diarized = diarizedTranscript {
+                    if let lateOffer, !lateOffer.offeredCaptures.isEmpty {
+                        lateOfferBanner(lateOffer)
+                    }
                     if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         GrainSpeakerTranscriptRows(
                             target: target,
@@ -728,7 +773,9 @@ struct ConversationFacesView: View {
                             onChanged: { await fetchFromDoor() },
                             onConfirmed: { outcome in applyConfirmedSpeaker(outcome) },
                             isRecording: isRecordingActive,
-                            confirmController: confirmController
+                            confirmController: confirmController,
+                            syncModel: syncModel,
+                            sheetPresenting: $tagSheetPresenting
                         )
                     } else {
                         // GrainSpeakerRow intentionally accepts plain words. Keep the
@@ -743,7 +790,9 @@ struct ConversationFacesView: View {
                             searchMatches: search.matches,
                             currentMatch: search.current,
                             isRecording: isRecordingActive,
-                            confirmController: confirmController
+                            confirmController: confirmController,
+                            syncModel: syncModel,
+                            sheetPresenting: $tagSheetPresenting
                         )
                     }
                 } else {
@@ -1197,6 +1246,47 @@ struct ConversationFacesView: View {
         applyConfirmedSpeaker(slot: slot, name: outcome.speakerName, speakerId: outcome.speakerId)
     }
 
+    /// A gentle, non-modal "apply this voice to N past conversations?" affordance shown in
+    /// the open conversation when the Mac's ACK carried a propagation offer AFTER the tag
+    /// sheet dismissed (local-first Section H). Applying is itself local-first: it durably
+    /// enqueues the assign-to-existing confirms and lets the drain ship them.
+    @ViewBuilder private func lateOfferBanner(_ outcome: ConfirmOutcome) -> some View {
+        let n = outcome.offeredCaptures.count
+        HStack(spacing: GrainSpacing.x2) {
+            Image(systemName: "person.2.fill").foregroundStyle(GrainColor.forgeBlue)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(outcome.speakerName) also matches \(n) past \(n == 1 ? "conversation" : "conversations")")
+                    .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                Text("Apply \(outcome.speakerName) to \(n == 1 ? "it" : "them")?")
+                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+            }
+            Spacer(minLength: GrainSpacing.x2)
+            GrainButton("Apply", variant: .tonal, size: .sm) { applyLateOffer(outcome) }
+            GrainButton("Not now", variant: .text, size: .sm) { lateOffer = nil }
+        }
+        .padding(GrainSpacing.x3)
+        .background(
+            RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
+                .fill(GrainColor.forgeBlueBg))
+        .overlay(
+            RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous)
+                .strokeBorder(GrainColor.forgeBlue.opacity(0.3), lineWidth: 1))
+        .padding(.bottom, GrainSpacing.x3)
+        .accessibilityIdentifier("speaker-late-offer")
+    }
+
+    /// Apply a late propagation offer, local-first: durably enqueue the assign-to-existing
+    /// confirms for the offered past captures (the drain ships them in the background).
+    private func applyLateOffer(_ outcome: ConfirmOutcome) {
+        let base = CaptureWAL.documentsCaptures()
+        let speakerId = outcome.speakerId
+        let intents = outcome.offeredCaptures.map {
+            (captureId: $0.captureId, slot: $0.slotLabel, speakerId: Optional(speakerId))
+        }
+        Task.detached { SpeakerConfirmQueue.enqueueAll(intents, baseDir: base) }
+        lateOffer = nil
+    }
+
     private func cacheIfReady(_ c: CaptureContent?) {
         guard let c, c.found, !c.transcript.isEmpty else { return }
         let baseDir = CaptureWAL.documentsCaptures()
@@ -1347,9 +1437,17 @@ private struct GrainSpeakerTranscriptRows: View {
     var isRecording: Bool = false
 
     /// Per-slot confirm phases — same state machine as SpeakerTranscriptSection.
-    /// OWNED BY THE PARENT detail so an in-flight/failed phase survives the
+    /// OWNED BY THE PARENT detail so an in-flight/confirmed phase survives the
     /// search-toggle swap between the two row surfaces (adversarial review P2/#4).
     @ObservedObject var confirmController: SpeakerConfirmController
+
+    /// Per-conversation sync state — the pending glyph + revert notices (local-first).
+    @ObservedObject var syncModel: SpeakerSyncModel
+
+    /// True while this surface's tag sheet is presenting — the parent reads it so a late
+    /// propagation-offer banner doesn't double-surface an offer the sheet already owns
+    /// (review P2#2).
+    @Binding var sheetPresenting: Bool
 
     @State private var tagging: CaptureSpeaker?
 
@@ -1380,18 +1478,31 @@ private struct GrainSpeakerTranscriptRows: View {
                 onConfirmed: onConfirmed,
                 isRecording: isRecording
             )
+            .onAppear { sheetPresenting = true }
+            .onDisappear { sheetPresenting = false }
         }
     }
 
     private func speakerRow(_ turn: SpeakerTurn) -> some View {
         let speaker = transcript.speaker(for: turn.slot)
+        let pendingSync = syncModel.isPending(turn.slot)
         return VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-            GrainSpeakerRow(
-                speakerName: transcript.displayLabel(for: turn.slot),
-                speakerColor: speakerTint(for: turn.slot),
-                time: rowTime(turn, speaker: speaker),
-                words: turn.text
-            )
+            HStack(alignment: .top, spacing: GrainSpacing.x1) {
+                GrainSpeakerRow(
+                    speakerName: transcript.displayLabel(for: turn.slot),
+                    speakerColor: speakerTint(for: turn.slot),
+                    time: rowTime(turn, speaker: speaker),
+                    words: turn.text
+                )
+                // GrainSpeakerRow takes a plain string; the subtle pending glyph rides
+                // ADJACENT (never a status word baked into the name), aligned to the
+                // name's baseline row.
+                if pendingSync {
+                    SpeakerSyncPendingGlyph().padding(.top, GrainSpacing.x2 + 1)
+                }
+            }
+            // Ghost only a STRONG (name-revealing) tentative match; a weak slot presents
+            // at full weight like an anonymous speaker (the reveal gate).
             .opacity((speaker.isInferred && speaker.revealedName != nil) ? 0.6 : 1)
             .textSelection(.enabled)
             .contentShape(Rectangle())
@@ -1399,12 +1510,20 @@ private struct GrainSpeakerTranscriptRows: View {
             .accessibilityAddTraits(.isButton)
             .accessibilityAction(named: "Edit speaker") { tagging = speaker }
 
+            if let notice = syncModel.notices[turn.slot] {
+                Text(notice)
+                    .grainTextStyle(.caption).foregroundStyle(GrainColor.amber)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, GrainSpacing.x4)
+                    .accessibilityIdentifier("speaker-sync-reverted")
+            }
+
             // The inline confirm affordance renders from its phase (in-flight /
-            // confirmed / failed) — same shared control as the legacy rows, so a tap
-            // ALWAYS answers within a frame. Kept visible while a transient phase
-            // lingers (the brief "Confirmed" check after the optimistic flip).
-            // Weak inferred slots reveal no name (revealedName == nil) and present like
-            // anonymous slots — tap-to-tag is the affordance (the one honesty gate).
+            // confirmed) — same shared control as the legacy rows, so a tap ALWAYS
+            // answers within a frame. Kept visible while the transient confirmed check
+            // lingers after the optimistic local flip. Weak inferred slots reveal no name
+            // (revealedName == nil) and present like anonymous slots — tap-to-tag is the
+            // affordance (the one honesty gate).
             if speaker.isInferred, let name = speaker.revealedName {
                 InlineConfirmControls(
                     phase: confirmController.phase(for: turn.slot),
@@ -1447,15 +1566,15 @@ private struct GrainSpeakerTranscriptRows: View {
         return parts.joined(separator: " · ")
     }
 
-    /// The controller runs the durable, deadline-bounded confirm flow and drives the
-    /// phase the affordance renders — in-flight within one frame, then a confirmed
-    /// check or an honest failure + retry. The intent stays queued on failure.
+    /// The controller runs the LOCAL-FIRST confirm flow and drives the phase the
+    /// affordance renders — in-flight within one frame, then a "Saved" check. The intent
+    /// is durably queued; the background ship reconciles the canonical name/id via the
+    /// synced notification (the parent observes it), or stays quietly pending offline.
     private func confirmInferred(slot: String) async {
         await confirmController.confirm(
             captureId: captureId, slot: slot,
             ship: ConfirmShip.make(target: target, captureId: captureId, slot: slot),
-            onConfirmed: onConfirmed,   // optimistic: show the confirmed name instantly
-            onChanged: onChanged)       // authoritative reconcile off the tap path
+            onConfirmed: onConfirmed)   // optimistic: show the saved name instantly
     }
 }
 

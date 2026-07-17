@@ -323,6 +323,39 @@ public struct SpeakerTranscript: Sendable, Equatable {
     /// Whether this capture has any tentative (inferred, unconfirmed) speaker to review.
     public var hasUnconfirmedInferred: Bool { !inferredSlots.isEmpty }
 
+    /// The LOCAL-FIRST render truth: this transcript with the still-pending speaker
+    /// confirms overlaid (track 20260717T1600). For each entry matching a slot the status
+    /// flips to `.confirmed` and the name becomes the entry's typed name, else the slot's
+    /// existing (inferred) name — a bare confirm keeps the inferred label. An entry for a
+    /// slot with no speakers-list record adds a confirmed one so the name renders. This is
+    /// what makes a local save render immediately, survive relaunch (the queue is durable),
+    /// and survive a stale door re-fetch clobbering the optimistic in-memory state. Pure —
+    /// the caller passes the entries already filtered to this capture. `nil`/empty → self.
+    public func applyingPendingConfirms(_ entries: [SpeakerConfirmQueue.Entry]) -> SpeakerTranscript {
+        guard !entries.isEmpty else { return self }
+        var updated = speakers
+        for e in entries {
+            let existingName = bySlot[e.slot]?.name
+            let resolvedName = (e.name?.isEmpty == false) ? e.name : existingName
+            if let i = updated.firstIndex(where: { $0.slot == e.slot }) {
+                let sp = updated[i]
+                updated[i] = CaptureSpeaker(
+                    slot: sp.slot, status: .confirmed,
+                    name: resolvedName ?? sp.name,
+                    inferScore: sp.inferScore,
+                    inferredSpeakerId: sp.inferredSpeakerId,
+                    confirmedSpeakerId: (e.speakerId?.isEmpty == false) ? e.speakerId : sp.confirmedSpeakerId)
+            } else {
+                updated.append(CaptureSpeaker(
+                    slot: e.slot, status: .confirmed,
+                    name: resolvedName,
+                    inferScore: nil, inferredSpeakerId: nil,
+                    confirmedSpeakerId: (e.speakerId?.isEmpty == false) ? e.speakerId : nil))
+            }
+        }
+        return SpeakerTranscript(speakers: updated, segments: segments)
+    }
+
     /// The whole transcript as plain, paste-ready text — one labelled block per speaker
     /// turn ("Speaker 1: …" / "Alice: …", using the same `displayLabel` the UI shows),
     /// turns in spoken order, blank-line separated. This is what the Copy action puts on

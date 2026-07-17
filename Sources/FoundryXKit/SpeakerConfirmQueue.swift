@@ -38,6 +38,35 @@ public enum SpeakerConfirmQueue {
     /// lost updates. (Adversarial review P2/#3, track 20260717T0900.)
     private static let ioQueue = DispatchQueue(label: "foundryx.speaker-confirm-queue")
 
+    /// Posted (main queue) after every mutating op that actually changed the file, so a
+    /// UI sync model can refresh its pending-glyph state. `userInfo["captureId"]` = the
+    /// affected capture (one post per distinct captureId for batch ops). Local-first
+    /// track 20260717T1600.
+    private static func postChanged(_ captureIds: Set<String>) {
+        guard !captureIds.isEmpty else { return }
+        DispatchQueue.main.async {
+            for id in captureIds {
+                NotificationCenter.default.post(
+                    name: .foundryxSpeakerConfirmQueueChanged, object: nil,
+                    userInfo: ["captureId": id])
+            }
+        }
+    }
+
+    /// Mints a STRICTLY-INCREASING timestamp so the ts-guarded remove can tell a stale
+    /// in-flight ship's ACK from a newer rename made while it was in flight — two rapid
+    /// confirms of the same slot within one wall-clock second would otherwise share a ts
+    /// and let the old ACK dequeue the newer, un-shipped intent (latest-wins integrity,
+    /// local-first track 20260717T1600). Millisecond wall-clock, floored to monotonic.
+    private static let tsLock = NSLock()
+    private nonisolated(unsafe) static var lastTs: UInt64 = 0   // tsLock-guarded
+    private static func mintTs() -> UInt64 {
+        tsLock.lock(); defer { tsLock.unlock() }
+        let wall = UInt64(max(0, Date().timeIntervalSince1970 * 1000))
+        lastTs = max(lastTs &+ 1, wall)
+        return lastTs
+    }
+
     /// The pending confirms (oldest first). Malformed lines are skipped, never fatal.
     public static func pending(baseDir: URL) -> [Entry] {
         ioQueue.sync { pendingLocked(baseDir: baseDir) }
@@ -51,17 +80,23 @@ public enum SpeakerConfirmQueue {
         }
     }
 
-    /// Durably record an intent (latest-wins per slot). Instant + offline-safe.
+    /// Durably record an intent (latest-wins per slot). Instant + offline-safe. Returns
+    /// the `ts` written so the caller can later ts-guard the remove for THIS intent (an
+    /// old in-flight ship's ACK must not dequeue a newer rename — see `remove(…ifTsMatches:)`).
+    @discardableResult
     public static func enqueue(captureId: String, slot: String, name: String? = nil,
                                speakerId: String? = nil, baseDir: URL,
-                               now: UInt64 = UInt64(max(0, Date().timeIntervalSince1970))) {
+                               now: UInt64? = nil) -> UInt64 {
+        let ts = now ?? mintTs()
         ioQueue.sync {
             var entries = pendingLocked(baseDir: baseDir)
                 .filter { !($0.captureId == captureId && $0.slot == slot) }
-            entries.append(Entry(captureId: captureId, slot: slot, name: name, speakerId: speakerId, ts: now))
+            entries.append(Entry(captureId: captureId, slot: slot, name: name, speakerId: speakerId, ts: ts))
             write(entries, baseDir: baseDir)
         }
+        postChanged([captureId])
         UsageHook.generation(kind: "speaker_confirm")   // content-free: a count, never the name
+        return ts
     }
 
     /// Durably record MANY intents in ONE read + ONE atomic write (latest-wins per slot,
@@ -70,25 +105,51 @@ public enum SpeakerConfirmQueue {
     /// rewrite so "apply to N past conversations" doesn't hammer the disk N times.
     public static func enqueueAll(_ entries: [(captureId: String, slot: String, speakerId: String?)],
                                   baseDir: URL,
-                                  now: UInt64 = UInt64(max(0, Date().timeIntervalSince1970))) {
+                                  now: UInt64? = nil) {
         guard !entries.isEmpty else { return }
+        // Route through the SAME strictly-increasing mint as `enqueue` (one ts per entry) so
+        // the "ts is monotonic per (captureId,slot)" invariant the ts-guarded remove relies
+        // on holds file-wide — a bulk-apply intent that ever collides with an interactive
+        // rename on the same slot can't hand out a backward-moving ts (review P3#4). Tests
+        // may pin `now`.
         ioQueue.sync {
             let incoming = Set(entries.map(Self.key))
             var kept = pendingLocked(baseDir: baseDir).filter { !incoming.contains(key($0.captureId, $0.slot)) }
             for e in entries {
-                kept.append(Entry(captureId: e.captureId, slot: e.slot, name: nil, speakerId: e.speakerId, ts: now))
+                kept.append(Entry(captureId: e.captureId, slot: e.slot, name: nil,
+                                  speakerId: e.speakerId, ts: now ?? mintTs()))
             }
             write(kept, baseDir: baseDir)
         }
+        postChanged(Set(entries.map(\.captureId)))
     }
 
     /// Drop the queued intent for a slot (called once it has shipped).
     public static func remove(captureId: String, slot: String, baseDir: URL) {
+        var changed = false
         ioQueue.sync {
-            let remaining = pendingLocked(baseDir: baseDir)
-                .filter { !($0.captureId == captureId && $0.slot == slot) }
-            write(remaining, baseDir: baseDir)
+            let before = pendingLocked(baseDir: baseDir)
+            let remaining = before.filter { !($0.captureId == captureId && $0.slot == slot) }
+            changed = remaining.count != before.count
+            if changed { write(remaining, baseDir: baseDir) }
         }
+        if changed { postChanged([captureId]) }
+    }
+
+    /// Drop the queued intent for a slot ONLY when its `ts` still matches — the latest-wins
+    /// integrity guard. An interactive confirm's ACK (or a specific drain ship) removes the
+    /// entry it shipped; if a NEWER rename replaced that entry while the ship was in flight,
+    /// the ts differs and the newer, un-shipped intent is KEPT for the drain (local-first
+    /// track 20260717T1600). No-op (no notification) when nothing matched.
+    public static func remove(captureId: String, slot: String, ifTsMatches ts: UInt64, baseDir: URL) {
+        var changed = false
+        ioQueue.sync {
+            let before = pendingLocked(baseDir: baseDir)
+            let remaining = before.filter { !($0.captureId == captureId && $0.slot == slot && $0.ts == ts) }
+            changed = remaining.count != before.count
+            if changed { write(remaining, baseDir: baseDir) }
+        }
+        if changed { postChanged([captureId]) }
     }
 
     /// Drop MANY queued intents in ONE read + ONE atomic write (the batch counterpart to
@@ -100,6 +161,7 @@ public enum SpeakerConfirmQueue {
             let remaining = pendingLocked(baseDir: baseDir).filter { !drop.contains(key($0.captureId, $0.slot)) }
             write(remaining, baseDir: baseDir)
         }
+        postChanged(Set(keys.map(\.captureId)))
     }
 
     /// A collision-safe dedupe key for a (captureId, slot) pair (control-char separator

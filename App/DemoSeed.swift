@@ -142,6 +142,12 @@ enum DemoSeed {
         guard ProcessInfo.processInfo.arguments.contains("-MainPreview") else { return }
         let base = CaptureWAL.documentsCaptures()
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        // A deterministic demo starts with NO pending speaker-confirms — otherwise a prior
+        // dev-harness/proof launch's durable local-first save (speaker-confirms.jsonl in the
+        // sim container) would carry over and render the seeded tentative speaker as already
+        // confirmed. Dev-harness only (never runs outside -MainPreview); clears the whole
+        // queue so each launch is a clean slate for the local-first proof.
+        try? FileManager.default.removeItem(at: base.appendingPathComponent("speaker-confirms.jsonl"))
         let now = Int(Date().timeIntervalSince1970)
         // (id, title, summary, stage, startOffsetSeconds, durationSeconds)
         let demos: [(String, String, String, String, Int, Int)] = [

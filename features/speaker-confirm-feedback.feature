@@ -1,56 +1,71 @@
-Feature: Confirming a speaker gives immediate, honest feedback
+Feature: Saving a speaker's name is instant and syncs quietly in the background
   As someone tagging who spoke in a conversation,
-  I want every confirm or save to respond the instant I tap it,
-  so I always know whether my change was applied, is still in flight, or failed.
+  I want my save to apply on my phone the instant I tap it and reach my computer on its own,
+  so a momentary disconnect never blocks me or throws a scary error.
 
-  Scenario: Tapping confirm shows progress immediately
+  Scenario: Tapping save responds immediately
     Given a conversation with a tentatively matched speaker
-    When I tap the confirm affordance for that speaker
-    Then the confirm shows an in-flight state before the computer has answered
+    When I tap to save that speaker
+    Then the save shows progress immediately, before my computer has answered
 
-  Scenario: A successful confirm shows a confirmation
-    Given a conversation with a tentatively matched speaker
-    And my computer acknowledges the confirmation
-    When I tap the confirm affordance and the round trip completes
-    Then I see a confirmed state for that speaker
-    And the change is no longer pending on my phone
-
-  Scenario: A successful confirm from the tag sheet closes the sheet
-    Given the tag-speaker sheet is open for a tentatively matched speaker
-    And my computer acknowledges the confirmation
-    When I confirm the speaker from the sheet and the round trip completes
-    Then the sheet dismisses itself
-
-  Scenario: Saving a name closes the sheet on success
-    Given the tag-speaker sheet is open for an unnamed speaker
-    And my computer acknowledges the confirmation
-    When I save a name for the speaker and the round trip completes
-    Then the sheet dismisses itself
-
-  Scenario: An unreachable computer keeps the change safe and says so
+  Scenario: Saving with the computer unreachable still succeeds instantly
     Given a conversation with a tentatively matched speaker
     And my computer cannot be reached
-    When I tap the confirm affordance and the round trip completes
-    Then I see an honest failure that says the change is saved on my phone
-    And the change stays pending on my phone so it ships later
-    And I am offered a retry
+    When I save a name for the speaker from the sheet
+    Then the save succeeds right away and the sheet dismisses itself
+    And the saved name shows in the conversation immediately
 
-  Scenario: A confirm that hangs never leaves a dead button
+  Scenario: Renaming a mismatched speaker records the typed name, not the old guess
     Given a conversation with a tentatively matched speaker
-    And my computer accepts the request but the answer never arrives
-    When I tap the confirm affordance and wait past the deadline
-    Then the confirm resolves to an honest unreachable failure
-    And the change stays pending on my phone so it ships later
+    And my computer cannot be reached
+    When I save a name for the speaker from the sheet
+    Then the saved change records only the typed name so my computer honors it
 
-  Scenario: A rejected confirm surfaces the failure instead of faking success
+  Scenario: A saved name survives relaunch before it has synced
     Given a conversation with a tentatively matched speaker
-    And my computer rejects the confirmation
-    When I tap the confirm affordance and the round trip completes
-    Then I see an honest failure, not a confirmed state
+    And my computer cannot be reached
+    When I save a name for the speaker from the sheet
+    And the app relaunches before the change has synced
+    Then the saved name still shows in the conversation
+    And the change is still waiting to sync
+
+  Scenario: A change waiting to sync shows a quiet indicator and no error
+    Given a conversation with a tentatively matched speaker
+    And my computer cannot be reached
+    When I save a name for the speaker from the sheet
+    Then the speaker shows a quiet waiting-to-sync indicator
+    And no error is shown anywhere
+
+  Scenario: The computer's acknowledgement clears the waiting indicator
+    Given a conversation with a tentatively matched speaker
+    And a saved name is waiting to sync
+    When my computer acknowledges the change
+    Then the waiting-to-sync indicator is gone
+    And the change is no longer pending on my phone
+
+  Scenario: A sync retry that still can't reach the computer shows no error
+    Given a saved name is waiting to sync
+    And my computer cannot be reached
+    When the phone retries the pending change
+    Then no error is shown anywhere
+    And the change stays pending on my phone so it ships later
 
   Scenario: An expired sign-in asks me to reconnect instead of retrying forever
-    Given speaker confirms are pending on my phone
+    Given speaker changes are waiting to sync on my phone
     And my sign-in to the computer has expired
-    When the phone retries the pending confirms
+    When the phone retries the pending changes
     Then the retry stops and requests re-authentication
-    And the pending confirms are kept for after I sign in again
+    And the pending changes are kept for after I sign in again
+
+  Scenario: The computer rejecting a change reverts it gently
+    Given a conversation with a tentatively matched speaker
+    And a saved name is waiting to sync
+    When my computer rejects the change
+    Then the change is no longer pending on my phone
+    And I see a gentle notice that it was reverted, not an error dialog
+
+  Scenario: An acknowledgement that matches past conversations offers to apply
+    Given a conversation with a tentatively matched speaker
+    And a saved name is waiting to sync
+    When my computer acknowledges the change and it matches past conversations
+    Then I am offered to apply the name to those past conversations

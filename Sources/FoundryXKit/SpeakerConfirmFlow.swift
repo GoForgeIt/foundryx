@@ -1,197 +1,236 @@
 // SpeakerConfirmFlow — the ONE path a speaker confirm/save takes from a tap to an
-// outcome the UI can render honestly (track 20260717T0900_speaker_confirm_feedback).
+// outcome the UI can render honestly. LOCAL-FIRST as of track
+// 20260717T1600_speaker_confirm_local_first.
 //
-// Why: the inline "Confirm: <name>" affordance and the tag sheet used to fire the door
-// call with no in-flight state, no success state, and no failure state — a lost relay
-// response or an expired sign-in read exactly like nothing happening (Nick, b230).
-// This flow makes every confirm:
+// Why local-first (Nick, b232): "the saving spinner is a nice touch but I ran into
+// 'couldn't connect to the computer'. Is it possible to save on the phone locally first
+// then get it to the computer in the background?" — YES. The name + slot are known at tap
+// time; the ONLY things the phone learns from the Mac are the propagation OFFER ("this
+// voice also matches N past conversations") and the canonical speakerId/name (a merge may
+// resolve a different record). Neither needs a live response.
+//
+// So every confirm now:
 //   1. DURABLE first — the intent is on disk (SpeakerConfirmQueue) before the wire.
-//   2. DEADLINE-BOUNDED — a hung round-trip resolves to an honest `.unreachable`
-//      instead of a dead button (the drain re-ships the queued intent later).
-//   3. CLASSIFIED — the UI gets `confirmed | failed(authExpired|unreachable|rejected)`,
-//      never a silent nothing.
+//   2. INSTANT local success — the change applies to the local view immediately (the
+//      pending overlay renders it, survives relaunch) and the affordance/sheet reads
+//      "Saved" right away. No spinner waits on the wire.
+//   3. SILENT background sync — the ship rides in the background; a subtle pending glyph
+//      sits by the name until the Mac ACKs (queue-change notification clears it).
+//   4. Failure is NOT an error — unreachable/timeout stays quietly pending (the drain
+//      retries); auth-expiry is handled ONCE by the drain's re-auth seam; a rare 4xx
+//      rejection drops the intent and reverts gently.
 //
-// FoundryXKit (UI-free): pure state + copy + an injectable `ship` closure, so the
-// brine step-defs drive the REAL flow hermetically.
+// FoundryXKit (UI-free): pure state + copy + injectable `ship`/callback closures, so the
+// brine step-defs drive the REAL flow hermetically (no network, no SwiftUI). It may use
+// Foundation + NotificationCenter (the sync model rides queue-change notifications).
 
 import Foundation
 
-// MARK: - phases + failures (what the UI renders)
+// MARK: - notifications (the observable sync seam)
 
-/// The lifecycle of one confirm affordance. The UI must flip to `.inFlight` within one
-/// frame of the tap and may only show `.confirmed` when the door ACKNOWLEDGED the
-/// confirm — never on hope.
+public extension Notification.Name {
+    /// Posted (main queue) after any mutating queue op that changed the file, so the sync
+    /// model can refresh the pending-glyph state. `userInfo["captureId"]` = the affected
+    /// capture.
+    static let foundryxSpeakerConfirmQueueChanged = Notification.Name("foundryxSpeakerConfirmQueueChanged")
+    /// Posted after the Mac ACKNOWLEDGES a queued confirm (interactive background ship OR
+    /// the drain). `userInfo["outcome"]` = the `ConfirmOutcome` — carries the canonical
+    /// speakerId/name to reconcile and any propagation `offeredCaptures` to surface.
+    static let foundryxSpeakerConfirmSynced = Notification.Name("foundryxSpeakerConfirmSynced")
+    /// Posted when the Mac REJECTS a queued confirm with a 4xx (non-401) — the intent was
+    /// dropped from the queue; the open conversation reverts the name to server truth and
+    /// shows a gentle transient notice. `userInfo`: captureId, slot, name (all String?).
+    static let foundryxSpeakerConfirmRejected = Notification.Name("foundryxSpeakerConfirmRejected")
+}
+
+// MARK: - what a confirm SHIPS (the name-vs-speakerId decision, in one pure place)
+
+/// The `(name, speakerId)` a confirm should SHIP through the door, decided in ONE pure,
+/// unit-tested place so the tag sheet and the tests can never drift (adversarial review
+/// P1). The rule matters because Lore's `confirm_slot` lets `speaker_id` WIN over `name`
+/// when both are present:
+///   • A TYPED name is NAME-ONLY (`speakerId == nil`) — Lore then confirms/creates/merges
+///     BY NAME. Shipping the slot's existing inferred/confirmed speakerId alongside a typed
+///     name would make Lore assign-to-the-OLD-speaker and silently DROP the typed name
+///     (the user sees the new name for a beat, then it flips back on the ACK reconcile).
+///   • A BARE confirm (no typed name) ships the slot's known speakerId to confirm the
+///     existing match (also robust for drain re-ships).
+public enum SpeakerConfirmIntent {
+    /// `typedName` is what the user typed (nil/blank = a bare confirm of the inferred match).
+    public static func make(typedName: String?, speaker: CaptureSpeaker)
+        -> (name: String?, speakerId: String?) {
+        let trimmed = typedName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmed, !trimmed.isEmpty {
+            return (trimmed, nil)   // NAME-ONLY — never ride the old speakerId
+        }
+        return (nil, speaker.confirmedSpeakerId ?? speaker.inferredSpeakerId)   // bare confirm
+    }
+}
+
+/// The decision to surface the late (post-sheet-dismissal) propagation offer banner —
+/// pure so it's unit-testable. Suppressed while a tag sheet is presenting, because the
+/// sheet surfaces the offer itself within its flash window (otherwise the same offer would
+/// double-surface: once in the modal sheet, once as a stale banner behind it — review P2#2).
+public enum SpeakerLateOffer {
+    public static func shouldSurface(offeredCount: Int, sheetPresenting: Bool) -> Bool {
+        offeredCount > 0 && !sheetPresenting
+    }
+}
+
+// MARK: - phases (what the inline affordance renders)
+
+/// The lifecycle of one confirm affordance. Local-first: the tap flips to `.inFlight`
+/// within a frame (the durable enqueue), then to `.confirmed` the instant the LOCAL save
+/// lands — never waiting on the wire. There is no `.failed` interactive phase: a sync that
+/// can't reach the Mac stays quietly pending (the glyph), it is not an error the affordance
+/// shows.
 public enum SpeakerConfirmPhase: Equatable, Sendable {
     case idle
     case inFlight
     case confirmed
-    case failed(SpeakerConfirmFailure)
 }
 
-/// Why a confirm did not complete. The intent is ALWAYS kept durably queued on
-/// failure — these distinguish what the user should be told (and whether a retry
-/// right now can help).
-public enum SpeakerConfirmFailure: Error, Equatable, Sendable {
-    /// The door rejected our sign-in (401 / expired id_token). A retry cannot succeed
-    /// until re-authentication; the queue keeps the intent for after that.
-    case authExpired
-    /// The computer could not be reached (transport failure, or the round trip blew
-    /// the deadline — the b230 lost-relay-response class). Retry may help; the drain
-    /// re-ships regardless.
-    case unreachable
-    /// The door/Lore answered with an error status — the confirm was actively refused.
-    case rejected(Int)
+// MARK: - the background ship + drain (the silent sync leg)
 
-    /// Map a thrown error from the ship leg onto the honest failure class.
-    public static func classify(_ error: Error) -> SpeakerConfirmFailure {
+/// How a background/drain ship of a queued confirm resolved, so the interactive leg and
+/// the drain classify it identically.
+public enum SpeakerShipDisposition: Equatable, Sendable {
+    /// The Mac acknowledged — dequeue (ts-guarded), write-through the cache, reconcile.
+    case synced
+    /// Sign-in expired (401). The drain's re-auth seam handles it; the intent stays queued.
+    case authExpired
+    /// The Mac actively refused with a 4xx (non-401) — drop the intent, revert gently.
+    case rejected(Int)
+    /// Unreachable / timeout / 5xx — stay queued, the drain retries. Not an error.
+    case transient
+
+    /// Map a thrown ship error onto its disposition. A `DeadlineExceeded` (a hung round
+    /// trip) and any transport/cancellation are `.transient`; a 4xx (non-401) is a real
+    /// rejection; 5xx is transient (the Mac is up but momentarily unhappy — retry).
+    public static func classify(_ error: Error) -> SpeakerShipDisposition {
         if let door = error as? DoorError {
             switch door {
             case .unauthorized: return .authExpired
-            case .http(let code): return .rejected(code)
-            case .transport: return .unreachable
+            case .http(let code): return (400..<500).contains(code) ? .rejected(code) : .transient
+            case .transport: return .transient
             }
         }
-        return .unreachable   // cancellation/timeout/URLSession — the computer is out of reach
+        return .transient   // deadline / cancellation / URLSession — the Mac is out of reach
     }
 }
-
-/// What the tag sheet must do after a confirm attempt resolves. Pure — the SwiftUI
-/// sheet just executes it, the brine step-defs assert it.
-public enum SpeakerSheetReaction: Equatable, Sendable {
-    /// Success with nothing more the user must see → the sheet dismisses ITSELF.
-    case dismiss
-    /// Success that matched past captures → surface the apply-to-past offer (stay).
-    case showOffer(ConfirmOutcome)
-    /// Failure → the sheet STAYS OPEN with the honest error (never a silent dismiss
-    /// that reads exactly like success).
-    case stayOpen(SpeakerConfirmFailure)
-}
-
-/// Honest, non-technical copy for a failed confirm. One source of truth so the inline
-/// affordance and the tag sheet never drift apart.
-public enum SpeakerConfirmPresentation {
-    public struct FailureCopy: Equatable, Sendable {
-        /// What happened + where the change lives now.
-        public let message: String
-        /// Whether an immediate retry is worth offering (false when only re-auth helps).
-        public let retryable: Bool
-    }
-
-    /// The sheet's post-confirm behavior, decided in ONE place.
-    public static func sheetReaction(
-        _ result: Result<ConfirmOutcome, SpeakerConfirmFailure>
-    ) -> SpeakerSheetReaction {
-        switch result {
-        case .success(let outcome):
-            return outcome.offeredCaptures.isEmpty ? .dismiss : .showOffer(outcome)
-        case .failure(let failure):
-            return .stayOpen(failure)
-        }
-    }
-
-    public static func failureCopy(_ failure: SpeakerConfirmFailure) -> FailureCopy {
-        switch failure {
-        case .authExpired:
-            return FailureCopy(
-                message: "Your sign-in expired — the change is saved on your phone and will sync after you reconnect.",
-                retryable: false)
-        case .unreachable:
-            return FailureCopy(
-                message: "Can't reach your computer — the change is saved on your phone and will sync automatically.",
-                retryable: true)
-        case .rejected:
-            return FailureCopy(
-                message: "Your computer couldn't apply this change. It's saved on your phone to try again.",
-                retryable: true)
-        }
-    }
-}
-
-// MARK: - the flow
 
 public enum SpeakerConfirmFlow {
-    /// Default ceiling on one interactive confirm round trip. Past it the tap resolves
-    /// to `.unreachable` (the durable queue still ships the intent on a later drain).
-    /// The door answers in well under a second when healthy; 12s covers a slow relay
-    /// leg without ever leaving a dead button.
+    /// Default ceiling on one background confirm round trip. Past it the ship resolves to
+    /// `.transient` (the durable queue re-ships on a later drain). The door answers in well
+    /// under a second when healthy; 12s covers a slow relay leg without wedging the ship.
     public static let defaultDeadline: TimeInterval = 12
 
-    /// Run one confirm: durably enqueue the intent, race `ship` against `deadline`,
-    /// and — only when the door acknowledged — dequeue and hand back the outcome.
-    /// On ANY failure the intent stays queued (offline-safe, same ethos as pending
-    /// finalizes/deletes) and the caller gets the classified failure to render.
-    ///
-    /// `ship` is the actual door call (`DoorClient.confirmSpeaker`); injected so tests
-    /// drive the real flow without a network.
-    public static func run(
+    /// Ship one already-durably-queued confirm in the BACKGROUND (detached from the phase
+    /// machine) and apply the side effects of its disposition:
+    ///   * synced   → ts-guarded remove + write-through the cached transcript + post
+    ///                `foundryxSpeakerConfirmSynced` (glyph clears, name/id reconcile,
+    ///                offers surface). Returns the outcome.
+    ///   * rejected → ts-guarded remove + post `foundryxSpeakerConfirmRejected`.
+    ///   * authExpired / transient → NOTHING (the intent stays queued; the drain retries /
+    ///     the drain's 401 seam re-auths). Returns nil.
+    /// `ts` is the queue entry's timestamp (from `enqueue`) so a stale ACK can't dequeue a
+    /// newer rename. Idempotent + offline-safe.
+    @discardableResult
+    public static func backgroundShip(
         captureId: String,
         slot: String,
-        name: String? = nil,
-        speakerId: String? = nil,
+        name: String?,
+        speakerId: String?,
+        ts: UInt64,
         baseDir: URL,
         deadline: TimeInterval = defaultDeadline,
         ship: @escaping @Sendable () async throws -> ConfirmOutcome
-    ) async -> Result<ConfirmOutcome, SpeakerConfirmFailure> {
-        // Durable FIRST, but OFF the calling actor — the queue's file read+rewrite must
-        // never hang the tap. Await so the intent is on disk before the wire (a crash
-        // between them must not lose it).
-        await Task.detached {
-            SpeakerConfirmQueue.enqueue(captureId: captureId, slot: slot,
-                                        name: name, speakerId: speakerId, baseDir: baseDir)
-        }.value
+    ) async -> ConfirmOutcome? {
         do {
             let outcome = try await withDeadline(deadline, ship: ship)
-            // Acknowledged → the intent has shipped; drop it from the durable queue.
             await Task.detached {
-                SpeakerConfirmQueue.remove(captureId: captureId, slot: slot, baseDir: baseDir)
+                SpeakerConfirmQueue.remove(captureId: captureId, slot: slot, ifTsMatches: ts, baseDir: baseDir)
+                TranscriptCacheStore.confirmSpeaker(
+                    captureId: captureId, slot: slot,
+                    name: outcome.speakerName.isEmpty ? name : outcome.speakerName,
+                    speakerId: outcome.speakerId.isEmpty ? speakerId : outcome.speakerId,
+                    baseDir: baseDir)
             }.value
-            return .success(outcome)
+            await SpeakerConfirmSync.postSynced(outcome)
+            return outcome
         } catch {
-            return .failure(SpeakerConfirmFailure.classify(error))
+            switch SpeakerShipDisposition.classify(error) {
+            case .rejected:
+                await Task.detached {
+                    SpeakerConfirmQueue.remove(captureId: captureId, slot: slot, ifTsMatches: ts, baseDir: baseDir)
+                }.value
+                await SpeakerConfirmSync.postRejected(captureId: captureId, slot: slot, name: name)
+            case .authExpired, .transient, .synced:
+                break   // stays queued — the drain retries / re-auths; never a scary error
+            }
+            return nil
         }
     }
 
-    /// Ship every queued speaker confirm (the 5s-drain retry leg), stopping honestly:
-    /// * transport failure → keep the rest queued, retry next drain (unchanged).
-    /// * `DoorError.unauthorized` → fire `onAuthExpired` and STOP — retrying an
-    ///   expired sign-in every 5s can never succeed (observed 2026-07-17: a silent
-    ///   ExpiredSignature 401 loop, forever). The confirms stay queued for after
-    ///   re-authentication.
-    /// Extracted from `CaptureManager.retryPendingSpeakerConfirms` so the behavior is
-    /// drivable by the brine step-defs without a network.
+    /// Ship every queued speaker confirm (the 5s-drain retry leg), classifying each entry:
+    ///   * synced       → ts-guarded remove + `onSynced(entry, outcome)` (write-through +
+    ///                    post synced), then CONTINUE.
+    ///   * authExpired  → `onAuthExpired()` and STOP — retrying an expired sign-in every 5s
+    ///                    can never succeed (observed 2026-07-17: a silent ExpiredSignature
+    ///                    401 loop). The confirms stay queued for after re-authentication.
+    ///   * rejected     → ts-guarded remove + `onRejected(entry)`, then CONTINUE (a bad
+    ///                    entry must not wedge the drain behind it).
+    ///   * transient    → STOP (hub unreachable / 5xx) — keep the rest queued, retry next
+    ///                    drain.
+    /// `ship` now returns the `ConfirmOutcome` so callers can reconcile the canonical
+    /// name/id and surface offers. Extracted from `CaptureManager.retryPendingSpeakerConfirms`
+    /// so the behavior is drivable by the brine step-defs without a network.
     public static func drainPending(
         baseDir: URL,
-        ship: @Sendable (SpeakerConfirmQueue.Entry) async throws -> Void,
+        ship: @Sendable (SpeakerConfirmQueue.Entry) async throws -> ConfirmOutcome,
+        onSynced: @Sendable (SpeakerConfirmQueue.Entry, ConfirmOutcome) async -> Void = { _, _ in },
+        onRejected: @Sendable (SpeakerConfirmQueue.Entry) async -> Void = { _ in },
         onAuthExpired: @MainActor () -> Void
     ) async {
         let entries = await Task.detached { SpeakerConfirmQueue.pending(baseDir: baseDir) }.value
         guard !entries.isEmpty else { return }
         for e in entries {
             do {
-                try await ship(e)
-                let capId = e.captureId, slot = e.slot
+                let outcome = try await ship(e)
                 await Task.detached {
-                    SpeakerConfirmQueue.remove(captureId: capId, slot: slot, baseDir: baseDir)
+                    SpeakerConfirmQueue.remove(captureId: e.captureId, slot: e.slot,
+                                               ifTsMatches: e.ts, baseDir: baseDir)
                 }.value
-            } catch DoorError.unauthorized {
-                await onAuthExpired()
-                break
+                await onSynced(e, outcome)
             } catch {
-                break   // hub unreachable — keep the rest queued, retry next drain
+                switch SpeakerShipDisposition.classify(error) {
+                case .authExpired:
+                    await onAuthExpired()
+                    return
+                case .rejected:
+                    await Task.detached {
+                        SpeakerConfirmQueue.remove(captureId: e.captureId, slot: e.slot,
+                                                   ifTsMatches: e.ts, baseDir: baseDir)
+                    }.value
+                    await onRejected(e)
+                    continue
+                case .transient, .synced:
+                    return   // hub unreachable — keep the rest queued, retry next drain
+                }
             }
         }
     }
 
-    /// Race `ship` against a wall-clock deadline. On deadline `DeadlineExceeded` is
-    /// thrown (classified `.unreachable`) and the ship task is cancelled best-effort.
+    /// Race `ship` against a wall-clock deadline. On deadline `DeadlineExceeded` is thrown
+    /// (classified `.transient`) and the ship task is cancelled best-effort.
     ///
-    /// Deliberately UNSTRUCTURED (adversarial review P1): a task group cannot return
-    /// until its children finish, so a ship leg parked on a non-cancellable
-    /// continuation (the relay mux turn — the exact b230 lost-response hang) would
-    /// defeat a group-based race and leave a forever-spinner. Here the deadline
-    /// resumes the caller REGARDLESS; the orphaned ship task resolves (or is torn
-    /// down with the transport) later, and its late result is discarded. The confirm
-    /// is idempotent and stays durably queued, so nothing is lost either way.
+    /// Deliberately UNSTRUCTURED (adversarial review P1): a task group cannot return until
+    /// its children finish, so a ship leg parked on a non-cancellable continuation (the
+    /// relay mux turn — the exact b230 lost-response hang) would defeat a group-based race
+    /// and leave a forever-spinner. Here the deadline resumes the caller REGARDLESS; the
+    /// orphaned ship task resolves (or is torn down with the transport) later, and its late
+    /// result is discarded. The confirm is idempotent and stays durably queued, so nothing
+    /// is lost either way.
     struct DeadlineExceeded: Error {}
     static func withDeadline(
         _ seconds: TimeInterval,
@@ -228,24 +267,60 @@ public enum SpeakerConfirmFlow {
     }
 }
 
+// MARK: - sync notification posting (one place)
+
+/// The single place both ship legs (interactive background + drain) post the sync
+/// notifications, so the userInfo shape can never drift.
+public enum SpeakerConfirmSync {
+    @MainActor public static func postSynced(_ outcome: ConfirmOutcome) {
+        NotificationCenter.default.post(
+            name: .foundryxSpeakerConfirmSynced, object: nil,
+            userInfo: ["outcome": outcome])
+    }
+
+    @MainActor public static func postRejected(captureId: String, slot: String, name: String?) {
+        var info: [AnyHashable: Any] = ["captureId": captureId, "slot": slot]
+        if let name { info["name"] = name }
+        NotificationCenter.default.post(
+            name: .foundryxSpeakerConfirmRejected, object: nil, userInfo: info)
+    }
+}
+
 // MARK: - the ship leg
 
 /// Builds the ship closure a confirm flow uses — the real `DoorClient.confirmSpeaker`
-/// call. DEBUG `-ConfirmProof <ok-slow|fail>` substitutes a deterministic stub so the
-/// simulator can screenshot in-flight / success / failure without a live door
-/// (precedent: `-AudioProof`). Never active outside DEBUG.
+/// call. DEBUG `-ConfirmProof <mode>` substitutes a deterministic stub so the simulator
+/// can screenshot the flow without a live door (precedent: `-AudioProof`). Modes:
+///   * `ok-slow`          — a visible in-flight beat, then a confirmed outcome.
+///   * `fail`             — a transport failure (stays quietly pending).
+///   * `offline-then-ack` — the INTERACTIVE ship always fails transport (so the save reads
+///                          instant-local + pending glyph); the DRAIN's ship (in
+///                          `CaptureManager.retryPendingSpeakerConfirms`) succeeds ~10s
+///                          after launch, clearing the glyph — the local-first proof.
+/// Never active outside DEBUG.
 public enum ConfirmShip {
+    /// The active `-ConfirmProof` mode, or nil. Exposed so the drain leg can honor
+    /// `offline-then-ack` in DEBUG.
+    public static var proofMode: String? {
+        #if DEBUG
+        let a = ProcessInfo.processInfo.arguments
+        if let i = a.firstIndex(of: "-ConfirmProof"), i + 1 < a.count { return a[i + 1] }
+        #endif
+        return nil
+    }
+
     public static func make(target: DoorTarget, captureId: String, slot: String,
                             name: String? = nil, speakerId: String? = nil)
         -> @Sendable () async throws -> ConfirmOutcome {
         #if DEBUG
-        let a = ProcessInfo.processInfo.arguments
-        if let i = a.firstIndex(of: "-ConfirmProof"), i + 1 < a.count {
-            let mode = a[i + 1]
+        if let mode = proofMode {
             let resolved = (name?.isEmpty == false ? name! : "Nick")
             return {
-                try? await Task.sleep(nanoseconds: 1_500_000_000)   // visible in-flight beat
-                if mode == "fail" { throw DoorError.transport("confirm-proof") }
+                try? await Task.sleep(nanoseconds: 300_000_000)   // a brief wire beat
+                // The interactive ship fails offline in this mode; the DRAIN ACKs later.
+                if mode == "fail" || mode == "offline-then-ack" {
+                    throw DoorError.transport("confirm-proof")
+                }
                 return ConfirmOutcome(captureId: captureId, slotLabel: slot,
                                       status: "confirmed", speakerId: "proof-speaker",
                                       speakerName: resolved, offeredCaptures: [])
@@ -259,13 +334,14 @@ public enum ConfirmShip {
     }
 }
 
-// MARK: - per-slot phase controller (the UI's confirm state machine)
+// MARK: - per-slot phase controller (the inline affordance's state machine)
 
-/// Owns the per-slot confirm phases for one transcript surface. The UI binds its
-/// inline "Confirm: <name>" affordances to `phase(for:)`; `confirm(...)` runs the
-/// durable flow and drives the phase transitions the feature scenarios assert:
-/// tap → `.inFlight` within one frame → `.confirmed` (dwells briefly, then clears —
-/// the row now renders the confirmed name itself) or `.failed` (sticky until retry).
+/// Owns the per-slot confirm phases for one transcript surface. The UI binds its inline
+/// "Confirm: <name>" affordances to `phase(for:)`; `confirm(...)` runs the LOCAL-FIRST
+/// flow: durably enqueue (the brief in-flight beat) → optimistic local apply +
+/// `.confirmed` immediately → background ship detached from the phase machine. The
+/// `.confirmed` check dwells briefly then clears back to the row's own rendering (which,
+/// via the pending overlay, already shows the saved name with its sync glyph).
 @MainActor
 public final class SpeakerConfirmController: ObservableObject {
     @Published public private(set) var phases: [String: SpeakerConfirmPhase] = [:]
@@ -285,9 +361,10 @@ public final class SpeakerConfirmController: ObservableObject {
 
     public func phase(for slot: String) -> SpeakerConfirmPhase { phases[slot] ?? .idle }
 
-    /// Run one confirm for `slot`. `onConfirmed` fires the instant the door
-    /// acknowledges (the optimistic label flip); `onChanged` is the background
-    /// authoritative reconcile. Returns the resolved phase (for tests).
+    /// Run one LOCAL-FIRST confirm for `slot`. `onConfirmed` fires the instant the local
+    /// save lands (the optimistic label flip) with a locally-built outcome. The background
+    /// ship then reconciles the canonical outcome via `foundryxSpeakerConfirmSynced`.
+    /// Returns the resolved phase (`.confirmed` on the local save) for tests.
     @discardableResult
     public func confirm(
         captureId: String,
@@ -295,29 +372,148 @@ public final class SpeakerConfirmController: ObservableObject {
         name: String? = nil,
         speakerId: String? = nil,
         ship: @escaping @Sendable () async throws -> ConfirmOutcome,
-        onConfirmed: @escaping (ConfirmOutcome) -> Void = { _ in },
-        onChanged: @escaping () async -> Void = {}
+        onConfirmed: @escaping (ConfirmOutcome) -> Void = { _ in }
     ) async -> SpeakerConfirmPhase {
         // Re-entrancy guard: a second tap (or a stale retry) while this slot is already
-        // in flight must not start a second round trip.
-        guard phases[slot] != .inFlight else { return .inFlight }
+        // in flight must not start a second enqueue+ship.
+        guard phases[slot] != .inFlight else { return phase(for: slot) }
         phases[slot] = .inFlight
-        let result = await SpeakerConfirmFlow.run(
-            captureId: captureId, slot: slot, name: name, speakerId: speakerId,
-            baseDir: baseDir, deadline: deadline, ship: ship)
-        switch result {
-        case .success(let outcome):
-            onConfirmed(outcome)   // optimistic: the label flips in place NOW
-            phases[slot] = .confirmed
-            Task { await onChanged() }   // reconcile off the tap path
-            let dwell = successDwell
-            Task { [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(dwell * 1_000_000_000))
-                if let self, self.phases[slot] == .confirmed { self.phases[slot] = nil }
-            }
-        case .failure(let failure):
-            phases[slot] = .failed(failure)
+        // Durable FIRST, OFF the calling actor — the queue's file read+rewrite must never
+        // hang the tap. Await so the intent is on disk before we claim success; the
+        // returned `ts` guards the background ship's later dequeue.
+        let base = baseDir
+        let ts = await Task.detached {
+            SpeakerConfirmQueue.enqueue(captureId: captureId, slot: slot,
+                                        name: name, speakerId: speakerId, baseDir: base)
+        }.value
+        // Instant LOCAL success — the label flips in place NOW; the Mac is not consulted.
+        onConfirmed(ConfirmOutcome(captureId: captureId, slotLabel: slot, status: "confirmed",
+                                   speakerId: speakerId ?? "", speakerName: name ?? "",
+                                   offeredCaptures: []))
+        phases[slot] = .confirmed
+        // Background ship — detached from the phase machine. On ACK it reconciles via the
+        // synced notification; on failure it stays quietly pending (drain retries).
+        let dl = deadline
+        Task.detached {
+            await SpeakerConfirmFlow.backgroundShip(
+                captureId: captureId, slot: slot, name: name, speakerId: speakerId,
+                ts: ts, baseDir: base, deadline: dl, ship: ship)
+        }
+        // The confirmed check lingers, then clears back to the row's rendering.
+        let dwell = successDwell
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(dwell * 1_000_000_000))
+            if let self, self.phases[slot] == .confirmed { self.phases[slot] = nil }
         }
         return phase(for: slot)
+    }
+}
+
+// MARK: - observable per-conversation sync state (the pending glyph + revert notices)
+
+/// The UI-facing sync state for ONE open conversation: which slots have a still-pending
+/// (un-synced) confirm — drives the subtle "waiting to sync" glyph — plus transient revert
+/// notices for the rare rejection. Rides the queue-change + rejection notifications so the
+/// glyph clears the instant the Mac ACKs and a rejection reverts gently. `@MainActor`
+/// ObservableObject; the view owns one per conversation.
+@MainActor
+public final class SpeakerSyncModel: ObservableObject {
+    /// The still-pending confirm entries for THIS capture (the pending overlay consumes
+    /// them; the glyph shows for their slots).
+    @Published public private(set) var pending: [SpeakerConfirmQueue.Entry] = []
+    /// Transient revert notices keyed by slot (auto-clear ~6s).
+    @Published public private(set) var notices: [String: String] = [:]
+
+    private var captureId: String = ""
+    private var baseDir: URL = URL(fileURLWithPath: NSTemporaryDirectory())
+    private let noticeDwell: TimeInterval
+    private var bound = false
+    /// Monotonic refresh generation. Each `refresh()` reads the queue on a detached task;
+    /// two notifications close together (enqueue then remove) start two reads whose
+    /// MainActor writes can land in EITHER order. Stamping each read and dropping a result
+    /// older than the newest already applied keeps the pending glyph from settling stale
+    /// (review P2#3).
+    private var refreshGen: UInt64 = 0
+    private var appliedGen: UInt64 = 0
+    // nonisolated(unsafe): mutated only on the main actor; deinit (nonisolated in
+    // Swift 6) must still read it to unregister the notification observers.
+    private nonisolated(unsafe) var observers: [NSObjectProtocol] = []
+
+    /// Empty init for the SwiftUI `@StateObject` default-value path — call `bind` once the
+    /// capture id is known (in `.onAppear`). Observers/refresh start on bind.
+    public init(noticeDwell: TimeInterval = 6) {
+        self.noticeDwell = noticeDwell
+    }
+
+    /// Bind-at-init for tests + direct callers that know the capture id up front.
+    public convenience init(captureId: String, baseDir: URL, noticeDwell: TimeInterval = 6) {
+        self.init(noticeDwell: noticeDwell)
+        bind(captureId: captureId, baseDir: baseDir)
+    }
+
+    /// Attach to a capture's durable queue: start observing queue-change + rejection
+    /// notifications and load the current pending state. Idempotent (a re-appearing view
+    /// won't double-bind).
+    public func bind(captureId: String, baseDir: URL) {
+        guard !bound else { return }
+        bound = true
+        self.captureId = captureId
+        self.baseDir = baseDir
+        refresh()
+        let capId = captureId
+        observers.append(NotificationCenter.default.addObserver(
+            forName: .foundryxSpeakerConfirmQueueChanged, object: nil, queue: .main) { [weak self] note in
+                guard (note.userInfo?["captureId"] as? String) == capId else { return }
+                MainActor.assumeIsolated { self?.refresh() }
+            })
+        observers.append(NotificationCenter.default.addObserver(
+            forName: .foundryxSpeakerConfirmRejected, object: nil, queue: .main) { [weak self] note in
+                guard (note.userInfo?["captureId"] as? String) == capId,
+                      let slot = note.userInfo?["slot"] as? String else { return }
+                let name = note.userInfo?["name"] as? String
+                MainActor.assumeIsolated { self?.showRevertNotice(slot: slot, name: name) }
+            })
+    }
+
+    deinit { observers.forEach { NotificationCenter.default.removeObserver($0) } }
+
+    /// The slots with a pending (un-synced) confirm — the glyph shows for these.
+    public var pendingSlots: Set<String> { Set(pending.map(\.slot)) }
+    public func isPending(_ slot: String) -> Bool { pendingSlots.contains(slot) }
+
+    /// Re-read the durable queue for THIS capture. Cheap (a small jsonl file). The read is
+    /// off-main and generation-stamped so an older read's result can never overwrite a newer
+    /// one's (out-of-order settle → a stuck glyph after an ACK; review P2#3).
+    public func refresh() {
+        let capId = captureId
+        let base = baseDir
+        refreshGen &+= 1
+        let gen = refreshGen
+        Task.detached { [weak self] in
+            let all = SpeakerConfirmQueue.pending(baseDir: base).filter { $0.captureId == capId }
+            await MainActor.run {
+                guard let self, gen >= self.appliedGen else { return }
+                self.appliedGen = gen
+                self.pending = all
+            }
+        }
+    }
+
+    /// Honest, non-technical, non-scary copy for a rejection revert.
+    public static func revertMessage(name: String?) -> String {
+        if let name, !name.isEmpty {
+            return "Your computer couldn't apply \(name) — reverted."
+        }
+        return "Your computer couldn't apply that change — reverted."
+    }
+
+    private func showRevertNotice(slot: String, name: String?) {
+        notices[slot] = Self.revertMessage(name: name)
+        refresh()   // the entry was dropped — clear the glyph
+        let dwell = noticeDwell
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(dwell * 1_000_000_000))
+            self?.notices[slot] = nil
+        }
     }
 }

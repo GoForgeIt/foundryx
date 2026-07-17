@@ -1,13 +1,16 @@
-// SpeakerConfirmProofUITests — the simulator interaction proof for speaker-confirm
-// feedback (track 20260717T0900_speaker_confirm_feedback). Drives the REAL app over
-// the demo-seeded library (`-MainPreview`, omi-demo-2 carries the inferred "Nick")
-// with the deterministic `-ConfirmProof` door stub, and attaches screenshots of:
-//   inline confirm: idle → in-flight → confirmed check
-//   inline confirm failure: honest copy + Retry (intent kept on the phone)
-//   tag sheet: open → in-flight → confirmed flash → SELF-DISMISS
-//   tag sheet failure: honest error, sheet STAYS OPEN
-// This is the visual proof of the b230 complaints: a tap always answers within a
-// frame, success is seen, failure is honest, and the sheet closes itself on success.
+// SpeakerConfirmProofUITests — the simulator interaction proof for LOCAL-FIRST speaker
+// save (track 20260717T1600_speaker_confirm_local_first). Drives the REAL app over the
+// demo-seeded library (`-MainPreview`, omi-demo-2 carries the inferred "Nick") with the
+// deterministic `-ConfirmProof` door stub, and attaches screenshots of the flow Nick
+// asked for on b232:
+//   inline save (offline-then-ack): idle → instant "Saved Nick" + the subtle pending
+//   glyph (waiting to sync) → the drain ACKs and the glyph CLEARS (synced).
+//   tag sheet: open → save → instant flash → the sheet dismisses ITSELF (never waits on
+//   the wire), the saved name in the conversation carrying the pending glyph.
+//
+// This is the visual proof that a save now succeeds on the phone the INSTANT it is
+// tapped and reaches the computer on its own — a momentary disconnect never blocks the
+// user nor throws the "couldn't connect to the computer" error Nick hit.
 
 import XCTest
 
@@ -33,6 +36,13 @@ final class SpeakerConfirmProofUITests: XCTestCase {
         return !element.exists
     }
 
+    /// The pending "waiting to sync" glyph (icloud.and.arrow.up) next to the name. Queried
+    /// type-agnostically: SwiftUI may surface the symbol as an image OR fold it into the
+    /// row's accessibility element (a button), so match on the identifier across any type.
+    private func pendingGlyph(_ app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any).matching(identifier: "speaker-sync-pending").firstMatch
+    }
+
     private func launchTranscript(proof: String) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["-MainPreview", "-Screen", "detail",
@@ -42,49 +52,41 @@ final class SpeakerConfirmProofUITests: XCTestCase {
         return app
     }
 
-    // ── inline "Confirm: Nick" ────────────────────────────────────────────────
+    // ── inline save: instant local success + pending glyph → drain ACK clears it ──
 
-    func testInlineConfirmShowsInFlightThenConfirmed() throws {
-        let app = launchTranscript(proof: "ok-slow")
+    func testInlineSaveIsInstantThenSyncsInBackground() throws {
+        // offline-then-ack: the interactive ship fails (offline) so the save is purely
+        // local; the 5s drain then ACKs, clearing the glyph — the local-first proof.
+        let app = launchTranscript(proof: "offline-then-ack")
         let confirm = app.buttons["Confirm: Nick"]
-        XCTAssertTrue(confirm.waitForExistence(timeout: 10), "inline confirm affordance renders")
+        XCTAssertTrue(confirm.waitForExistence(timeout: 10), "inline save affordance renders")
         shoot(app, "01-inline-idle")
 
         confirm.tap()
-        // Within a frame the affordance is a spinner + "Confirming Nick…".
-        XCTAssertTrue(app.staticTexts["Confirming Nick…"].waitForExistence(timeout: 2),
-                      "tap answers immediately with an in-flight state")
-        shoot(app, "02-inline-inflight")
+        // Within a frame the save has landed LOCALLY — "Saved Nick", never a spinner that
+        // waits on the wire. (The confirmed check dwells briefly then clears to the row.)
+        XCTAssertTrue(app.staticTexts["Saved Nick"].waitForExistence(timeout: 2),
+                      "the save answers instantly with a local success")
+        shoot(app, "02-inline-saved-instant")
 
-        // The stub acknowledges after 1.5s → the confirmed check + the label flips.
-        XCTAssertTrue(app.staticTexts["Confirmed Nick"].waitForExistence(timeout: 5),
-                      "success is SEEN, not silent")
-        shoot(app, "03-inline-confirmed")
+        // The subtle pending glyph shows the change is waiting to sync to the computer.
+        XCTAssertTrue(pendingGlyph(app).waitForExistence(timeout: 4),
+                      "a pending-sync glyph rides next to the saved name")
+        shoot(app, "03-inline-pending-glyph")
+
+        // The drain ACKs (the DEBUG stub) → the glyph disappears. NO error ever surfaces.
+        XCTAssertTrue(waitGone(pendingGlyph(app), timeout: 20),
+                      "the glyph clears once the computer acknowledges the change")
+        shoot(app, "04-inline-synced-glyph-cleared")
         app.terminate()
     }
 
-    func testInlineConfirmFailureIsHonestWithRetry() throws {
+    // ── tag sheet: save is instant + the sheet dismisses itself, no live response ──
+
+    func testSheetSaveIsInstantAndSelfDismissesOffline() throws {
+        // Pure-offline stub: the sheet must STILL save instantly and dismiss itself —
+        // this is the exact case Nick hit ("couldn't connect to the computer").
         let app = launchTranscript(proof: "fail")
-        let confirm = app.buttons["Confirm: Nick"]
-        XCTAssertTrue(confirm.waitForExistence(timeout: 10))
-        confirm.tap()
-        XCTAssertTrue(app.staticTexts["Confirming Nick…"].waitForExistence(timeout: 2))
-        // The stub fails after 1.5s → honest copy + Retry, never a silent nothing.
-        XCTAssertTrue(app.buttons["Retry"].waitForExistence(timeout: 5),
-                      "failure offers a retry")
-        XCTAssertTrue(
-            app.staticTexts.containing(
-                NSPredicate(format: "label CONTAINS %@", "saved on your phone")
-            ).firstMatch.exists,
-            "failure copy says where the change lives")
-        shoot(app, "04-inline-failure-retry")
-        app.terminate()
-    }
-
-    // ── the tag-speaker sheet ────────────────────────────────────────────────
-
-    func testSheetConfirmShowsProgressThenDismissesItself() throws {
-        let app = launchTranscript(proof: "ok-slow")
         let notThem = app.buttons["Not them"]
         XCTAssertTrue(notThem.waitForExistence(timeout: 10))
         notThem.tap()   // opens the tag sheet for the inferred speaker
@@ -94,44 +96,17 @@ final class SpeakerConfirmProofUITests: XCTestCase {
         shoot(app, "05-sheet-open")
 
         app.buttons["Confirm Nick"].tap()
-        XCTAssertTrue(app.staticTexts["Confirming Nick…"].waitForExistence(timeout: 2),
-                      "the tapped button becomes a spinner within a frame")
-        shoot(app, "06-sheet-inflight")
+        // The sheet flashes the saved beat then dismisses ITSELF — even offline, it never
+        // waits on the wire nor shows the "couldn't connect" error.
+        XCTAssertTrue(waitGone(sheetTitle, timeout: 5),
+                      "the sheet dismisses itself on the instant local save, offline")
+        shoot(app, "06-sheet-self-dismissed-offline")
 
-        // Success flash, then the sheet closes ITSELF (no offer in the stub outcome).
-        XCTAssertTrue(app.staticTexts["Confirmed Nick"].waitForExistence(timeout: 5),
-                      "the confirmed beat is shown before dismissal")
-        shoot(app, "07-sheet-confirmed-flash")
-        XCTAssertTrue(waitGone(sheetTitle, timeout: 5), "the sheet dismisses itself on success")
-        shoot(app, "08-sheet-self-dismissed")
-        app.terminate()
-    }
-
-    func testSheetFailureStaysOpenWithHonestError() throws {
-        let app = launchTranscript(proof: "fail")
-        let notThem = app.buttons["Not them"]
-        XCTAssertTrue(notThem.waitForExistence(timeout: 10))
-        notThem.tap()
-
-        let sheetTitle = app.staticTexts["Tag speaker"]
-        XCTAssertTrue(sheetTitle.waitForExistence(timeout: 5))
-        app.buttons["Confirm Nick"].tap()
-        XCTAssertTrue(app.staticTexts["Confirming Nick…"].waitForExistence(timeout: 2))
-
-        // The stub fails → the sheet STAYS OPEN with the honest error (the old code
-        // silently dismissed, which read exactly like success).
-        let deadline = Date().addingTimeInterval(6)
-        var sawError = false
-        while Date() < deadline, !sawError {
-            sawError = app.staticTexts.containing(
-                NSPredicate(format: "label CONTAINS %@", "saved on your phone")
-            ).firstMatch.exists
-            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
-        }
-        XCTAssertTrue(sawError, "failure surfaces the honest error")
-        XCTAssertTrue(sheetTitle.exists, "the sheet stays open on failure")
-        XCTAssertTrue(app.buttons["Confirm Nick"].exists, "the primary button doubles as the retry")
-        shoot(app, "09-sheet-failure-stays-open")
+        // Back in the conversation the saved name carries the pending-sync glyph (the
+        // change is safe on the phone, syncing in the background).
+        XCTAssertTrue(pendingGlyph(app).waitForExistence(timeout: 5),
+                      "the saved change waits to sync with a subtle glyph, not an error")
+        shoot(app, "07-conversation-pending-after-offline-save")
         app.terminate()
     }
 }
