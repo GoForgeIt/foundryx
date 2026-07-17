@@ -456,6 +456,13 @@ public final class CaptureManager: ObservableObject {
     /// back). Reset to false whenever a fresh recording STARTS and whenever one is
     /// explicitly STOPPED/ended, so a new recording always presents full-screen.
     @Published public private(set) var recordingScreenMinimized = false
+    /// The session-owned, pause-aware elapsed clock (track 20260717T0630). Anchored to
+    /// the RECORDING SESSION, not the conversation: internal silence-gap rolls PRESERVE
+    /// it (`beginSession` stamps only when nil), and ONLY explicit boundaries clear it
+    /// (phone-mic stop, End-current / manual split, reconnect-grace expiry). Views DERIVE
+    /// the readout from this — they hold no timer or pause `@State` — so a re-present
+    /// (minimize → restore) can never reset it or lose its paused deductions.
+    @Published public private(set) var recordingClock: RecordingClock?
     /// Ambient candidates surfaced by the Tier-1 lane DURING the active recording —
     /// most-recent-first, deduped by utterance, capped small. The recording screen maps
     /// these to its notification/task rows; cleared when the conversation ends.
@@ -745,6 +752,7 @@ public final class CaptureManager: ObservableObject {
                                                        now: now,
                                                        silenceGap: SilenceSegmenter.defaultSilenceGap) else { return }
         suspendedSession = nil
+        recordingClock = nil   // the held session finally ends here — no new session begins
         log?.info("capture \(held.wal.captureId): reconnect-grace silence boundary reached — ending held conversation")
         endSession()
     }
@@ -1221,6 +1229,10 @@ public final class CaptureManager: ObservableObject {
         lastRecordBlockReason = nil   // starting cleanly — clear any prior block message
         recordingScreenMinimized = false   // a fresh recording always presents full-screen
         isRecordingMic = true
+        // A fresh recording is never born paused (the `.streaming` mic branch clears any
+        // inherited pause) — anchor the session clock to now. `beginSession` will preserve
+        // this when the mic's `.streaming` opens the WAL, so internal rolls keep it.
+        recordingClock = RecordingClock(startedAt: Date())
         router.resetSegmenter()
         micSource.start()
         log?.info("phone mic: recording requested")
@@ -1355,6 +1367,7 @@ public final class CaptureManager: ObservableObject {
                 // Phone-mic Stop / permission-deny is an EXPLICIT boundary → end now and
                 // reset the mic flag so the Record button returns to idle (no grace).
                 isRecordingMic = false
+                recordingClock = nil   // explicit stop → clear the session clock (no roll)
                 endSession()
                 // A permission-denied failure is otherwise silent — surface it so the
                 // Record CTA can point the user at Settings.
@@ -1945,6 +1958,9 @@ public final class CaptureManager: ObservableObject {
     @discardableResult
     public func resumeRecording(captureId: String) -> Bool {
         guard canResumeRecording(captureId: captureId) else { return false }
+        // Resuming is an explicit user action → a FRESH session anchor (recording resumed
+        // now), respecting the current pause intent. Does not flow through beginSession.
+        recordingClock = RecordingClock(startedAt: Date(), paused: isPaused, now: Date())
         let wal = captures.first(where: { $0.captureId == captureId }) ?? makeWAL(captureId: captureId)
         active = wal
         captures.removeAll { $0.captureId == captureId }
@@ -2194,6 +2210,13 @@ public final class CaptureManager: ObservableObject {
     }
 
     private func beginSession() {
+        // Stamp the session clock ONLY when there isn't one — so an internal silence-gap
+        // roll (`endSession(); beginSession()`) PRESERVES the existing anchor and stays
+        // invisible to the user. An explicit boundary (split/stop/grace-expiry) clears the
+        // clock first, so the next fresh session re-anchors here (track 20260717T0630).
+        if recordingClock == nil {
+            recordingClock = RecordingClock(startedAt: Date(), paused: isPaused, now: Date())
+        }
         let id = Self.newCaptureId()
         let wal = makeWAL(captureId: id)
         active = wal
@@ -2313,6 +2336,10 @@ public final class CaptureManager: ObservableObject {
     /// frame is routed (both run synchronously on the main actor).
     public func splitConversation() {
         guard active != nil else { return }
+        // An explicit boundary (manual split / Live Activity "End current", which routes
+        // here) RESETS the session clock: clear it BEFORE the roll so the following
+        // beginSession re-anchors a fresh clock rather than preserving the old one.
+        recordingClock = nil
         endSession()
         beginSession()
         router.resetSegmenter()   // fresh boundary state for the new conversation
@@ -2481,6 +2508,7 @@ public final class CaptureManager: ObservableObject {
     // silently auto-capturing.
     public func pause() {
         isPaused = true
+        recordingClock?.pause(at: Date())   // freeze the session clock while paused
         CaptureSettings.omiCaptureDesiredState = .paused
         router.setPaused(true)
         pushLiveState(.update)   // reflect paused state on the Live Activity + widget
@@ -2488,6 +2516,7 @@ public final class CaptureManager: ObservableObject {
     }
     public func resume() {
         isPaused = false
+        recordingClock?.resume(at: Date())   // fold the paused span in; continue without a jump
         CaptureSettings.omiCaptureDesiredState = .listening
         router.setPaused(false)
         pushLiveState(.update)
@@ -2756,6 +2785,11 @@ public final class CaptureManager: ObservableObject {
             active?.finish()
             active = nil
             isRecordingMic = false
+            // Deleting the LIVE recording is an explicit end — clear the session clock so
+            // the next session (e.g. the Omi re-streaming) anchors FRESH; a stale clock
+            // here would survive `beginSession`'s stamp-only-if-nil and inflate the timer
+            // (adversarial review M1, track 20260717T0630).
+            recordingClock = nil
             pushLiveState(.end)
         }
         clearNeedsFinalize(captureId)

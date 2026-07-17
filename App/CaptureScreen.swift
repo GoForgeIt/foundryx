@@ -86,24 +86,20 @@ struct MeterCaption: View {
     }
 }
 
-/// The ticking elapsed readout (1 Hz), monospaced so it never wobbles. Excludes paused
-/// spans so the counter STOPS while paused (the audio does) and resumes without a jump —
-/// it shows time actually recorded, not wall-clock since start.
-struct ElapsedLabel: View {
-    let since: Date
-    /// Whether capture is currently paused — the counter freezes while true.
-    var paused: Bool = false
+/// The session-owned ticking elapsed readout (1 Hz), monospaced so it never wobbles.
+/// STATELESS — it holds NO `@State`: it derives its value from a `RecordingClock` the
+/// manager owns (`clock.elapsed(now:)`, which already excludes paused spans), so a view
+/// re-present (minimize → restore, a fresh `fullScreenCover`) can never reset it or
+/// double-count a pause. A nil clock reads `0:00` (no live session).
+struct SessionElapsedLabel: View {
+    /// The session clock to render (manager-owned); nil ⇒ no live recording.
+    let clock: RecordingClock?
     /// Optional font override (defaults to the Grain `.caption` scale). The full-screen
-    /// RecordingScreen reuses this same paused-aware clock for its big ring-center time
-    /// and its small forge island time, so it needs to restyle the readout.
+    /// RecordingScreen reuses this for its big ring-center time AND its small forge island
+    /// time, so it needs to restyle the readout.
     var font: Font? = nil
     /// Optional colour override (defaults to `textMuted`).
     var color: Color? = nil
-
-    /// Total time already spent paused (accumulated across completed pause spans).
-    @State private var pausedAccumulated: TimeInterval = 0
-    /// When the CURRENT pause began, or nil when running.
-    @State private var pauseStartedAt: Date?
 
     @ViewBuilder private func readout(_ s: Int) -> some View {
         let text = Text(String(format: "%d:%02d", s / 60, s % 60))
@@ -112,23 +108,10 @@ struct ElapsedLabel: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { timeline in
-            let now = timeline.date
-            // While paused, this span grows exactly as wall-clock does, holding the
-            // displayed elapsed steady; on resume it folds into pausedAccumulated.
-            let livePause = pauseStartedAt.map { now.timeIntervalSince($0) } ?? 0
-            let s = max(0, Int(now.timeIntervalSince(since) - pausedAccumulated - livePause))
+            let s = max(0, Int(clock?.elapsed(now: timeline.date) ?? 0))
             readout(s)
                 .foregroundStyle(color ?? GrainColor.textMuted)
                 .monospacedDigit()
-        }
-        .onAppear { if paused, pauseStartedAt == nil { pauseStartedAt = Date() } }
-        .onChange(of: paused) { nowPaused in
-            if nowPaused {
-                if pauseStartedAt == nil { pauseStartedAt = Date() }
-            } else if let start = pauseStartedAt {
-                pausedAccumulated += Date().timeIntervalSince(start)
-                pauseStartedAt = nil
-            }
         }
     }
 }
@@ -1025,8 +1008,8 @@ struct CaptureScreen: View {
                     }
                 }
                 Spacer()
-                if let wal = manager.active {
-                    ElapsedLabel(since: wal.status.startedAt, paused: manager.isPaused)
+                if manager.active != nil {
+                    SessionElapsedLabel(clock: manager.recordingClock)
                 }
                 RecordingRingView(meter: manager.meter, paused: manager.isPaused)
                     .frame(width: 34, height: 34)

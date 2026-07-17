@@ -8,7 +8,7 @@
 // build as you speak; ambient suggestions stack only when one actually exists; and a
 // primary "End and save" foot closes the capture.
 //
-// Assembled from existing primitives — GrainVoiceRing, ElapsedLabel (paused-aware),
+// Assembled from existing primitives — GrainVoiceRing, SessionElapsedLabel (session-owned,
 // ProvisionalLiveTitle, LiveTranscript.renderedSegments, GrainSuggestionCard — so the
 // live behaviour matches the inline strip it supersedes. All colour via GrainColor
 // tokens; light + dark. (FoundryXKit types are same-module — the App target compiles
@@ -61,14 +61,16 @@ struct RecordingScreen: View {
     /// replacement.
     var onMinimize: () -> Void = {}
 
-    /// A stable fallback origin for the clock if no WAL is active yet (real recording
-    /// always has an active WAL; this only guards the first frame / edge cases).
-    @State private var fallbackStart = Date()
-
     /// The effective live transcript — the frozen preview, else live manager state.
     private var liveT: LiveTranscript { preview?.transcript ?? manager.liveTranscript }
-    /// The clock origin — the frozen preview, else the active capture's start, else the fallback.
-    private var since: Date { preview?.since ?? manager.active?.status.startedAt ?? fallbackStart }
+    /// The effective session clock — the frozen preview (DEV screenshot path) mapped to a
+    /// clock at its origin, else the manager's session-owned `recordingClock`. DERIVED,
+    /// never stored: this view holds no timer, so a minimize → restore re-present cannot
+    /// reset or double-count the elapsed time (track 20260717T0630).
+    private var clock: RecordingClock? {
+        if let preview { return RecordingClock(startedAt: preview.since) }
+        return manager.recordingClock
+    }
     private var statusWord: String { manager.isPaused ? "Paused" : "Recording" }
 
     var body: some View {
@@ -131,8 +133,8 @@ struct RecordingScreen: View {
                 .font(GrainFont.sans(8, weight: .heavy))
                 .tracking(0.6)
                 .foregroundStyle(GrainColor.forgeInk)
-            ElapsedLabel(since: since, paused: manager.isPaused,
-                         font: GrainFont.sans(8, weight: .heavy), color: GrainColor.forgeInk)
+            SessionElapsedLabel(clock: clock,
+                                font: GrainFont.sans(8, weight: .heavy), color: GrainColor.forgeInk)
         }
         .accessibilityElement(children: .combine)
     }
@@ -145,8 +147,8 @@ struct RecordingScreen: View {
             ZStack {
                 RecordingScreenRing(meter: manager.meter, paused: manager.isPaused)
                 VStack(spacing: 2) {
-                    ElapsedLabel(since: since, paused: manager.isPaused,
-                                 font: GrainFont.sans(30, weight: .semibold), color: GrainColor.ink)
+                    SessionElapsedLabel(clock: clock,
+                                        font: GrainFont.sans(30, weight: .semibold), color: GrainColor.ink)
                     Text("Voice ring")
                         .grainTextStyle(.caption)
                         .foregroundStyle(GrainColor.textFaint)

@@ -694,7 +694,7 @@ private struct RecordingPill: View {
     let onOpen: () -> Void
 
     var body: some View {
-        if let wal = manager.active {
+        if manager.active != nil {
             TimelineView(.periodic(from: .now, by: 1)) { _ in
                 let phase = displayedPhase()
                 let presentation = RecordingPillPresentation.make(from: phase)
@@ -711,7 +711,7 @@ private struct RecordingPill: View {
                             .grainTextStyle(.caption)
                             .foregroundStyle(presentation.tone.recordingPillColor)
                     }
-                    ElapsedLabel(since: wal.status.startedAt, paused: phase == .paused)
+                    SessionElapsedLabel(clock: manager.recordingClock)
                     Button("End") { _ = manager.endCurrentConversation() }
                         .grainTextStyle(.caption)
                         .foregroundStyle(GrainColor.dangerRed)
