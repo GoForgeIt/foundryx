@@ -21,6 +21,26 @@ public final class FoundationModelsTitler: LocalTitleSummary, @unchecked Sendabl
     private let breaker: ModelWedgeBreaker
     public init(breaker: ModelWedgeBreaker = FoundationModelsTitler.breaker) { self.breaker = breaker }
 
+    /// The SHARPENED title ask (track 20260717T1500, Nick: "make sure the prompt
+    /// actually gives a good summary of what has happened so far rather than just
+    /// recent words"). The `transcript` is already the WHOLE-conversation bounded
+    /// head+tail; the instruction makes the model name the conversation's overall
+    /// TOPIC/PURPOSE, not echo the latest lines. The external (Fireworks) refresh is
+    /// prompted door-side with the same intent, over the same whole-conversation history.
+    static func titlePrompt(transcript: String, inProgress: Bool = false) -> String {
+        let subject = inProgress ? "an in-progress conversation" : "a conversation"
+        return """
+        Below is the full transcript of \(subject) so far. Read the WHOLE transcript, \
+        then in 3 to 6 words name what the conversation is fundamentally ABOUT — its main \
+        topic or purpose across the entire discussion, NOT just the most recent lines and \
+        NOT a quote of the last thing said. Reply with ONLY the title: no quotes, no \
+        punctuation, no preamble.
+
+        TRANSCRIPT:
+        \(transcript)
+        """
+    }
+
     public var isAvailable: Bool {
         // Availability is about HARDWARE (Apple-Intelligence support), NOT health — the breaker
         // never flips this false. Refusal happens inside the turn methods, so callers that gate
@@ -74,7 +94,7 @@ public final class FoundationModelsTitler: LocalTitleSummary, @unchecked Sendabl
                 try await withPerfTimeout("fm-title", ms: 20_000) {
                     let session = LanguageModelSession()
                     let title = try await session.respond(
-                        to: "Give a 3–6 word title for this conversation transcript. Reply with ONLY the title, no quotes.\n\n\(bounded)"
+                        to: Self.titlePrompt(transcript: bounded)
                     ).content.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
                     let summary = try await session.respond(
                         to: "Summarize this conversation in 1–2 plain sentences. Reply with ONLY the summary.\n\n\(bounded)"
@@ -103,7 +123,7 @@ public final class FoundationModelsTitler: LocalTitleSummary, @unchecked Sendabl
                 try await withPerfTimeout("fm-live-title", ms: 15_000) {
                     let session = LanguageModelSession()
                     return try await session.respond(
-                        to: "Give a 3–6 word title for this in-progress conversation transcript. Reply with ONLY the title, no quotes.\n\n\(bounded)"
+                        to: Self.titlePrompt(transcript: bounded, inProgress: true)
                     ).content.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
                 }
             }

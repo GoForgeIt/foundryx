@@ -208,12 +208,16 @@ public enum WholeConversationTitle {
     ]
 }
 
-/// One settled live title: its text plus the TIER it came from. Model titles
-/// (on-device Foundation Models) outrank heuristic ones.
+/// One settled live title: its text plus the TIER it came from. Ranked worst→best:
+/// the pure-Swift heuristic (instant, free) is the floor; the on-device Foundation
+/// Models title (the instant placeholder's upgrade + the offline fallback) outranks
+/// it; the phone-originated EXTERNAL refresh (Fireworks via the door, on the
+/// exponential backoff — track 20260717T1500) is the sharpest and outranks both.
 public struct LiveTitleState: Equatable, Sendable {
     public enum Tier: Int, Comparable, Sendable {
         case heuristic = 0
         case model = 1
+        case external = 2
         public static func < (lhs: Tier, rhs: Tier) -> Bool { lhs.rawValue < rhs.rawValue }
     }
 
@@ -281,4 +285,44 @@ public struct LiveTitleCadence: Sendable, Equatable {
     public static let `default` = LiveTitleCadence(
         heuristicMinNewWords: 8, modelMinWords: 30, modelMinNewWords: 25,
         modelRefreshSeconds: 45)
+}
+
+/// The EXPONENTIAL BACKOFF schedule for the phone-originated EXTERNAL live-title
+/// refresh (track 20260717T1500, Nick-approved). The instant on-device placeholder
+/// (heuristic + Foundation Models) names the conversation immediately and for free;
+/// on this GEOMETRIC cadence the phone asks the door for an EXTERNAL (Fireworks)
+/// re-title that SHARPENS it. The interval BEFORE each refresh doubles — ~1, 2, 4,
+/// 8, 16 min… — capped at `ceiling` (the "between refreshes" cap), so a long
+/// conversation refreshes at most every ceiling. Geometric spacing keeps external
+/// spend sub-cent over a multi-hour conversation (≈6 calls in the first hour).
+///
+/// Pure + Sendable so the schedule is unit-tested independent of any clock; the
+/// manager owns the wall-clock anchor and the "skip a tick with no new words" gate.
+public struct LiveTitleBackoff: Sendable, Equatable {
+    /// Delay from the conversation's start to the FIRST external refresh.
+    public var firstDelay: TimeInterval
+    /// Each subsequent interval multiplies the previous by this.
+    public var multiplier: Double
+    /// No interval is ever longer than this (the cap "between refreshes").
+    public var ceiling: TimeInterval
+
+    public init(firstDelay: TimeInterval, multiplier: Double, ceiling: TimeInterval) {
+        self.firstDelay = firstDelay
+        self.multiplier = multiplier
+        self.ceiling = ceiling
+    }
+
+    /// Nick-approved default: first at ~1 min, then +2, +4, +8, +16 min… capped at
+    /// 30 min between refreshes.
+    public static let `default` = LiveTitleBackoff(firstDelay: 60, multiplier: 2, ceiling: 1_800)
+
+    /// The delay to wait BEFORE the refresh that follows `completedRefreshes`
+    /// already-fired refreshes. `0` ⇒ `firstDelay` (the first refresh); each further
+    /// refresh doubles the previous interval, capped at `ceiling`. Negative inputs are
+    /// clamped to the first delay.
+    public func delay(afterRefreshes completedRefreshes: Int) -> TimeInterval {
+        guard completedRefreshes > 0 else { return min(firstDelay, ceiling) }
+        let raw = firstDelay * pow(multiplier, Double(completedRefreshes))
+        return min(raw, ceiling)
+    }
 }

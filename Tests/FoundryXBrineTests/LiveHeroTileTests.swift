@@ -58,6 +58,18 @@ private final class LiveHeroWorld: @unchecked Sendable {
     var titleState: LiveTitleState?
     var displayTail = ""             // what the OLD title derived from (bounded tail)
 
+    var lastExternalTitle = ""
+    /// The EXTERNAL (Fireworks-via-door) refresh that arrives on the backoff cadence:
+    /// routed through the SAME arbiter the manager uses, at the external tier.
+    func externalRefresh(_ text: String) {
+        lastExternalTitle = text
+        titleState = LiveTitleArbiter.merged(current: titleState, candidateText: text, tier: .external)
+    }
+    /// A later on-device (Foundation Models) guess between external ticks.
+    func onDeviceGuess(_ text: String) {
+        titleState = LiveTitleArbiter.merged(current: titleState, candidateText: text, tier: .model)
+    }
+
     /// One finalized utterance lands: context + bounded display tail + a heuristic
     /// refresh through the arbiter — the manager's per-final path in miniature.
     func speakFinal(_ line: String) {
@@ -311,6 +323,34 @@ private enum LiveHeroSteps {
                     throw BrineStepError("a heuristic overwrote the model title")
                 }
             },
+            // MARK: two-tier — external refresh sharpens; offline still names (track 20260717T1500)
+
+            defineStep("the desktop refreshes the title from an external model") { ctx, _, _ in
+                w.externalRefresh("Kitchen remodel budget permits and contractor timeline")
+                return ctx
+            },
+            defineCheck("the sharper external title replaces the on-device one") { _, _, _ in
+                guard w.titleState?.tier == .external, w.titleState?.text == w.lastExternalTitle else {
+                    throw BrineStepError("the external title did not take over: \(String(describing: w.titleState))")
+                }
+            },
+            defineCheck("a later on-device guess never downgrades the external title") { _, _, _ in
+                w.onDeviceGuess("A rough on-device kitchen guess")
+                guard w.titleState?.tier == .external, w.titleState?.text == w.lastExternalTitle else {
+                    throw BrineStepError("an on-device guess downgraded the external title: \(String(describing: w.titleState))")
+                }
+            },
+            defineStep("the desktop is unreachable") { ctx, _, _ in
+                // Offline: no external candidate arrives. The standing title is untouched
+                // (the manager keeps the on-device title and simply stops asking the door).
+                return ctx
+            },
+            defineCheck("the on-device title still names the conversation") { _, _, _ in
+                guard let title = w.titleState?.text, !title.isEmpty else {
+                    throw BrineStepError("offline left the conversation with no name")
+                }
+            },
+
             defineCheck("the saved conversation's final title still comes from the full pipeline") { _, _, _ in
                 // The durable card law, exercised for real: the session's rolling title
                 // seeds the card as PROVISIONAL; the pipeline (Kiln) title takes over and

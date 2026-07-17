@@ -1100,6 +1100,57 @@ public final class DoorClient: @unchecked Sendable {
         return try JSONDecoder().decode(ConfirmOutcome.self, from: data)
     }
 
+    /// Request an EXTERNAL live re-title for an IN-PROGRESS conversation (track
+    /// 20260717T1500). During recording the phone is the only node holding the
+    /// transcript text, so it ORIGINATES the refresh: POST the whole-conversation
+    /// `history` (the bounded head+tail the phone maintains) plus a monotonic `seq`
+    /// (so the door can apply only the latest); the door runs it through an EXTERNAL
+    /// model (Fireworks) and returns a sharpened `{title}`. Relay-aware — works
+    /// off-LAN over the R1b tunnel like the transcript fetch — and bearer-gated.
+    ///
+    /// GRACEFUL by contract: returns `nil` (never throws) when the door doesn't
+    /// support the route yet (404 — an old desktop) or returns no usable title, so
+    /// the phone simply keeps its on-device placeholder. Transport / 401 / 5xx THROW
+    /// so the caller treats it as offline and holds the on-device title — offline
+    /// still gets a title.
+    public func liveTitle(captureId: String, history: String, seq: Int) async throws -> String? {
+        struct Body: Encodable { let history: String; let seq: Int }
+        struct Reply: Decodable { let title: String? }
+        let body = try JSONEncoder().encode(Body(history: history, seq: seq))
+        let path = "/foundryx/capture/\(captureId)/live-title"
+        if let relay = target.relay?.interactive() {
+            let resp = try await RelayHTTP.roundTrip(
+                relay: relay, bearer: target.bearer, method: "POST",
+                path: path, contentType: "application/json", body: body,
+                session: session, log: log, useMux: target.useMux)
+            if resp.status == 401 { throw DoorError.unauthorized }
+            if resp.status == 404 { return nil }   // old door — no live-title route
+            guard resp.status == 200 else { throw DoorError.http(resp.status) }
+            let title = (try? JSONDecoder().decode(Reply.self, from: resp.body))?.title
+            return title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let s = target.baseURL.absoluteString
+        let base = s.hasSuffix("/") ? String(s.dropLast()) : s
+        guard let url = URL(string: "\(base)\(path)") else {
+            throw DoorError.transport("bad live-title url")
+        }
+        var r = URLRequest(url: url)
+        r.httpMethod = "POST"
+        r.setValue("Bearer \(target.bearer)", forHTTPHeaderField: "Authorization")
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.httpBody = body
+        r.timeoutInterval = 20
+        let (data, response) = try await session.data(for: r)
+        guard let http = response as? HTTPURLResponse else {
+            throw DoorError.transport("non-HTTP response")
+        }
+        if http.statusCode == 401 { throw DoorError.unauthorized }
+        if http.statusCode == 404 { return nil }   // old door — no live-title route
+        guard http.statusCode == 200 else { throw DoorError.http(http.statusCode) }
+        let title = (try? JSONDecoder().decode(Reply.self, from: data))?.title
+        return title?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Relay a gate decision to the door's approvals endpoint
     /// (`POST /foundryx/chat/{session}/approvals/{call}` — answers a suspended turn).
     /// `decision` is "once" | "always" | "reject"; the suspended /chat SSE then resumes.

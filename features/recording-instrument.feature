@@ -35,6 +35,19 @@ Feature: The recording instrument
     And a smarter on-device title, when one arrives, replaces the rough one
     And the saved conversation's final title still comes from the full pipeline
 
+  # The instant on-device title is a PLACEHOLDER; an EXTERNAL model (Fireworks, via
+  # the desktop) SHARPENS it on an exponential backoff (~1, 3, 7, 15 min…). The
+  # external title outranks the on-device one and never gets downgraded; and when the
+  # desktop is unreachable the on-device title simply stands — offline still gets a
+  # name (track 20260717T1500).
+  Scenario: an external refresh sharpens the live title, and offline still gets a name
+    Given I am recording and the conversation has moved through several topics
+    When the desktop refreshes the title from an external model
+    Then the sharper external title replaces the on-device one
+    And a later on-device guess never downgrades the external title
+    When the desktop is unreachable
+    Then the on-device title still names the conversation
+
   Scenario: recording survives leaving the tab
     Given I am recording on the capture page
     When I switch to the chat tab

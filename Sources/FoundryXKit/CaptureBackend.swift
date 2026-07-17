@@ -44,6 +44,8 @@ extension CaptureManager {
                             locationProvider: ConversationLocationProviding? = nil,
                             liveTranscriber: LiveTranscriberFactory? = nil,
                             liveTitler: LocalTitleSummary? = nil,
+                            liveTitleExternal: (@Sendable (String, String, Int) async throws -> String?)? = nil,
+                            liveTitleBackoff: LiveTitleBackoff = .default,
                             localMode: Bool = false) {
         self.init(target: target,
                   baseDir: baseDir,
@@ -59,6 +61,11 @@ extension CaptureManager {
                   locationProvider: locationProvider,
                   liveTranscriber: liveTranscriber,
                   liveTitler: liveTitler,
+                  // External live-title stays OFF in "just my phone" mode by default (the
+                  // on-device placeholder stands offline); the DEBUG proof harness injects
+                  // a scripted external to demonstrate the sharpen in the simulator.
+                  liveTitleExternal: liveTitleExternal,
+                  liveTitleBackoff: liveTitleBackoff,
                   uploadSegment: localMode ? { @Sendable _, _, _ in } : nil)
     }
 }

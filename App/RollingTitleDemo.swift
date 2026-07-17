@@ -75,4 +75,24 @@ final class ScriptedLiveTranscriber: LiveTranscribing, @unchecked Sendable {
         return finalized
     }
 }
+
+/// The scripted EXTERNAL (Fireworks-shaped) live-title refresh for the proof harness
+/// (track 20260717T1500). Stands in for the door's `/foundryx/capture/<id>/live-title`
+/// route so the simulator can watch the two-tier flow WITHOUT a real desktop: the
+/// instant heuristic placeholder appears, then on the backoff this returns a sharper
+/// WHOLE-conversation title that outranks it. Content-aware over the passed history so
+/// the sharpen visibly tracks where the conversation has gone. DEBUG-only.
+enum ScriptedExternalTitle {
+    static func closure() -> @Sendable (String, String, Int) async throws -> String? {
+        { _, history, _ in
+            // A touch of latency, like a real external round-trip.
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            let h = history.lowercased()
+            if h.contains("contractor") || h.contains("permits") {
+                return "Kitchen Reno: Budget and Permits"
+            }
+            return "Kitchen Renovation Budget Plan"
+        }
+    }
+}
 #endif

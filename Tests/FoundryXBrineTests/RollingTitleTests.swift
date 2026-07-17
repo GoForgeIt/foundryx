@@ -134,6 +134,65 @@ final class RollingTitleTests: XCTestCase {
         XCTAssertNil(LiveTitleArbiter.merged(current: nil, candidateText: "", tier: .heuristic))
     }
 
+    // MARK: external tier outranks the on-device placeholder (track 20260717T1500)
+
+    func testExternalTitleReplacesBothHeuristicAndModel() {
+        // The external (Fireworks-via-door) refresh is the sharpest tier: it takes over
+        // from the instant on-device placeholder even when the placeholder is model-tier.
+        let placeholder = LiveTitleState(text: "Kitchen renovation planning", tier: .model)
+        let sharpened = LiveTitleArbiter.merged(current: placeholder,
+                                                candidateText: "Kitchen remodel budget and permits",
+                                                tier: .external)
+        XCTAssertEqual(sharpened?.tier, .external, "the external title outranks the on-device model")
+        XCTAssertEqual(sharpened?.text, "Kitchen remodel budget and permits")
+        // …and neither a later heuristic nor a later on-device model can downgrade it.
+        let afterHeuristic = LiveTitleArbiter.merged(current: sharpened,
+                                                     candidateText: "Totally Different Words Here",
+                                                     tier: .heuristic)
+        XCTAssertEqual(afterHeuristic, sharpened, "a heuristic never overwrites an external title")
+        let afterModel = LiveTitleArbiter.merged(current: sharpened,
+                                                 candidateText: "A Different On Device Guess",
+                                                 tier: .model)
+        XCTAssertEqual(afterModel, sharpened, "the on-device model never overwrites an external title")
+    }
+
+    func testExternalRefreshOnlyReplacesWhenMeaningfullyDifferent() {
+        // Once an external title is settled, another external refresh must not jitter it
+        // for a near-identical result (anti-flicker: same tier → similarity gate).
+        let settled = LiveTitleState(text: "Kitchen remodel budget and permits", tier: .external)
+        let similar = LiveTitleArbiter.merged(current: settled,
+                                              candidateText: "Kitchen remodel budget permits timeline",
+                                              tier: .external)
+        XCTAssertEqual(similar, settled, "a near-identical external refresh does not rewrite the title")
+        let different = LiveTitleArbiter.merged(current: settled,
+                                                candidateText: "Vacation flights to Lisbon in June",
+                                                tier: .external)
+        XCTAssertEqual(different?.text, "Vacation flights to Lisbon in June",
+                       "a genuinely different external title earns the replacement")
+    }
+
+    // MARK: the exponential backoff schedule (pure)
+
+    func testBackoffScheduleDoublesFromOneMinuteAndCapsAtThirty() {
+        let b = LiveTitleBackoff.default   // firstDelay 60s, x2, ceiling 1800s
+        XCTAssertEqual(b.delay(afterRefreshes: 0), 60, "first refresh at ~1 min")
+        XCTAssertEqual(b.delay(afterRefreshes: 1), 120, "then +2 min")
+        XCTAssertEqual(b.delay(afterRefreshes: 2), 240, "then +4 min")
+        XCTAssertEqual(b.delay(afterRefreshes: 3), 480, "then +8 min")
+        XCTAssertEqual(b.delay(afterRefreshes: 4), 960, "then +16 min")
+        XCTAssertEqual(b.delay(afterRefreshes: 5), 1800, "then capped at 30 min (not 32)")
+        XCTAssertEqual(b.delay(afterRefreshes: 6), 1800, "and stays capped")
+        XCTAssertEqual(b.delay(afterRefreshes: 20), 1800, "still capped far out")
+    }
+
+    func testBackoffNeverExceedsCeilingEvenWithATinyFirstDelay() {
+        let b = LiveTitleBackoff(firstDelay: 5, multiplier: 3, ceiling: 20)
+        XCTAssertEqual(b.delay(afterRefreshes: 0), 5)
+        XCTAssertEqual(b.delay(afterRefreshes: 1), 15)
+        XCTAssertEqual(b.delay(afterRefreshes: 2), 20, "min(45, 20)")
+        XCTAssertEqual(b.delay(afterRefreshes: -3), 5, "negative clamps to the first delay")
+    }
+
     // MARK: the manager owns ONE live title for both surfaces
 
     @MainActor
@@ -171,6 +230,36 @@ final class RollingTitleTests: XCTestCase {
             func titleAndSummary(for transcript: String) async throws -> (title: String, summary: String) {
                 bump()
                 return (title, "summary")
+            }
+        }
+
+        /// Hands out a FRESH transcriber per conversation (a split/roll makes a new one)
+        /// and remembers the latest, so a test can pump the current conversation.
+        final class FakeFactory: @unchecked Sendable {
+            private let lock = NSLock()
+            private var made: [FakeLiveTranscriber] = []
+            func make() -> FakeLiveTranscriber { let f = FakeLiveTranscriber(); lock.lock(); made.append(f); lock.unlock(); return f }
+            var last: FakeLiveTranscriber? { lock.lock(); defer { lock.unlock() }; return made.last }
+        }
+
+        /// A stand-in for the door's external live-title route: records every call
+        /// (captureId, history, seq) and either returns a sharpened title or throws
+        /// (offline). Thread-safe so it can back the `@Sendable` closure seam.
+        final class ExternalRecorder: @unchecked Sendable {
+            struct Call: Sendable { let captureId: String; let history: String; let seq: Int }
+            private let lock = NSLock()
+            private var _calls: [Call] = []
+            private let reply: String?
+            private let fails: Bool
+            init(reply: String?, fails: Bool = false) { self.reply = reply; self.fails = fails }
+            var calls: [Call] { lock.lock(); defer { lock.unlock() }; return _calls }
+            var count: Int { lock.lock(); defer { lock.unlock() }; return _calls.count }
+            func closure() -> @Sendable (String, String, Int) async throws -> String? {
+                { [self] captureId, history, seq in
+                    lock.withLock { _calls.append(Call(captureId: captureId, history: history, seq: seq)) }
+                    if fails { throw DoorError.transport("offline") }
+                    return reply
+                }
             }
         }
     }
@@ -257,5 +346,150 @@ final class RollingTitleTests: XCTestCase {
 
         mgr.endCurrentConversation()
         try await waitUntil { mgr.liveTitle == nil }
+    }
+
+    // MARK: two-tier live title — instant placeholder + external backoff refresh
+
+    /// firstDelay 0 so the external refresh fires on the first eligible finalized
+    /// snapshot: the heuristic placeholder appears instantly, then the external
+    /// (Fireworks-via-door) refresh SHARPENS it — and the door receives the WHOLE
+    /// conversation history, not just the recent words.
+    @MainActor
+    func testExternalRefreshSharpensTheInstantPlaceholderWithWholeHistory() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let src = Fixtures.TestSource()
+        let fake = Fixtures.FakeLiveTranscriber()
+        let recorder = Fixtures.ExternalRecorder(reply: "Fireworks Sharpened Title")
+        let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
+        let mgr = CaptureManager(target: target, baseDir: dir, source: src,
+                                 finalize: { _, _ in },
+                                 liveTranscriber: { fake },
+                                 liveTitler: nil,   // heuristic-only placeholder (isolate external)
+                                 liveTitleExternal: recorder.closure(),
+                                 liveTitleBackoff: LiveTitleBackoff(firstDelay: 0, multiplier: 2, ceiling: 1))
+
+        src.onState?(.streaming)
+        try await waitUntil { mgr.active != nil }
+
+        let context = "okay so the kitchen renovation budget is our topic today for planning cabinets and counters"
+        fake.emit(finalSnap(context))
+        // The instant placeholder appears (heuristic, no network), then the external wins.
+        try await waitUntil { mgr.liveTitle != nil }
+        try await waitUntil { mgr.liveTitle == "Fireworks Sharpened Title" }
+
+        let firstCall = try XCTUnwrap(recorder.calls.first)
+        XCTAssertEqual(firstCall.seq, 0, "the first live-title request carries seq 0")
+        XCTAssertTrue(firstCall.history.lowercased().contains("kitchen renovation budget"),
+                      "the door receives the WHOLE conversation history, not just recent words")
+        XCTAssertFalse(mgr.active?.captureId.isEmpty ?? true)
+        XCTAssertEqual(firstCall.captureId, mgr.active?.captureId, "keyed by the phone capture id")
+    }
+
+    /// Door unreachable / offline: the external refresh throws, the on-device (here
+    /// heuristic) title STANDS, and after the failure budget the door stops being asked.
+    @MainActor
+    func testOfflineKeepsTheOnDeviceTitleAndStopsAskingAfterFailures() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let src = Fixtures.TestSource()
+        let fake = Fixtures.FakeLiveTranscriber()
+        let recorder = Fixtures.ExternalRecorder(reply: nil, fails: true)
+        let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
+        let mgr = CaptureManager(target: target, baseDir: dir, source: src,
+                                 finalize: { _, _ in },
+                                 liveTranscriber: { fake },
+                                 liveTitler: nil,
+                                 liveTitleExternal: recorder.closure(),
+                                 liveTitleBackoff: LiveTitleBackoff(firstDelay: 0, multiplier: 2, ceiling: 1))
+
+        src.onState?(.streaming)
+        try await waitUntil { mgr.active != nil }
+
+        // Emit a growing conversation so each new snapshot is an eligible tick.
+        var context = "planning the quarterly platform budget with the whole team today for the offsite"
+        for i in 0..<6 {
+            context += " and then topic\(i) and detail\(i) about the roadmap and hiring plans"
+            fake.emit(finalSnap(context))
+            try await Task.sleep(nanoseconds: 60_000_000)
+        }
+        // Offline still gets a title (the heuristic placeholder), never blank.
+        let title = try XCTUnwrap(mgr.liveTitle, "offline must still produce an on-device title")
+        XCTAssertFalse(title.isEmpty)
+        // The door was asked at most the failure budget, then abandoned — not hammered.
+        try await waitUntil { recorder.count >= 3 }
+        let settled = recorder.count
+        // A couple more snapshots must NOT drive more calls (external disabled for the session).
+        context += " one more closing wrap up about the launch timeline and the next steps"
+        fake.emit(finalSnap(context))
+        try await Task.sleep(nanoseconds: 120_000_000)
+        XCTAssertEqual(recorder.count, settled, "a down door is abandoned, not hammered")
+        XCTAssertLessThanOrEqual(settled, 3, "external stops after the failure budget")
+    }
+
+    /// The backoff never spends a call on silence: after a successful refresh, a
+    /// re-emitted snapshot with NO new words does not trigger another external call.
+    @MainActor
+    func testExternalSkipsATickWithNoNewWords() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let src = Fixtures.TestSource()
+        let fake = Fixtures.FakeLiveTranscriber()
+        let recorder = Fixtures.ExternalRecorder(reply: "Sharpened One")
+        let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
+        let mgr = CaptureManager(target: target, baseDir: dir, source: src,
+                                 finalize: { _, _ in },
+                                 liveTranscriber: { fake },
+                                 liveTitler: nil,
+                                 liveTitleExternal: recorder.closure(),
+                                 liveTitleBackoff: LiveTitleBackoff(firstDelay: 0, multiplier: 2, ceiling: 1))
+
+        src.onState?(.streaming)
+        try await waitUntil { mgr.active != nil }
+
+        let context = "planning the quarterly platform budget with the whole team today for the offsite agenda"
+        fake.emit(finalSnap(context))
+        try await waitUntil { recorder.count == 1 }
+        // Re-emit the SAME context (no new finalized words) — must not spend another call.
+        fake.emit(finalSnap(context))
+        try await Task.sleep(nanoseconds: 120_000_000)
+        XCTAssertEqual(recorder.count, 1, "no new words → no external call (never spend on silence)")
+        // Genuinely new words → a new refresh is allowed.
+        fake.emit(finalSnap(context + " and now a completely new closing topic about vacation flights"))
+        try await waitUntil { recorder.count == 2 }
+    }
+
+    /// A genuinely NEW conversation (manual split) re-arms the backoff and re-targets:
+    /// the external refresh fires again for the new capture id with a fresh seq — and
+    /// it is never left stuck "in flight" across the transcriber swap (regression guard).
+    @MainActor
+    func testNewConversationReArmsExternalAndReTargets() async throws {
+        let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let src = Fixtures.TestSource()
+        let factory = Fixtures.FakeFactory()
+        let recorder = Fixtures.ExternalRecorder(reply: "Sharpened Title")
+        let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
+        let mgr = CaptureManager(target: target, baseDir: dir, source: src,
+                                 finalize: { _, _ in },
+                                 liveTranscriber: { factory.make() },
+                                 liveTitler: nil,
+                                 liveTitleExternal: recorder.closure(),
+                                 liveTitleBackoff: LiveTitleBackoff(firstDelay: 0, multiplier: 2, ceiling: 1))
+
+        src.onState?(.streaming)
+        try await waitUntil { mgr.active != nil && factory.last != nil }
+        let convo1 = try XCTUnwrap(mgr.active?.captureId)
+        let sentence = "planning the quarterly platform budget with the whole team today for the offsite agenda"
+        factory.last!.emit(finalSnap(sentence))
+        try await waitUntil { recorder.count == 1 }
+        XCTAssertEqual(recorder.calls[0].seq, 0)
+        XCTAssertEqual(recorder.calls[0].captureId, convo1)
+
+        // Manual split → a brand-new conversation (new transcriber + capture id).
+        mgr.splitConversation()
+        try await waitUntil { mgr.active?.captureId != nil && mgr.active?.captureId != convo1 }
+        let convo2 = try XCTUnwrap(mgr.active?.captureId)
+        factory.last!.emit(finalSnap("a totally separate discussion about the vacation flights to Lisbon in June"))
+        // External is NOT stuck in-flight across the swap: it fires again, re-armed.
+        try await waitUntil { recorder.count == 2 }
+        XCTAssertEqual(recorder.calls[1].captureId, convo2, "the external refresh re-targets the new conversation")
+        XCTAssertEqual(recorder.calls[1].seq, 0, "a fresh conversation resets the request sequence")
     }
 }

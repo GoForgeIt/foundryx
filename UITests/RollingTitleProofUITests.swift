@@ -92,6 +92,15 @@ final class RollingTitleProofUITests: XCTestCase {
         // conversation to that point).
         XCTAssertNotEqual(early, evolved, "the title updates as the conversation grows")
 
+        // 4. Two-tier proof (track 20260717T1500): the EXTERNAL refresh (scripted
+        // Fireworks stand-in) has sharpened the instant on-device placeholder on the
+        // backoff — the evolved title is the external one, which the simulator's lack
+        // of Apple Intelligence means could only come from the external tier.
+        shoot(app, "03-external-sharpen")
+        let externalTitles = ["Kitchen Renovation Budget Plan", "Kitchen Reno: Budget and Permits"]
+        XCTAssertTrue(externalTitles.contains(evolved),
+                      "the external refresh sharpened the live title on the backoff: \(evolved)")
+
         // Leave the simulator clean.
         let endAndSave = app.buttons["End and save"].firstMatch
         if endAndSave.waitForExistence(timeout: 5) { endAndSave.tap() }

@@ -393,9 +393,16 @@ private struct MainTabs: View {
         // proof harness, a scripted transcriber that replays a known conversation
         // through the REAL pipeline (title heuristic + arbiter + published title).
         var liveFactory = LiveTranscription.defaultFactory()
+        // The EXTERNAL live-title refresh (track 20260717T1500): nil ⇒ the door path
+        // (door branch) or off (local). The DEBUG proof harness overrides it with a
+        // scripted external + a fast backoff so the two-tier sharpen is screenshottable.
+        var scriptedExternal: (@Sendable (String, String, Int) async throws -> String?)?
+        var liveBackoff = LiveTitleBackoff.default
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-RollingTitleDemo") {
             liveFactory = ScriptedLiveTranscriber.factory()
+            scriptedExternal = ScriptedExternalTitle.closure()
+            liveBackoff = LiveTitleBackoff(firstDelay: 4, multiplier: 2, ceiling: 20)
         }
         #endif
         let mgr: CaptureManager
@@ -414,6 +421,10 @@ private struct MainTabs: View {
                 micSource: MicFrameSource(log: log),
                 liveTranscriber: liveFactory,
                 liveTitler: systemTitler,
+                // Production local mode: external OFF (nil) — the on-device title stands
+                // offline. Only the DEBUG proof harness injects a scripted external here.
+                liveTitleExternal: scriptedExternal,
+                liveTitleBackoff: liveBackoff,
                 localMode: true)
         } else {
             localSTT = nil
@@ -423,7 +434,18 @@ private struct MainTabs: View {
                 // Omi is disconnected) — flows through the identical Opus/WAL/finalize path.
                 micSource: MicFrameSource(log: log),
                 liveTranscriber: liveFactory,
-                liveTitler: systemTitler)
+                // On-device Foundation Models stays the INSTANT placeholder + offline
+                // fallback; the door refresh SHARPENS it externally on the backoff.
+                liveTitler: systemTitler,
+                // Phone-originated EXTERNAL live re-title (track 20260717T1500): the door
+                // runs the whole-conversation history through Fireworks. Relay-aware, so
+                // it works off-LAN; unreachable/old door → the on-device title stands.
+                // (The DEBUG proof harness swaps in a scripted external.)
+                liveTitleExternal: scriptedExternal ?? { captureId, history, seq in
+                    try await DoorClient(target: target).liveTitle(
+                        captureId: captureId, history: history, seq: seq)
+                },
+                liveTitleBackoff: liveBackoff)
         }
         // Omi hardware button: a DOUBLE-click pauses/resumes the current recording — the
         // same action as the on-screen Pause. Fires only if the paired Omi firmware exposes

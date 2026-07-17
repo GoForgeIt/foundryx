@@ -854,11 +854,14 @@ public final class CaptureManager: ObservableObject {
     #endif
 
     // MARK: rolling live title (track 20260717T1015) — whole-conversation, debounced
-    /// The optional on-device titler for LIVE refreshes (nil ⇒ heuristic-only).
+    /// The optional on-device titler for LIVE refreshes (nil ⇒ heuristic-only). This
+    /// is the INSTANT PLACEHOLDER's upgrade AND the offline fallback (Nick, track
+    /// 20260717T1500): it keeps naming the conversation cheaply and works with no
+    /// network; the external refresh only SHARPENS it when a door is reachable.
     private let liveTitler: LocalTitleSummary?
     /// The refresh cadence (injected so tests collapse the debounce).
     private let liveTitleCadence: LiveTitleCadence
-    /// The settled title + its tier (heuristic vs model) behind `liveTitle`.
+    /// The settled title + its tier (heuristic / model / external) behind `liveTitle`.
     private var liveTitleState: LiveTitleState?
     private var titleWordsAtLastHeuristic = 0
     private var titleWordsAtLastModel = 0
@@ -868,6 +871,33 @@ public final class CaptureManager: ObservableObject {
     /// Consecutive live-titler failures tolerated before the session goes
     /// heuristic-only (on-device turns have hung in the wild).
     private static let maxModelTitleFailures = 2
+
+    // MARK: external live title (track 20260717T1500) — phone-originated, backoff-scheduled
+    /// The EXTERNAL live-title refresh (nil ⇒ off — "just my phone" / offline: the
+    /// on-device placeholder stands alone). Called on the exponential backoff with the
+    /// whole-conversation history + a monotonic seq; returns a sharpened external title
+    /// (nil ⇒ door has no route / no title). Injected so tests drive it without a door.
+    private let liveTitleExternal: (@Sendable (_ captureId: String, _ history: String, _ seq: Int) async throws -> String?)?
+    /// The exponential backoff schedule (injected so tests collapse the wait).
+    private let liveTitleBackoff: LiveTitleBackoff
+    /// The conversation-scoped backoff anchor. `nil` until the first fresh conversation
+    /// arms it; PRESERVED across an internal silence-gap roll and a resume-same-id so a
+    /// long conversation keeps its widened spacing (never re-tightens to 60s on a roll).
+    private var backoffStartedAt: Date?
+    /// Absolute time of the next scheduled external refresh (nil ⇒ not armed).
+    private var nextExternalFireAt: Date?
+    /// External refreshes that have already fired this conversation (drives the doubling).
+    private var externalRefreshCount = 0
+    private var externalTitleInFlight = false
+    private var externalTitleFailures = 0
+    /// Finalized word count at the last SUCCESSFUL external refresh — the "skip a tick
+    /// with no new words" gate (never spend an external call on silence).
+    private var wordsAtLastExternal = 0
+    /// Monotonic per-conversation request sequence so the door applies only the latest.
+    private var nextLiveTitleSeq = 0
+    /// Consecutive external failures tolerated before the conversation stops asking the
+    /// door (a down/absent door must not be hammered; the on-device title stands).
+    private static let maxExternalTitleFailures = 3
 
     /// Test seam: override the per-segment door upload for every WAL this manager
     /// builds (so the bounded-retry / backoff / abandon / re-auth paths are exercised
@@ -887,12 +917,16 @@ public final class CaptureManager: ObservableObject {
                 liveTranscriber: LiveTranscriberFactory? = nil,
                 liveTitler: LocalTitleSummary? = nil,
                 liveTitleCadence: LiveTitleCadence = .default,
+                liveTitleExternal: (@Sendable (String, String, Int) async throws -> String?)? = nil,
+                liveTitleBackoff: LiveTitleBackoff = .default,
                 uploadSegment: (@Sendable (String, UInt64, Data) async throws -> Void)? = nil) {
         self.target = target
         self.uploadSegment = uploadSegment
         self.makeLiveTranscriber = liveTranscriber
         self.liveTitler = liveTitler
         self.liveTitleCadence = liveTitleCadence
+        self.liveTitleExternal = liveTitleExternal
+        self.liveTitleBackoff = liveTitleBackoff
         self.baseDir = baseDir ?? CaptureWAL.documentsCaptures()
         self.log = log
         self.source = source
@@ -2131,7 +2165,9 @@ public final class CaptureManager: ObservableObject {
         router.setExternalPCM(isRecordingMic)
         router.setPaused(isPaused)
         router.setWAL(wal)
-        startLiveTranscription()
+        // Resume-same-id (explicit user re-open): CONTINUE the external backoff spacing
+        // rather than re-tightening to 60s — the conversation is the same one.
+        startLiveTranscription(freshConversation: false)
         lastHeartbeatAt = 0; lastHeartbeatFrames = router.stats().count
         pushLiveState(.start)
         startMeter()            // a live capture is ALWAYS metered, regardless of which screen is visible (Bug 2)
@@ -2361,6 +2397,9 @@ public final class CaptureManager: ObservableObject {
         // roll (`endSession(); beginSession()`) PRESERVES the existing anchor and stays
         // invisible to the user. An explicit boundary (split/stop/grace-expiry) clears the
         // clock first, so the next fresh session re-anchors here (track 20260717T0630).
+        // The SAME nil-clock signal distinguishes a genuinely new conversation (re-arm the
+        // external title backoff) from an internal roll (keep the widened spacing).
+        let freshConversation = (recordingClock == nil)
         if recordingClock == nil {
             recordingClock = RecordingClock(startedAt: Date(), paused: isPaused, now: Date())
         }
@@ -2400,7 +2439,7 @@ public final class CaptureManager: ObservableObject {
         router.setExternalPCM(isRecordingMic)
         router.setPaused(isPaused)
         router.setWAL(wal)                        // frames now flow into this WAL
-        startLiveTranscription()                  // additive live preview (no-op if unwired)
+        startLiveTranscription(freshConversation: freshConversation)   // additive live preview (no-op if unwired)
         lastHeartbeatAt = 0; lastHeartbeatFrames = router.stats().count   // fresh heartbeat baseline
         pushLiveState(.start)   // start the Live Activity + refresh the home-screen widget
         startMeter()            // a live capture is ALWAYS metered, regardless of which screen is visible (Bug 2)
@@ -2456,7 +2495,9 @@ public final class CaptureManager: ObservableObject {
         router.setExternalPCM(false)              // ambient Omi keeps the internal decode tap
         router.setPaused(isPaused)
         router.setWAL(wal)                        // frames now flow into this WAL — continued sequence
-        startLiveTranscription()
+        // Resume-same-id across reconnect/relaunch: CONTINUE the external backoff schedule
+        // (the same conversation continues — never reset the spacing on an internal roll).
+        startLiveTranscription(freshConversation: false)
         lastHeartbeatAt = 0; lastHeartbeatFrames = router.stats().count
         pushLiveState(.start)
         startMeter()
@@ -2470,10 +2511,14 @@ public final class CaptureManager: ObservableObject {
     /// Spin up a fresh per-conversation live transcriber (if a factory is wired) and
     /// pump its provisional transcript into `liveTranscript`. All failures are
     /// non-fatal: capture continues with no live preview.
-    private func startLiveTranscription() {
+    private func startLiveTranscription(freshConversation: Bool) {
+        // The transient title state resets for every fresh transcriber (empty context);
+        // the external backoff schedule ONLY re-arms for a genuinely new conversation —
+        // an internal roll / resume-same-id continues the widened spacing.
+        resetLiveTitleTransient()
+        if freshConversation { resetLiveTitleBackoff() }
         guard let make = makeLiveTranscriber, let t = make() else { return }
         liveTranscript = .empty
-        resetLiveTitle()
         liveTranscriber = t
         #if canImport(AVFoundation)
         liveBox.set(t)
@@ -2517,7 +2562,9 @@ public final class CaptureManager: ObservableObject {
         // provisional card (better than first-words-of-tail) until the authoritative
         // pipeline title lands. Then clear the published title with the preview.
         let sessionTitle = liveTitleState?.text
-        resetLiveTitle()
+        // Only the transient title clears here; the conversation-scoped external backoff
+        // survives a transcriber teardown so an internal roll keeps its schedule.
+        resetLiveTitleTransient()
         if let t {
             Task { @MainActor [weak self] in
                 let settled = await t.finish()
@@ -2529,8 +2576,12 @@ public final class CaptureManager: ObservableObject {
         }
     }
 
-    /// Clear all rolling-title state (session begin/end).
-    private func resetLiveTitle() {
+    /// Clear the TRANSIENT rolling-title state tied to one transcriber (the visible
+    /// title + the heuristic/on-device-model cadence counters). Runs on every
+    /// transcriber (re)start — including an internal roll / resume — because a fresh
+    /// transcriber begins with an empty context. Does NOT touch the conversation-scoped
+    /// external backoff schedule.
+    private func resetLiveTitleTransient() {
         liveTitle = nil
         liveTitleState = nil
         titleWordsAtLastHeuristic = 0
@@ -2538,6 +2589,29 @@ public final class CaptureManager: ObservableObject {
         lastModelTitleAt = nil
         modelTitleInFlight = false
         modelTitleFailures = 0
+        // Transcriber-scoped external guards: a transcriber swap (roll/resume) invalidates
+        // any in-flight external call and RESETS the per-transcriber word watermark (the
+        // fresh transcriber's context restarts small — otherwise the stale-and-larger
+        // watermark would suppress the external refresh for the rest of the conversation).
+        externalTitleInFlight = false
+        wordsAtLastExternal = 0
+    }
+
+    /// Arm the EXTERNAL backoff schedule for a genuinely NEW conversation (track
+    /// 20260717T1500): first external refresh one `firstDelay` from now, counters
+    /// cleared. Deliberately NOT called on an internal silence-gap roll or a
+    /// resume-same-id, so a long conversation keeps its widened spacing rather than
+    /// re-tightening to 60s every time the transcriber is swapped.
+    private func resetLiveTitleBackoff() {
+        // Conversation-scoped only (transcriber-scoped guards live in the transient reset,
+        // which always runs alongside this). Re-arming here re-tightens spacing to 60s —
+        // done ONLY for a genuinely new conversation, never an internal roll / resume.
+        let now = Date()
+        backoffStartedAt = now
+        nextExternalFireAt = now.addingTimeInterval(liveTitleBackoff.delay(afterRefreshes: 0))
+        externalRefreshCount = 0
+        externalTitleFailures = 0
+        nextLiveTitleSeq = 0
     }
 
     /// Recompute the rolling title from the WHOLE conversation context. Runs only on
@@ -2556,6 +2630,7 @@ public final class CaptureManager: ObservableObject {
             }
         }
         maybeRefreshModelTitle(context: snap.titleContext, words: words)
+        maybeRefreshExternalTitle(context: snap.titleContext, words: words)
     }
 
     /// A debounced on-device model refresh of the live title: at most one in flight,
@@ -2591,6 +2666,65 @@ public final class CaptureManager: ObservableObject {
                 self.log?.warn("live title refresh failed (\(self.modelTitleFailures)): \((error as NSError).localizedDescription)")
             }
         }
+    }
+
+    /// The EXTERNAL live-title refresh on the EXPONENTIAL BACKOFF (track 20260717T1500,
+    /// Nick-approved). The on-device heuristic/model title is the INSTANT placeholder;
+    /// this asks the door for an external (Fireworks) re-title that SHARPENS it on a
+    /// geometric cadence (~1, 3, 7, 15, 31 min… capped 30 min between refreshes). It is
+    /// SNAPSHOT-DRIVEN — evaluated only when new finalized speech arrives — so it never
+    /// spends a call on silence. Guards: external wired at all (nil ⇒ "just my phone" /
+    /// offline → placeholder stands); at most one in flight; not paused; ≥ minimum words;
+    /// NEW words since the last success; the backoff time reached; not disabled after
+    /// repeated failures; an active capture id. The whole-conversation `context` (the
+    /// phone's bounded head+tail) is what the door titles — not the recent words.
+    private func maybeRefreshExternalTitle(context: String, words: Int) {
+        guard let fetch = liveTitleExternal, !isPaused,
+              !externalTitleInFlight,
+              externalTitleFailures < Self.maxExternalTitleFailures,
+              let captureId = active?.captureId else { return }
+        // Don't title a near-empty conversation, and skip a tick with no new words.
+        guard words >= WholeConversationTitle.minimumWords,
+              words > wordsAtLastExternal else { return }
+        // Self-arm if a resume-same-id continued into a conversation the backoff was
+        // never armed for (fresh app process); otherwise honor the standing schedule.
+        if nextExternalFireAt == nil { resetLiveTitleBackoff() }
+        guard let due = nextExternalFireAt, Date() >= due else { return }
+
+        externalTitleInFlight = true
+        let seq = nextLiveTitleSeq
+        nextLiveTitleSeq += 1
+        // The session identity at launch: a roll/resume swaps the transcriber, and a
+        // stale completion must not title the NEXT transcriber's conversation.
+        let session = liveTranscriber
+        Task { @MainActor [weak self] in
+            do {
+                let title = try await fetch(captureId, context, seq)
+                guard let self, self.liveTranscriber === session else { return }
+                self.externalTitleInFlight = false
+                self.externalTitleFailures = 0
+                self.wordsAtLastExternal = words
+                self.advanceExternalBackoff()
+                if let title, !title.isEmpty {
+                    self.applyTitleCandidate(title, tier: .external)
+                }
+            } catch {
+                guard let self, self.liveTranscriber === session else { return }
+                self.externalTitleInFlight = false
+                self.externalTitleFailures += 1
+                // Widen on failure too (spacing keeps growing); the on-device title stands.
+                self.advanceExternalBackoff()
+                self.log?.warn("external live title refresh failed (\(self.externalTitleFailures)): \((error as NSError).localizedDescription)")
+            }
+        }
+    }
+
+    /// Advance the backoff after an external attempt (success OR failure) so the next
+    /// refresh is one doubled interval out (capped at the ceiling), anchored to now.
+    private func advanceExternalBackoff() {
+        externalRefreshCount += 1
+        nextExternalFireAt = Date().addingTimeInterval(
+            liveTitleBackoff.delay(afterRefreshes: externalRefreshCount))
     }
 
     /// Route a candidate through the anti-flicker arbiter; publish only real changes.
