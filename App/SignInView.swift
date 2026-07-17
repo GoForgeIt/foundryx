@@ -1,9 +1,12 @@
 import SwiftUI
 import Grain
 
-// FoundryX remote sign-in (M5 R1b) — branded entry gate. "Continue with Google /
-// Microsoft" → resolve the account's designated desktop host → connect off-LAN
-// through the blind relay. Styled with the Grain design system to match the app.
+// FoundryX remote sign-in (M5 R1b) — SHEET-ONLY since track 20260715T1502
+// (Nick 2026-07-16): this page never gates the app anymore. The welcome surface
+// is the front door (sign-in buttons + live connect status live THERE — see
+// PersonaWelcomeStep + WelcomeFrontDoor); this view remains as the in-app
+// account/status sheet (Settings account, Vault sign-in, waitlist sign-in) with
+// Retry connection / Sign out. Styled with Grain to match the app.
 //
 // LOGO: uses a placeholder brand mark (SF Symbol) until the real Foundry / Ville
 // logo assets are added to Resources/Assets.xcassets (then swap `brandMark`).

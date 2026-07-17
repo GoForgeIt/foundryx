@@ -42,10 +42,22 @@ enum OnboardingPrefs {
 
 struct OnboardingFlowView: View {
     let baseDir: URL
+    /// Track 20260715T1502: when the welcome ALREADY fronted the app (the connect
+    /// gate marked it seen), the flow starts at the voice step so a fresh install
+    /// never meets the welcome twice (AC3/AC4). Settings' "Replay the full
+    /// first-run tour" leaves this false — the full tour still opens with it.
+    var skipWelcome: Bool = false
     let onDone: () -> Void
 
     private enum Step { case welcome, voice, ambient }
-    @State private var step: Step = .welcome
+    @State private var step: Step
+
+    init(baseDir: URL, skipWelcome: Bool = false, onDone: @escaping () -> Void) {
+        self.baseDir = baseDir
+        self.skipWelcome = skipWelcome
+        self.onDone = onDone
+        _step = State(initialValue: skipWelcome ? .voice : .welcome)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -85,14 +97,18 @@ struct OnboardingFlowView: View {
 /// "What brings you here?" switch sits ABOVE the art and re-renders the screen
 /// in place; the choice persists and is editable in Settings. Either action
 /// marks the welcome seen (B2) — "Set up later" dismisses it forever.
-/// A quiet, live connection status shown on the welcome when it doubles as the
-/// post-sign-in CONNECT gate (track 20260715T1502). Default-nil on the welcome
-/// leaves the first-run flow + Settings-explorer renditions unchanged.
-struct WelcomeConnectStatus: Equatable {
-    let text: String
-    /// true once the connection settled (connected / on-phone) → a calm sage dot;
-    /// false while still resolving → a working amber dot.
-    let settled: Bool
+// WelcomeConnectStatus moved to FoundryXKit (Sources/FoundryXKit/WelcomeFrontDoor.swift)
+// so the connect-pill mapping is pure + `swift test`-covered (track 20260715T1502 re-cut).
+
+/// The welcome's sign-in rendition (track 20260715T1502, Nick 2026-07-16): the
+/// welcome surface IS the front door — a signed-out user meets the sign-in
+/// provider buttons ON the welcome, never the old SignInView connection page.
+struct WelcomeSignInActions {
+    let providers: [AuthProvider]
+    /// An honest caption under the buttons ("Signing in…", an error, or the
+    /// unconfigured-build notice). nil = nothing to say.
+    let statusText: String?
+    let onTap: (AuthProvider) -> Void
 }
 
 struct PersonaWelcomeStep: View {
@@ -103,6 +119,10 @@ struct PersonaWelcomeStep: View {
     /// "Take me in" / "Skip the welcome" (track 20260715T1502). nil = the original
     /// first-run + Settings-explorer welcome, unchanged.
     var connect: WelcomeConnectStatus? = nil
+    /// When non-nil the welcome is the SIGNED-OUT front door: the action area
+    /// renders the sign-in provider buttons instead of Continue / "Take me in",
+    /// and nothing marks the welcome seen (seeing the door isn't the ceremony).
+    var signIn: WelcomeSignInActions? = nil
 
     @State private var persona: OnboardingPersona = PersonaPrefs.persona()
 
@@ -141,15 +161,19 @@ struct PersonaWelcomeStep: View {
                 if let connect {
                     connectPill(connect).padding(.bottom, GrainSpacing.x3)
                 }
-                GrainButton(connect == nil ? PersonaWelcomeLayout.primaryAction : "Take me in",
-                            variant: .filled, size: .regular) {
-                    WelcomePrefs.markSeen()
-                    onStart()
-                }
-                GrainButton(connect == nil ? PersonaWelcomeLayout.quietAction : "Skip the welcome",
-                            variant: .text, size: .regular) {
-                    WelcomePrefs.markSeen()
-                    onSkip()
+                if let signIn {
+                    signInActions(signIn)
+                } else {
+                    GrainButton(connect == nil ? PersonaWelcomeLayout.primaryAction : "Take me in",
+                                variant: .filled, size: .regular) {
+                        WelcomePrefs.markSeen()
+                        onStart()
+                    }
+                    GrainButton(connect == nil ? PersonaWelcomeLayout.quietAction : "Skip the welcome",
+                                variant: .text, size: .regular) {
+                        WelcomePrefs.markSeen()
+                        onSkip()
+                    }
                 }
                 HStack(spacing: 5) {
                     Image(grain: .key).font(.system(size: 10, weight: .light))
@@ -212,6 +236,37 @@ struct PersonaWelcomeStep: View {
                 }
             }
         }
+    }
+
+    /// The sign-in front door's action area (track 20260715T1502 re-cut): the same
+    /// provider buttons the old SignInView carried, now living ON the welcome. An
+    /// empty provider list (unconfigured build) shows only the honest caption.
+    @ViewBuilder private func signInActions(_ signIn: WelcomeSignInActions) -> some View {
+        VStack(spacing: GrainSpacing.x2) {
+            ForEach(signIn.providers, id: \.self) { p in
+                Button { signIn.onTap(p) } label: {
+                    HStack(spacing: GrainSpacing.x2) {
+                        Image(systemName: p == .google ? "globe" : "building.2.fill")
+                        Text(p == .apple ? "Sign in with Apple"
+                             : "Continue with \(p == .google ? "Google" : "Microsoft")")
+                            .fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, GrainSpacing.x3)
+                    .background(GrainColor.forgeBlue)
+                    .foregroundStyle(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: GrainRadius.lg, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+            if let statusText = signIn.statusText {
+                Text(statusText)
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textFaint)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .padding(.horizontal, GrainSpacing.x4)
     }
 
     /// The connect-gate status pill (track 20260715T1502): a small settled/working

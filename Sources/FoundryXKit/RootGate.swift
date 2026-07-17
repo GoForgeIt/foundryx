@@ -22,10 +22,16 @@ public enum RootGate {
                                    brain: BrainChoice,
                                    hostResolved: Bool,
                                    letStraightIn: Bool = false) -> RootDestination {
-        guard splashElapsed else { return .signInGate }   // the branded launch splash first
-        // "Take me straight in": a returning user who turned the welcome/sign-in gate off
-        // opens directly into the phone-only tier — whole and offline, no forced sign-in.
-        if !signedIn { return letStraightIn ? .phoneBrain : .signInGate }
+        // "Take me straight in" (Nick 2026-07-16, track 20260715T1502): NO gate of any
+        // kind — not the splash, not the welcome, never the old connection page. The app
+        // opens immediately; a chosen computer brain is used the moment it resolves, and
+        // connection status shows IN the app (Settings → Brain), not as an interstitial.
+        if letStraightIn {
+            if signedIn, brain == .myComputer, hostResolved { return .computerBrain }
+            return .phoneBrain
+        }
+        guard splashElapsed else { return .signInGate }   // the welcome front door leads
+        if !signedIn { return .signInGate }
         if brain == .myComputer, hostResolved { return .computerBrain }
         return .phoneBrain
     }

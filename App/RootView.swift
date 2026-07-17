@@ -8,12 +8,11 @@ import Grain
 struct RootView: View {
     @StateObject private var remote = RemoteSession()
     @State private var showingAccount = false
-    // On a FRESH launch, let the branded sign-in screen sit for ~2s before
-    // auto-advancing into the app (so an already-signed-in user still sees it).
-    // This .task runs once at launch; foregrounding an already-open app does NOT
-    // re-run it, so we never bounce back to the gate mid-session.
-    @State private var splashElapsed = false
     @State private var showingOnboarding = false
+    /// Whether the presented onboarding flow skips its internal welcome step
+    /// (set at present-time from WelcomeFrontDoor.firstRunPresentation — the
+    /// welcome-as-gate already played the ceremony, never twice).
+    @State private var onboardingSkipsWelcome = false
     /// B2 (track 20260714T1800): the persona welcome, ONCE post-sign-in, on its
     /// own flag — established installs (onboarding migrated to "completed") still
     /// see it once after the update; "Set up later" dismisses it forever.
@@ -35,51 +34,56 @@ struct RootView: View {
     @StateObject private var accountDeletion = AccountDeletionModel.live()
     @Environment(\.scenePhase) private var scenePhase
 
-    /// T5: an established, signed-in, non-opted-out user sees the persona welcome AS
-    /// the post-sign-in connect gate (with live status) until they enter the app.
-    /// False for a signed-out user, a fresh install (not yet onboarded), an opted-out
-    /// user, and after entry — so every other entry path is untouched.
-    private var connectWelcomeActive: Bool {
-        remote.email != nil
-            && !WelcomePrefs.letStraightIn()
-            && OnboardingPrefs.completed
-            && !enteredApp
+    /// The front-door rendition for the `.signInGate` destination (track
+    /// 20260715T1502 re-cut, Nick 2026-07-16: the welcome IS the front door — the
+    /// old SignInView connection page never gates, on any path).
+    private var frontDoorSurface: WelcomeFrontDoor.Surface {
+        WelcomeFrontDoor.surface(signedIn: remote.email != nil,
+                                 letStraightIn: WelcomePrefs.letStraightIn(),
+                                 entered: enteredApp)
     }
 
-    /// T5: the live connection line for the connect-welcome pill, from remote.status.
-    private var connectionNote: WelcomeConnectStatus? {
-        switch remote.status {
-        case .resolving:
-            return WelcomeConnectStatus(text: "Connecting to your computer…", settled: false)
-        case .connected:
-            let suffix = remote.email.map { " · \($0)" } ?? ""
-            return WelcomeConnectStatus(text: "Connected" + suffix, settled: true)
-        case .noHost:
-            return WelcomeConnectStatus(text: "On your phone", settled: true)
-        case .error:
-            return WelcomeConnectStatus(text: "Couldn't reach your computer", settled: false)
-        default:
-            return nil
-        }
-    }
-
-    /// T5: the connect-welcome's action — enter the app exactly once. Marking it seen
+    /// The connect-welcome's action — enter the app exactly once. Marking it seen
     /// FIRST guarantees presentFirstRunSurfacesIfNeeded() (and the dest onChange) can
-    /// never re-present the legacy post-entry welcome (AC4).
+    /// never re-present the legacy post-entry welcome (AC4) — firstRunPresentation
+    /// with welcomeSeen == true never returns .standaloneWelcome.
     private func enterApp() {
         WelcomePrefs.markSeen()
         enteredApp = true
-        splashElapsed = true
         presentFirstRunSurfacesIfNeeded()
     }
 
     var body: some View {
         // DEV-only visual harness: `-WelcomePreview` launch arg shows the persona
         // welcome directly (chooser flips expert/individual/firm), bypassing auth
-        // so the design can be screenshot-verified in the simulator. No effect in
-        // normal launches.
-        if ProcessInfo.processInfo.arguments.contains("-WelcomePreview") {
-            return AnyView(PersonaWelcomeStep(onStart: {}, onSkip: {}))
+        // so the design can be screenshot-verified in the simulator. Variants
+        // (track 20260715T1502 AC5 — the sim harness can't seed a signed-in
+        // session, so each front-door rendition is directly renderable):
+        //   `-WelcomePreview signin`     the signed-out front door (provider buttons)
+        //   `-WelcomePreview connecting` the connect gate, still resolving (amber)
+        //   `-WelcomePreview connect`    the connect gate, settled (sage, Connected)
+        // No effect in normal launches.
+        let args = ProcessInfo.processInfo.arguments
+        if let i = args.firstIndex(of: "-WelcomePreview") {
+            let variant = i + 1 < args.count ? args[i + 1] : ""
+            switch variant {
+            case "signin":
+                return AnyView(PersonaWelcomeStep(
+                    onStart: {}, onSkip: {},
+                    signIn: WelcomeSignInActions(providers: [.apple, .google, .microsoft],
+                                                 statusText: nil, onTap: { _ in })))
+            case "connecting":
+                return AnyView(PersonaWelcomeStep(
+                    onStart: {}, onSkip: {},
+                    connect: WelcomeFrontDoor.connectStatus(.resolving, email: nil)))
+            case "connect":
+                return AnyView(PersonaWelcomeStep(
+                    onStart: {}, onSkip: {},
+                    connect: WelcomeFrontDoor.connectStatus(.connected(host: "mac"),
+                                                            email: "nick@example.com")))
+            default:
+                return AnyView(PersonaWelcomeStep(onStart: {}, onSkip: {}))
+            }
         }
         // DEV-only visual harness: `-MainPreview` mounts the real tabs in phone-only
         // mode (no auth, no door) over the demo cards DemoSeed dropped on disk, so every
@@ -110,8 +114,10 @@ struct RootView: View {
                 """)
             return AnyView(AnswerSurfaceView(answer: demo, onDone: {}))
         }
+        // The welcome front door leads until the user enters (enterApp); an
+        // opted-out user short-circuits inside RootGate — no gate of any kind.
         let dest = RootGate.destination(signedIn: remote.email != nil,
-                                        splashElapsed: splashElapsed,
+                                        splashElapsed: enteredApp,
                                         brain: brains.choice,
                                         hostResolved: remote.makeDoorTarget() != nil,
                                         letStraightIn: WelcomePrefs.letStraightIn())
@@ -122,20 +128,25 @@ struct RootView: View {
         Group {
             switch dest {
             case .signInGate:
-                // T5 (track 20260715T1502): an established, non-opted-out user meets
-                // the cool persona welcome — carrying the live connection status — as
-                // the connect gate, instead of the bare SignInView. "Take me in" enters;
-                // "Skip the welcome" persists the opt-out and enters.
-                if connectWelcomeActive {
-                    PersonaWelcomeStep(
-                        onStart: enterApp,
-                        onSkip: { WelcomePrefs.setLetStraightIn(true); enterApp() },
-                        connect: connectionNote)
-                } else {
-                    // The forced identity login (track 20260705T1100 decision #5) +
-                    // the branded launch splash.
-                    SignInView(remote: remote, onDone: { }, dismissable: false)
-                }
+                // Track 20260715T1502 (re-cut, Nick 2026-07-16): the welcome IS the
+                // front door — ONE call site, parameterized by rendition (plan-review
+                // F2: same SwiftUI identity, so sign-in → connect-gate morphs in
+                // place instead of remounting). Signed out ⇒ the provider buttons
+                // live ON the welcome; signed in ⇒ the live connect pill + "Take me
+                // in" / "Skip the welcome". The old SignInView never gates — even
+                // the logically-unreachable `.none` fallback renders the welcome.
+                PersonaWelcomeStep(
+                    onStart: enterApp,
+                    onSkip: { WelcomePrefs.setLetStraightIn(true); enterApp() },
+                    connect: frontDoorSurface == .welcomeConnectGate
+                        ? WelcomeFrontDoor.connectStatus(remote.status, email: remote.email)
+                        : nil,
+                    signIn: frontDoorSurface == .welcomeSignIn
+                        ? WelcomeSignInActions(
+                            providers: remote.isConfigured ? remote.providers : [],
+                            statusText: WelcomeFrontDoor.signInCaption(remote.status),
+                            onTap: { p in Task { await remote.signIn(p) } })
+                        : nil)
             case .computerBrain:
                 if let target = remote.makeDoorTarget() {
                     MainTabs(target: target, remote: remote, brains: brains, local: false,
@@ -188,18 +199,10 @@ struct RootView: View {
         }
         .task { await remote.restore() }
         .task { await VaultStorefrontBox.shared.refresh() }
-        .task {
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            // T5 (track 20260715T1502): while the persona welcome IS the connect
-            // gate (established, non-opted-out user), do NOT auto-advance — the
-            // welcome's own action (enterApp) advances instead, so it's seen once.
-            guard !connectWelcomeActive else { return }
-            splashElapsed = true
-            // Already signed in from a restored session: the destination never
-            // *changes*, so check the first-run gate here too. Existing installs
-            // (any recordings on disk) are migrated to "onboarded" silently.
-            if remote.email != nil { presentFirstRunSurfacesIfNeeded() }
-        }
+        // The fixed 2 s splash task is GONE (track 20260715T1502 re-cut): the
+        // welcome front door replaces the branded splash for gated users (its own
+        // action advances — enterApp), and an opted-out user goes straight in with
+        // zero delay. No path paints the old SignInView while waiting.
         // First-run onboarding (runs ONCE, after the first sign-in): teach the owner's
         // voice + the ambient opt-in. Dismissing counts as done — never re-prompts;
         // both steps stay reachable from Settings. B2: migration suppresses ONLY
@@ -209,7 +212,8 @@ struct RootView: View {
             if d != .signInGate { presentFirstRunSurfacesIfNeeded() }
         }
         .fullScreenCover(isPresented: $showingOnboarding) {
-            OnboardingFlowView(baseDir: CaptureWAL.documentsCaptures()) {
+            OnboardingFlowView(baseDir: CaptureWAL.documentsCaptures(),
+                               skipWelcome: onboardingSkipsWelcome) {
                 showingOnboarding = false
             }
         }
@@ -244,21 +248,26 @@ struct RootView: View {
         }
     }
 
-    /// The post-sign-in first-run ladder (B2): migrate, then EITHER the full
-    /// onboarding flow (fresh installs — it opens with the welcome) OR the
-    /// standalone persona welcome (established installs that haven't seen it).
+    /// The post-sign-in first-run ladder (B2): migrate, then render the ONE pure
+    /// decision (WelcomeFrontDoor.firstRunPresentation — tested in the kit): the
+    /// full onboarding flow (skipping its welcome step when the gate already was
+    /// the welcome), the standalone persona welcome, or nothing.
     private func presentFirstRunSurfacesIfNeeded() {
+        // Called from both enterApp() and the dest onChange — never re-decide
+        // over an already-presented surface (implement-review F3).
+        if showingOnboarding || showingWelcome { return }
         OnboardingPrefs.migrateIfPriorUse(baseDir: CaptureWAL.documentsCaptures())
-        // Honor "take me straight in" — no welcome ceremony when the user turned it off.
-        if WelcomePrefs.letStraightIn() { return }
-        let onboardingWillPresent =
-            OnboardingGate.shouldPresent(signedIn: true, completed: OnboardingPrefs.completed)
-        if onboardingWillPresent {
+        switch WelcomeFrontDoor.firstRunPresentation(
+            letStraightIn: WelcomePrefs.letStraightIn(),
+            onboardingCompleted: OnboardingPrefs.completed,
+            welcomeSeen: WelcomePrefs.seen()) {
+        case .onboarding(let skipWelcome):
+            onboardingSkipsWelcome = skipWelcome
             showingOnboarding = true
-        } else if WelcomeGate.shouldPresent(signedIn: true,
-                                            onboardingWillPresent: false,
-                                            welcomeSeen: WelcomePrefs.seen()) {
+        case .standaloneWelcome:
             showingWelcome = true
+        case .none:
+            break
         }
     }
 }
@@ -599,12 +608,19 @@ private struct MainTabs: View {
                 router.selected = .activity
             }
             #endif
-            // Start the model fetch the moment the phone tier appears — so the
-            // download runs (visibly) during first-run exploration, not silently on
-            // the first "stop recording". Best-effort; the banner shows progress.
-            if local, let stt = localSTT {
-                Task { await stt.prewarm() }
-            }
+        }
+        // Start the model fetch when the phone tier appears — visible during
+        // first-run exploration rather than silent on the first "stop recording".
+        // A short grace + view-lifetime cancellation (.task, not onAppear's fire-
+        // and-forget) keeps a TRANSIENT phone-tier mount — a straight-in launch
+        // while the computer brain resolves (track 20260715T1502) — from kicking
+        // a ~150 MB model download on every launch; a real phone-tier stay still
+        // prewarms after the grace, and the first finalize loads regardless.
+        .task {
+            guard local, let stt = localSTT else { return }
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled else { return }
+            await stt.prewarm()
         }
         // The recording pill (track 20260713T0903): leaving the capture tab never
         // stops a recording — a quiet pill shows the ticking elapsed time, taps back

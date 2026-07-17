@@ -71,10 +71,10 @@ struct SettingsScreen: View {
             Section {
                 brainRow(.justMyPhone,
                          subtitle: "Free. Recordings, transcripts, and summaries never leave this phone.")
-                brainRow(.myComputer,
-                         subtitle: remote.relay == nil
-                            ? "Pair with the Foundry desktop app (sign in on your Mac first)."
-                            : "Connected via your designated host.")
+                // LIVE connection info in-app (track 20260715T1502, Nick 2026-07-16:
+                // status lives on the welcome or in the app — this is the in-app home,
+                // what a straight-in user glances instead of any gate).
+                brainRow(.myComputer, subtitle: computerBrainSubtitle)
                 // The hosted cell's consumer entrypoint (proposal
                 // 20260630T0458_secure_web_hosted_foundry) — waitlist until it ships.
                 HStack {
@@ -314,6 +314,16 @@ struct SettingsScreen: View {
                 Text("On").grainTextStyle(.caption).foregroundStyle(GrainColor.sage)
             }
         }
+    }
+
+    /// The "My computer" row's LIVE status line, from the same tested mapping the
+    /// welcome connect pill uses (WelcomeFrontDoor.connectStatus) — one source of
+    /// truth for "how is my door/hub connection doing", now visible in-app.
+    private var computerBrainSubtitle: String {
+        if let status = WelcomeFrontDoor.connectStatus(remote.status, email: remote.email) {
+            return status.text
+        }
+        return "Pair with the Foundry desktop app (sign in on your Mac first)."
     }
 
     private func brainRow(_ c: BrainChoice, subtitle: String) -> some View {
