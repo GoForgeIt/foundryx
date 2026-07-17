@@ -71,12 +71,28 @@ final class PerfTelemetry: NSObject, @unchecked Sendable {
 
         // Let kit code (CaptureManager hydration, drain) report spans through us
         // without importing MetricKit/UIKit.
-        PerfHook.install { [weak sink] name, ms in sink?.span(name, ms: ms) }
+        //
+        // The `sink?.span(...)` call is the emission path and is UNCHANGED (byte-for-byte
+        // the same span shipped to /diag/log). AFTER it, the same span is forwarded
+        // READ-ONLY to the opt-in in-app overlay (track 20260717T0600 T3). The overlay
+        // gate lives in the model (dropped unless the Settings toggle is on) and it never
+        // touches the sink — emission is completely independent of the toggle.
+        PerfHook.install { [weak sink] name, ms in
+            sink?.span(name, ms: ms)
+            Self.forwardToOverlay(label: name, ms: ms)
+        }
         // …and let kit code (CaptureManager, ChatViewModel, AmbientLane, …) report
         // content-free usage events through the SAME kind of bridge.
         UsageHook.install { [weak usageSink] kind, cats, nums in
             usageSink?.emit(kind, cats: cats, nums: nums)
         }
+
+        #if DEBUG
+        // Screen-proof seam (`-PerfOverlayDemo`): turn the overlay on and inject a few
+        // demo pills so the gated overlay can be screenshot in the simulator without a
+        // real hang. DEBUG-only, opt-in by launch arg — never in a shipped build.
+        Self.installOverlayDemoIfRequested()
+        #endif
 
         #if canImport(MetricKit)
         MXMetricManager.shared.add(self)
@@ -107,6 +123,34 @@ final class PerfTelemetry: NSObject, @unchecked Sendable {
     func record(_ name: String, ms: Int) { sink?.span(name, ms: ms) }
 
     @objc private func onBackground() { sink?.flush(); usageSink?.flush() }
+
+    /// Forward an already-shipped span/hang to the in-app overlay READ-ONLY (track
+    /// 20260717T0600 T3). Hops to the main actor (the model is @MainActor); the model
+    /// drops the line unless the Settings toggle is on. This has NO effect on the sink —
+    /// telemetry emission is byte-identical whether or not this runs.
+    static func forwardToOverlay(label: String, ms: Int) {
+        Task { @MainActor in PerfOverlayModel.shared.record(label: label, ms: ms) }
+    }
+
+    #if DEBUG
+    /// `-PerfOverlayDemo`: DEBUG-only screenshot seam. Lights the overlay for THIS
+    /// SESSION ONLY (in-memory override — the persisted Settings pref is untouched,
+    /// review P3-1) and keeps a few demo pills present (re-injected on a cadence so
+    /// they outlive their TTL for a screenshot). Never compiled into Release/TestFlight.
+    static func installOverlayDemoIfRequested() {
+        guard ProcessInfo.processInfo.arguments.contains("-PerfOverlayDemo") else { return }
+        Task { @MainActor in PerfOverlayModel.shared.sessionOverrideEnabled = true }
+        let demo: [(String, Int)] = [
+            ("capture-hydrate", 820), ("lore-drain", 1240), ("cold-launch", 1820),
+        ]
+        Task { @MainActor in
+            while !Task.isCancelled {
+                for (name, ms) in demo { PerfOverlayModel.shared.record(label: name, ms: ms) }
+                do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { break }
+            }
+        }
+    }
+    #endif
 
     /// A stable per-install anonymous id (identifierForVendor's first 8 hex).
     /// Not PII: rotates on full uninstall, never identifies the person.
@@ -160,6 +204,8 @@ extension PerfTelemetry: MXMetricManagerSubscriber {
                 let ms = Int(hang.hangDuration.converted(to: .milliseconds).value)
                 // Keep the existing single-frame blame line EXACTLY (dashboards grep it).
                 sink.hang(ms: ms, blamedFrame: Self.blamedFrame(hang.callStackTree))
+                // Read-only overlay forward (unchanged emission above; see start()).
+                Self.forwardToOverlay(label: "hang", ms: ms)
                 // THEN ship the FULL call tree (track 20260717T0448): every frame as
                 // binary@uuid8+0xoffset + a full-UUID image table, size-capped, so both
                 // the recurring 650ms hang and the 48s hang become atos-able off-line.

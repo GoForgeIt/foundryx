@@ -662,7 +662,12 @@ private struct MainTabs: View {
         // stops a recording — a quiet pill shows the ticking elapsed time, taps back
         // to the instrument, and can end the conversation right here.
         .overlay(alignment: .top) {
-            if RecordingPillState.visible(
+            // Capture-tab suppression (track 20260717T0600 T1 follow-up): on the Capture
+            // tab the hero slot IS the live recording tile, so the pill would be a second,
+            // redundant representation of the same recording. Call-site guard only — the
+            // shared visibility rule (and the pill on every other tab) is untouched.
+            if router.selected != .capture,
+               RecordingPillState.visible(
                 recordingActive: manager.active != nil || manager.isRecordingMic,
                 onCaptureTab: router.selected == .capture,
                 minimized: manager.recordingScreenMinimized) {
@@ -674,6 +679,10 @@ private struct MainTabs: View {
                 }
             }
         }
+        // The opt-in performance overlay (track 20260717T0600 T3): perf-span/hang pills,
+        // gated behind Settings → DIAGNOSTICS (DEFAULT OFF); renders nothing when off and
+        // never blocks taps to content underneath. Layered above the recording pill.
+        .overlay(alignment: .top) { PerfOverlayView() }
         // A tapped answer notification opens the full answer surface
         // (features/ambient-answer-loop.feature).
         .sheet(isPresented: Binding(

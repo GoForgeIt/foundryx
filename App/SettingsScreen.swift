@@ -31,6 +31,9 @@ struct SettingsScreen: View {
     @State private var agentName =
         UserDefaults.standard.string(forKey: AmbientPrefs.agentNameKey) ?? ""
     @State private var fullContextGrading = AmbientPrefs.fullContextGrading()
+    /// The in-app performance overlay toggle (track 20260717T0600 T3). DEFAULT OFF;
+    /// flipping it takes effect live (the overlay model reads the pref per line).
+    @State private var perfOverlayEnabled = DiagPrefs.perfOverlayEnabled()
     @State private var showingTour = false
     @State private var letStraightIn = WelcomePrefs.letStraightIn()
     @State private var persona = PersonaPrefs.persona()
@@ -199,6 +202,20 @@ struct SettingsScreen: View {
                 }
             } header: {
                 GrainSectionEyebrow("AMBIENT INTELLIGENCE")
+            }
+
+            Section {
+                Toggle("Show performance overlay", isOn: $perfOverlayEnabled)
+                    .onChange(of: perfOverlayEnabled) { on in
+                        DiagPrefs.setPerfOverlayEnabled(on)
+                        // Off clears the screen at once; on lets new spans start showing
+                        // without an app restart (the model reads the pref per line).
+                        if !on { PerfOverlayModel.shared.clearAll() }
+                    }
+            } header: {
+                GrainSectionEyebrow("DIAGNOSTICS")
+            } footer: {
+                Text("Shows spans and hangs as pills at the top of the screen.")
             }
 
             Section {
