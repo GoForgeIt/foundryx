@@ -93,6 +93,34 @@ final class PerfHangStackTests: XCTestCase {
         XCTAssertEqual(occurrences, 1, "the FoundryX image is deduped to one table entry")
     }
 
+    // WS-A — the `kind` parameter re-verbs the lines: `stallstack`/`stallimg` (live sampled
+    // stall) and `cpustack`/`cpuimg` (CPU exception), while the DEFAULT stays byte-identical
+    // to the shipped `hangstack`/`hangimg` (dashboards grep those unchanged).
+    func testKindParameterReverbsStackAndImageLines() {
+        let parse = PerfHangStack.parse(fromTreeJSON: fixtureTreeJSON())
+
+        // Default is byte-identical to an explicit "hangstack".
+        let dflt = PerfDiag.hangStackLines(ms: 650, frames: parse.frames, truncated: false, ctx: ctx)
+        let hang = PerfDiag.hangStackLines(ms: 650, frames: parse.frames, truncated: false,
+                                           ctx: ctx, kind: "hangstack")
+        XCTAssertEqual(dflt, hang, "the default kind is exactly the existing hangstack output")
+
+        // stallstack / stallimg.
+        let stall = PerfDiag.hangStackLines(ms: 700, frames: parse.frames, truncated: false,
+                                            ctx: ctx, kind: "stallstack")
+        XCTAssertTrue(stall.contains { $0.contains(" stallstack ms=700 t=1/1 fr=") })
+        XCTAssertTrue(stall.contains { $0.contains(" stallimg ms=700 imgs=") })
+        XCTAssertFalse(stall.contains { $0.contains(" hangstack ") || $0.contains(" hangimg ") })
+        // The frame tokens are the SAME grammar regardless of kind.
+        XCTAssertTrue(stall.contains { $0.contains("FoundryX@aabbccdd+0x1df:CaptureManager.rebuild") })
+
+        // cpustack / cpuimg.
+        let cpu = PerfDiag.hangStackLines(ms: 90000, frames: parse.frames, truncated: false,
+                                          ctx: ctx, kind: "cpustack")
+        XCTAssertTrue(cpu.contains { $0.contains(" cpustack ms=90000 t=1/1 fr=") })
+        XCTAssertTrue(cpu.contains { $0.contains(" cpuimg ms=90000 imgs=") })
+    }
+
     // AC3 — the EXISTING single-frame hang line is emitted UNCHANGED (byte-for-byte).
     func testExistingHangLineUnchanged() {
         let line = PerfDiag.hang(ms: 650, blamedFrame: "CaptureManager.rebuild", ctx: ctx)

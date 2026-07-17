@@ -61,6 +61,12 @@ public enum SummaryBackfill {
                 result = try await titler.titleAndSummary(for: text)
             } catch is PerfTimeout {
                 wedged = true; break   // model wedged — do NOT keep hammering it this pass
+            } catch is ModelWedgedError {
+                // The session breaker is OPEN (a wedge was already seen — here or at another call
+                // site). Treat it exactly like a fresh wedge: STOP the pass and leave the one-time
+                // marker unwritten, so the backfill re-runs once the model recovers. Refusal must
+                // never burn the marker (that would strand these cards as permanently un-backfilled).
+                wedged = true; break
             } catch {
                 continue   // a per-card transient failure: skip this card, keep the pass going
             }

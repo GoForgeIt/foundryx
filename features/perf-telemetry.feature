@@ -66,3 +66,57 @@ Feature: The app reports its own performance
   Scenario: telemetry ships identically whether the overlay is on or off
     Given a perf span named "capture-hydrate" that took 820 milliseconds
     Then the shipped perf line is byte-identical with the overlay off and on
+
+  # Live main-thread stall reporting (track 20260717T0900 WS-A): the app names WHERE it
+  # stalled from the user's own device — not just that it stalled — for the ~700ms nav
+  # hangs MetricKit's daily hang path never surfaces. Bounded so a stuck device can't flood.
+
+  Scenario: a sustained main-thread stall is reported with the blocked code location
+    Given the main thread is blocked at a known call site for 700 milliseconds
+    When the stall is captured and formatted for shipping
+    Then the line names it a stall stack, carries the duration, and names the blocked frame
+
+  Scenario: a runaway CPU burn reports its full call stack
+    Given a runaway CPU exception of 90000 milliseconds with a full call tree
+    When it is formatted for shipping
+    Then the line names it a CPU stack and carries every frame with an image table
+
+  Scenario: a brief stall under the threshold is not reported
+    Given the stall threshold is 250 milliseconds
+    And the main thread pauses for 120 milliseconds
+    Then no stall is reported
+
+  Scenario: stall reporting is bounded so a stuck device cannot flood telemetry
+    Given a stall report budget of at most 1 report every 5 seconds and 60 per session
+    When 3 stalls happen within the same second
+    Then only 1 stall is reported
+    And after the session cap is reached further stalls are dropped
+
+  # The on-device model wedge breaker (track WS-C): a wedged Apple Foundation Models
+  # turn is unblocked at the 20s deadline but keeps burning CPU in a detached task
+  # (~86s measured). Without a breaker EVERY call site can spawn a fresh runaway. A
+  # session-scoped breaker trips on the first wedge and refuses further turns for a
+  # cool-down, so a wedged model costs one runaway — not one per call site.
+
+  Scenario: a wedged on-device model is not called again for a cool-down
+    Given a healthy on-device model breaker
+    When the on-device model wedges
+    Then the next on-device turn is refused for the cool-down
+
+  Scenario: after the cool-down one probe decides, and a healthy probe restores normal turns
+    Given a wedged on-device model breaker
+    When the cool-down elapses
+    Then exactly one on-device probe is allowed
+    And a second on-device turn is still refused
+    When the probe turn succeeds
+    Then on-device turns proceed normally
+
+  Scenario: after the cool-down a re-wedged probe re-opens the cool-down
+    Given a wedged on-device model breaker
+    When the cool-down elapses
+    And the on-device probe wedges again
+    Then the next on-device turn is refused for the cool-down
+
+  Scenario: a healthy on-device model is unaffected by the breaker
+    Given a healthy on-device model breaker
+    Then on-device turns proceed normally

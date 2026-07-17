@@ -81,10 +81,41 @@ final class PerfTelemetry: NSObject, @unchecked Sendable {
             sink?.span(name, ms: ms)
             Self.forwardToOverlay(label: name, ms: ms)
         }
+        // Pre-formatted multi-line payloads (live stall-stack captures) ride the SAME sink,
+        // each flushed immediately — same wire as the MetricKit hang-stack lines.
+        PerfHook.installLines { [weak sink] lines in
+            for line in lines { sink?.emit(line, flush: true) }
+        }
         // …and let kit code (CaptureManager, ChatViewModel, AmbientLane, …) report
         // content-free usage events through the SAME kind of bridge.
         UsageHook.install { [weak usageSink] kind, cats, nums in
             usageSink?.emit(kind, cats: cats, nums: nums)
+        }
+
+        // PRODUCTION main-thread stall sensor (track 20260717T0900 WS-A): a live watchdog
+        // in EVERY build so ~700ms nav hangs at un-instrumented sites become greppable
+        // `nav-stall` spans (+ a sampled `stallstack` naming the blocked site) — the
+        // MetricKit hang path only surfaces the worst hangs, ~daily. Armed ~5s after start
+        // so launch cost isn't miscounted as a stall. SKIPPED under `-PerfLog`: the harness
+        // (DemoSeed) owns a watchdog, and double emission would double-count.
+        if !ProcessInfo.processInfo.arguments.contains("-PerfLog") {
+            let dog = Self.makeStallWatchdog(ctx: ctx)
+            self.stallWatchdog = dog
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { dog.start() }
+            // P1-1 (implement.review.md): iOS SUSPENDS a backgrounded process while the
+            // mach clock keeps counting — without a pause, the ping in flight at
+            // suspension would "measure" the whole background gap on resume as a bogus
+            // multi-second nav-stall (and sample an innocent resuming main thread,
+            // burning a session stack-capture slot). Pause on background, clean-slate
+            // resume on foreground.
+            #if canImport(UIKit)
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.didEnterBackgroundNotification, object: nil,
+                queue: nil) { _ in dog.pause() }
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.willEnterForegroundNotification, object: nil,
+                queue: nil) { _ in dog.resume() }
+            #endif
         }
 
         #if DEBUG
@@ -97,6 +128,42 @@ final class PerfTelemetry: NSObject, @unchecked Sendable {
         #if canImport(MetricKit)
         MXMetricManager.shared.add(self)
         #endif
+    }
+
+    /// The retained live stall watchdog (armed once, runs for the process lifetime).
+    private var stallWatchdog: MainThreadStallWatchdog?
+
+    /// Build a fully-wired production stall watchdog: rate-limited `nav-stall` spans and,
+    /// when it catches the main thread blocked ≥400ms, a ONE-per-stall sampled backtrace
+    /// shipped as `stallstack`/`stallimg` lines naming the blocked site. Shared by the
+    /// production path (here) and the `-PerfLog` harness (DemoSeed) so both exercise the
+    /// identical sampler + emission path. `ctx` pins the build/install id on stack lines.
+    static func makeStallWatchdog(ctx: PerfContext) -> MainThreadStallWatchdog {
+        // nav-stall spans: ≤1/5s, ≤60/session. Stack captures are heavier: ≤1/30s, ≤5/session.
+        let navBudget = StallReportBudget(minInterval: 5, maxPerSession: 60)
+        let stackBudget = StallReportBudget(minInterval: 30, maxPerSession: 5)
+        let sampler = MainThreadStackSampler(targetQueue: .main)
+        return MainThreadStallWatchdog(
+            thresholdMs: 250,
+            pingInterval: 0.25,
+            target: .main,
+            captureThresholdMs: 400,
+            onStack: { ms in
+                guard stackBudget.admit() else { return }
+                let frames = sampler.sample()
+                guard !frames.isEmpty else { return }
+                let lines = PerfDiag.hangStackLines(ms: ms, frames: frames, truncated: false,
+                                                    ctx: ctx, kind: "stallstack")
+                PerfHook.emitLines(lines)
+            },
+            emit: { ms in if navBudget.admit() { PerfHook.span("nav-stall", ms: ms) } })
+    }
+
+    /// The current perf context (build + anonymous install id) — used by the `-PerfLog`
+    /// harness to build a stall watchdog before/without the sink's context.
+    static func currentContext() -> PerfContext {
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        return PerfContext(build: build, installId: anonymousInstallId())
     }
 
     /// Point the usage sink at the resolved door (post sign-in) so content-free product
@@ -217,8 +284,19 @@ extension PerfTelemetry: MXMetricManagerSubscriber {
                 }
             }
             for cpu in p.cpuExceptionDiagnostics ?? [] {
-                sink.hang(ms: Int(cpu.totalCPUTime.converted(to: .milliseconds).value),
-                          blamedFrame: "cpu:" + Self.blamedFrame(cpu.callStackTree))
+                let ms = Int(cpu.totalCPUTime.converted(to: .milliseconds).value)
+                // Keep the existing single blamed-frame line EXACTLY (dashboards grep it).
+                sink.hang(ms: ms, blamedFrame: "cpu:" + Self.blamedFrame(cpu.callStackTree))
+                // THEN ship the FULL call tree (track 20260717T0900 WS-A) as `cpustack`
+                // lines, exactly as hangs do — so a runaway CPU burn (the 90s MetricKit
+                // sample blamed on a deduplicated Swift Concurrency thunk) becomes
+                // atos-able off-line instead of one unattributable frame.
+                let parse = PerfHangStack.parse(fromTreeJSON: cpu.callStackTree.jsonRepresentation())
+                for line in PerfDiag.hangStackLines(ms: ms, frames: parse.frames,
+                                                    truncated: parse.truncated, ctx: sink.context,
+                                                    kind: "cpustack") {
+                    sink.emit(line, flush: true)
+                }
             }
             for dw in p.diskWriteExceptionDiagnostics ?? [] {
                 sink.hang(ms: Int(dw.totalWritesCaused.converted(to: .megabytes).value),

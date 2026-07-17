@@ -57,3 +57,31 @@ Feature: An honest waiting experience for every slow moment
     When I look at the rotating fact after 0 seconds and again after 5 seconds
     Then the two facts are different
     And looking again at the same moment shows the same fact
+
+  # The capture-screen sync strip (WS-B): a calm, one-line, constant-height row. It must
+  # never jerk the conversation list, never flicker on brief syncs, and never blink out
+  # the instant a drain finishes.
+
+  Scenario: a brief sync never flashes the syncing bar
+    Given my library shows some conversations
+    When a sync starts and finishes within a second
+    Then the syncing bar is never shown
+
+  Scenario: a sustained sync shows the bar after a moment without moving the list
+    Given my library shows some conversations
+    When a sync stays active for more than two seconds
+    Then the syncing bar is shown
+    And the conversation list below the strip never moves
+
+  Scenario: once shown, the syncing bar never disappears in under three seconds
+    Given my library shows some conversations
+    And a sync has been active long enough to show the syncing bar
+    When the sync finishes right away
+    Then the syncing bar is still shown two seconds later
+    And it has settled by four seconds later
+
+  Scenario: when everything is synced the strip settles to all conversations saved
+    Given my library shows some conversations
+    And a sync has run and then finished and settled
+    When I read the strip
+    Then it says all my conversations are saved

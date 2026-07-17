@@ -145,7 +145,7 @@ struct CaptureScreen: View {
     /// After a merge lands, the primary conversation to OPEN so you see it all together
     /// (drives a programmatic push into its detail). Cleared when the detail is dismissed.
     @State private var justMergedId: String?
-    #if DEBUG
+    #if DEBUG || PERF_HARNESS
     @State private var deepDetail = false      // screen-proof: `-Screen detail`
     @State private var deepRecording = false   // screen-proof: `-Screen recording`
     /// screen-proof: `-CaptureHome recording` → the Capture tab's LIVE HERO TILE (not the
@@ -261,8 +261,10 @@ struct CaptureScreen: View {
                 conversationDetail(wal)
             }
         }
-        #if DEBUG
-        // DEV screen-proof deep-links (real manager + target): `-Screen detail` opens a
+        #if DEBUG || PERF_HARNESS
+        // DEV screen-proof deep-links (real manager + target; PERF_HARNESS too, so the
+        // sim-perf deep-nav phase can surveil the detail/speaker surfaces under the
+        // stall watchdog): `-Screen detail` opens a
         // conversation's three-face detail; `-Screen recording` presents the full
         // RecordingScreen from a FROZEN preview (fixed clock + seeded live transcript +
         // demo suggestions) so every section renders in the simulator without a real mic.
@@ -1287,37 +1289,45 @@ struct CaptureScreen: View {
         return false
     }
 
+    // The one-line, CONSTANT-HEIGHT "your data is safe" strip (WS-B). The old strip
+    // swapped between a one-liner, a three-line waiting card, and nothing — shoving the
+    // list down every time a sync flapped. Now it's a fixed-height row whose content
+    // cross-fades, debounced + minimum-shown by `SyncBarPresenter` so brief drains never
+    // flicker it. All copy/height come from the strip's own honest ingredients below.
     private var syncBar: some View {
-        VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-            if let progress = syncProgress, !sourceFailed {
-                // The "N processing, syncing…" stall class — a REAL backlog drain gets
-                // the shared honest-wait experience with a true determinate bar (WS-C).
-                WaitingExperienceView(
-                    model: WaitingExperienceModel(
-                        kind: .sync, onDevice: local, progress: progress,
-                        stats: WaitingLibraryStats(
-                            conversationCount: manager.statsSummary.totalConversations)),
-                    compact: true)
-            } else if let message = syncMessage {
-                HStack(spacing: GrainSpacing.x2) {
-                    Circle().fill(anyWorkPending ? GrainColor.amber : GrainColor.sage)
-                        .frame(width: GrainSpacing.x2, height: GrainSpacing.x2)
-                    Text(message).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-                    Spacer()
-                }
-            } else if !manager.captures.isEmpty {
-                HStack(spacing: GrainSpacing.x2) {
-                    Circle().fill(GrainColor.sage)
-                        .frame(width: GrainSpacing.x2, height: GrainSpacing.x2)
-                    Text(local ? "All conversations saved" : "All captures saved to computer")
-                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-                    Spacer()
-                }
-            }
+        SyncStatusStripView(content: syncStripContent)
+    }
+
+    /// The honest ingredients for the strip, computed from live sync state. Every string
+    /// is real: the determinate sync count comes from `WaitingExperienceModel.statusLine`,
+    /// the pending detail from `syncMessage`, and the calm settled line from
+    /// `SyncStripCopy` — nothing is invented.
+    private var syncStripContent: SyncStripContent {
+        let determinate = syncProgress != nil && !sourceFailed
+        // The honest "N of M segments …" count paired with the bar while syncing.
+        let syncingText: String = {
+            guard let progress = syncProgress else { return syncMessage ?? "" }
+            let model = WaitingExperienceModel(kind: .sync, onDevice: local, progress: progress)
+            return model.statusLine(elapsed: 0)
+        }()
+        // Settled content: the pending detail if any work is still in flight, else the
+        // calm all-saved line.
+        let settledText: String
+        let settledIsPending: Bool
+        if let message = syncMessage {
+            settledText = message
+            settledIsPending = anyWorkPending
+        } else {
+            settledText = SyncStripCopy.allSaved(local: local)
+            settledIsPending = false
         }
-        .padding(.horizontal, GrainSpacing.x4)
-        .padding(.top, GrainSpacing.x2)
-        .padding(.bottom, GrainSpacing.x1)
+        return SyncStripContent(
+            hasCaptures: !manager.captures.isEmpty,
+            syncing: determinate,
+            progress: syncProgress,
+            syncingText: syncingText,
+            settledText: settledText,
+            settledIsPending: settledIsPending)
     }
 
     private var anyWorkPending: Bool {

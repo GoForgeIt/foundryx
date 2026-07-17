@@ -46,6 +46,52 @@ final class MainThreadStallWatchdogTests: XCTestCase {
         XCTAssertTrue(emitted.value.isEmpty, "no stall spans on a responsive queue")
     }
 
+    /// WS-A — while a ping is STILL stuck (main blocked right now), the watchdog fires the
+    /// stack-capture hook ONCE per stall, only after captureThreshold is crossed.
+    func testMidStallStackCaptureFiresOnceAfterCaptureThreshold() {
+        let target = DispatchQueue(label: "test.fake-main-capture")
+        let captures = LockedBox<[Int]>([])
+        let emits = LockedBox<[Int]>([])
+        let dog = MainThreadStallWatchdog(
+            thresholdMs: 250, pingInterval: 0.05, target: target,
+            captureThresholdMs: 400,
+            onStack: { ms in captures.mutate { $0.append(ms) } },
+            emit: { ms in emits.mutate { $0.append(ms) } })
+        dog.start()
+        // Wedge the "main" queue ~700ms — past both the 250ms report threshold and the
+        // 400ms capture threshold — so a live capture must trigger mid-stall.
+        target.async { Thread.sleep(forTimeInterval: 0.7) }
+        let deadline = Date().addingTimeInterval(3)
+        while captures.value.isEmpty && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+        // Let the stall end so the terminal emit also lands.
+        Thread.sleep(forTimeInterval: 0.4)
+        dog.stop()
+
+        XCTAssertEqual(captures.value.count, 1, "exactly one stack capture per stall, not per tick")
+        XCTAssertGreaterThanOrEqual(captures.value.first ?? 0, 400, "capture only after the 400ms threshold")
+        XCTAssertFalse(emits.value.isEmpty, "the terminal nav-stall span still emits when the ping lands")
+    }
+
+    /// WS-A — a stall that stays UNDER the capture threshold (but over the report threshold)
+    /// emits a span but never captures a stack.
+    func testStallUnderCaptureThresholdDoesNotSample() {
+        let target = DispatchQueue(label: "test.fake-main-nocap")
+        let captures = LockedBox<[Int]>([])
+        let emits = LockedBox<[Int]>([])
+        let dog = MainThreadStallWatchdog(
+            thresholdMs: 100, pingInterval: 0.03, target: target,
+            captureThresholdMs: 400,
+            onStack: { ms in captures.mutate { $0.append(ms) } },
+            emit: { ms in emits.mutate { $0.append(ms) } })
+        dog.start()
+        target.async { Thread.sleep(forTimeInterval: 0.2) }   // 200ms: > report, < capture
+        let deadline = Date().addingTimeInterval(2)
+        while emits.value.isEmpty && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+        dog.stop()
+        XCTAssertFalse(emits.value.isEmpty, "a 200ms stall still reports a span")
+        XCTAssertTrue(captures.value.isEmpty, "but stays under the 400ms capture threshold — no stack")
+    }
+
     /// start() is idempotent and stop() actually stops future emits.
     func testStopStopsAndStartIsIdempotent() {
         let target = DispatchQueue(label: "test.fake-main-stop")
@@ -60,6 +106,43 @@ final class MainThreadStallWatchdogTests: XCTestCase {
         target.async { Thread.sleep(forTimeInterval: 0.3) }
         Thread.sleep(forTimeInterval: 0.6)
         XCTAssertTrue(emitted.value.isEmpty, "no emits after stop()")
+    }
+
+    /// P1-1 (implement.review.md): a ping in flight when the app suspends must be
+    /// DISCARDED on resume — the background gap is not a stall. Model the suspension
+    /// as a wedge that outlives a pause(): the stuck ping lands after resume() with a
+    /// huge "delay", and no span (and no stack capture) may be emitted for it; a
+    /// fresh wedge after resume is still caught.
+    func testPauseDiscardsInFlightPingAcrossBackgroundGap() {
+        let target = DispatchQueue(label: "test.fake-main-pause")
+        let emitted = LockedBox<[Int]>([])
+        let captures = LockedBox<[Int]>([])
+        let dog = MainThreadStallWatchdog(
+            thresholdMs: 250, pingInterval: 0.05, target: target,
+            captureThresholdMs: 400,
+            onStack: { ms in captures.mutate { $0.append(ms) } },
+            emit: { ms in emitted.mutate { $0.append(ms) } })
+        dog.start()
+        // The "suspension": a wedge begins, a ping gets stuck in it, then the app
+        // backgrounds (pause) while the ping is still in flight.
+        target.async { Thread.sleep(forTimeInterval: 0.8) }
+        Thread.sleep(forTimeInterval: 0.15)   // let a ping post into the wedge
+        dog.pause()
+        Thread.sleep(forTimeInterval: 0.9)    // the wedge ends while "backgrounded"
+        dog.resume()
+        Thread.sleep(forTimeInterval: 0.3)    // healthy post-resume pings
+        XCTAssertTrue(emitted.value.isEmpty,
+                      "the gap-spanning ping must be discarded, not emitted as a stall")
+        XCTAssertTrue(captures.value.filter { $0 > 800 }.isEmpty,
+                      "no stack capture may be attributed to the background gap")
+        // Still alive: a REAL wedge after resume is caught.
+        target.async { Thread.sleep(forTimeInterval: 0.6) }
+        let deadline = Date().addingTimeInterval(3)
+        while emitted.value.isEmpty && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        dog.stop()
+        XCTAssertFalse(emitted.value.isEmpty, "a real post-resume wedge still emits")
     }
 }
 

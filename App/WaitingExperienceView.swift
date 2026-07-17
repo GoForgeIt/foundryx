@@ -135,9 +135,21 @@ struct WaitingExperienceProof: View {
             Spacer()
             WaitingExperienceView(model: model)
             if kind == .sync {
-                // Also show the compact banner form used in the capture screen.
-                WaitingExperienceView(model: model, compact: true)
-                    .padding(GrainSpacing.x4)
+                // Also show the REAL capture-screen strip (WS-B) — the fixed-height,
+                // one-line sync row. `.immediate` config so the single-frame screenshot
+                // captures the syncing presentation without waiting out the debounce.
+                SyncStatusStripView(
+                    content: SyncStripContent(
+                        hasCaptures: true,
+                        syncing: true,
+                        progress: .determinate(done: 214, total: 1210),
+                        syncingText: WaitingExperienceModel(
+                            kind: .sync, onDevice: false,
+                            progress: .determinate(done: 214, total: 1210)).statusLine(elapsed: 0),
+                        settledText: SyncStripCopy.allSaved(local: false),
+                        settledIsPending: false),
+                    config: .immediate)
+                    .padding(.vertical, GrainSpacing.x2)
                     .background(GrainColor.surface)
                     .clipShape(RoundedRectangle(cornerRadius: GrainRadius.card, style: .continuous))
             }

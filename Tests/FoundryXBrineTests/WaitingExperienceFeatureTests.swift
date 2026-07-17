@@ -45,10 +45,32 @@ private final class WaitingExperienceWorld: @unchecked Sendable {
     var tipLate: WaitingTip?
     var tipRepeat: WaitingTip?
 
+    // The sync strip (WS-B) hysteresis machine, driven by a synthetic clock.
+    let base = Date(timeIntervalSince1970: 1_000_000)
+    var presenter = SyncBarPresenter()
+    var presentation: SyncBarPresentation = .settled
+    var everSyncing = false
+    var local = true
+
     func reset(_ model: WaitingExperienceModel) {
         self.model = model
         elapsed = 0
         tipEarly = nil; tipLate = nil; tipRepeat = nil
+    }
+
+    /// Fresh strip machine for a new sync scenario.
+    func resetStrip() {
+        presenter = SyncBarPresenter()
+        presentation = .settled
+        everSyncing = false
+        local = true
+    }
+
+    /// Step the presenter at `base + offset` seconds, remembering if the syncing bar was
+    /// ever shown (the debounce guarantee).
+    func step(syncing: Bool, at offset: TimeInterval) {
+        presentation = presenter.step(syncing: syncing, now: base.addingTimeInterval(offset))
+        if presentation == .syncing { everSyncing = true }
     }
 }
 
@@ -152,6 +174,75 @@ private enum WaitingExperienceSteps {
             defineCheck("looking again at the same moment shows the same fact") { _, _, _ in
                 try expect(world.tipEarly == world.tipRepeat,
                            "same-moment fact was not stable")
+            },
+
+            // MARK: Sync strip (WS-B) — debounce, minimum-show, no layout shift.
+
+            defineStep("my library shows some conversations") { ctx, _, _ in
+                world.resetStrip()
+                return ctx
+            },
+            defineStep("a sync starts and finishes within a second") { ctx, _, _ in
+                // Active for < the 1.5s appear delay, then stops — never earns the bar.
+                world.step(syncing: true, at: 0)
+                world.step(syncing: true, at: 0.5)
+                world.step(syncing: false, at: 0.9)
+                return ctx
+            },
+            defineStep("a sync stays active for more than two seconds") { ctx, _, _ in
+                world.step(syncing: true, at: 0)
+                world.step(syncing: true, at: 2.0)
+                return ctx
+            },
+            defineStep("a sync has been active long enough to show the syncing bar") { ctx, _, _ in
+                world.step(syncing: true, at: 0)
+                world.step(syncing: true, at: 2.0)   // shown at base+2.0
+                return ctx
+            },
+            defineStep("the sync finishes right away") { ctx, _, _ in
+                world.step(syncing: false, at: 2.0)  // finishes the instant it showed
+                return ctx
+            },
+            defineStep("a sync has run and then finished and settled") { ctx, _, _ in
+                world.step(syncing: true, at: 0)
+                world.step(syncing: true, at: 2.0)   // shown
+                world.step(syncing: false, at: 2.0)  // finished
+                world.step(syncing: false, at: 10.0) // well past the 3s minimum-show
+                return ctx
+            },
+            defineStep("I read the strip") { ctx, _, _ in ctx },
+
+            defineCheck("the syncing bar is never shown") { _, _, _ in
+                try expect(!world.everSyncing, "the syncing bar was shown for a brief sync")
+            },
+            defineCheck("the syncing bar is shown") { _, _, _ in
+                try expect(world.presentation == .syncing,
+                           "expected the syncing bar, got \(world.presentation)")
+            },
+            defineCheck("the conversation list below the strip never moves") { _, _, _ in
+                // The strip is one height for every presentation ⇒ nothing below can move.
+                let a = SyncStripLayout.height(for: .syncing)
+                let b = SyncStripLayout.height(for: .settled)
+                try expect(a == b && a == SyncStripLayout.totalHeight,
+                           "strip height changed between presentations: \(a) vs \(b)")
+            },
+            defineCheck("the syncing bar is still shown two seconds later") { _, _, _ in
+                // 2s after it showed (base+4.0) — still inside the 3s minimum-show window.
+                world.step(syncing: false, at: 4.0)
+                try expect(world.presentation == .syncing,
+                           "the bar disappeared inside the 3s minimum-show window")
+            },
+            defineCheck("it has settled by four seconds later") { _, _, _ in
+                // 4s after it showed (base+6.0) — past the minimum-show window.
+                world.step(syncing: false, at: 6.0)
+                try expect(world.presentation == .settled,
+                           "the bar had not settled after the minimum-show window")
+            },
+            defineCheck("it says all my conversations are saved") { _, _, _ in
+                try expect(world.presentation == .settled,
+                           "expected the settled strip, got \(world.presentation)")
+                try expect(SyncStripCopy.allSaved(local: world.local) == "All conversations saved",
+                           "settled copy was \(SyncStripCopy.allSaved(local: world.local))")
             },
         ]
     }

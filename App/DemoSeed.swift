@@ -96,16 +96,33 @@ enum DemoSeed {
     static func installPerfLogIfRequested() {
         guard ProcessInfo.processInfo.arguments.contains("-PerfLog") else { return }
         PerfHook.install { name, ms in NSLog("perf-span %@ ms=%d", name, ms) }
-        // nav-stall watchdog (track 20260717T0759 AC6): live main-thread stall spans so
-        // the sim-perf nav phase can gate "zero stalls >250ms during normal nav". Armed
-        // a beat AFTER launch settles — the synthetic stress seeding + first hydration
-        // swap are launch cost (covered by the hydrate/first-paint budgets), not nav.
+        // Mirror pre-formatted stack lines (stall/hang/cpu) to NSLog too, so the sim harness
+        // can grep the live stall-stack proof (`-StallDemo`) without a relay endpoint.
+        PerfHook.installLines { lines in for l in lines { NSLog("perf-line %@", l) } }
+        // nav-stall watchdog (track 20260717T0759 AC6 → 20260717T0900 WS-A): live main-thread
+        // stall spans AND a sampled `stallstack` naming the blocked site. Armed a beat AFTER
+        // launch settles — the synthetic stress seeding + first hydration swap are launch cost
+        // (covered by the hydrate/first-paint budgets), not nav.
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { stallWatchdog.start() }
     }
 
-    /// Harness-only main-thread stall sensor (see installPerfLogIfRequested). Retained
-    /// for the process lifetime once armed.
-    private static let stallWatchdog = MainThreadStallWatchdog()
+    /// Harness main-thread stall sensor (see installPerfLogIfRequested). The FULL production
+    /// wiring (sampler + budgets + stall-stack emission) so a `-PerfLog`/`-StallDemo` sim run
+    /// exercises the real path end-to-end. Retained for the process lifetime once armed.
+    private static let stallWatchdog = PerfTelemetry.makeStallWatchdog(ctx: PerfTelemetry.currentContext())
+
+    /// `-StallDemo`: DEBUG/PERF_HARNESS proof seam. ~8s after launch, deliberately block the
+    /// main thread ~600ms so the live stall watchdog + cross-thread sampler + emission path
+    /// can be proven end-to-end in the simulator. Pair with `-PerfLog` to mirror the resulting
+    /// `nav-stall` span + `stallstack`/`stallimg` lines to NSLog for grepping. No effect
+    /// on a normal launch.
+    static func installStallDemoIfRequested() {
+        guard ProcessInfo.processInfo.arguments.contains("-StallDemo") else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+            NSLog("perf-harness: -StallDemo blocking main thread ~600ms")
+            usleep(600_000)   // ~600ms block; the watchdog (armed at 5s) catches it mid-stall
+        }
+    }
 
     /// `-FreshActionState` (UI-proof determinism): wipe the action pipeline's
     /// mutable stores + the chat list so every proof run starts from the same

@@ -31,6 +31,7 @@ struct FoundryXApp: App {
         // delivered THROUGH Foundry (the door appends it to the local telemetry rollup).
         #if DEBUG || PERF_HARNESS
         DemoSeed.installPerfLogIfRequested()  // `-PerfLog`: mirror perf spans to the unified log
+        DemoSeed.installStallDemoIfRequested() // `-StallDemo`: prove the live stall-stack path
         DemoSeed.seedStressIfRequested()      // `-StressSeed <N>`: large-library perf harness
         BenchModel.runIfRequested()           // `-BenchModel`: on-device model latency bench
         DemoSeed.resetActionStateIfRequested() // `-FreshActionState`: deterministic UI-proof state

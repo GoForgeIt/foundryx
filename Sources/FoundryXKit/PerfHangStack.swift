@@ -121,29 +121,38 @@ public extension PerfDiag {
     }
 
     /// Serialize a hang's call tree into shippable lines:
-    ///   `perf … hangstack ms=<ms> t=<i>/<k> fr=<frame>;<frame>;…`   (one or more,
+    ///   `perf … <kind> ms=<ms> t=<i>/<k> fr=<frame>;<frame>;…`   (one or more,
     ///        `t=<i>/<k>` = chunk i of k in emit order, so the server can reassemble)
-    ///   `perf … hangimg  ms=<ms> imgs=<uuid8>=<FULL-UUID>;…`         (ONE line, deduped,
+    ///   `perf … <kind-img> ms=<ms> imgs=<uuid8>=<FULL-UUID>;…`   (ONE line, deduped,
     ///        only images referenced by an emitted frame)
+    ///
+    /// `kind` selects the line's verb — `hangstack` (MetricKit hang, DEFAULT so existing
+    /// callers stay byte-identical), `stallstack` (live sampled main-thread stall), or
+    /// `cpustack` (MetricKit CPU exception). The image line's verb is derived from it
+    /// (`hangimg`/`stallimg`/`cpuimg`) by swapping `stack`→`img`.
     ///
     /// Bounded: total across ALL lines ≤ `maxTotalBytes` (4096) and each line
     /// ≤ `maxLineBytes` (~1500). If frames are dropped for EITHER cap (the parser's
-    /// frame cap OR the byte budget), the LAST hangstack line ends with a literal
+    /// frame cap OR the byte budget), the LAST stack line ends with a literal
     /// `;trunc` token. Empty input → no lines.
     static func hangStackLines(ms: Int,
                                frames: [PerfStackFrame],
                                truncated: Bool,
                                ctx: PerfContext,
+                               kind: String = "hangstack",
                                maxLineBytes: Int = 1500,
                                maxTotalBytes: Int = 4096) -> [String] {
         guard !frames.isEmpty else { return [] }
 
+        // The image line's verb: `hangstack`→`hangimg`, `stallstack`→`stallimg`, etc.
+        let imgLabel = kind.replacingOccurrences(of: "stack", with: "img")
+
         // A fixed head estimate for accounting. Real `t=<i>/<k>` is rendered at the end;
         // "t=00/00" over-reserves 2 digits per side, and `truncMargin` covers any slack
         // (incl. the trailing ";trunc"), so the true bytes never exceed the caps.
-        let stackHead = "\(head(ctx)) hangstack ms=\(ms) t=00/00 fr="
+        let stackHead = "\(head(ctx)) \(kind) ms=\(ms) t=00/00 fr="
         let headBytes = stackHead.utf8.count
-        let imgHeadBytes = "\(head(ctx)) hangimg ms=\(ms) imgs=".utf8.count
+        let imgHeadBytes = "\(head(ctx)) \(imgLabel) ms=\(ms) imgs=".utf8.count
         let truncMargin = ";trunc".utf8.count + 8
 
         // Bytes the image line would occupy for the currently-referenced images.
@@ -204,12 +213,12 @@ public extension PerfDiag {
         for (i, tokens) in chunks.enumerated() {
             var body = tokens.joined(separator: ";")
             if dropped && i == k - 1 { body += ";trunc" }   // explicit truncation marker
-            lines.append("\(head(ctx)) hangstack ms=\(ms) t=\(i + 1)/\(k) fr=\(body)")
+            lines.append("\(head(ctx)) \(kind) ms=\(ms) t=\(i + 1)/\(k) fr=\(body)")
         }
         // The image table (full UUIDs for dSYM lookup), deduped, referenced images only.
         if !images.isEmpty {
             let body = images.map { "\($0.short)=\($0.full)" }.joined(separator: ";")
-            lines.append("\(head(ctx)) hangimg ms=\(ms) imgs=\(body)")
+            lines.append("\(head(ctx)) \(imgLabel) ms=\(ms) imgs=\(body)")
         }
         return lines
     }

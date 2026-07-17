@@ -108,6 +108,33 @@ private final class PerfWorld: @unchecked Sendable {
     var overlay = PerfOverlayState(maxPills: 4, ttl: 4)
     var clock = Date(timeIntervalSince1970: 1_000_000)
 
+    // Model wedge breaker side (WS-C) — an injected monotonic clock so the cool-down elapses
+    // deterministically with no real time passing.
+    var breakerClock: TimeInterval = 0
+    var breaker: ModelWedgeBreaker!
+    static let breakerCooldown: TimeInterval = 600
+
+    func resetBreaker() {
+        breakerClock = 0
+        breaker = ModelWedgeBreaker(cooldownSeconds: PerfWorld.breakerCooldown,
+                                    refusalThrottleSeconds: 60,
+                                    clock: { [weak self] in self?.breakerClock ?? 0 })
+    }
+
+    // Live stall side (WS-A).
+    var stallFrames: [PerfStackFrame] = []
+    var stackLines: [String] = []
+    var stallThresholdMs = 250
+    private let emitLock = NSLock()
+    private var _stallEmits: [Int] = []
+    func appendStallEmit(_ ms: Int) { emitLock.lock(); _stallEmits.append(ms); emitLock.unlock() }
+    var stallEmits: [Int] { emitLock.lock(); defer { emitLock.unlock() }; return _stallEmits }
+    // Budget side (injected clock).
+    var budget: StallReportBudget?
+    var budgetNanos: UInt64 = 0
+    var budgetCap = 0
+    var admitCount = 0
+
     var perfCtx: PerfContext { PerfContext(build: "166", installId: installId) }
 
     /// Record a span into the overlay honoring the CURRENT pref — exactly what the app's
@@ -275,6 +302,160 @@ private enum PerfSteps {
                 let on = PerfDiag.marker(name: w.spanName, ms: w.spanMs, ctx: w.perfCtx)
                 guard off == on else {
                     throw BrineStepError("overlay changed the shipped line:\n off=\(off)\n  on=\(on)")
+                }
+            },
+
+            // MARK: on-device model wedge breaker (WS-C — the pure ModelWedgeBreaker)
+            defineStep("a healthy on-device model breaker") { ctx, _, _ in
+                w.resetBreaker(); return ctx
+            },
+            defineStep("a wedged on-device model breaker") { ctx, _, _ in
+                w.resetBreaker(); w.breaker.tripWedge(); return ctx   // OPEN from clock 0
+            },
+            defineStep("the on-device model wedges") { ctx, _, _ in
+                w.breaker.tripWedge(); return ctx
+            },
+            defineStep("the cool-down elapses") { ctx, _, _ in
+                w.breakerClock += PerfWorld.breakerCooldown + 1   // step just past the cool-down edge
+                return ctx
+            },
+            defineStep("the on-device probe wedges again") { ctx, _, _ in
+                guard w.breaker.admit() == .probe else {
+                    throw BrineStepError("expected the single half-open probe, got a non-probe admission")
+                }
+                w.breaker.tripWedge()   // the probe wedged too → re-open
+                return ctx
+            },
+            defineStep("the probe turn succeeds") { ctx, _, _ in
+                w.breaker.recordSuccess(); return ctx
+            },
+            defineCheck("the next on-device turn is refused for the cool-down") { _, _, _ in
+                guard case .refused(let ms, _) = w.breaker.admit(), ms > 0 else {
+                    throw BrineStepError("expected a refusal with a live cool-down, got a proceed/probe")
+                }
+            },
+            defineCheck("exactly one on-device probe is allowed") { _, _, _ in
+                guard w.breaker.admit() == .probe else {
+                    throw BrineStepError("cool-down elapsed but no probe was allowed")
+                }
+            },
+            defineCheck("a second on-device turn is still refused") { _, _, _ in
+                guard case .refused(let ms, _) = w.breaker.admit(), ms == 0 else {
+                    throw BrineStepError("a second concurrent turn was not refused while the probe is in flight")
+                }
+            },
+            defineCheck("on-device turns proceed normally") { _, _, _ in
+                guard w.breaker.admit() == .proceed else {
+                    throw BrineStepError("expected the breaker CLOSED (turns proceed), it refused")
+                }
+            },
+
+            // MARK: live main-thread stall reporting (WS-A — the real pure types)
+            defineStep("the main thread is blocked at a known call site for {int} milliseconds") { ctx, p, _ in
+                w.spanMs = try p.requireInt(0)
+                // A known-site frame, exactly the shape the sampler produces on-device.
+                w.stallFrames = [
+                    PerfStackFrame(binaryName: "FoundryX",
+                                   binaryUUID: "AABBCCDD-1122-3344-5566-77889900AABB",
+                                   offset: 0x1df, symbol: "CaptureManager.rebuild"),
+                    PerfStackFrame(binaryName: "libsystem_kernel.dylib",
+                                   binaryUUID: "11111111-2222-3333-4444-555555555555",
+                                   offset: 0x10, symbol: nil),
+                ]
+                return ctx
+            },
+            defineStep("the stall is captured and formatted for shipping") { ctx, _, _ in
+                w.stackLines = PerfDiag.hangStackLines(ms: w.spanMs, frames: w.stallFrames,
+                                                       truncated: false, ctx: w.perfCtx, kind: "stallstack")
+                return ctx
+            },
+            defineCheck("the line names it a stall stack, carries the duration, and names the blocked frame") { _, _, _ in
+                guard w.stackLines.contains(where: { $0.contains(" stallstack ms=\(w.spanMs) ") }),
+                      w.stackLines.contains(where: { $0.contains(" stallimg ms=\(w.spanMs) ") }),
+                      w.stackLines.contains(where: { $0.contains("FoundryX@aabbccdd+0x1df:CaptureManager.rebuild") })
+                else { throw BrineStepError("not a well-formed stall stack: \(w.stackLines)") }
+            },
+            defineStep("a runaway CPU exception of {int} milliseconds with a full call tree") { ctx, p, _ in
+                w.spanMs = try p.requireInt(0)
+                w.stallFrames = [
+                    PerfStackFrame(binaryName: "FoundryX", binaryUUID: "AABBCCDD-1122-3344-5566-77889900AABB",
+                                   offset: 0x100, symbol: "SummaryBackfill.run"),
+                    PerfStackFrame(binaryName: "FoundryX", binaryUUID: "AABBCCDD-1122-3344-5566-77889900AABB",
+                                   offset: 0x200, symbol: "FoundationModelsTitler.title"),
+                    PerfStackFrame(binaryName: "libswift_Concurrency.dylib",
+                                   binaryUUID: "22222222-3333-4444-5555-666666666666",
+                                   offset: 0x40, symbol: nil),
+                ]
+                w.stackLines = PerfDiag.hangStackLines(ms: w.spanMs, frames: w.stallFrames,
+                                                       truncated: false, ctx: w.perfCtx, kind: "cpustack")
+                return ctx
+            },
+            defineCheck("the line names it a CPU stack and carries every frame with an image table") { _, _, _ in
+                guard let stackLine = w.stackLines.first(where: { $0.contains(" cpustack ms=\(w.spanMs) ") }),
+                      w.stackLines.contains(where: { $0.contains(" cpuimg ms=\(w.spanMs) ") }) else {
+                    throw BrineStepError("not a well-formed cpu stack: \(w.stackLines)")
+                }
+                let fr = stackLine.range(of: "fr=").map { String(stackLine[$0.upperBound...]) } ?? ""
+                guard fr.split(separator: ";").count >= 3 else {
+                    throw BrineStepError("cpu stack did not carry the full tree: \(fr)")
+                }
+            },
+            defineStep("the stall threshold is {int} milliseconds") { ctx, p, _ in
+                w.stallThresholdMs = try p.requireInt(0); return ctx
+            },
+            defineStep("the main thread pauses for {int} milliseconds") { ctx, p, _ in
+                let pauseMs = try p.requireInt(0)
+                // Drive the REAL watchdog against an injected serial queue wedged for pauseMs;
+                // a pause under the threshold must not emit a nav-stall.
+                let target = DispatchQueue(label: "brine.stall-\(UUID().uuidString)")
+                let dog = MainThreadStallWatchdog(thresholdMs: w.stallThresholdMs, pingInterval: 0.03,
+                                                  target: target,
+                                                  emit: { ms in w.appendStallEmit(ms) })
+                dog.start()
+                let pauseSecs = Double(pauseMs) / 1000.0
+                target.async { usleep(useconds_t(pauseSecs * 1_000_000)) }
+                // Wait out the pause plus a settle margin so any (unwanted) emit would land.
+                usleep(useconds_t((pauseSecs + 0.3) * 1_000_000))
+                dog.stop()
+                return ctx
+            },
+            defineCheck("no stall is reported") { _, _, _ in
+                guard w.stallEmits.isEmpty else {
+                    throw BrineStepError("a sub-threshold pause was wrongly reported: \(w.stallEmits)")
+                }
+            },
+            defineStep("a stall report budget of at most 1 report every {int} seconds and {int} per session") { ctx, p, _ in
+                let interval = TimeInterval(try p.requireInt(0))
+                w.budgetCap = try p.requireInt(1)
+                w.budgetNanos = 0
+                w.admitCount = 0
+                w.budget = StallReportBudget(minInterval: interval, maxPerSession: w.budgetCap,
+                                             clock: { w.budgetNanos })
+                return ctx
+            },
+            defineStep("{int} stalls happen within the same second") { ctx, p, _ in
+                let n = try p.requireInt(0)
+                for _ in 0..<n { if w.budget?.admit() == true { w.admitCount += 1 } }  // clock frozen
+                return ctx
+            },
+            defineCheck("only {int} stall is reported") { _, p, _ in
+                let want = try p.requireInt(0)
+                guard w.admitCount == want else {
+                    throw BrineStepError("expected \(want) report(s), got \(w.admitCount)")
+                }
+            },
+            defineCheck("after the session cap is reached further stalls are dropped") { _, _, _ in
+                guard let budget = w.budget else { throw BrineStepError("no budget") }
+                // Space admits past the interval until the session cap is reached.
+                var guardCount = 0
+                while budget.consumed < w.budgetCap && guardCount < w.budgetCap * 4 {
+                    w.budgetNanos &+= 10_000_000_000   // +10s clears any spacing
+                    _ = budget.admit()
+                    guardCount += 1
+                }
+                w.budgetNanos &+= 10_000_000_000
+                guard budget.admit() == false else {
+                    throw BrineStepError("a report was admitted past the session cap of \(w.budgetCap)")
                 }
             },
         ]

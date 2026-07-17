@@ -98,6 +98,7 @@ public enum PerfDiag {
 public enum PerfHook {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var _report: (@Sendable (String, Int) -> Void)?
+    nonisolated(unsafe) private static var _emitLines: (@Sendable ([String]) -> Void)?
 
     public static func install(_ f: @escaping @Sendable (String, Int) -> Void) {
         lock.lock(); _report = f; lock.unlock()
@@ -106,6 +107,20 @@ public enum PerfHook {
     public static func span(_ name: String, ms: Int) {
         lock.lock(); let f = _report; lock.unlock()
         f?(name, ms)
+    }
+
+    /// Install the pre-formatted-lines bridge. The App points this at its PerfSink (each
+    /// line shipped flush:true) so kit code — e.g. the live stall-stack sampler — can ship
+    /// multi-line `stallstack`/`stallimg` payloads WITHOUT importing UIKit/MetricKit or
+    /// holding a sink. Content-free by construction: only frame tokens, never free text.
+    public static func installLines(_ f: @escaping @Sendable ([String]) -> Void) {
+        lock.lock(); _emitLines = f; lock.unlock()
+    }
+    /// Ship already-formatted perf lines (no-op until the app installs the bridge).
+    public static func emitLines(_ lines: [String]) {
+        guard !lines.isEmpty else { return }
+        lock.lock(); let f = _emitLines; lock.unlock()
+        f?(lines)
     }
 
     /// Time an async operation and report it as a span — on BOTH the success and
