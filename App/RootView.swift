@@ -296,7 +296,17 @@ struct RootView: View {
 @MainActor
 final class TabRouter: ObservableObject {
     typealias Tab = AppTab
-    @Published var selected: Tab = AppTab.launch
+    @Published var selected: Tab = AppTab.launch {
+        didSet {
+            // `tab-switch` span (track 20260717T0759 AC6): the main-thread cost of a
+            // tab change, from the selection write through the runloop turn that
+            // commits the destination's view build — the user-felt switch latency.
+            // Budget-gated in sim-perf's nav phase (<100ms).
+            guard oldValue != selected else { return }
+            let span = PerfSpan(name: "tab-switch")
+            DispatchQueue.main.async { PerfHook.span("tab-switch", ms: span.elapsedMs()) }
+        }
+    }
     @Published var showActionChooser = false
 }
 

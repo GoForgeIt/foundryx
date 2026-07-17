@@ -60,6 +60,11 @@ enum DemoSeed {
     /// stats the file SIZE + `.ack` presence, it never decodes the frames.
     private static func seedSegments(dir: URL, index k: Int, count n: Int, avg: Int) -> Int {
         let fm = FileManager.default
+        // Idempotent across relaunches (the nav phase relaunches the same install):
+        // if this capture already has its seg-0 on disk, the segment set is seeded.
+        if fm.fileExists(atPath: dir.appendingPathComponent("seg-000000000000.opus").path) {
+            return 0
+        }
         // A few heavy captures hold most of the backlog; the rest are short.
         let isHeavy = (k % 20 == 0)
         let segCount: Int
@@ -91,7 +96,16 @@ enum DemoSeed {
     static func installPerfLogIfRequested() {
         guard ProcessInfo.processInfo.arguments.contains("-PerfLog") else { return }
         PerfHook.install { name, ms in NSLog("perf-span %@ ms=%d", name, ms) }
+        // nav-stall watchdog (track 20260717T0759 AC6): live main-thread stall spans so
+        // the sim-perf nav phase can gate "zero stalls >250ms during normal nav". Armed
+        // a beat AFTER launch settles — the synthetic stress seeding + first hydration
+        // swap are launch cost (covered by the hydrate/first-paint budgets), not nav.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { stallWatchdog.start() }
     }
+
+    /// Harness-only main-thread stall sensor (see installPerfLogIfRequested). Retained
+    /// for the process lifetime once armed.
+    private static let stallWatchdog = MainThreadStallWatchdog()
 
     /// `-FreshActionState` (UI-proof determinism): wipe the action pipeline's
     /// mutable stores + the chat list so every proof run starts from the same

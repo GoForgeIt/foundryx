@@ -1260,6 +1260,12 @@ public final class CaptureManager: ObservableObject {
     /// start). Split out of `startMicRecording` so the permission-gated path and the
     /// already-granted path share one begin.
     private func beginMicRecording(_ micSource: AudioFrameSource) {
+        // `record-start` span (track 20260717T0759 AC6): OUR work from begin through the
+        // runloop turn that commits the recording surface's presentation. Deliberately
+        // starts here — after any first-run permission prompt — so the metric is app
+        // latency, not user decision time. Budget-gated in sim-perf's nav phase (<200ms).
+        let recordStartSpan = PerfSpan(name: "record-start")
+        DispatchQueue.main.async { PerfHook.span("record-start", ms: recordStartSpan.elapsedMs()) }
         lastRecordBlockReason = nil   // starting cleanly — clear any prior block message
         recordingScreenMinimized = false   // a fresh recording always presents full-screen
         isRecordingMic = true
