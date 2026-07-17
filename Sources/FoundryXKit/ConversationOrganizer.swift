@@ -19,7 +19,7 @@ import Foundation
 /// A lightweight placeholder row for the FIRST paint of the Capture list (T1 AC5):
 /// captureId + title + a short date label, read from `card.json` only — NO segment scan.
 /// Replaced by the real `CaptureWAL` cards the instant off-main hydration completes.
-public struct ConversationRowLite: Identifiable, Sendable, Equatable {
+public struct ConversationRowLite: Identifiable, Sendable, Equatable, Codable {
     public let captureId: String
     public let title: String
     public let dateLabel: String
@@ -29,6 +29,39 @@ public struct ConversationRowLite: Identifiable, Sendable, Equatable {
         self.captureId = captureId
         self.title = title
         self.dateLabel = dateLabel
+    }
+}
+
+/// Durable single-file warm-rows INDEX for a truly fast first paint (T3, WS-B perf).
+/// `seedWarmListRows` used to ENUMERATE the entire captures dir (thousands of entries incl.
+/// `.discarded` junk), sort, and then per visible row do 3 `fileExists` + a `card.json` read —
+/// SYNCHRONOUSLY on the main actor at startup (first-paint 495ms avg / 2722ms max @ N=128 on
+/// device; budget <300ms). Instead we persist the top ~`warmSeedCount` rows to ONE file that
+/// launch reads with a SINGLE synchronous decode; the enumeration path is a fallback only on an
+/// index MISS (first launch after update). The off-main hydration still corrects/replaces the
+/// rows, so a stale index only ever shows a slightly-old title/date for a few hundred ms.
+public enum WarmListIndexStore {
+    static let schema = 1
+    static let filename = "list-index.json"
+
+    private struct Index: Codable { var v: Int; var rows: [ConversationRowLite] }
+
+    static func indexURL(baseDir: URL) -> URL { baseDir.appendingPathComponent(filename) }
+
+    /// Load the persisted warm rows, or nil on miss / corrupt / wrong-schema (→ the caller
+    /// falls back to the enumeration scan). Never throws.
+    public static func load(baseDir: URL) -> [ConversationRowLite]? {
+        guard let data = try? Data(contentsOf: indexURL(baseDir: baseDir)),
+              let idx = try? JSONDecoder().decode(Index.self, from: data),
+              idx.v == schema else { return nil }
+        return idx.rows
+    }
+
+    /// Persist the warm rows (atomic). Caller passes the already-bounded top rows.
+    public static func save(_ rows: [ConversationRowLite], baseDir: URL) {
+        try? FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
+        guard let data = try? JSONEncoder().encode(Index(v: schema, rows: rows)) else { return }
+        try? data.write(to: indexURL(baseDir: baseDir), options: [.atomic])
     }
 }
 

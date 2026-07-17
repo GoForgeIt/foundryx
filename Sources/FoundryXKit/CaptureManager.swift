@@ -239,6 +239,39 @@ public final class CaptureManager: ObservableObject {
                 && !snap.confirmedInLore
         }.count
         statsSummary = makeStatsSummary(for: visible)
+        persistWarmListIndexIfChanged(from: visible)
+    }
+
+    /// The captureIds last written to the warm-rows index — so a rebuild that didn't change the
+    /// top-N set skips the (off-main) rewrite.
+    private var lastIndexedIds: [String] = []
+
+    /// Persist the top `warmSeedCount` warm rows to the durable single-file index (T3, WS-B),
+    /// OFF the main actor, whenever the top-N set changes (a new/reordered conversation, or the
+    /// first hydration). The main actor only snapshots ids + memoised durable starts; the
+    /// detached task reads each card + writes the file. A slightly-stale title is tolerated — the
+    /// real cards replace these rows the instant hydration publishes `visibleCaptures`.
+    private func persistWarmListIndexIfChanged(from visible: [CaptureWAL]) {
+        guard !visible.isEmpty else { return }
+        let snapshot: [(id: String, started: UInt64)] = visible.prefix(Self.warmSeedCount).map {
+            ($0.captureId, UInt64(max(0, startTime(of: $0))))
+        }
+        let ids = snapshot.map(\.id)
+        guard ids != lastIndexedIds else { return }
+        lastIndexedIds = ids
+        let base = baseDir
+        Task.detached(priority: .utility) {
+            var rows: [ConversationRowLite] = []
+            rows.reserveCapacity(snapshot.count)
+            for s in snapshot {
+                let card = ConversationCardStore.load(captureId: s.id, baseDir: base)
+                let started = card?.startedAt ?? s.started
+                let title = (card?.title?.isEmpty == false) ? card!.title! : "Conversation"
+                rows.append(ConversationRowLite(captureId: s.id, title: title,
+                                                dateLabel: CaptureManager.warmDateLabel(started)))
+            }
+            WarmListIndexStore.save(rows, baseDir: base)
+        }
     }
 
     /// Test seam: force a visible-list rebuild WITHOUT any invalidation, so a test can prove
@@ -3053,6 +3086,32 @@ public final class CaptureManager: ObservableObject {
     /// JSON reads), never O(all folders × all segments). The off-main WAL hydration then
     /// replaces these with the real cards + their status pollers.
     private func seedWarmListRows() {
+        // FAST PATH (T3, WS-B): read the persisted warm-rows index — ONE synchronous file
+        // decode — instead of enumerating the ENTIRE captures dir (thousands of entries incl.
+        // `.discarded` junk) + 3 `fileExists` + a `card.json` read per row on the main actor at
+        // startup (first-paint 495ms avg / 2722ms max @ N=128 on device). A bounded
+        // (O(warmSeedCount)) filter drops any row deleted/discarded since the index was written,
+        // so a stale index never shows a removed conversation. Empty after filtering ⇒ fall
+        // through to the scan (rare all-deleted top-N). Off-main hydration then corrects/replaces.
+        if let indexed = WarmListIndexStore.load(baseDir: baseDir) {
+            let fm = FileManager.default
+            let rows = indexed.filter { row in
+                let dir = baseDir.appendingPathComponent(row.captureId, isDirectory: true)
+                var isDir: ObjCBool = false
+                // Dir gone entirely (remote-delete ACK removed it) OR tombstoned → filter it out.
+                guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { return false }
+                if fm.fileExists(atPath: dir.appendingPathComponent(".deleted").path) { return false }
+                if fm.fileExists(atPath: dir.appendingPathComponent(".discarded").path) { return false }
+                return true
+            }
+            if !rows.isEmpty { listRows = rows; return }
+        }
+        seedWarmListRowsByScan()
+    }
+
+    /// Index-MISS fallback (first launch after update): the original enumeration path. Bounded to
+    /// a first screen, so the work is O(first-screen small JSON reads), never O(all folders).
+    private func seedWarmListRowsByScan() {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(at: baseDir, includingPropertiesForKeys: nil)
         else { return }
@@ -3088,7 +3147,7 @@ public final class CaptureManager: ObservableObject {
 
     /// A compact "when" label for a scan-free seed row (the full time·place·duration meta
     /// arrives with the real card).
-    private static func warmDateLabel(_ startedAt: UInt64) -> String {
+    private nonisolated static func warmDateLabel(_ startedAt: UInt64) -> String {
         guard startedAt > 0 else { return "" }
         let f = DateFormatter()
         f.dateFormat = "EEE, MMM d · h:mm a"
