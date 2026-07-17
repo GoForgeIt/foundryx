@@ -92,6 +92,55 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     private let wmLock = NSLock()
     private var watermark: Int64 = -1
 
+    /// LAZY SEGMENT SCAN (launch-hang fix, 2026-07-16). Constructing a WAL used to
+    /// EAGERLY scan its segment dir in `init` (`scanExisting`): enumerate + parse every
+    /// segment file, derive the watermark from the on-disk `.ack` markers, and publish.
+    /// Hydrating up to `maxCapturesToLoad` of those at launch turned into a multi-second
+    /// stat storm (real-phone `capture-hydrate` spans of 6–11 s on backlogged libraries)
+    /// that kept the conversation list stuck on its warm seed for seconds. The scan is now
+    /// DEFERRED: a WAL constructs cheaply, and the (still one-time, idempotent) segment
+    /// work happens only when a WAL's segment state is actually needed — the durable
+    /// upload watermark on first read (`ensureWatermarkLoaded`), and the next append seq on
+    /// the first flush (`ensureNextSeqLoadedOnIO`). The launch warm pass calls `warmStatus`
+    /// off-main to fill in real counts a moment AFTER the fast card swap, not before it.
+    ///
+    /// Two separate guards on purpose: the watermark lives under `wmLock` and is read from
+    /// arbitrary threads (status/drain), while `nextSeq` is `io`-queue-only, so deriving it
+    /// must happen ON that serial queue (in `flushLocked`) to stay race-free.
+    private let scanLock = NSLock()
+    private var watermarkLoaded = false
+    private var nextSeqLoaded = false          // io queue only
+
+    /// Load the durable upload watermark exactly once, lazily. Idempotent + thread-safe:
+    /// `scanLock` serializes so concurrent first-readers all see the fully-loaded value
+    /// (never the −1 default mid-derive). Distinct from `wmLock`, which
+    /// `loadOrDeriveWatermark` takes internally to set `watermark` — no re-entrancy.
+    private func ensureWatermarkLoaded() {
+        scanLock.lock(); defer { scanLock.unlock() }
+        guard !watermarkLoaded else { return }
+        loadOrDeriveWatermark()
+        watermarkLoaded = true
+    }
+
+    /// Derive the next segment seq once, lazily, from the highest on-disk segment. MUST be
+    /// called on the serial `io` queue (it reads/writes `nextSeq`, which is io-queue-only) —
+    /// so a resumed/active capture continues its sequence instead of overwriting seg 0.
+    private func ensureNextSeqLoadedOnIO() {
+        guard !nextSeqLoaded else { return }
+        nextSeqLoaded = true
+        if let maxSeq = allSegmentURLs().map({ $0.0 }).max() { nextSeq = maxSeq + 1 }
+    }
+
+    /// Launch WARM pass (off the fast first-paint path): trigger the lazy watermark load
+    /// and publish the real status ONCE, so the conversation list + sync banner reflect
+    /// true segment/sync counts a moment AFTER the fast card swap. Cheap per WAL; the owner
+    /// runs it off-main over the hydrated set. Deliberately does NOT sync — the
+    /// CaptureManager's bounded, backoff-aware drain remains the SOLE upload coordinator.
+    public func warmStatus() {
+        ensureWatermarkLoaded()
+        publish()
+    }
+
     /// `baseDir` defaults to the app's Documents dir (persists across launches).
     public init(captureId: String,
                 target: DoorTarget,
@@ -112,7 +161,8 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         self.status = CaptureStatus(id: captureId, stage: .recording, totalSegments: 0,
                                     syncedSegments: 0, bytes: 0, startedAt: startedAt,
                                     streaming: false, lastSyncError: nil)
-        scanExisting()
+        // NO eager segment scan here — see the LAZY SEGMENT SCAN note above. The watermark
+        // and next-append seq are derived on first use; the launch warm pass fills status.
     }
 
     public static func documentsCaptures() -> URL {
@@ -157,6 +207,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
 
     private func flushLocked() {
         guard !buffer.isEmpty else { return }
+        ensureNextSeqLoadedOnIO()   // derive the resume seq before the first append (io queue)
         let seq = nextSeq; nextSeq += 1
         let body = CaptureWAL.encodeSegment(buffer)
         buffer.removeAll(keepingCapacity: true)
@@ -387,6 +438,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     /// `watermark + 1` (bulk-ACK can fill holes anywhere, not just the next seq),
     /// persisting it. Monotonic — never moves backward.
     private func advanceWatermarkOverContiguousAcks() {
+        ensureWatermarkLoaded()
         wmLock.lock()
         var next = UInt64(watermark + 1)
         while FileManager.default.fileExists(
@@ -403,7 +455,12 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     private func watermarkURL() -> URL { dir.appendingPathComponent(".upload-watermark") }
 
     /// The current upload watermark (highest contiguously-ACK'd seq; −1 ⇒ none yet).
-    public func uploadWatermark() -> Int64 { wmLock.lock(); defer { wmLock.unlock() }; return watermark }
+    /// Triggers the one-time lazy watermark load — so `computeStatus`, `pendingSegmentURLs`,
+    /// and any direct caller resume from the true durable point, never the −1 default.
+    public func uploadWatermark() -> Int64 {
+        ensureWatermarkLoaded()
+        wmLock.lock(); defer { wmLock.unlock() }; return watermark
+    }
 
     /// Load the persisted watermark, else DERIVE it from the on-disk `.ack` markers
     /// (the highest contiguous run of ACK'd seqs from 0) so a pre-existing / stuck
@@ -433,6 +490,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     /// successors), persisting it. Called after each 200 ACK; uploads are in-order so
     /// `seq == watermark + 1` normally. Monotonic — never moves backward.
     private func advanceWatermark(throughAcked seq: UInt64) {
+        ensureWatermarkLoaded()
         wmLock.lock()
         guard Int64(seq) == watermark + 1 else { wmLock.unlock(); return }
         watermark = Int64(seq)
@@ -567,15 +625,4 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
             .sorted { $0.0 < $1.0 }
     }
 
-    private func scanExisting() {
-        let segs = allSegmentURLs()
-        if let maxSeq = segs.map({ $0.0 }).max() { nextSeq = maxSeq + 1 }
-        loadOrDeriveWatermark()   // resume point: load, else derive from on-disk `.ack` markers
-        publish()
-        // NOTE: no auto-sync here on purpose. The CaptureManager's bounded, backoff-aware
-        // drain is the SOLE upload coordinator. A per-WAL `Task { sync() }` on construction
-        // meant a multi-day backlog spawned hundreds of UNBOUNDED concurrent uploads the
-        // instant the app launched (a retry storm that pegged the device) — exactly the
-        // bug this change fixes. Pending segments drain through the rate-limited drain.
-    }
 }

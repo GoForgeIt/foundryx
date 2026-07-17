@@ -1939,7 +1939,13 @@ public final class CaptureManager: ObservableObject {
         // nextSeq = merged max + 1, watermark derived from the surviving `.ack` markers, so
         // the newly appended (un-ACK'd) segments read as PENDING and get uploaded.
         if let idx = captures.firstIndex(where: { $0.captureId == primaryId }) {
-            captures[idx] = makeWAL(captureId: primaryId)
+            let rebuilt = makeWAL(captureId: primaryId)
+            // Warm the fresh WAL's status NOW (on the main actor `publish()` applies
+            // synchronously) so the segment scan is lazy but the merged primary is
+            // immediately browsable — its real 0/N counts are in `status` before the
+            // rebuild below reads them, instead of the empty just-constructed default.
+            rebuilt.warmStatus()
+            captures[idx] = rebuilt
         }
         retryStates[primaryId] = nil
         finalizing.remove(primaryId)
@@ -2796,9 +2802,9 @@ public final class CaptureManager: ObservableObject {
     /// frame — WITHOUT re-introducing the launch-time segment-scan hang (T1 AC5). This
     /// enumerates directory NAMES once (one cheap bulk syscall, same as `loadExisting`),
     /// takes the newest `warmSeedCount`, and reads each capture's `card.json` (title +
-    /// durable start) — NO `CaptureWAL`/`makeWAL`, NO per-segment stat storm (the getxattr
-    /// storm that caused the 7.5s hang lives ONLY inside `CaptureWAL.scanExisting`, which
-    /// this never touches). Bounded to a first screen, so the work is O(first-screen small
+    /// durable start) — NO `CaptureWAL`/`makeWAL`, NO per-segment stat storm (the per-WAL
+    /// segment scan is now lazy — `CaptureWAL.warmStatus` off the first-paint path — and
+    /// this never touches it). Bounded to a first screen, so the work is O(first-screen small
     /// JSON reads), never O(all folders × all segments). The off-main WAL hydration then
     /// replaces these with the real cards + their status pollers.
     private func seedWarmListRows() {
@@ -2845,19 +2851,21 @@ public final class CaptureManager: ObservableObject {
     }
 
     private func loadExisting() {
-        // The WHOLE hydrate runs off the main actor: constructing a CaptureWAL
-        // scans its segment dir and stats every segment file (bytes/acks) — 300
-        // captures of that inside CaptureManager.init hung launches for seconds
-        // (7.5s hang report, 2026-07-13: RootView.body -> MainTabs.init ->
-        // loadExisting -> CaptureWAL.scanExisting -> attributesOfItem, main
-        // thread). Enumerate + build in the background, publish ONCE on main
-        // (one didSet -> one rebuild, preserving the earlier O(N^2) fix), then
-        // run the startup work that needs the timeline.
+        // Hydration runs off the main actor in TWO phases so first paint never waits on
+        // the per-segment scan (launch-hang fix, 2026-07-16):
+        //   1. FAST SWAP — enumerate the library and construct each `CaptureWAL` CHEAPLY
+        //      (the segment scan is now LAZY, see CaptureWAL), then append once. This is
+        //      the `capture-hydrate` span, and it's what unblocks the list's warm-seed ->
+        //      real-card swap. Constructing 300 WALs used to EAGERLY scan every segment
+        //      dir here (6–11s `capture-hydrate` on backlogged phones), stranding the list
+        //      on its warm seed for seconds.
+        //   2. WARM — off-main, off the first-paint path: `warmStatus()` runs the deferred
+        //      scan per WAL to fill in true segment/sync counts, then the startup work that
+        //      NEEDS those counts (orphan reconcile, retention). A moment behind the swap.
         let base = baseDir
         hydration = Task.detached(priority: .userInitiated) { [weak self] in
-            // Measure hydration so a launch-cost regression is visible in the
-            // fleet telemetry (perf span "capture-hydrate"), not only when a
-            // user forwards a hang report.
+            // Measure the FAST construction phase (perf span "capture-hydrate") so a
+            // launch-cost regression greps out of fleet telemetry as SLOW.
             let span = PerfSpan(name: "capture-hydrate")
             let fm = FileManager.default
             guard let entries = try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: nil)
@@ -2878,19 +2886,32 @@ public final class CaptureManager: ObservableObject {
                 picked.append(name)
             }
             guard let self else { return }
-            let hydrated = picked.map { self.makeWAL(captureId: $0) }   // the stat storm, off-main
-            // Retention sweep ALSO off the main actor (was the startup main-thread hang).
-            let prunedAudio = Self.retentionSweep(ids: picked, baseDir: self.baseDir)
+            // Phase 1 — cheap WAL construction (no segment scan). The list swaps to real
+            // cards the instant this appends; titles/summaries come scan-free from card.json.
+            let hydrated = picked.map { self.makeWAL(captureId: $0) }
             let ms = span.elapsedMs()
             await MainActor.run {
                 // A capture STARTED before hydration finished sits at index 0
                 // (newest); the hydrated backlog appends behind it — order holds.
-                self.captures.append(contentsOf: hydrated)   // one didSet -> one rebuild
+                self.captures.append(contentsOf: hydrated)   // one didSet -> one rebuild; swaps NOW
+            }
+            PerfHook.span("capture-hydrate-n\(hydrated.count)", ms: ms)
+
+            // Phase 2 — WARM the statuses (the deferred per-segment scan) OFF the first-paint
+            // path, then the startup work that needs true counts. Under its OWN span so the
+            // moved work stays visible in telemetry WITHOUT counting against the hydrate
+            // budget (the harness matches `capture-hydrate*`, not `capture-status-warm*`).
+            let warm = PerfSpan(name: "capture-status-warm")
+            for wal in hydrated { wal.warmStatus() }
+            // Retention sweep ALSO off the main actor (was a startup main-thread hang).
+            let prunedAudio = Self.retentionSweep(ids: picked, baseDir: self.baseDir)
+            let warmMs = warm.elapsedMs()
+            await MainActor.run {
                 self.pruneDiscardedFragments()
                 self.finishStartupAfterHydration(prunedAudioIds: prunedAudio)
+                self.rebuildVisibleCaptures()   // reflect warmed counts (banner/stats/orphan prune)
             }
-            // Ship the hydration cost (count + ms) — a slow one greps out as SLOW.
-            PerfHook.span("capture-hydrate-n\(hydrated.count)", ms: ms)
+            PerfHook.span("capture-status-warm-n\(hydrated.count)", ms: warmMs)
         }
     }
 
