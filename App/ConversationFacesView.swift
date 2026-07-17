@@ -1392,7 +1392,7 @@ private struct GrainSpeakerTranscriptRows: View {
                 time: rowTime(turn, speaker: speaker),
                 words: turn.text
             )
-            .opacity(speaker.isInferred ? 0.6 : 1)
+            .opacity((speaker.isInferred && speaker.revealedName != nil) ? 0.6 : 1)
             .textSelection(.enabled)
             .contentShape(Rectangle())
             .onTapGesture { tagging = speaker }
@@ -1403,7 +1403,9 @@ private struct GrainSpeakerTranscriptRows: View {
             // confirmed / failed) — same shared control as the legacy rows, so a tap
             // ALWAYS answers within a frame. Kept visible while a transient phase
             // lingers (the brief "Confirmed" check after the optimistic flip).
-            if speaker.isInferred, let name = speaker.name {
+            // Weak inferred slots reveal no name (revealedName == nil) and present like
+            // anonymous slots — tap-to-tag is the affordance (the one honesty gate).
+            if speaker.isInferred, let name = speaker.revealedName {
                 InlineConfirmControls(
                     phase: confirmController.phase(for: turn.slot),
                     name: name,
@@ -1414,7 +1416,7 @@ private struct GrainSpeakerTranscriptRows: View {
             } else if confirmController.phase(for: turn.slot) != .idle {
                 InlineConfirmControls(
                     phase: confirmController.phase(for: turn.slot),
-                    name: speaker.name ?? transcript.displayLabel(for: turn.slot),
+                    name: speaker.revealedName ?? transcript.displayLabel(for: turn.slot),
                     onConfirm: { Task { await confirmInferred(slot: turn.slot) } },
                     onNotThem: { tagging = speaker })
                 .padding(.leading, GrainSpacing.x4)
@@ -1437,12 +1439,10 @@ private struct GrainSpeakerTranscriptRows: View {
             let seconds = max(0, startMs / 1_000)
             parts.append(String(format: "%d:%02d", seconds / 60, seconds % 60))
         }
-        if speaker.isInferred {
-            if let score = speaker.inferScore {
-                parts.append("tentative · \(Int((score * 100).rounded()))%")
-            } else {
-                parts.append("tentative")
-            }
+        // Cosine is never rendered as a percentage (it is not a probability). A strong
+        // inferred match shows the honest hint; a weak one presents like anonymous.
+        if speaker.isInferred, speaker.revealedName != nil {
+            parts.append(SpeakerConfidence.inlineStrongHint)
         }
         return parts.joined(separator: " · ")
     }
