@@ -209,4 +209,34 @@ final class ConversationCardTests: XCTestCase {
         // Unknown stage degrades to stored, never crashes.
         XCTAssertEqual(CaptureLifecycleStage(wire: "wat"), .stored)
     }
+
+    // F1 (track 20260717T0448) — the poller merges card.json OUTSIDE the CaptureManager's
+    // sight, so it fires `onCardWritten` (the manager's sidecar-memo invalidation hook) —
+    // but ONLY when the merge ACTUALLY wrote (a change), never on an unchanged re-poll.
+    func testPollerFiresOnCardWrittenOnlyOnRealMerge() async throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("foundryx-poller-cb-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let box = PollerIDBox()
+        // Always returns "transcribing": the FIRST poll changes the stage (writes), the
+        // second is identical (no write) — so the callback must fire exactly once.
+        let fetcher = ScriptedFetcher(["transcribing"])
+        let poller = CaptureStatusPoller(captureId: "omi-cb", client: fetcher,
+                                         baseInterval: 0.01, baseDir: dir,
+                                         onCardWritten: { id in box.record(id) })
+        _ = await poller.pollOnce()
+        _ = await poller.pollOnce()
+        XCTAssertEqual(box.ids(), ["omi-cb"],
+                       "a real card merge fires onCardWritten once; an unchanged re-poll does not re-fire")
+    }
+}
+
+/// Thread-safe collector for the poller's `onCardWritten` callback (fires on the main actor).
+final class PollerIDBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String] = []
+    func record(_ id: String) { lock.lock(); recorded.append(id); lock.unlock() }
+    func ids() -> [String] { lock.lock(); defer { lock.unlock() }; return recorded }
 }

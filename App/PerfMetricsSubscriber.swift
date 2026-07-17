@@ -136,7 +136,17 @@ extension PerfTelemetry: MXMetricManagerSubscriber {
         for p in payloads {
             for hang in p.hangDiagnostics ?? [] {
                 let ms = Int(hang.hangDuration.converted(to: .milliseconds).value)
+                // Keep the existing single-frame blame line EXACTLY (dashboards grep it).
                 sink.hang(ms: ms, blamedFrame: Self.blamedFrame(hang.callStackTree))
+                // THEN ship the FULL call tree (track 20260717T0448): every frame as
+                // binary@uuid8+0xoffset + a full-UUID image table, size-capped, so both
+                // the recurring 650ms hang and the 48s hang become atos-able off-line.
+                // Serialized through the pure kit core (no MetricKit types leak into it).
+                let parse = PerfHangStack.parse(fromTreeJSON: hang.callStackTree.jsonRepresentation())
+                for line in PerfDiag.hangStackLines(ms: ms, frames: parse.frames,
+                                                    truncated: parse.truncated, ctx: sink.context) {
+                    sink.emit(line, flush: true)
+                }
             }
             for cpu in p.cpuExceptionDiagnostics ?? [] {
                 sink.hang(ms: Int(cpu.totalCPUTime.converted(to: .milliseconds).value),

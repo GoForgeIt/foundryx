@@ -1066,6 +1066,13 @@ struct ConversationFacesView: View {
             TranscriptCacheStore.save(entry, captureId: capId, baseDir: baseDir)
             ConversationCardStore.merge(captureId: capId, baseDir: baseDir,
                                         title: title, summary: summary, stage: nil)
+            // We just wrote transcript.json + card.json OUTSIDE the CaptureManager's sight;
+            // tell it to invalidate its per-capture sidecar memo so the list's membership +
+            // stats (distinct speakers) reflect this write (track 20260717T0448).
+            await MainActor.run {
+                NotificationCenter.default.post(name: .foundryxSidecarChanged, object: nil,
+                                                userInfo: ["captureId": capId])
+            }
         }
     }
 

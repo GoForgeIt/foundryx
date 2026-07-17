@@ -74,15 +74,21 @@ public enum PerfDiag {
         } ?? "unknown"
     }
 
-    private static func head(_ ctx: PerfContext) -> String {
+    /// The shared `perf build=… dev=…` prefix every line carries. Internal so the
+    /// hang-stack formatters (PerfHangStack.swift) build lines in the SAME grammar.
+    static func head(_ ctx: PerfContext) -> String {
         "perf build=\(ctx.build) dev=\(ctx.installId)"
     }
 
-    /// Keep values single-token + PII-free: no whitespace, no '@'.
-    private static func sanitize(_ s: String) -> String {
+    /// Keep values single-token + PII-free: no whitespace, no '@', no '\n', and no ';'
+    /// (';' is the frame/image separator in the hang-stack lines — an un-stripped ';' in
+    /// a binary name or symbol would otherwise split one token into two and corrupt the
+    /// line grammar the server re-parses). Internal so PerfHangStack shares ONE sanitizer.
+    static func sanitize(_ s: String) -> String {
         s.replacingOccurrences(of: " ", with: "_")
             .replacingOccurrences(of: "@", with: "_")
             .replacingOccurrences(of: "\n", with: "_")
+            .replacingOccurrences(of: ";", with: "_")
     }
 }
 

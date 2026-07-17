@@ -21,6 +21,11 @@ import Combine
 /// as conversations finish, not only when the screen (re)appears.
 public extension Notification.Name {
     static let foundryxConversationFinalized = Notification.Name("foundryxConversationFinalized")
+    /// Posted when a capture's DURABLE sidecar (transcript.json / card.json) is written
+    /// OUTSIDE the CaptureManager's sight — the detail view's content cache (track
+    /// 20260717T0448). The manager observes it to invalidate its per-capture sidecar memo
+    /// + rebuild, so membership/stats reflect the write. `userInfo["captureId"]` = the id.
+    static let foundryxSidecarChanged = Notification.Name("foundryxSidecarChanged")
 }
 
 /// One typed insight in a recap (blocker resolution B4). The TYPE is a

@@ -239,6 +239,12 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
     /// metadata tombstone (`card.json`), so the conversation shows a name + description
     /// across launches and after its transcript text has been pruned.
     private let baseDir: URL?
+    /// Fired (on the main actor) ONLY when a poll's card merge actually WROTE card.json —
+    /// so the manager can invalidate its per-capture sidecar memo + rebuild the list. The
+    /// poller writes the durable card tombstone outside the manager's sight, so without
+    /// this the manager's memo would go stale after a title/summary landed (track
+    /// 20260717T0448 F1). nil in door-free unit tests that don't seed a manager.
+    private let onCardWritten: (@MainActor @Sendable (String) -> Void)?
     // Touched only on the main actor (start/stop + the @MainActor apply).
     @MainActor private var task: Task<Void, Never>?
     @MainActor private var lastTranscribed = false
@@ -248,13 +254,15 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
                 initialStage: CaptureLifecycleStage = .stored,
                 baseInterval: TimeInterval = 5,
                 maxInterval: TimeInterval = 60,
-                baseDir: URL? = nil) {
+                baseDir: URL? = nil,
+                onCardWritten: (@MainActor @Sendable (String) -> Void)? = nil) {
         self.captureId = captureId
         self.client = client
         self.stage = initialStage
         self.baseInterval = baseInterval
         self.maxInterval = maxInterval
         self.baseDir = baseDir
+        self.onCardWritten = onCardWritten
         // Seed the live state from the durable card tombstone so the card shows its
         // name/description immediately on launch, before the first poll returns.
         if let baseDir, let card = ConversationCardStore.load(captureId: captureId, baseDir: baseDir) {
@@ -323,8 +331,11 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
         // Persist name/description/stage into the durable card tombstone so the whole
         // timeline stays browsable (with a title + summary) offline + after pruning.
         if let baseDir {
-            ConversationCardStore.merge(captureId: captureId, baseDir: baseDir,
-                                        title: resp.title, summary: resp.summary, stage: resp.stage)
+            let wrote = ConversationCardStore.merge(captureId: captureId, baseDir: baseDir,
+                                                    title: resp.title, summary: resp.summary, stage: resp.stage)
+            // Only signal a REAL change — repeat polls with unchanged content don't churn
+            // the manager's memo/rebuild (mirrors merge's own change-gated event log).
+            if wrote { onCardWritten?(captureId) }
         }
         // Keep polling past a terminal stage ONLY while a transcribed (non-failed)
         // capture is still waiting on its background-generated title.

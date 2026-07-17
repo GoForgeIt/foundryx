@@ -230,14 +230,21 @@ public final class CaptureManager: ObservableObject {
         // point) so the processing banner reads a cached count — no per-render disk
         // churn. A conversation is processing when it has real audio but no transcript
         // yet (not cached, not confirmed in Lore) and isn't the live recording.
+        // Reads the per-capture sidecar MEMO (seeded off-main at hydration) — no disk here.
         processingConversationCount = visible.filter { wal in
-            wal !== active
+            let snap = sidecar(for: wal.captureId)
+            return wal !== active
                 && wal.status.totalSegments > 0
-                && bestLocalTranscript(wal.captureId) == nil
-                && !TranscriptCacheStore.isConfirmedInLore(captureId: wal.captureId, baseDir: baseDir)
+                && snap.bestTranscriptText == nil
+                && !snap.confirmedInLore
         }.count
         statsSummary = makeStatsSummary(for: visible)
     }
+
+    /// Test seam: force a visible-list rebuild WITHOUT any invalidation, so a test can prove
+    /// the rebuild reads the per-capture sidecar MEMO and not disk (in production a `captures`
+    /// mutation is the trigger). Internal — reachable only via `@testable import`.
+    func rebuildVisibleCapturesForTests() { rebuildVisibleCaptures() }
 
     /// How many visible conversations are still being processed (audio captured, no
     /// transcript yet) — drives the top-of-list processing banner. Recomputed only on
@@ -254,11 +261,15 @@ public final class CaptureManager: ObservableObject {
     @Published public private(set) var lastFinalizedAt: Date?
 
     private func makeStatsSummary(for visible: [CaptureWAL]) -> StatsSummary {
+        // Both inputs come from MEMORY: meta from the metaCache (warmed at hydration,
+        // invalidated on every meta write), transcript from the sidecar memo's stripped
+        // stats transcript (text + speakers + extra-slot stubs — byte-identical word +
+        // distinct-speaker counts without retaining the heavy segment/paragraph arrays).
         let snapshots = visible.map { wal in
             StatsConversationSnapshot(
                 captureId: wal.captureId,
                 meta: conversationMeta(for: wal.captureId),
-                transcript: TranscriptCacheStore.load(captureId: wal.captureId, baseDir: baseDir)
+                transcript: sidecar(for: wal.captureId).statsTranscript
             )
         }
         return StatsSummary.build(from: snapshots)
@@ -284,41 +295,32 @@ public final class CaptureManager: ObservableObject {
     /// audio AND its transcript text have been pruned. Empty (0-segment) captures with
     /// no tombstone are still hidden (useless cards).
     private func isBrowsable(_ wal: CaptureWAL) -> Bool {
-        if isDiscarded(wal.captureId) { return false }   // sub-substance junk fragment — never show
-        if isDeleted(wal.captureId) { return false }     // user-deleted captures never show again
+        // All sidecar state (discard/delete markers, transcript text, card + confirmed
+        // tombstones) reads from the per-capture MEMO — no synchronous disk I/O here (R3).
+        let snap = sidecar(for: wal.captureId)
+        if snap.isDiscarded { return false }   // sub-substance junk fragment — never show
+        if snap.isDeleted { return false }     // user-deleted captures never show again
         if wal.status.streaming { return true }   // the active capture always shows
         let id = wal.captureId
         // If we hold judge-able transcript text locally, HIDE empty / near-silent /
         // filler captures — they pollute the timeline with useless noise cards
         // (track 20260628T1654; Omi empty-conversation gates). Data is kept, not shown.
-        if let text = bestLocalTranscript(id) {
+        if let text = snap.bestTranscriptText {
             return ConversationContentFilter.isMeaningful(
                 transcript: text, durationSeconds: conversationDurationSeconds(id))
         }
         // No transcript text yet (still processing): keep the prior visibility rule —
         // show real-audio / tombstoned captures, hide 0-segment empties.
         if CaptureManager.isWorthShowing(wal.status) { return true }
-        return hasCachedTranscript(id)
-            || ConversationCardStore.exists(captureId: id, baseDir: baseDir)
-            || TranscriptCacheStore.isConfirmedInLore(captureId: id, baseDir: baseDir)
-    }
-
-    /// The best transcript text we hold locally for the empty/filler filter: the cached
-    /// Kiln transcript, else the on-device provisional body. nil when we have neither
-    /// (still processing) — the caller then falls back to audio-presence visibility.
-    private func bestLocalTranscript(_ captureId: String) -> String? {
-        if let c = TranscriptCacheStore.load(captureId: captureId, baseDir: baseDir),
-           !c.transcript.isEmpty { return c.transcript }
-        if let card = ConversationCardStore.load(captureId: captureId, baseDir: baseDir),
-           let body = card.provisionalTranscript, !body.isEmpty { return body }
-        return nil
+        return snap.hasCachedTranscript || snap.cardExists || snap.confirmedInLore
     }
 
     /// The conversation's duration (seconds) from its durable meta, or nil when not yet
-    /// finalized — drives Omi's "higher bar for short clips" empty filter.
+    /// finalized — drives Omi's "higher bar for short clips" empty filter. Reads the
+    /// memoised `metaCache` (warmed at hydration, invalidated on every meta write), so the
+    /// filler filter costs no disk on the rebuild path.
     private func conversationDurationSeconds(_ captureId: String) -> TimeInterval? {
-        guard let dur = ConversationMetaStore.load(captureId: captureId, baseDir: baseDir)?.durationSeconds
-        else { return nil }
+        guard let dur = conversationMeta(for: captureId)?.durationSeconds else { return nil }
         return TimeInterval(dur)
     }
 
@@ -891,13 +893,32 @@ public final class CaptureManager: ObservableObject {
         loadExisting()         // OFF-MAIN hydration; finishes via finishStartupAfterHydration
         startDrainTimer()
         startSegmentTimer()    // wall-clock silence + runaway force-split watchdog
+        // OUT-OF-MANAGER sidecar writes (the detail view's content cache re-saves
+        // transcript.json + card.json on a fetch/speaker-confirm) invalidate the memo via a
+        // notification, so the next rebuild reflects them (track 20260717T0448).
+        sidecarObserver = NotificationCenter.default.addObserver(
+            forName: .foundryxSidecarChanged, object: nil, queue: .main) { [weak self] note in
+            guard let id = note.userInfo?["captureId"] as? String else { return }
+            MainActor.assumeIsolated {
+                self?.invalidateSidecar(id)
+                self?.scheduleSidecarRebuild()
+            }
+        }
+    }
+
+    /// The `.foundryxSidecarChanged` observer token — removed in deinit so a torn-down
+    /// manager (each test builds a fresh one) leaves no dangling registration.
+    private nonisolated(unsafe) var sidecarObserver: NSObjectProtocol?
+
+    deinit {
+        if let sidecarObserver { NotificationCenter.default.removeObserver(sidecarObserver) }
     }
 
     /// Startup work that NEEDS the hydrated timeline (orphan reconcile, retention
     /// sweeps, the widget seed) — runs once hydration lands on the main actor.
-    private func finishStartupAfterHydration(prunedAudioIds: [String]) {
+    private func finishStartupAfterHydration(retention: RetentionSweepResult) {
         reconcileOrphanedCaptures()  // give crash-orphaned captures real bounds + finalize them
-        applyRetentionSweep(prunedAudioIds: prunedAudioIds)  // the sweep already ran off-main
+        applyRetentionSweep(retention)  // the sweep already ran off-main; invalidates touched memos
         // Hydration is authoritative now — drop the scan-free warm seed unconditionally.
         // (rebuildVisibleCaptures only clears it when `visible` is non-empty; a library whose
         // newest captures are ALL filler resolves to visible==[] with a non-empty seed, which
@@ -928,6 +949,111 @@ public final class CaptureManager: ObservableObject {
         return loaded
     }
 
+    // MARK: per-capture sidecar memo (R3) — kill the list-rebuild main-thread disk storm
+
+    /// A per-capture memo of the DURABLE sidecar state `rebuildVisibleCaptures` reads, so
+    /// the rebuild (membership + processing count + stats) does ZERO synchronous sidecar
+    /// disk I/O on the main actor. Audit (2026-07-17): the rebuild fired on every
+    /// `captures` didSet + 7 sites and did up to ~3×N full transcript.json decodes + card
+    /// loads + marker stats ON MAIN — a same-site, library-size-proportional hang.
+    ///
+    /// TEXT + speakers ONLY — never the decoded segment/paragraph arrays (those are the
+    /// memory bulk; membership needs text + markers, stats needs word-count + distinct
+    /// speakers). Seeded OFF the main actor during hydration and INVALIDATED at every
+    /// write site (see `invalidateSidecar`).
+    struct SidecarSnapshot: Sendable {
+        /// `.discarded` marker present (sub-substance junk → never shown).
+        let isDiscarded: Bool
+        /// `.deleted` tombstone present (user-deleted → never shown).
+        let isDeleted: Bool
+        /// The best local transcript for the empty/filler membership filter: the cached
+        /// transcript text if non-empty, else the card's provisional body. nil ⇒ no
+        /// readable text yet (still processing) → the caller falls back to audio presence.
+        let bestTranscriptText: String?
+        /// transcript.json exists (the readable tombstone / "Ready" signal).
+        let hasCachedTranscript: Bool
+        /// card.json exists (the all-time browsable tombstone).
+        let cardExists: Bool
+        /// `.lore-confirmed` marker present.
+        let confirmedInLore: Bool
+        /// The STRIPPED cached transcript for StatsSummary: text + speakers + stub segments
+        /// carrying ONLY the extra (segment-referenced but speaker-array-absent) slots, so
+        /// the distinct-speaker + word counts are byte-identical to loading the full
+        /// transcript WITHOUT retaining the heavy segment/paragraph arrays. nil when no
+        /// transcript.json decoded (matches the pre-change stats snapshot's nil transcript).
+        let statsTranscript: CachedTranscript?
+    }
+
+    private var sidecarCache: [String: SidecarSnapshot] = [:]
+
+    /// Build a capture's sidecar memo from disk. `nonisolated static` so hydration can run
+    /// it OFF the main actor (pure disk — touches no actor state, Sendable result).
+    nonisolated static func loadSidecar(captureId id: String, baseDir: URL) -> SidecarSnapshot {
+        let dir = baseDir.appendingPathComponent(id, isDirectory: true)
+        let fm = FileManager.default
+        let discarded = fm.fileExists(atPath: dir.appendingPathComponent(".discarded").path)
+        let deleted = fm.fileExists(atPath: dir.appendingPathComponent(".deleted").path)
+        let cached = TranscriptCacheStore.load(captureId: id, baseDir: baseDir)   // transient full decode
+        let card = ConversationCardStore.load(captureId: id, baseDir: baseDir)
+        // bestLocalTranscript: the cached transcript text if non-empty, else the card's
+        // on-device provisional body (identical resolution to the old bestLocalTranscript).
+        let best: String?
+        if let c = cached, !c.transcript.isEmpty { best = c.transcript }
+        else if let body = card?.provisionalTranscript, !body.isEmpty { best = body }
+        else { best = nil }
+        // Strip the stats transcript to text + speakers + extra-slot stubs so the heavy
+        // arrays are dropped but StatsSummary.countDistinctSpeakers sees the SAME identities:
+        // it counts speaker-array identities PLUS any segment slot not in the speaker array,
+        // so one empty stub segment per extra slot reproduces the count exactly.
+        let stats: CachedTranscript? = cached.map { full in
+            let knownSlots = Set(full.speakers.map(\.slot))
+            let extraSlots = Set(full.segments.map(\.speaker)).subtracting(knownSlots).subtracting([""])
+            let stubs = extraSlots.enumerated().map {
+                TranscriptSegment(seq: $0.offset, text: "", speaker: $0.element)
+            }
+            return CachedTranscript(transcript: full.transcript, title: nil, summary: nil,
+                                    segments: stubs, speakers: full.speakers,
+                                    paragraphs: [], fetchedAt: 0)
+        }
+        return SidecarSnapshot(
+            isDiscarded: discarded,
+            isDeleted: deleted,
+            bestTranscriptText: best,
+            hasCachedTranscript: TranscriptCacheStore.hasCachedTranscript(captureId: id, baseDir: baseDir),
+            cardExists: ConversationCardStore.exists(captureId: id, baseDir: baseDir),
+            confirmedInLore: TranscriptCacheStore.isConfirmedInLore(captureId: id, baseDir: baseDir),
+            statsTranscript: stats)
+    }
+
+    /// The memoised sidecar for a capture, loading from disk ONLY on a cold miss. Hydration
+    /// warms every capture BEFORE the first rebuild, so the rebuild path stays memory-only;
+    /// a cold miss (a capture added after hydration, or just-invalidated) loads exactly one.
+    private func sidecar(for id: String) -> SidecarSnapshot {
+        if let hit = sidecarCache[id] { return hit }
+        let snap = Self.loadSidecar(captureId: id, baseDir: baseDir)
+        sidecarCache[id] = snap
+        return snap
+    }
+
+    /// Drop a capture's memoised sidecar after ANY write to its transcript / card / markers,
+    /// so the next rebuild reflects the change. Liberal invalidation is SAFE (a cold miss
+    /// re-loads one capture); a MISSED one — stale membership/stats — is the only real
+    /// hazard, so every writer (in-manager + the poller + the detail-view cache) calls this.
+    func invalidateSidecar(_ id: String) { sidecarCache[id] = nil }
+
+    /// A COALESCED visible-list rebuild for OUT-OF-MANAGER writers (the status poller's card
+    /// merge, the detail-view content cache): several can fire in one runloop tick, so hop
+    /// once and rebuild a single time rather than N times.
+    private var sidecarRebuildScheduled = false
+    private func scheduleSidecarRebuild() {
+        guard !sidecarRebuildScheduled else { return }
+        sidecarRebuildScheduled = true
+        Task { @MainActor [weak self] in
+            self?.sidecarRebuildScheduled = false
+            self?.rebuildVisibleCaptures()
+        }
+    }
+
     /// The durable, lightweight card metadata (name/description/stage) for a capture —
     /// the all-time tombstone that lets EVERY conversation show a title + summary in
     /// the list, even after its transcript text has been pruned. `nil` for a capture
@@ -954,7 +1080,15 @@ public final class CaptureManager: ObservableObject {
         let client = DoorClient(target: target, log: log)
         // Pass baseDir so the poller persists title/summary/stage into the durable card
         // tombstone (card.json) — the all-time browsable name + description.
-        let poller = CaptureStatusPoller(captureId: captureId, client: client, baseDir: baseDir)
+        // F1 — the poller merges title/summary into card.json OUTSIDE the manager's sight
+        // (its own off-main loop). Wire a callback (fired only when the merge actually
+        // changed the card) that invalidates the memo + coalesces a rebuild, so the
+        // browsable tombstone / card reflect it without a per-rebuild disk read.
+        let poller = CaptureStatusPoller(captureId: captureId, client: client, baseDir: baseDir,
+                                         onCardWritten: { [weak self] id in
+            self?.invalidateSidecar(id)
+            self?.scheduleSidecarRebuild()
+        })
         pollers[captureId] = poller
         return poller
     }
@@ -991,6 +1125,7 @@ public final class CaptureManager: ObservableObject {
             // Also seed the durable card tombstone with the name/description.
             ConversationCardStore.merge(captureId: captureId, baseDir: baseDir,
                                         title: c.title, summary: c.summary, stage: nil)
+            self?.invalidateSidecar(captureId)   // transcript + card just changed on disk
             self?.rebuildVisibleCaptures()   // a freshly-cached tombstone can change membership
         }
     }
@@ -1477,6 +1612,7 @@ public final class CaptureManager: ObservableObject {
                         .write(to: discardMarker(id), options: [.atomic])
                     clearNeedsFinalize(id)
                     retryStates[id] = nil
+                    invalidateSidecar(id)   // `.discarded` now present
                     discardedAny = true
                     log?.info("capture \(id): pruned stuck-empty capture (0 segments, aged out)")
                 }
@@ -1820,6 +1956,7 @@ public final class CaptureManager: ObservableObject {
         ConversationMetaStore.recordOpen(captureId: captureId, baseDir: baseDir, at: nowUnixSecs())
         invalidateMeta(captureId)
         ConversationCardStore.recordStart(captureId: captureId, baseDir: baseDir, startedAt: nowUnixSecs())
+        invalidateSidecar(captureId)   // card.json may have just been created (cardExists)
         CaptureEventLog.append(.captureStarted, captureId: captureId,
                                payload: ["source": captureSource.rawValue, "resume": "true"],
                                baseDir: baseDir)
@@ -2073,6 +2210,7 @@ public final class CaptureManager: ObservableObject {
         ConversationMetaStore.recordStart(captureId: id, baseDir: baseDir, at: startSecs)
         invalidateMeta(id)
         ConversationCardStore.recordStart(captureId: id, baseDir: baseDir, startedAt: startSecs)
+        invalidateSidecar(id)   // card.json may have just been created (cardExists)
         // Append-only event log (track 20260705T1100, decision #3): the durable
         // history a future brain is seeded from by replay.
         CaptureEventLog.append(.captureStarted, captureId: id,
@@ -2157,6 +2295,7 @@ public final class CaptureManager: ObservableObject {
         let changed = ConversationCardStore.seedProvisional(
             captureId: captureId, baseDir: baseDir, transcript: transcript, title: title)
         if changed {
+            invalidateSidecar(captureId)   // the provisional body/title just landed on the card
             rebuildVisibleCaptures()
             // The last-finished title the home widget shows is derived from the newest card.
             // This seed (incl. the async transcript-refine after endSession) can change it,
@@ -2311,6 +2450,12 @@ public final class CaptureManager: ObservableObject {
         do {
             try await finalizeCapture(id, meta)
             clearNeedsFinalize(id)
+            // The finalize backend may be the LOCAL brain (LocalBackend), which writes the
+            // transcript + card sidecars directly — OUTSIDE the manager's sight. Invalidate
+            // the memo + rebuild so a phone-only transcript's membership/stats reflect it
+            // (a no-op cost for the door path, whose transcript arrives via ensureRecent…).
+            invalidateSidecar(id)
+            rebuildVisibleCaptures()
             // The ambient lane's rolling buffer is ephemeral by design — the finalized
             // capture's authoritative transcript comes from the normal pipeline.
             if let lane = ambientLane { Task.detached { await lane.endCapture(captureId: id) } }
@@ -2549,6 +2694,7 @@ public final class CaptureManager: ObservableObject {
         try? Data(reason.utf8).write(to: discardMarker(captureId), options: [.atomic])
         clearNeedsFinalize(captureId)
         retryStates[captureId] = nil
+        invalidateSidecar(captureId)   // `.discarded` now present → memo must not show it
     }
 
     // MARK: delete conversation (user intent — instant local hide, durable remote retry)
@@ -2619,6 +2765,7 @@ public final class CaptureManager: ObservableObject {
         if let poller = pollers.removeValue(forKey: captureId) { poller.stop() }
         deleteConversationFilesKeepingMarkers(captureId)
         metaCache[captureId] = nil
+        invalidateSidecar(captureId)   // `.deleted` marker + files just changed on disk
         captures.removeAll { $0.captureId == captureId }   // didSet republishes immediately
         log?.info("capture \(captureId): deleted locally; remote delete queued")
     }
@@ -2642,10 +2789,10 @@ public final class CaptureManager: ObservableObject {
         let activeId = active?.captureId
         let ids = captures.compactMap { $0.captureId == activeId ? nil : $0.captureId }
         let base = baseDir
-        let prunedAudio = await Task.detached(priority: .utility) {
+        let result = await Task.detached(priority: .utility) {
             Self.retentionSweep(ids: ids, baseDir: base)
         }.value
-        applyRetentionSweep(prunedAudioIds: prunedAudio)
+        applyRetentionSweep(result)
     }
 
     // MARK: retention — the sweep runs OFF the main actor (pure disk); the caller applies
@@ -2653,12 +2800,23 @@ public final class CaptureManager: ObservableObject {
     // name/description tombstone) and ~30d local AUDIO (only when confirmed in Lore AND a
     // readable tombstone survives). Idempotent + offline-safe. Never the active capture.
 
+    /// What the off-main retention sweep changed on disk, so the main actor can invalidate
+    /// the sidecar memo for EXACTLY the touched captures (a text prune + card merge, or an
+    /// audio prune, both shift a capture's memoised membership/stats).
+    struct RetentionSweepResult: Sendable {
+        /// Captures whose local audio was pruned (their WAL status must be refreshed).
+        let prunedAudioIds: [String]
+        /// Captures whose cached transcript TEXT was pruned (+ card merged) — memo stale.
+        let prunedTextIds: [String]
+    }
+
     /// The full retention sweep for `ids`, done ENTIRELY off the main thread. NOTHING here
     /// touches actor state — disk only — so it is safe to run from a detached task. Returns
-    /// the ids whose local audio was pruned, so the caller can refresh those WALs + rebuild
-    /// the visible list on the main actor.
-    nonisolated static func retentionSweep(ids: [String], baseDir: URL) -> [String] {
+    /// the ids whose local audio / transcript text was pruned, so the caller can refresh
+    /// those WALs, invalidate their sidecar memo, and rebuild the visible list on main.
+    nonisolated static func retentionSweep(ids: [String], baseDir: URL) -> RetentionSweepResult {
         // ~14d transcript TEXT (preserve the name/description card first, then drop the text).
+        var prunedText: [String] = []
         for id in ids {
             guard !isDeletedOnDisk(id, baseDir: baseDir) else { continue }
             guard TranscriptCacheStore.hasCachedTranscript(captureId: id, baseDir: baseDir) else { continue }
@@ -2669,6 +2827,7 @@ public final class CaptureManager: ObservableObject {
                                             title: t.title, summary: t.summary, stage: nil)
             }
             TranscriptCacheStore.pruneTranscriptText(captureId: id, baseDir: baseDir)
+            prunedText.append(id)
         }
         // ~30d local AUDIO (confirmed in Lore AND a readable tombstone survives).
         var prunedAudio: [String] = []
@@ -2684,17 +2843,22 @@ public final class CaptureManager: ObservableObject {
             deleteLocalAudioOnDisk(id, baseDir: baseDir)
             prunedAudio.append(id)
         }
-        return prunedAudio
+        return RetentionSweepResult(prunedAudioIds: prunedAudio, prunedTextIds: prunedText)
     }
 
-    /// Apply the off-main sweep's audio-prune result on the main actor: refresh the pruned
-    /// WALs' status (membership may shift to tombstone) and rebuild the visible list once.
-    private func applyRetentionSweep(prunedAudioIds: [String]) {
-        guard !prunedAudioIds.isEmpty else { return }
-        let pruned = Set(prunedAudioIds)
-        for wal in captures where pruned.contains(wal.captureId) { wal.refreshStatus() }
+    /// Apply the off-main sweep's result on the main actor: invalidate the memo for every
+    /// touched capture (text prune / card merge / audio prune all shift membership/stats),
+    /// refresh the audio-pruned WALs' status, and rebuild the visible list once.
+    private func applyRetentionSweep(_ result: RetentionSweepResult) {
+        let touched = Set(result.prunedAudioIds).union(result.prunedTextIds)
+        guard !touched.isEmpty else { return }
+        for id in touched { invalidateSidecar(id) }
+        let prunedAudio = Set(result.prunedAudioIds)
+        for wal in captures where prunedAudio.contains(wal.captureId) { wal.refreshStatus() }
         rebuildVisibleCaptures()
-        log?.info("retention: pruned local audio for \(prunedAudioIds.count) capture(s) (>30d, confirmed, tombstoned)")
+        if !result.prunedAudioIds.isEmpty {
+            log?.info("retention: pruned local audio for \(result.prunedAudioIds.count) capture(s) (>30d, confirmed, tombstoned)")
+        }
     }
 
     // MARK: retention — nonisolated disk primitives (safe to run off the main actor)
@@ -2889,13 +3053,33 @@ public final class CaptureManager: ObservableObject {
             // Phase 1 — cheap WAL construction (no segment scan). The list swaps to real
             // cards the instant this appends; titles/summaries come scan-free from card.json.
             let hydrated = picked.map { self.makeWAL(captureId: $0) }
-            let ms = span.elapsedMs()
+            let ms = span.elapsedMs()   // capture-hydrate = WAL construction ONLY (unchanged)
+            // R3 — seed the per-capture sidecar (+meta) memo OFF the main actor, under its
+            // OWN span (NOT matching capture-hydrate* — the budget-grep rule), so the didSet
+            // rebuild that fires on `captures.append` reads a WARM cache (memory), not disk.
+            // This is the work that previously ran ON the main actor inside every rebuild.
+            let seedSpan = PerfSpan(name: "capture-sidecar-seed")
+            var seededSidecars: [String: SidecarSnapshot] = [:]
+            var seededMeta: [String: ConversationMeta?] = [:]
+            seededSidecars.reserveCapacity(picked.count)
+            seededMeta.reserveCapacity(picked.count)
+            for id in picked {
+                seededSidecars[id] = Self.loadSidecar(captureId: id, baseDir: self.baseDir)
+                seededMeta[id] = ConversationMetaStore.load(captureId: id, baseDir: self.baseDir)
+            }
+            let seedMs = seedSpan.elapsedMs()
             await MainActor.run {
+                // Seed BEFORE append so the append's didSet rebuild hits the warm cache.
+                // Keep any entry the main actor already wrote during the async gap (a
+                // capture started mid-hydration) — the disk seed must not clobber live state.
+                self.sidecarCache.merge(seededSidecars) { current, _ in current }
+                self.metaCache.merge(seededMeta) { current, _ in current }
                 // A capture STARTED before hydration finished sits at index 0
                 // (newest); the hydrated backlog appends behind it — order holds.
                 self.captures.append(contentsOf: hydrated)   // one didSet -> one rebuild; swaps NOW
             }
             PerfHook.span("capture-hydrate-n\(hydrated.count)", ms: ms)
+            PerfHook.span("capture-sidecar-seed-n\(picked.count)", ms: seedMs)
 
             // Phase 2 — WARM the statuses (the deferred per-segment scan) OFF the first-paint
             // path, then the startup work that needs true counts. Under its OWN span so the
@@ -2904,12 +3088,17 @@ public final class CaptureManager: ObservableObject {
             let warm = PerfSpan(name: "capture-status-warm")
             for wal in hydrated { wal.warmStatus() }
             // Retention sweep ALSO off the main actor (was a startup main-thread hang).
-            let prunedAudio = Self.retentionSweep(ids: picked, baseDir: self.baseDir)
+            let retention = Self.retentionSweep(ids: picked, baseDir: self.baseDir)
             let warmMs = warm.elapsedMs()
             await MainActor.run {
+                // R4 — the startup main-actor TAIL (orphan reconcile + retention apply +
+                // rebuild + widget seed) was invisible (capture-status-warm stops before this
+                // hop). Measure it under its own span so any residual main-thread cost shows.
+                let finishSpan = PerfSpan(name: "capture-startup-finish")
                 self.pruneDiscardedFragments()
-                self.finishStartupAfterHydration(prunedAudioIds: prunedAudio)
+                self.finishStartupAfterHydration(retention: retention)
                 self.rebuildVisibleCaptures()   // reflect warmed counts (banner/stats/orphan prune)
+                PerfHook.span("capture-startup-finish-n\(hydrated.count)", ms: finishSpan.elapsedMs())
             }
             PerfHook.span("capture-status-warm-n\(hydrated.count)", ms: warmMs)
         }
