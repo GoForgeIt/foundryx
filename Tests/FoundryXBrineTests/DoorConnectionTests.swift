@@ -225,6 +225,126 @@ final class DoorConnectionTests: XCTestCase {
                                     "frames spaced over time — incremental, not batched")
     }
 
+    // MARK: reconnect backoff / circuit breaker (TARGET 1 — relay-CPU runaway)
+
+    /// The pure backoff schedule: base doubles per consecutive failure, capped, jittered.
+    /// Pins the exact curve so a regression that flattens or unbounds it is caught.
+    func testReconnectDelaySchedule() {
+        let j = 1.0
+        XCTAssertEqual(DoorConnectionPool.reconnectDelay(forFailures: 0, jitter: j), 0.0, accuracy: 1e-9)
+        XCTAssertEqual(DoorConnectionPool.reconnectDelay(forFailures: 1, jitter: j), 0.25, accuracy: 1e-9)
+        XCTAssertEqual(DoorConnectionPool.reconnectDelay(forFailures: 2, jitter: j), 0.5, accuracy: 1e-9)
+        XCTAssertEqual(DoorConnectionPool.reconnectDelay(forFailures: 3, jitter: j), 1.0, accuracy: 1e-9)
+        XCTAssertEqual(DoorConnectionPool.reconnectDelay(forFailures: 4, jitter: j), 2.0, accuracy: 1e-9)
+        XCTAssertEqual(DoorConnectionPool.reconnectDelay(forFailures: 5, jitter: j), 4.0, accuracy: 1e-9)
+        XCTAssertEqual(DoorConnectionPool.reconnectDelay(forFailures: 6, jitter: j), 8.0, accuracy: 1e-9)
+        // Capped: further failures never grow the window past reconnectMaxDelay.
+        XCTAssertEqual(DoorConnectionPool.reconnectDelay(forFailures: 7, jitter: j), 8.0, accuracy: 1e-9)
+        XCTAssertEqual(DoorConnectionPool.reconnectDelay(forFailures: 40, jitter: j), 8.0, accuracy: 1e-9)
+        // Jitter scales the whole delay (±20% by default).
+        XCTAssertEqual(DoorConnectionPool.reconnectDelay(forFailures: 3, jitter: 0.8), 0.8, accuracy: 1e-9)
+        XCTAssertEqual(DoorConnectionPool.reconnectDelay(forFailures: 3, jitter: 1.2), 1.2, accuracy: 1e-9)
+    }
+
+    /// A hand-advanced monotonic clock + a dial counter, so the breaker is exercised with
+    /// zero sleeping and zero networking.
+    private final class FakeClock: @unchecked Sendable {
+        private let lock = NSLock(); private var t: TimeInterval = 0
+        func now() -> TimeInterval { lock.lock(); defer { lock.unlock() }; return t }
+        func advance(_ dt: TimeInterval) { lock.lock(); t += dt; lock.unlock() }
+    }
+    private final class DialCounter: @unchecked Sendable {
+        private let lock = NSLock(); private var n = 0
+        func bump() { lock.lock(); n += 1; lock.unlock() }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return n }
+    }
+
+    /// THE anti-busy-loop invariant for the relay-CPU runaway: against a persistently
+    /// failing relay leg, no volume of turn() calls drives more than one Noise XX
+    /// handshake (dial) per backoff window. Without the breaker, each call re-dials →
+    /// repeated handshakes → the sustained crypto CPU we saw in the 48–90s diagnostics.
+    func testPersistentlyFailingChannelDoesNotBusyLoopHandshakes() async throws {
+        let clock = FakeClock()
+        let dials = DialCounter()
+        let makeChannel: @Sendable (RelayConfig) async throws -> MuxFrameChannel = { _ in
+            dials.bump()
+            throw DoorConnectionError.channelError("relay leg down")   // dial always fails
+        }
+        let pool = DoorConnectionPool(makeChannel: makeChannel,
+                                      now: { clock.now() }, jitter: { 1.0 })
+        let cfg = RelayConfig(relayURL: URL(string: "ws://x")!, tunnelId: "t",
+                              staticPrivate: Data(repeating: 0, count: 32), expectedDoorStatic: nil)
+
+        // 50 rapid turns at t=0: the first dials (fails → schedules a 0.25s window); every
+        // subsequent call inside the window is refused fast, WITHOUT a handshake.
+        for _ in 0..<50 { _ = try? await pool.turn(config: cfg, request: Data("x".utf8)) }
+        XCTAssertEqual(dials.count, 1, "one handshake per window, not one per call")
+
+        // Advance past the first window → exactly one new dial (failure #2 → 0.5s window).
+        clock.advance(0.30)
+        _ = try? await pool.turn(config: cfg, request: Data("x".utf8))
+        XCTAssertEqual(dials.count, 2)
+        // Still inside the 0.5s window → refused, no dial.
+        for _ in 0..<20 { _ = try? await pool.turn(config: cfg, request: Data("x".utf8)) }
+        XCTAssertEqual(dials.count, 2, "still gated inside the longer window")
+
+        // Now hammer for a simulated ~60s at a tight 0.1s cadence (600 calls) while the
+        // leg stays dead. The window saturates at the 8s cap, so total handshakes stay in
+        // the low teens — bounded — instead of 600. This is the CPU-runaway fix.
+        for _ in 0..<600 {
+            clock.advance(0.1)
+            _ = try? await pool.turn(config: cfg, request: Data("x".utf8))
+        }
+        XCTAssertLessThan(dials.count, 20, "persistently-dead leg throttled to a handful of handshakes/min")
+    }
+
+    /// The breaker must NOT penalise a legitimate first-connect, and must reset the moment
+    /// the relay leg recovers (a real network flip) — so recovery isn't stuck behind a
+    /// stale backoff window.
+    func testFirstConnectImmediateAndBreakerResetsOnSuccess() async throws {
+        let clock = FakeClock()
+        let dials = DialCounter()
+        // Fail the first dial, then succeed (models: leg down, then network flips back).
+        let makeChannel: @Sendable (RelayConfig) async throws -> MuxFrameChannel = { _ in
+            let attempt = dials.count
+            dials.bump()
+            if attempt < 1 { throw DoorConnectionError.channelError("down") }
+            let ch = DoorConnectionTests.LoopbackChannel()
+            let door = Task {
+                while let frame = await ch.toDoor.pull() {
+                    guard let (id, k, payload) = decodeMuxFrame(frame),
+                          MuxKind(rawValue: k) == .request else { continue }
+                    Task {
+                        ch.fromDoor.push(encodeMuxFrame(turnId: id, kind: .responseFrame, payload: payload))
+                        ch.fromDoor.push(encodeMuxFrame(turnId: id, kind: .responseEnd, payload: Data()))
+                    }
+                }
+            }
+            _ = door   // kept alive by the channel's queues; cancelled when the test ends
+            return ch
+        }
+        let pool = DoorConnectionPool(makeChannel: makeChannel,
+                                      now: { clock.now() }, jitter: { 1.0 })
+        let cfg = RelayConfig(relayURL: URL(string: "ws://x")!, tunnelId: "t",
+                              staticPrivate: Data(repeating: 0, count: 32), expectedDoorStatic: nil)
+
+        // First call dials immediately (no prior failure to gate it) and fails.
+        _ = try? await pool.turn(config: cfg, request: Data("a".utf8))
+        XCTAssertEqual(dials.count, 1, "first-connect is never delayed by the breaker")
+
+        // Past the first window, the leg is back: this dial succeeds and the turn completes.
+        clock.advance(0.30)
+        let ok = try await pool.turn(config: cfg, request: Data("b".utf8))
+        XCTAssertEqual(ok.map { String(decoding: $0, as: UTF8.self) }, ["b"], "recovered turn round-trips")
+        XCTAssertEqual(dials.count, 2, "one dial to fail, one to recover")
+
+        // Breaker reset on success: the live connection is reused with NO new dial, and no
+        // residual backoff lingers.
+        let ok2 = try await pool.turn(config: cfg, request: Data("c".utf8))
+        XCTAssertEqual(ok2.map { String(decoding: $0, as: UTF8.self) }, ["c"])
+        XCTAssertEqual(dials.count, 2, "recovered connection reused — breaker fully reset")
+    }
+
     /// The incremental SSE parser tolerates `data:` lines split ACROSS mux frame boundaries:
     /// only whole lines are emitted; a partial line carries forward in the remainder.
     func testDrainSSELinesHandlesSplitLines() {
