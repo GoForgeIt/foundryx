@@ -139,25 +139,80 @@ public struct PerfTimeout: Error, Sendable {
     public init(name: String, ms: Int) { self.name = name; self.ms = ms }
 }
 
+/// The single-resume guard shared between `withPerfTimeout`'s op task, its deadline task,
+/// and the caller's continuation. The FIRST finisher resumes the caller exactly once; the
+/// loser is cancelled (best-effort). A non-cooperative op that finishes AFTER the deadline
+/// already unblocked the caller learns it LOST (`resume` → false) and emits an orphan span.
+private final class PerfTimeoutGuard<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resumed = false
+    private var opTask: Task<Void, Never>?
+    private var deadlineTask: Task<Void, Never>?
+
+    func attach(op: Task<Void, Never>, deadline: Task<Void, Never>) {
+        lock.lock(); opTask = op; deadlineTask = deadline; lock.unlock()
+    }
+
+    /// Resume the caller exactly once. Returns true iff THIS call won the race (resumed the
+    /// continuation); false means another finisher already resumed it — the caller is the
+    /// orphan (the op finishing after the deadline had unblocked the caller). Cancels the
+    /// loser task best-effort; a non-cooperative op ignores that (hence the orphan span).
+    func resume(_ result: sending Result<T, Error>, _ cont: CheckedContinuation<T, Error>) -> Bool {
+        lock.lock()
+        if resumed { lock.unlock(); return false }
+        resumed = true
+        let op = opTask, dl = deadlineTask
+        lock.unlock()
+        cont.resume(with: result)
+        dl?.cancel(); op?.cancel()
+        return true
+    }
+}
+
 /// Race `op` against a deadline. Returns op's result if it finishes first; throws
-/// `PerfTimeout` (and cancels op) if the deadline wins. Also reports a `<name>-timeout`
-/// span so the timeout is visible in the perf stream.
+/// `PerfTimeout` if the deadline wins. Also reports a `<name>-timeout` span so the timeout
+/// is visible in the perf stream.
+///
+/// CRITICAL (2026-07-17, WS-B): the caller resumes AT the deadline even when `op` does NOT
+/// cooperate with cancellation. The old implementation raced op-vs-deadline inside a
+/// `withThrowingTaskGroup`, which cannot RETURN until every child completes — so a wedged,
+/// non-cancellable `LanguageModelSession.respond` turn (FoundationModels) kept the caller
+/// blocked until it actually finished (~86s measured; fm-title-timeout fired at ms=20000 but
+/// fm-title-err landed at 86136/88706). Implicated in sustained CPU burn (that 86s stall ×
+/// up to 12 SummaryBackfill calls). Now `op` runs in a DETACHED task and the caller is
+/// resumed by whichever finisher wins via a single-resume guard; the wedged op is left to
+/// finish on its own and, when it does, emits `<name>-orphan-done ms=` so the real wedge
+/// duration stays visible in telemetry.
 public func withPerfTimeout<T: Sendable>(
     _ name: String, ms: Int,
     _ op: @escaping @Sendable () async throws -> T
 ) async throws -> T {
-    try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask { try await op() }
-        group.addTask {
-            try await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
-            PerfHook.span("\(name)-timeout", ms: ms)
-            throw PerfTimeout(name: name, ms: ms)
+    let guardState = PerfTimeoutGuard<T>()
+    return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<T, Error>) in
+        // The op, DETACHED so a non-cooperative op can never hold the caller past the
+        // deadline. It measures its OWN span so an orphan (a turn that outran the deadline)
+        // reports the true wedge duration when it finally completes.
+        let opTask = Task.detached(priority: .userInitiated) {
+            let span = PerfSpan(name: name)
+            let outcome: Result<T, Error>
+            do { outcome = .success(try await op()) } catch { outcome = .failure(error) }
+            if !guardState.resume(outcome, cont) {
+                // The deadline already unblocked the caller — this op is the orphan. Record
+                // its real wedge duration so a non-cooperative hang stays measurable.
+                PerfHook.span("\(name)-orphan-done", ms: span.elapsedMs())
+            }
         }
-        defer { group.cancelAll() }
-        guard let result = try await group.next() else {
-            throw PerfTimeout(name: name, ms: ms)
+        // The deadline. If it wins, resume the caller with PerfTimeout NOW (no waiting on the
+        // wedged op) and emit the `-timeout` span. If the op already won, the sleep is
+        // cancelled and this no-ops.
+        let deadlineTask = Task.detached(priority: .userInitiated) {
+            try? await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
+            if Task.isCancelled { return }
+            if guardState.resume(.failure(PerfTimeout(name: name, ms: ms)), cont) {
+                PerfHook.span("\(name)-timeout", ms: ms)
+            }
         }
-        return result
+        guardState.attach(op: opTask, deadline: deadlineTask)
     }
 }
 

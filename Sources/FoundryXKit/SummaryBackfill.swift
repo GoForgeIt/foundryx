@@ -45,17 +45,33 @@ public enum SummaryBackfill {
         // leave those cards title-only. The marker is only written once the addressable set
         // is exhausted (nothing left to defer), so it converges instead of misfiring once.
         var deferred = false
+        // The on-device model can WEDGE — a 20s+ non-cooperative turn that surfaces as a
+        // `PerfTimeout` from `withPerfTimeout`. If it does, STOP the pass immediately: calling
+        // the wedged model the other 11 times pins the CPU for minutes (and this pass re-fires
+        // on every list appear). We leave the one-time marker UNWRITTEN so the backfill runs
+        // again once the model recovers.
+        var wedged = false
         for id in captureIds {
             if Task.isCancelled { return filled }   // .task(id:) re-fires: don't double-run
             if filled >= limit { break }
             if let existing = cardSummary(id), !existing.isEmpty { continue }   // skip summarized
             guard let text = transcript(id), !text.isEmpty else { deferred = true; continue }
-            guard let result = try? await titler.titleAndSummary(for: text) else { continue }
+            let result: (title: String, summary: String)
+            do {
+                result = try await titler.titleAndSummary(for: text)
+            } catch is PerfTimeout {
+                wedged = true; break   // model wedged — do NOT keep hammering it this pass
+            } catch {
+                continue   // a per-card transient failure: skip this card, keep the pass going
+            }
             let summary = result.summary.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !summary.isEmpty else { continue }
             ConversationCardStore.merge(captureId: id, baseDir: baseDir, summary: summary)
             filled += 1
         }
+        // Model wedged mid-pass: return WITHOUT burning the one-time marker so the backfill
+        // is re-runnable once the model is healthy again.
+        if wedged { return filled }
         // One-time marker ONLY when nothing was deferred — i.e. every unsummarized card that
         // could be filled was. Pruned-transcript cards that never get an on-phone transcript
         // keep the backfill re-runnable, but each re-run is cheap (skips summarized, no model
