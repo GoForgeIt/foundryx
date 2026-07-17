@@ -34,6 +34,29 @@ echo "==> FoundryX TestFlight ship — build #$BUILD_NUM"
 echo "==> xcodegen generate"
 xcodegen generate >/dev/null
 
+# 1b. Retain per-build dSYMs BEFORE the previous archive is clobbered below.
+#     b229's dSYM was lost forever to that rm (which crippled hang-report
+#     symbolication — track 20260717T0759); never again. Keyed by
+#     CFBundleVersion + binary UUID so every TestFlight build keeps an
+#     atos-able dSYM in build/dsyms/<version>-<uuid>/. Keep all; never delete.
+retain_dsyms() {
+  local archive="$1"
+  local dsym="$archive/dSYMs/FoundryX.app.dSYM"
+  local bin="$dsym/Contents/Resources/DWARF/FoundryX"
+  [ -f "$bin" ] || return 0
+  local ver uuid dest
+  ver="$(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleVersion' \
+        "$archive/Info.plist" 2>/dev/null || echo unknown)"
+  uuid="$(dwarfdump --uuid "$bin" 2>/dev/null | head -1 | awk '{print $2}')"
+  [ -n "$uuid" ] || uuid=nouuid
+  dest="build/dsyms/${ver}-${uuid}"
+  [ -d "$dest" ] && return 0   # already retained — idempotent
+  mkdir -p "$dest"
+  cp -R "$archive/dSYMs/." "$dest/"
+  echo "==> retained dSYMs → $dest"
+}
+retain_dsyms build/FoundryX.xcarchive
+
 # 2. Unsigned archive (rcodesign signs afterward; Xcode signing is disabled).
 echo "==> xcodebuild archive (unsigned, CFBundleVersion=$BUILD_NUM)"
 rm -rf build/FoundryX.xcarchive build/Payload build/FoundryX.ipa
@@ -45,6 +68,10 @@ xcodebuild archive \
   >/dev/null
 APP="build/FoundryX.xcarchive/Products/Applications/FoundryX.app"
 [ -d "$APP" ] || { echo "archive produced no .app"; exit 1; }
+
+# 2b. Retain the NEW build's dSYMs immediately — don't depend on the next ship run
+#     happening before anything else clobbers the archive.
+retain_dsyms build/FoundryX.xcarchive
 
 # 3. Embed the provisioning profiles (app + widget extension).
 cp build/signing/FoundryX_AppStore.mobileprovision "$APP/embedded.mobileprovision"
