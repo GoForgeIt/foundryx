@@ -125,7 +125,7 @@ private enum WaitingExperienceSteps {
                            "headline was \(world.model.copy.headline)")
             },
             defineCheck("it tells me the audio never leaves my phone") { _, _, _ in
-                try expect(world.model.copy.privacyLine.contains("on your device"),
+                try expect(world.model.copy.privacyLine.contains("never leaves your phone"),
                            "privacy line was \(world.model.copy.privacyLine)")
             },
             defineCheck("it tells me longer recordings take longer") { _, _, _ in

@@ -82,7 +82,7 @@ public struct WaitCopy: Equatable, Sendable {
         case .recap:
             return WaitCopy(
                 headline: "Summarizing on your iPhone",
-                privacyLine: "The recap is written by a model running entirely on your device — your conversations never leave it.")
+                privacyLine: "The recap is written by a model running entirely on your device — no conversation text is sent anywhere to summarize it.")
         case .title:
             return WaitCopy(
                 headline: "Naming this conversation",
@@ -92,7 +92,9 @@ public struct WaitCopy: Equatable, Sendable {
         case .transcription:
             return WaitCopy(
                 headline: "Transcribing locally",
-                privacyLine: "Speech-to-text runs on your device — the audio never goes to a server we run.")
+                privacyLine: onDevice
+                    ? "Speech-to-text runs on your iPhone — the audio never leaves your phone."
+                    : "Speech-to-text runs on your own Mac — the audio never goes to a server we run.")
         case .doorFetch:
             return WaitCopy(
                 headline: "Fetching from your Mac",
@@ -232,7 +234,7 @@ public struct WaitingTipDeck: Equatable, Sendable {
     // Evergreen, always-true facts about the app's actual mechanism.
     static let evergreen: [String] = [
         "Every segment is written to your phone's disk before it's sent — a dropped connection never loses a word.",
-        "Transcripts are searchable right on your phone; the full-text search never leaves the device.",
+        "Your transcripts are stored as plain text on your phone, ready to search in an instant.",
         "Your phone keeps its own copy of every recording, even after it's backed up to your Mac.",
         "The link to your Mac is end-to-end encrypted — even the relay that carries it can't read a thing.",
         "Titles, summaries, and recaps are written by a model on your device, not in anyone's cloud.",
@@ -245,7 +247,9 @@ public struct WaitingTipDeck: Equatable, Sendable {
         case .title:
             return ["The title comes from the transcript itself — no conversation content is uploaded to name it."]
         case .transcription:
-            return ["On-device transcription means even a private conversation is turned into text without leaving your phone."]
+            return onDevice
+                ? ["On-device transcription turns even a private conversation into text without it ever leaving your phone."]
+                : ["Transcription happens on your own Mac — your audio is never sent to our servers to be read."]
         case .doorFetch:
             return ["Your conversations live on your Mac, not our servers — this is your own computer answering."]
         case .sync:
@@ -259,7 +263,7 @@ public struct WaitingTipDeck: Equatable, Sendable {
         var out: [String] = []
         if let c = stats.conversationCount, c > 0 {
             let unit = c == 1 ? "conversation" : "conversations"
-            out.append("You've captured \(WaitProgressLabel.grouped(c)) \(unit) so far — all searchable on-device.")
+            out.append("You've captured \(WaitProgressLabel.grouped(c)) \(unit) so far — kept on your own devices.")
         }
         if let s = stats.segmentsOnComputer, s > 0 {
             let unit = s == 1 ? "segment" : "segments"
