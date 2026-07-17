@@ -151,15 +151,18 @@ final class SpeakerTranscriptTests: XCTestCase {
     }
 
     func testInferredSpeakerIsTentativeAndOffersConfirm() {
+        // A STRONG inferred match (cosine at/above SpeakerConfidence.strongFloor) still
+        // surfaces its tentative name in the label; a weak one falls back to the number
+        // (covered separately in SpeakerConfidenceTests).
         let t = SpeakerTranscript(
             speakers: [CaptureSpeaker(slot: "speaker_1", status: .inferred,
-                                      name: "Bob", inferScore: 0.82,
+                                      name: "Bob", inferScore: 0.93,
                                       inferredSpeakerId: "spk_bob")],
             segments: [TranscriptSegment(seq: 0, text: "hey", speaker: "speaker_1")])
         let sp = t.speaker(for: "speaker_1")
         XCTAssertTrue(sp.isInferred, "inferred match renders tentative, not solid")
         XCTAssertEqual(sp.name, "Bob", "the tentative name is offered for confirm")
-        XCTAssertEqual(sp.inferScore ?? 0, 0.82, accuracy: 0.0001)
+        XCTAssertEqual(sp.inferScore ?? 0, 0.93, accuracy: 0.0001)
         XCTAssertEqual(t.displayLabel(for: "speaker_1"), "Bob")
         XCTAssertEqual(t.inferredSlots, ["speaker_1"])
         XCTAssertTrue(t.hasUnconfirmedInferred, "drives the review-speakers affordance")

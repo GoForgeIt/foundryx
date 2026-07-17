@@ -216,7 +216,8 @@ struct SpeakerTurnRow: View {
                         .grainTextStyle(.caption)
                         .foregroundStyle(speaker.isAnonymous ? GrainColor.textMuted : accent)
                         .fontWeight(.semibold)
-                    if speaker.isInferred {
+                    if speaker.isInferred,
+                       SpeakerConfidence.tier(for: speaker.inferScore) == .strong {
                         Text(tentativeHint)
                             .grainTextStyle(.caption)
                             .foregroundStyle(GrainColor.textFaint)
@@ -265,12 +266,11 @@ struct SpeakerTurnRow: View {
         }
     }
 
-    /// "tentative · 82%" — the inferred-match confidence hint.
+    /// The inline hint beside a STRONG inferred name. A raw cosine is NEVER rendered as
+    /// a percentage (see SpeakerConfidence); weak matches don't reach here — they show
+    /// "Speaker N" with no hint.
     private var tentativeHint: String {
-        if let score = speaker.inferScore {
-            return "tentative · \(Int((score * 100).rounded()))%"
-        }
-        return "tentative"
+        SpeakerConfidence.inlineStrongHint
     }
 }
 
@@ -617,10 +617,9 @@ struct SpeakerTagSheet: View {
     }
 
     private func scoreCaption(_ inferred: String) -> String {
-        if let s = speaker.inferScore {
-            return "Tentatively matched to \(inferred) (\(Int((s * 100).rounded()))% confidence). Confirm to enable future recognition."
-        }
-        return "Tentatively matched to \(inferred). Confirm to enable future recognition."
+        // NEVER render the raw cosine as a percentage: strong → "Might be <name>",
+        // weak → a neutral "Unknown speaker" prompt (SpeakerConfidence owns the copy).
+        SpeakerConfidence.sheetCopy(name: inferred, score: speaker.inferScore)
     }
 
     /// Confirm/correct: `name == nil` is a bare confirm of the inferred match; a
