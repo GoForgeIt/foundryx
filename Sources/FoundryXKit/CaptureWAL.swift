@@ -131,14 +131,99 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         if let maxSeq = allSegmentURLs().map({ $0.0 }).max() { nextSeq = maxSeq + 1 }
     }
 
-    /// Launch WARM pass (off the fast first-paint path): trigger the lazy watermark load
-    /// and publish the real status ONCE, so the conversation list + sync banner reflect
-    /// true segment/sync counts a moment AFTER the fast card swap. Cheap per WAL; the owner
-    /// runs it off-main over the hydrated set. Deliberately does NOT sync — the
-    /// CaptureManager's bounded, backoff-aware drain remains the SOLE upload coordinator.
+    /// Launch WARM pass (off the fast first-paint path): publish the real status ONCE, so the
+    /// conversation list + sync banner reflect true segment/sync counts a moment AFTER the fast
+    /// card swap. Cheap per WAL; the owner runs it off-main over the hydrated set. Deliberately
+    /// does NOT sync — the CaptureManager's bounded, backoff-aware drain remains the SOLE upload
+    /// coordinator.
+    ///
+    /// DURABLE STATUS CACHE (2026-07-17, WS-B). This pass USED to re-derive every hydrated
+    /// capture's segment/sync/byte state by enumerating its thousands of segment files + `.ack`
+    /// markers EVERY launch — the `capture-status-warm-n128` storm (avg 180s, max 1780s on a
+    /// backlogged device). Now, when a per-capture status cache is present + valid, it publishes
+    /// that snapshot and SKIPS the directory scan entirely. Only a cache MISS or a CORRUPT cache
+    /// falls through to the full scan (which then persists a fresh clean cache). Every segment
+    /// mutation (append/ack/bulk-ack/prune/poison) invalidates the cache, so a stale snapshot is
+    /// never served. The cache is DISPLAY-ONLY: the upload path still reads the durable
+    /// `.upload-watermark` file + the real `.ack` files, so a stale cache can NEVER re-upload an
+    /// already-ACK'd segment or lose audio.
     public func warmStatus() {
+        if let cached = loadStatusCache() {
+            publish(statusFromCache(cached))
+            return
+        }
+        // Cache miss / corrupt → the real one-time scan, then persist a clean cache for next
+        // launch. `ensureWatermarkLoaded` + `computeStatus` are the (now infrequent) scan.
         ensureWatermarkLoaded()
-        publish()
+        let s = computeStatus()
+        publish(s)
+        persistStatusCache(s, watermark: uploadWatermark())
+    }
+
+    // MARK: durable per-capture status cache (launch warm stat-storm fix, WS-B)
+
+    /// The persisted snapshot of a warm scan: enough to publish the list/banner without
+    /// re-enumerating segment + `.ack` files. `v` is a schema tag so a shape change auto-
+    /// invalidates every on-disk cache. DISPLAY-ONLY — never drives the upload watermark.
+    struct StatusCache: Codable, Sendable {
+        static let schema = 1
+        var v: Int
+        var totalSegments: Int
+        var syncedSegments: Int
+        var bytes: Int
+        var watermark: Int64
+    }
+
+    private func statusCacheURL() -> URL { dir.appendingPathComponent(".status-cache.json") }
+
+    /// Load the durable status cache IF present + decodable + current-schema; nil on any
+    /// doubt (missing / corrupt / schema mismatch) so the caller falls back to a full scan.
+    /// Never throws — correctness prefers a rescan over trusting a questionable cache.
+    private func loadStatusCache() -> StatusCache? {
+        guard let data = try? Data(contentsOf: statusCacheURL()),
+              let c = try? JSONDecoder().decode(StatusCache.self, from: data),
+              c.v == StatusCache.schema else { return nil }
+        return c
+    }
+
+    /// Rebuild a `CaptureStatus` from the cached counts. Warm runs on RELOADED (non-streaming)
+    /// captures, so `streaming` is false and the stage is derived from the counts exactly as
+    /// `computeStatus` would with `streaming == false`; `lastSyncError` is cleared (a fresh
+    /// launch has attempted no sync yet).
+    private func statusFromCache(_ c: StatusCache) -> CaptureStatus {
+        var s = status
+        s.totalSegments = c.totalSegments
+        s.syncedSegments = c.syncedSegments
+        s.bytes = c.bytes
+        s.streaming = false
+        s.lastSyncError = nil
+        s.stage = c.totalSegments == 0 ? .savedOnPhone
+            : (c.syncedSegments == c.totalSegments ? .savedToComputer : .savedOnPhone)
+        return s
+    }
+
+    /// Persist a clean status cache from a freshly-SCANNED status (called only after a real
+    /// warm scan). Skipped for a streaming capture (warm never runs on the active one, but a
+    /// streaming snapshot must never be cached as terminal). Atomic write.
+    private func persistStatusCache(_ s: CaptureStatus, watermark: Int64) {
+        guard !s.streaming else { return }
+        let c = StatusCache(v: StatusCache.schema, totalSegments: s.totalSegments,
+                            syncedSegments: s.syncedSegments, bytes: s.bytes, watermark: watermark)
+        guard let data = try? JSONEncoder().encode(c) else { return }
+        try? data.write(to: statusCacheURL(), options: [.atomic])
+    }
+
+    /// Invalidate (delete) the durable status cache — called at EVERY segment mutation so the
+    /// next warm pass rescans instead of serving a stale snapshot. Cheap unlink; no-op if absent.
+    private func invalidateStatusCache() {
+        try? FileManager.default.removeItem(at: statusCacheURL())
+    }
+
+    /// Nonisolated invalidation for an OUT-OF-INSTANCE mutation (the retention audio prune
+    /// deletes a capture's segment files directly on disk, without the live WAL object). Keeps
+    /// the cache honest when segments vanish underneath a not-yet-hydrated capture.
+    public static func invalidateStatusCache(captureDir: URL) {
+        try? FileManager.default.removeItem(at: captureDir.appendingPathComponent(".status-cache.json"))
     }
 
     /// `baseDir` defaults to the app's Documents dir (persists across launches).
@@ -214,6 +299,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         let url = dir.appendingPathComponent(CaptureWAL.segName(seq))
         do {
             try body.write(to: url, options: [.atomic])   // temp + atomic rename
+            invalidateStatusCache()   // a new segment changes total/bytes → force a rescan next warm
             log?.info("capture \(captureId): wrote segment \(seq) (\(body.count)B) to WAL")
         } catch {
             log?.error("capture \(captureId): WAL write seg \(seq) failed: \(error.localizedDescription)")
@@ -275,6 +361,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
             } catch {
                 lastError = "segment \(seq) unreadable: \((error as NSError).localizedDescription)"
                 log?.error("capture \(captureId): segment \(seq) file missing/corrupt — permanent poison, retiring (audio kept)")
+                invalidateStatusCache()   // poison changes the capture's terminal state → rescan next warm
                 publish()
                 return .poisoned(seq: seq, reason: "segment file missing/corrupt")
             }
@@ -301,6 +388,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
                     do {
                         try Data().write(to: ackURL(job.url), options: [.atomic])   // 200 ACK ⇒ saved to computer
                         advanceWatermark(throughAcked: seq)                        // durable resume point moves forward
+                        invalidateStatusCache()   // synced count/watermark changed → rescan next warm
                         uploaded += 1
                         log?.info("capture \(captureId): segment \(seq) ACK'd by desktop (saved to computer)")
                         publish()
@@ -340,6 +428,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
             return .authExpired
         }
         if let poison = firstPoison {
+            invalidateStatusCache()   // permanent-poison retire changes terminal state → rescan next warm
             publish()
             return .poisoned(seq: poison.seq, reason: poison.reason)
         }
@@ -430,6 +519,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         }
         guard newlyMarked > 0 else { return 0 }
         advanceWatermarkOverContiguousAcks()
+        invalidateStatusCache()   // bulk-ACK changed the synced count/watermark → rescan next warm
         publish()
         return newlyMarked
     }
@@ -589,7 +679,12 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     }
 
     private func publish() {
-        let s = computeStatus()
+        publish(computeStatus())
+    }
+
+    /// Publish a pre-computed status (the warm cache-hit path publishes a cached snapshot
+    /// WITHOUT calling `computeStatus`, so no segment enumeration happens).
+    private func publish(_ s: CaptureStatus) {
         let apply: () -> Void = { [weak self] in
             guard let self else { return }
             self.status = s

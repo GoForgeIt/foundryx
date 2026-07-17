@@ -2974,6 +2974,9 @@ public final class CaptureManager: ObservableObject {
         for f in files where f.pathExtension == "opus" || f.pathExtension == "ack" {
             try? FileManager.default.removeItem(at: f)
         }
+        // Segment files vanished underneath any (possibly not-yet-hydrated) WAL — drop its
+        // durable status cache so the next warm rescans to the pruned (0-segment) truth.
+        CaptureWAL.invalidateStatusCache(captureDir: dir)
     }
 
     /// Instance shim for the reconcile path — delegates to the nonisolated primitive.
