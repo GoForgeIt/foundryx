@@ -102,7 +102,15 @@ struct ConversationFacesView: View {
     @State private var player: AVAudioPlayer?
     @State private var playbackOwnsSession = false
 
-    private enum AudioState: Equatable { case idle, loading, playing, unavailable, failed(String) }
+    private enum AudioState: Equatable { case idle, loading, playing, failure(AudioPlaybackPresentation.Outcome) }
+
+    /// Playback must NEVER compete with a live recording (it would ride the
+    /// `.playAndRecord`/`.measurement` session and steal the mic route). True while the
+    /// phone mic is recording OR the shared session is already owned by a record engine
+    /// — the gate that disables Listen (see `listenRow`) and short-circuits `playAudio`.
+    private var isRecordingActive: Bool {
+        manager.isRecordingMic || PlaybackSession.recordOwnsSession
+    }
 
     // MARK: - derived content (identical semantics to the previous detail)
 
@@ -224,6 +232,16 @@ struct ConversationFacesView: View {
         .refreshable { await fetchFromDoor() }
         .task { await initialLoad() }
         .onAppear { loadFaceData() }
+        #if DEBUG
+        // Deterministic screen-proof of the Listen row states without a live door:
+        //   -AudioProof loading      → the "Loading audio…" state
+        //   -AudioProof playing      → seeds the in-memory replay cache with a short
+        //                              silent clip and plays it (the "Stop" state)
+        //   -AudioProof unavailable  → "Audio no longer available" (pruned)
+        //   -AudioProof unreachable  → "Can't reach your computer" (offline)
+        // Visual-only; production behavior and the in-memory-only cache are unchanged.
+        .onAppear { applyAudioProofIfRequested() }
+        #endif
         .onDisappear { stopPlayback() }
         .sheet(isPresented: $showRelayAnswer) {
             if let answer = linkedAnswer {
@@ -641,7 +659,8 @@ struct ConversationFacesView: View {
                             captureId: captureId,
                             transcript: diarized,
                             onChanged: { await fetchFromDoor() },
-                            onConfirmed: { outcome in applyConfirmedSpeaker(outcome) }
+                            onConfirmed: { outcome in applyConfirmedSpeaker(outcome) },
+                            isRecording: isRecordingActive
                         )
                     } else {
                         // GrainSpeakerRow intentionally accepts plain words. Keep the
@@ -654,7 +673,8 @@ struct ConversationFacesView: View {
                             onChanged: { await fetchFromDoor() },
                             onConfirmed: { outcome in applyConfirmedSpeaker(outcome) },
                             searchMatches: search.matches,
-                            currentMatch: search.current
+                            currentMatch: search.current,
+                            isRecording: isRecordingActive
                         )
                     }
                 } else {
@@ -861,17 +881,44 @@ struct ConversationFacesView: View {
     // MARK: - listen / receipt (unchanged behavior)
 
     @ViewBuilder private var listenRow: some View {
-        switch audioState {
-        case .idle:
-            GrainButton("Listen", variant: .tonal, size: .sm) { Task { await playAudio() } }
-        case .loading:
-            Text("Loading audio…").grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-        case .playing:
+        // Recording wins the audio session: while it's live, Listen is DISABLED with an
+        // honest reason (never start new playback that would fight the mic). An already
+        // playing clip is left to finish (the session guard prevents category theft).
+        if case .playing = audioState {
             GrainButton("Stop", variant: .text, size: .sm) { stopPlayback() }
-        case .unavailable:
-            Text("Audio not available").grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-        case .failed(let why):
-            Text("Couldn't play audio: \(why)").grainTextStyle(.caption).foregroundStyle(GrainColor.amber)
+        } else if let reason = AudioPlaybackPresentation.playbackDisabledReason(isRecording: isRecordingActive) {
+            Text(reason).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+        } else {
+            switch audioState {
+            case .idle:
+                GrainButton("Listen", variant: .tonal, size: .sm) { Task { await playAudio() } }
+            case .loading:
+                Text("Loading audio…").grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+            case .playing:
+                GrainButton("Stop", variant: .text, size: .sm) { stopPlayback() }
+            case .failure(let outcome):
+                audioFailureLabel(outcome)
+            }
+        }
+    }
+
+    /// Honest, non-technical copy for a playback failure — a pruned recording reads
+    /// distinctly (soft, faint) from an unreachable computer (soft, muted); a real
+    /// failure smolders amber. Never raw NSError text.
+    @ViewBuilder private func audioFailureLabel(_ outcome: AudioPlaybackPresentation.Outcome) -> some View {
+        let copy = AudioPlaybackPresentation.copy(for: outcome)
+        let tint: Color = {
+            switch outcome {
+            case .unavailable: return GrainColor.textFaint
+            case .unreachable: return GrainColor.textMuted
+            case .failed:      return GrainColor.amber
+            }
+        }()
+        VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+            Text(copy.title).grainTextStyle(.caption).foregroundStyle(tint)
+            if let subtitle = copy.subtitle {
+                Text(subtitle).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            }
         }
     }
 
@@ -1125,6 +1172,9 @@ struct ConversationFacesView: View {
     // MARK: - audio replay (same semantics as the previous detail)
 
     private func playAudio() async {
+        // Never start playback while a recording owns the session — the row already shows
+        // the disabled reason; this is the tap-time guard so nothing races the gate.
+        guard !isRecordingActive else { return }
         audioState = .loading
         do {
             let cacheKey = await AudioReplayCache.shared.key(
@@ -1132,11 +1182,11 @@ struct ConversationFacesView: View {
             var wav = await AudioReplayCache.shared.get(cacheKey)
             if wav == nil {
                 guard let bytes = try await DoorClient(target: target).captureAudio(captureId: captureId) else {
-                    audioState = .unavailable   // 404: endpoint not ready / audio pruned
+                    audioState = .failure(.unavailable)   // 404 / nil: pruned on the computer
                     return
                 }
                 guard let converted = OggOpusReplay.wav(fromOggOpus: bytes) else {
-                    audioState = .failed("undecodable audio")
+                    audioState = .failure(.failed)
                     return
                 }
                 await AudioReplayCache.shared.put(cacheKey, wav: converted)
@@ -1154,7 +1204,7 @@ struct ConversationFacesView: View {
         } catch {
             PlaybackSession.end(changed: playbackOwnsSession)
             playbackOwnsSession = false
-            audioState = .failed((error as NSError).localizedDescription)
+            audioState = .failure(AudioPlaybackPresentation.failurePresentation(for: error))
         }
     }
 
@@ -1165,6 +1215,46 @@ struct ConversationFacesView: View {
         PlaybackSession.end(changed: playbackOwnsSession)
         playbackOwnsSession = false
     }
+
+    #if DEBUG
+    /// Screen-proof only (`-AudioProof <state>`): drive a Listen row state deterministically
+    /// in the simulator, where no real door serves `/audio`. Never runs outside DEBUG.
+    private func applyAudioProofIfRequested() {
+        let a = ProcessInfo.processInfo.arguments
+        guard let i = a.firstIndex(of: "-AudioProof"), i + 1 < a.count else { return }
+        switch a[i + 1] {
+        case "loading":     audioState = .loading
+        case "unavailable": audioState = .failure(.unavailable)
+        case "unreachable": audioState = .failure(.unreachable)
+        case "playing":
+            Task {
+                // Seed the in-memory cache so playAudio() resolves without the door.
+                let key = await AudioReplayCache.shared.key(captureId: captureId, startMs: nil, endMs: nil)
+                await AudioReplayCache.shared.put(key, wav: Self.debugSilentWav(seconds: 30))
+                await playAudio()
+            }
+        default: break
+        }
+    }
+
+    /// A tiny valid PCM WAV (silence) so AVAudioPlayer reaches `.playing` for the proof.
+    private static func debugSilentWav(seconds: Int) -> Data {
+        let sampleRate = 8000, channels = 1, bits = 16
+        let frames = sampleRate * max(seconds, 1)
+        let dataBytes = frames * channels * (bits / 8)
+        var d = Data()
+        func u32(_ v: Int) -> Data { var x = UInt32(v).littleEndian; return Data(bytes: &x, count: 4) }
+        func u16(_ v: Int) -> Data { var x = UInt16(v).littleEndian; return Data(bytes: &x, count: 2) }
+        d.append("RIFF".data(using: .ascii)!); d.append(u32(36 + dataBytes))
+        d.append("WAVE".data(using: .ascii)!)
+        d.append("fmt ".data(using: .ascii)!); d.append(u32(16)); d.append(u16(1)); d.append(u16(channels))
+        d.append(u32(sampleRate)); d.append(u32(sampleRate * channels * (bits / 8)))
+        d.append(u16(channels * (bits / 8))); d.append(u16(bits))
+        d.append("data".data(using: .ascii)!); d.append(u32(dataBytes))
+        d.append(Data(count: dataBytes))   // silence
+        return d
+    }
+    #endif
 }
 
 /// Grain-backed diarized rows. Speaker management stays on the existing sheet and
@@ -1177,6 +1267,8 @@ private struct GrainSpeakerTranscriptRows: View {
     /// Optimistic hook: fired the instant the door acknowledges a confirm, so the
     /// parent can flip the in-memory speaker for that slot before the re-fetch lands.
     let onConfirmed: (ConfirmOutcome) -> Void
+    /// True while a recording is active — the tag sheet disables voice-sample playback.
+    var isRecording: Bool = false
 
     @State private var tagging: CaptureSpeaker?
 
@@ -1204,7 +1296,8 @@ private struct GrainSpeakerTranscriptRows: View {
                 displayLabel: transcript.displayLabel(for: speaker.slot),
                 sampleWindow: transcript.voiceSampleWindow(for: speaker.slot),
                 onChanged: { await onChanged() },
-                onConfirmed: onConfirmed
+                onConfirmed: onConfirmed,
+                isRecording: isRecording
             )
         }
     }

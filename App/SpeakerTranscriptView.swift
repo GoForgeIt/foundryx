@@ -61,6 +61,8 @@ struct SpeakerTranscriptSection: View {
     var searchMatches: [TranscriptMatch] = []
     /// The match the search cursor is on — emphasized stronger than the rest.
     var currentMatch: TranscriptMatch? = nil
+    /// True while a recording is active — the tag sheet disables voice-sample playback.
+    var isRecording: Bool = false
 
     @State private var tagging: CaptureSpeaker?
 
@@ -98,7 +100,8 @@ struct SpeakerTranscriptSection: View {
                 displayLabel: transcript.displayLabel(for: speaker.slot),
                 sampleWindow: transcript.voiceSampleWindow(for: speaker.slot),
                 onChanged: { await onChanged() },
-                onConfirmed: onConfirmed
+                onConfirmed: onConfirmed,
+                isRecording: isRecording
             )
         }
     }
@@ -255,6 +258,10 @@ struct SpeakerTagSheet: View {
     /// Optimistic hook: fired the instant the door acknowledges a confirm so the detail
     /// can flip the in-memory speaker for that slot before the authoritative re-fetch.
     var onConfirmed: (ConfirmOutcome) -> Void = { _ in }
+    /// True while a recording is active — voice-sample playback is DISABLED then (it must
+    /// never fight the mic for the audio session). Defaults false so non-recording call
+    /// sites are unchanged.
+    var isRecording: Bool = false
 
     @Environment(\.dismiss) private var dismiss
     @State private var name: String = ""
@@ -263,9 +270,10 @@ struct SpeakerTagSheet: View {
     @State private var offer: ConfirmOutcome?
     @State private var applied = false
 
-    /// Voice-sample playback: idle → loading → playing; unavailable when the door
-    /// 404s (audio pruned) or the bytes don't decode. Sheet-local — closing stops it.
-    private enum SampleState: Equatable { case idle, loading, playing, unavailable, failed }
+    /// Voice-sample playback: idle → loading → playing; a `failure` carries the honest
+    /// outcome (pruned audio vs unreachable computer vs a real failure). Sheet-local —
+    /// closing stops it.
+    private enum SampleState: Equatable { case idle, loading, playing, failure(AudioPlaybackPresentation.Outcome) }
     @State private var sampleState: SampleState = .idle
     @State private var samplePlayer: AVAudioPlayer?
     /// Whether playVoiceSample() flipped the shared session to .playback (and so must
@@ -339,35 +347,58 @@ struct SpeakerTagSheet: View {
 
     // ── "Hear this voice" ────────────────────────────────────────────────────
 
+    /// Playback must never steal the audio session from a live recording — while one is
+    /// active, "Hear this voice" is disabled (the passed-in flag OR a record engine
+    /// already owning the shared session).
+    private var isPlaybackBlocked: Bool { isRecording || PlaybackSession.recordOwnsSession }
+
     @ViewBuilder private var voiceSampleRow: some View {
-        switch sampleState {
-        case .idle, .playing:
-            GrainButton(
-                sampleState == .playing ? "Stop" : "▶ Hear this voice",
-                variant: .outlined, size: .regular
-            ) {
-                if sampleState == .playing {
-                    samplePlayer?.stop()
-                    samplePlayer = nil
-                    sampleState = .idle
-                    PlaybackSession.end(changed: sampleOwnsSession)
-                    sampleOwnsSession = false
-                } else {
+        if case .playing = sampleState {
+            GrainButton("Stop", variant: .outlined, size: .regular) {
+                samplePlayer?.stop()
+                samplePlayer = nil
+                sampleState = .idle
+                PlaybackSession.end(changed: sampleOwnsSession)
+                sampleOwnsSession = false
+            }
+        } else if let reason = AudioPlaybackPresentation.playbackDisabledReason(isRecording: isPlaybackBlocked) {
+            Text(reason).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+        } else {
+            switch sampleState {
+            case .idle:
+                GrainButton("▶ Hear this voice", variant: .outlined, size: .regular) {
                     Task { await playVoiceSample() }
                 }
+            case .loading:
+                HStack(spacing: GrainSpacing.x2) {
+                    ProgressView().controlSize(.small)
+                    Text("Fetching voice sample…")
+                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                }
+            case .failure(let outcome):
+                sampleFailureLabel(outcome)
+            case .playing:
+                EmptyView()   // handled above
             }
-        case .loading:
-            HStack(spacing: GrainSpacing.x2) {
-                ProgressView().controlSize(.small)
-                Text("Fetching voice sample…")
-                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+        }
+    }
+
+    /// Honest, non-technical copy for a voice-sample failure — pruned audio (faint) reads
+    /// distinctly from an unreachable computer (muted); a real failure smolders amber.
+    @ViewBuilder private func sampleFailureLabel(_ outcome: AudioPlaybackPresentation.Outcome) -> some View {
+        let copy = AudioPlaybackPresentation.copy(for: outcome)
+        let tint: Color = {
+            switch outcome {
+            case .unavailable: return GrainColor.textFaint
+            case .unreachable: return GrainColor.textMuted
+            case .failed:      return GrainColor.amber
             }
-        case .unavailable:
-            Text("Voice sample unavailable (audio no longer on the desktop).")
-                .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-        case .failed:
-            Text("Couldn't play the voice sample.")
-                .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+        }()
+        VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+            Text(copy.title).grainTextStyle(.caption).foregroundStyle(tint)
+            if let subtitle = copy.subtitle {
+                Text(subtitle).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            }
         }
     }
 
@@ -376,6 +407,9 @@ struct SpeakerTagSheet: View {
     /// failure → failed. The sheet stays fully usable for naming either way.
     private func playVoiceSample() async {
         guard let window = sampleWindow else { return }
+        // Never start playback while a recording owns the session (the row already shows
+        // the disabled reason; this is the tap-time guard).
+        guard !isPlaybackBlocked else { return }
         sampleState = .loading
         do {
             // Cache (app-session, ≤1 day) → replaying a sample never re-downloads.
@@ -386,12 +420,12 @@ struct SpeakerTagSheet: View {
                 guard let data = try await DoorClient(target: target).captureAudio(
                     captureId: captureId, startMs: window.startMs, endMs: window.endMs)
                 else {
-                    sampleState = .unavailable
+                    sampleState = .failure(.unavailable)
                     return
                 }
                 // Ogg-Opus → WAV on-device (AVAudioPlayer can't decode Opus).
                 guard let converted = OggOpusReplay.wav(fromOggOpus: data) else {
-                    sampleState = .failed
+                    sampleState = .failure(.failed)
                     return
                 }
                 await AudioReplayCache.shared.put(cacheKey, wav: converted)
@@ -428,7 +462,7 @@ struct SpeakerTagSheet: View {
         } catch {
             PlaybackSession.end(changed: sampleOwnsSession)
             sampleOwnsSession = false
-            sampleState = .failed
+            sampleState = .failure(AudioPlaybackPresentation.failurePresentation(for: error))
         }
     }
 
