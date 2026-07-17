@@ -1275,6 +1275,9 @@ public final class CaptureManager: ObservableObject {
         recordingClock = RecordingClock(startedAt: Date())
         router.resetSegmenter()
         micSource.start()
+        // Diagnostic slice: how much of record-start is OUR synchronous begin work vs
+        // the SwiftUI presentation commit that follows in the same runloop turn.
+        PerfHook.span("record-start-sync", ms: recordStartSpan.elapsedMs())
         log?.info("phone mic: recording requested")
     }
 

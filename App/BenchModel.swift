@@ -1,4 +1,4 @@
-#if DEBUG
+#if DEBUG || PERF_HARNESS
 import Foundation
 
 /// Phase 4 — on-device-model latency bench. `-BenchModel` drives the real system

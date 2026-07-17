@@ -3,6 +3,15 @@ options:
   bundleIdPrefix: com.goforgeit
   deploymentTarget:
     iOS: "16.0"
+# PerfRelease = Release + the PERF_HARNESS compilation condition on the APP target
+# only (see FoundryX target configs). sim-perf.sh builds this so perf budgets measure
+# OPTIMIZED code while the DEBUG-gated harness hooks (-StressSeed/-PerfLog/watchdog)
+# stay available. A config (not a CLI SWIFT_ACTIVE_COMPILATION_CONDITIONS override)
+# because the CLI override leaks into SPM packages and breaks swift-crypto's flags.
+configs:
+  Debug: debug
+  Release: release
+  PerfRelease: release
 packages:
   Grain:
     path: ../grain/platforms/grain-swift
@@ -113,6 +122,10 @@ targets:
         Release:
           # Device/archive (TestFlight) signs via the team + automatic provisioning.
           CODE_SIGNING_ALLOWED: YES
+        PerfRelease:
+          # sim-perf harness: optimized build with the harness hooks compiled in.
+          CODE_SIGNING_ALLOWED: NO
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: PERF_HARNESS
 
   # iOS-simulator test target: runs the existing Brine scenario/step + FoundryXKit
   # unit suite (Tests/FoundryXBrineTests) on the iOS runtime — NOT just macOS via

@@ -1,4 +1,4 @@
-#if DEBUG
+#if DEBUG || PERF_HARNESS
 import Foundation
 // (FoundryXKit types are same-module — the App target compiles Sources/FoundryXKit directly)
 
