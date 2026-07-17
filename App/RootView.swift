@@ -89,9 +89,14 @@ struct RootView: View {
         // mode (no auth, no door) over the demo cards DemoSeed dropped on disk, so every
         // screen can be screenshot-verified against the prototype. No effect normally.
         if ProcessInfo.processInfo.arguments.contains("-MainPreview") {
+            // `-RemoteChat`: mount the computer-tier chat surface (composer always
+            // present) so the act-in-chat prefill can be screenshot-verified in the
+            // simulator, where the phone-tier surface hides its composer behind the
+            // Apple Intelligence gate. Dev-harness only; no effect normally.
             return AnyView(MainTabs(
                 target: DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "local"),
-                remote: remote, brains: brains, local: true,
+                remote: remote, brains: brains,
+                local: !ProcessInfo.processInfo.arguments.contains("-RemoteChat"),
                 vaultFunnel: vaultFunnel, accountDeletion: accountDeletion, showingAccount: .constant(false)))
         }
         // DEV-only: `-Screen answer` mounts the answer/decision-brief with demo data
@@ -595,6 +600,18 @@ private struct MainTabs: View {
         // correct — so toggling the Omi off actually hands off + drops it, and a transient
         // reconnect is reflected — regardless of which tab is visible.
         .onChange(of: device.connectionState) { _ in syncOmiConnection() }
+        // Land on the chat tab whenever the card broker carries a seed (an accepted
+        // card's [Run]) OR a composer prefill (the Actions face's "Act on it in
+        // chat"). Driven off the PUBLISHED values against the live @StateObject
+        // router — the init-time onNavigate closure captures the router created in
+        // THAT body evaluation, which a re-evaluated init discards, silently
+        // stranding navigation on the origin tab.
+        .onReceive(AmbientCardBroker.shared.$pendingSeed) { seed in
+            if seed != nil { router.selected = .chat }
+        }
+        .onReceive(AmbientCardBroker.shared.$pendingPrefill) { seed in
+            if seed != nil { router.selected = .chat }
+        }
         .onAppear {
             syncOmiConnection()
             #if DEBUG

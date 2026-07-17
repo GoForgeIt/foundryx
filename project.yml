@@ -143,6 +143,26 @@ targets:
         # Bundle.module-style lookups resolve on-device like they do under SPM.
         TARGETED_DEVICE_FAMILY: "1,2"
 
+  # UI-proof lane (track 20260715T1500 addendum): XCUITests that drive the REAL
+  # app through the demo-seeded screens (`-MainPreview`) by accessibility
+  # identifier and attach screenshots — the simulator proof for interaction
+  # tracks (the Actions-face options flow first). Run via the FoundryXUIProof
+  # scheme; screenshots land in the .xcresult bundle.
+  FoundryXUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - UITests
+    dependencies:
+      - target: FoundryX
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGNING_ALLOWED: NO
+        TEST_TARGET_NAME: FoundryX
+        TARGETED_DEVICE_FAMILY: "1,2"
+
   # Widget extension: the home/lock-screen "Capture Status" widget + the capture Live
   # Activity (Dynamic Island). Shares CaptureActivityAttributes + CaptureWidgetSnapshot
   # with the app by compiling those two source files into BOTH targets (the Xcode build
@@ -185,3 +205,16 @@ targets:
           CODE_SIGNING_ALLOWED: NO
         Release:
           CODE_SIGNING_ALLOWED: YES
+
+schemes:
+  # The simulator interaction-proof scheme: builds the app + UI tests and runs
+  # the XCUITest proof flows (screenshots attach to the .xcresult).
+  FoundryXUIProof:
+    build:
+      targets:
+        FoundryX: all
+        FoundryXUITests: all
+    test:
+      config: Debug
+      targets:
+        - FoundryXUITests

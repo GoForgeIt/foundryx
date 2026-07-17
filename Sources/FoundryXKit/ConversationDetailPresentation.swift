@@ -131,6 +131,8 @@ public struct ConversationActionsPresentation: Equatable, Sendable {
             case ready = "Ready"
             case open = "Open"
             case dismissed = "Dismissed"
+            /// The user rejected it from the options sheet ("Not an action").
+            case notAnAction = "Not an action"
         }
 
         public let id: String
@@ -140,15 +142,33 @@ public struct ConversationActionsPresentation: Equatable, Sendable {
         public let meta: String?
         public let kind: Kind
         public let state: State
+        /// The raw actionable line as heard — the feedback join key. Present
+        /// only on rows the spotter surfaced (reject/refine make sense there).
+        public let utterance: String?
+        /// The user's latest refinement note, rendered on the row.
+        public let note: String?
+        /// The act-on-it-in-chat prefill. Nil means the row offers no chat action.
+        public let seed: String?
+        /// The outcome-log seed a SENT prefill records as a `run` — present ONLY
+        /// on spotter-surfaced rows. Answer/user rows never log `run`: no nudge
+        /// was accepted, and a fabricated `run` would poison the router's
+        /// true-positive signal and the Activity ledger.
+        public let runSeed: String?
         /// True when the item is finished.
         public var done: Bool { state == .completed }
 
-        public init(id: String, label: String, meta: String?, kind: Kind, state: State) {
+        public init(id: String, label: String, meta: String?, kind: Kind, state: State,
+                    utterance: String? = nil, note: String? = nil, seed: String? = nil,
+                    runSeed: String? = nil) {
             self.id = id
             self.label = label
             self.meta = meta
             self.kind = kind
             self.state = state
+            self.utterance = utterance
+            self.note = note
+            self.seed = seed
+            self.runSeed = runSeed
         }
     }
 
@@ -161,31 +181,55 @@ public struct ConversationActionsPresentation: Equatable, Sendable {
 
     /// Build the face from everything that ACTUALLY surfaced for this capture:
     /// ambient candidates joined to their outcomes (ConversationActions), the
-    /// delivered answers linked to it, and the user's own added actions.
+    /// delivered answers linked to it, the user's own added actions, and the
+    /// user's feedback on the surfaced items (rejections + refinement notes).
     public static func build(captureId: String,
                              decisions: [AmbientDecision],
                              outcomes: [CardOutcomeRecord],
                              answers: [LinkedConversationAnswer],
-                             userActions: [UserConversationAction]) -> Self {
+                             userActions: [UserConversationAction],
+                             feedback: [ActionFeedbackRecord] = []) -> Self {
         var rows: [Row] = []
         for card in ConversationActions.cards(
             for: captureId, decisions: decisions, outcomes: outcomes) {
             let label = card.summary.isEmpty ? card.utterance : card.summary
             let meta = (!card.summary.isEmpty && card.utterance != card.summary)
                 ? "\u{201C}\(card.utterance)\u{201D}" : nil
-            rows.append(Row(id: "surfaced-\(card.id)", label: label, meta: meta,
-                            kind: .surfaced, state: state(of: card.outcome)))
+            rows.append(Row(
+                id: "surfaced-\(card.id)", label: label, meta: meta,
+                kind: .surfaced, state: state(of: card.outcome),
+                utterance: card.utterance,
+                note: ActionFeedbackStore.latestRefinement(
+                    forUtterance: card.utterance, in: feedback),
+                seed: chatSeed(utterance: card.utterance, summary: card.summary),
+                runSeed: card.utterance))
         }
         for (i, answer) in answers.enumerated() {
             rows.append(Row(id: "answer-\(i)", label: "Answer found",
-                            meta: answer.title, kind: .answer, state: .ready))
+                            meta: answer.title, kind: .answer, state: .ready,
+                            seed: answer.title.isEmpty ? nil
+                                : chatSeed(utterance: answer.title, summary: "")))
         }
         for action in userActions {
             rows.append(Row(id: "user-\(action.id)", label: action.title,
                             meta: "Added by you", kind: .user,
-                            state: action.done ? .completed : .open))
+                            state: action.done ? .completed : .open,
+                            seed: userActionSeed(title: action.title)))
         }
         return Self(rows: rows)
+    }
+
+    /// The act-in-chat prefill for a surfaced moment — the SAME template the
+    /// ambient card notification seeds chat with, so acting from the Actions
+    /// face reads identically to accepting the nudge live.
+    public static func chatSeed(utterance: String, summary: String) -> String {
+        let ask = summary.isEmpty ? "help with that" : summary
+        return "While I was recording, this came up: \u{201C}\(utterance)\u{201D}\n\nPlease \(ask)."
+    }
+
+    /// The act-in-chat prefill for an action the user added by hand.
+    public static func userActionSeed(title: String) -> String {
+        "From one of my conversations, I noted an action: \u{201C}\(title)\u{201D}\n\nPlease help me get it done."
     }
 
     /// The prototype's outcome vocabulary over the logged card outcomes.
@@ -195,6 +239,7 @@ public struct ConversationActionsPresentation: Equatable, Sendable {
         case .answered: return .ready
         case .pending: return .open
         case .dismissed: return .dismissed
+        case .rejected: return .notAnAction
         }
     }
 }

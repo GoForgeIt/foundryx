@@ -15,6 +15,11 @@ struct LocalChatScreen: View {
     @State private var messages: [(role: String, text: String)] = []
     @State private var input = ""
     @State private var thinking = false
+    /// The outcome-log seed of a pending Actions-face prefill — logged as a
+    /// `run` only when the user actually sends the turn; cleared when the
+    /// composer is emptied (an abandoned prefill is not a run). Nil for
+    /// prefills that must never log one (answer/user rows).
+    @State private var prefillSeed: String?
     @State private var waitlistJoined =
         UserDefaults.standard.bool(forKey: "foundryx.waitlist.joined")
 
@@ -49,6 +54,26 @@ struct LocalChatScreen: View {
             }
         }
         .grainBackground()
+        // An Actions-face "Act on it in chat" prefill (track 20260715T1500
+        // addendum) — fill the composer, never auto-send.
+        .onAppear { consumePrefill() }
+        .onReceive(AmbientCardBroker.shared.$pendingPrefill) { _ in consumePrefill() }
+        // A fully-cleared composer abandons the prefill — a LATER unrelated send
+        // must not log a `run` for it. (send() empties input AFTER logging.)
+        .onChange(of: input) { text in
+            if text.isEmpty { prefillSeed = nil }
+        }
+    }
+
+    private func consumePrefill() {
+        // No engine ⇒ no composer to fill — leave the prefill unconsumed rather
+        // than stuffing an invisible field (the Actions face doesn't offer
+        // act-in-chat on this tier; this is defense in depth).
+        guard engine != nil, let seed = AmbientCardBroker.shared.pendingPrefill else { return }
+        AmbientCardBroker.shared.pendingPrefill = nil
+        prefillSeed = AmbientCardBroker.shared.pendingPrefillRunSeed
+        AmbientCardBroker.shared.pendingPrefillRunSeed = nil
+        input = seed
     }
 
     /// The persistent honesty notice + waitlist button (never dismissible).
@@ -83,6 +108,11 @@ struct LocalChatScreen: View {
     private func send() {
         let q = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty, let engine, !thinking else { return }
+        // A turn that started from an Actions-face prefill is a run once SENT.
+        if let seeded = prefillSeed {
+            AmbientCardBroker.prefillSent(seed: seeded)
+            prefillSeed = nil
+        }
         input = ""
         messages.append(("user", q))
         thinking = true

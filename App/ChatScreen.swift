@@ -17,6 +17,11 @@ struct ChatScreen: View {
     @ObservedObject var log: DoorLog
 
     @State private var input = ""
+    /// The pending Actions-face prefill: which conversation it seeded and the
+    /// outcome-log seed to record as a `run` when (and only when) the user
+    /// actually sends that turn IN that conversation. Nil runSeed rows
+    /// (answer/user actions) never set this — they must not log a `run`.
+    @State private var prefillRun: (chatId: String, seed: String)?
     @State private var sessionId = ""
     @State private var streaming = false
     @State private var showingChats = false
@@ -65,7 +70,8 @@ struct ChatScreen: View {
         }
         .grainBackground()
         .onAppear {
-            hydrateActive(); Task { await loadModels() }; consumeAmbientSeed()
+            hydrateActive(); Task { await loadModels() }
+            consumeAmbientSeed(); consumeAmbientPrefill()
             // A completed tool-using turn is an agent run — remember it in the
             // activity ledger (features/ambient-answer-loop.feature).
             model.onRunCompleted = { activities in
@@ -94,6 +100,8 @@ struct ChatScreen: View {
         .onChange(of: store.activeId) { _ in hydrateActive() }
         // An accepted ambient card ([Run]) — also fires when already on the chat tab.
         .onReceive(AmbientCardBroker.shared.$pendingSeed) { _ in consumeAmbientSeed() }
+        // An Actions-face "Act on it in chat" — prefills the composer, no auto-send.
+        .onReceive(AmbientCardBroker.shared.$pendingPrefill) { _ in consumeAmbientPrefill() }
         .sheet(isPresented: $showingChats) {
             ChatListSheet(store: store) { showingChats = false }
         }
@@ -125,6 +133,21 @@ struct ChatScreen: View {
         hydrateActive()
         input = seed
         send()
+    }
+
+    /// Pre-fill the composer with an Actions-face seed WITHOUT sending — the
+    /// user acts on it conversationally (edit, then send). The `run` outcome is
+    /// logged only when the seeded turn actually goes out (see `send()`).
+    private func consumeAmbientPrefill() {
+        guard !streaming, let seed = AmbientCardBroker.shared.pendingPrefill else { return }
+        AmbientCardBroker.shared.pendingPrefill = nil
+        let runSeed = AmbientCardBroker.shared.pendingPrefillRunSeed
+        AmbientCardBroker.shared.pendingPrefillRunSeed = nil
+        let convo = store.newConversation()
+        store.select(convo.id)
+        hydrateActive()
+        input = seed
+        prefillRun = runSeed.map { (chatId: convo.id, seed: $0) }
     }
 
     // MARK: header — chats drawer · model picker · new chat
@@ -170,6 +193,15 @@ struct ChatScreen: View {
 
     private func send() {
         guard let active = store.active else { return }
+        // A turn that started from an Actions-face prefill is a run the moment
+        // it's actually SENT (not when it was merely prefilled) — logged with
+        // the utterance seed so the join resolves even after edits, and ONLY
+        // when the send happens in the conversation the prefill seeded (a send
+        // in another chat is not acting on the action).
+        if let run = prefillRun {
+            if run.chatId == active.id { AmbientCardBroker.prefillSent(seed: run.seed) }
+            prefillRun = nil
+        }
         let text = input; input = ""; streaming = true
         // iOS quirk: a vertical-axis TextField can keep its rendered glyphs when the
         // bound string is reset within the same tap/return submit cycle, so the message

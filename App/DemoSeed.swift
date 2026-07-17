@@ -173,6 +173,43 @@ enum DemoSeed {
                     segments: [], speakers: [], fetchedAt: UInt64(max(0, now))),
                 captureId: id, baseDir: base)
         }
+
+        // Actions-face proof (track 20260715T1500 addendum): candidate decisions
+        // for omi-demo-1, written through the SAME log the ambient lane writes
+        // (ambient-decisions.jsonl), so the detail's Actions face renders real-
+        // shaped rows in the simulator. Idempotent: skipped once present.
+        let decisionLog = base.appendingPathComponent("ambient-decisions.jsonl")
+        let seedMark = "send Sarah the numbers section"
+        let existing = (try? String(contentsOf: decisionLog, encoding: .utf8)) ?? ""
+        if !existing.contains(seedMark) {
+            let candidates: [(UInt64, String, String)] = [
+                (UInt64(max(0, now - 3_500)),
+                 "Remind me to send Sarah the numbers section tonight",
+                 "Set a reminder to send Sarah the numbers section tonight"),
+                (UInt64(max(0, now - 3_460)),
+                 "We should get the relay figures into the deck before Thursday",
+                 "Add the relay figures to the launch deck before Thursday"),
+            ]
+            for (ts, utterance, summary) in candidates {
+                let line = (try? JSONSerialization.data(withJSONObject: [
+                    "ts": ts, "captureId": "omi-demo-1", "windowChars": 480,
+                    "outcome": "candidate",
+                    "candidate": ["utterance": utterance, "summary": summary,
+                                  "confidence": 0.86],
+                    "latencyMs": 210,
+                ])) ?? Data()
+                guard !line.isEmpty else { continue }
+                var out = line
+                out.append(UInt8(ascii: "\n"))
+                if let h = try? FileHandle(forWritingTo: decisionLog) {
+                    defer { try? h.close() }
+                    _ = try? h.seekToEnd()
+                    try? h.write(contentsOf: out)
+                } else {
+                    try? out.write(to: decisionLog)
+                }
+            }
+        }
     }
 }
 #endif

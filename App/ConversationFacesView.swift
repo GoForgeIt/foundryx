@@ -86,6 +86,8 @@ struct ConversationFacesView: View {
     @State private var showRelayAnswer = false
     @State private var addingAction = false
     @State private var newActionTitle = ""
+    /// The action row whose options sheet is open (track 20260715T1500 addendum).
+    @State private var selectedAction: ConversationActionsPresentation.Row?
 
     // MARK: transcript search
     @State private var query = ""
@@ -451,39 +453,60 @@ struct ConversationFacesView: View {
             }
             addActionControl
         }
+        .sheet(item: $selectedAction) { row in
+            actionOptionsSheet(row)
+        }
     }
 
     private func actionRow(_ row: ConversationActionsPresentation.Row) -> some View {
-        HStack(alignment: .top, spacing: GrainSpacing.x3) {
-            ZStack {
-                RoundedRectangle(cornerRadius: GrainRadius.md, style: .continuous)
-                    .fill(actionKindTint(row.kind).opacity(0.12))
-                Image(grain: actionIcon(row))
-                    .grainTextStyle(.body)
-                    .foregroundStyle(actionKindTint(row.kind))
-            }
-            .frame(width: GrainSpacing.x8, height: GrainSpacing.x8)
-
-            VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-                Text(row.label)
-                    .grainTextStyle(.body)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(GrainColor.ink)
-                if let meta = row.meta, !meta.isEmpty {
-                    Text(meta)
-                        .grainTextStyle(.caption)
-                        .foregroundStyle(GrainColor.textMuted)
-                        .fixedSize(horizontal: false, vertical: true)
+        // Tapping ANY action row opens its options sheet — act on it in chat,
+        // refine it, or mark it "Not an action" (track 20260715T1500 addendum).
+        Button {
+            selectedAction = row
+        } label: {
+            HStack(alignment: .top, spacing: GrainSpacing.x3) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: GrainRadius.md, style: .continuous)
+                        .fill(actionKindTint(row.kind).opacity(0.12))
+                    Image(grain: actionIcon(row))
+                        .grainTextStyle(.body)
+                        .foregroundStyle(actionKindTint(row.kind))
                 }
+                .frame(width: GrainSpacing.x8, height: GrainSpacing.x8)
+
+                VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                    Text(row.label)
+                        .grainTextStyle(.body)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(GrainColor.ink)
+                        .multilineTextAlignment(.leading)
+                    if let meta = row.meta, !meta.isEmpty {
+                        Text(meta)
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(GrainColor.textMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.leading)
+                    }
+                    if let note = row.note, !note.isEmpty {
+                        Text("Your note: \(note)")
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(GrainColor.amber)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.leading)
+                    }
+                }
+                Spacer(minLength: GrainSpacing.x2)
+                GrainStatusWord(
+                    row.state.rawValue,
+                    tone: actionStatusTone(row.state),
+                    showsDot: false
+                )
             }
-            Spacer(minLength: GrainSpacing.x2)
-            GrainStatusWord(
-                row.state.rawValue,
-                tone: actionStatusTone(row.state),
-                showsDot: false
-            )
+            .padding(.vertical, GrainSpacing.x3)
+            .contentShape(Rectangle())
         }
-        .padding(.vertical, GrainSpacing.x3)
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("action-row-\(row.id)")
         .overlay(alignment: .bottom) {
             Rectangle().fill(GrainColor.borderFaint).frame(height: 1)
         }
@@ -528,6 +551,52 @@ struct ConversationFacesView: View {
         loadFaceData()
     }
 
+    // MARK: action options (track 20260715T1500 addendum)
+
+    /// The options sheet for a tapped action row: act on it in chat (composer
+    /// prefill), refine (note the spotter learns from), not-an-action (reject,
+    /// optional comment). Reject/refine exist only for rows the SPOTTER
+    /// surfaced — they are its labeled training signal.
+    private func actionOptionsSheet(_ row: ConversationActionsPresentation.Row) -> some View {
+        // Act-in-chat exists only where a composer actually exists to prefill:
+        // the computer tier always has one; the phone tier hides its composer
+        // behind the Apple Intelligence gate — offering the option there would
+        // strand the user on the upgrade prompt with an invisible seed.
+        let chatCanCompose = !local || makeSystemChatModel() != nil
+        return ActionOptionsSheet(
+            row: row,
+            onAct: (chatCanCompose ? row.seed : nil).map { seed in
+                { AmbientCardBroker.shared.prefillChat(seed: seed, runSeed: row.runSeed) }
+            },
+            onReject: row.utterance.map { utterance in
+                { comment in recordFeedback(.rejected, row: row,
+                                            utterance: utterance, comment: comment) }
+            },
+            onRefine: row.utterance.map { utterance in
+                { comment in recordFeedback(.refined, row: row,
+                                            utterance: utterance, comment: comment) }
+            })
+    }
+
+    /// Persist one piece of action feedback: the full record (utterance +
+    /// comment) into the on-phone `action-feedback.jsonl` the spotter's
+    /// training loop reads, and the outcome WORD into `ambient-cards.jsonl` so
+    /// the row's state resolves and the label ships over the redacted
+    /// ambient-signal channel (comments never leave the phone).
+    private func recordFeedback(_ kind: ActionFeedbackRecord.Kind,
+                                row: ConversationActionsPresentation.Row,
+                                utterance: String, comment: String) {
+        ActionFeedbackStore.append(
+            ActionFeedbackRecord(captureId: captureId, utterance: utterance,
+                                 summary: row.label, kind: kind, comment: comment),
+            baseDir: CaptureWAL.documentsCaptures())
+        switch kind {
+        case .rejected: AmbientCardBroker.rejected(seed: utterance)
+        case .refined: AmbientCardBroker.refined(seed: utterance)
+        }
+        loadFaceData()
+    }
+
     /// The Actions-face icon keys on the action's TYPE (`row.kind`), not its state:
     /// a surfaced nudge reads as a bolt, an answer from memory as a spark, a
     /// hand-added action as a pencil — so the row's ORIGIN is legible at a glance
@@ -556,7 +625,7 @@ struct ConversationFacesView: View {
         switch state {
         case .completed, .ready: return .ready
         case .open: return .attention
-        case .dismissed: return .neutral
+        case .dismissed, .notAnAction: return .neutral
         }
     }
 
@@ -572,10 +641,12 @@ struct ConversationFacesView: View {
             at: ActivityStore.answersLogURL(besides: decisionLog), captureId: captureId)
         let userActions = UserActionStore.load(
             captureId: captureId, baseDir: CaptureWAL.documentsCaptures())
+        let feedback = ActionFeedbackStore.load(
+            captureId: captureId, baseDir: CaptureWAL.documentsCaptures())
         linkedAnswer = answers.first
         actions = ConversationActionsPresentation.build(
             captureId: captureId, decisions: decisions, outcomes: outcomes,
-            answers: answers, userActions: userActions)
+            answers: answers, userActions: userActions, feedback: feedback)
     }
 
     // MARK: - Transcript face

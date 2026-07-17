@@ -26,6 +26,9 @@ public enum ActionOutcome: Equatable, Sendable {
     case dismissed
     /// A lookup card that showed its answer from the user's memory.
     case answered
+    /// The user marked it "Not an action" from the Actions face — the spotter's
+    /// strongest labeled false positive (track 20260715T1500 addendum).
+    case rejected
 
     /// Map the on-disk outcome word; anything unknown degrades to pending.
     public init(wire: String) {
@@ -33,6 +36,7 @@ public enum ActionOutcome: Equatable, Sendable {
         case "run": self = .sentToChat
         case "dismissed": self = .dismissed
         case "answered": self = .answered
+        case "rejected": self = .rejected
         default: self = .pending
         }
     }
@@ -44,6 +48,7 @@ public enum ActionOutcome: Equatable, Sendable {
         case .sentToChat: return "Sent to chat"
         case .dismissed: return "Dismissed"
         case .answered: return "Answered"
+        case .rejected: return "Not an action"
         }
     }
 }
@@ -118,14 +123,18 @@ public enum ConversationActions {
 
     /// The latest outcome whose seed carries this utterance — the seed is the
     /// only join key the outcome log has (it embeds the utterance verbatim).
-    /// No matching record means the card is still pending.
+    /// No matching record means the card is still pending. `refined` lines are
+    /// state-transparent: refining an action never changes what came of it
+    /// (track 20260715T1500 addendum), so they are skipped here.
     private static func outcome(
         forUtterance utterance: String, in records: [CardOutcomeRecord]
     ) -> ActionOutcome {
         // Seeds are clipped to 300 chars in the log — clip the key the same way
         // so a long utterance still matches its truncated seed.
         let key = String(utterance.prefix(200))
-        guard let hit = records.last(where: { $0.seed.contains(key) }) else {
+        guard let hit = records.last(where: {
+            $0.outcome != "refined" && $0.seed.contains(key)
+        }) else {
             return .pending
         }
         return ActionOutcome(wire: hit.outcome)
