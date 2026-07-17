@@ -229,6 +229,41 @@ final class ConversationRecapTests: XCTestCase {
         XCTAssertTrue(model.daily?.freshnessLine.hasPrefix("Grows after each processed conversation") ?? false)
     }
 
+    // WS-C: `isComposing` is the honest wait signal the WaitingExperience binds to —
+    // it pulses true only for a REAL on-device model run over actual material, and is
+    // never raised for the instant deterministic fallback or an empty (silent) period.
+    @MainActor
+    func testIsComposingIsTheHonestRecapWaitSignal() async {
+        let today = Calendar.current.startOfDay(for: Date())
+        let pool = [RecapConversation(captureId: "a", title: "Morning", summary: "First.",
+                                      at: today.addingTimeInterval(3600))]
+
+        // Real composer + material ⇒ pulses true, then settles false.
+        let model = ActivityRecapModel(poolProvider: { pool }, composer: CountingComposer())
+        var sawTrue = false
+        let c1 = model.$isComposing.sink { if $0 { sawTrue = true } }
+        await model.rebuildAll()
+        c1.cancel()
+        XCTAssertTrue(sawTrue, "a real on-device recap run should surface as a named wait")
+        XCTAssertFalse(model.isComposing, "the wait clears when the run finishes")
+
+        // No on-device model ⇒ instant deterministic build ⇒ never a wait.
+        let noModel = ActivityRecapModel(poolProvider: { pool }, composer: nil)
+        var sawTrue2 = false
+        let c2 = noModel.$isComposing.sink { if $0 { sawTrue2 = true } }
+        await noModel.rebuildAll()
+        c2.cancel()
+        XCTAssertFalse(sawTrue2, "no on-device model ⇒ no waiting UI")
+
+        // Empty period ⇒ nothing to compose ⇒ silence, never a wait.
+        let empty = ActivityRecapModel(poolProvider: { [] }, composer: CountingComposer())
+        var sawTrue3 = false
+        let c3 = empty.$isComposing.sink { if $0 { sawTrue3 = true } }
+        await empty.rebuildAll()
+        c3.cancel()
+        XCTAssertFalse(sawTrue3, "an empty period is silence, not a wait")
+    }
+
     // T3 AC3/AC4: a pool signature is stable for the same set, order-independent,
     // and changes on any add or content edit.
     func testPoolSignatureStableAndChangeSensitive() {

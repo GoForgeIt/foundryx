@@ -1257,19 +1257,49 @@ struct CaptureScreen: View {
 
     // MARK: global "your data is safe" signal
 
+    /// The HONEST determinate drain progress across captures that still have pending
+    /// segments — read-only over the sync-owned WAL state (WS-C). `nil` when nothing is
+    /// draining, so no fake bar ever shows.
+    private var syncProgress: WaitProgress? {
+        let active = manager.captures.filter { $0.status.pendingSegments > 0 }
+        guard !active.isEmpty else { return nil }
+        let total = active.reduce(0) { $0 + $1.status.totalSegments }
+        let done = active.reduce(0) { $0 + $1.status.syncedSegments }
+        return .determinate(done: done, total: total)
+    }
+
+    private var sourceFailed: Bool {
+        if case .failed = manager.sourceState { return true }
+        return false
+    }
+
     private var syncBar: some View {
-        HStack(spacing: GrainSpacing.x2) {
-            if let message = syncMessage {
-                Circle().fill(anyWorkPending ? GrainColor.amber : GrainColor.sage)
-                    .frame(width: GrainSpacing.x2, height: GrainSpacing.x2)
-                Text(message).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+        VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+            if let progress = syncProgress, !sourceFailed {
+                // The "N processing, syncing…" stall class — a REAL backlog drain gets
+                // the shared honest-wait experience with a true determinate bar (WS-C).
+                WaitingExperienceView(
+                    model: WaitingExperienceModel(
+                        kind: .sync, onDevice: local, progress: progress,
+                        stats: WaitingLibraryStats(
+                            conversationCount: manager.statsSummary.totalConversations)),
+                    compact: true)
+            } else if let message = syncMessage {
+                HStack(spacing: GrainSpacing.x2) {
+                    Circle().fill(anyWorkPending ? GrainColor.amber : GrainColor.sage)
+                        .frame(width: GrainSpacing.x2, height: GrainSpacing.x2)
+                    Text(message).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                    Spacer()
+                }
             } else if !manager.captures.isEmpty {
-                Circle().fill(GrainColor.sage)
-                    .frame(width: GrainSpacing.x2, height: GrainSpacing.x2)
-                Text(local ? "All conversations saved" : "All captures saved to computer")
-                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                HStack(spacing: GrainSpacing.x2) {
+                    Circle().fill(GrainColor.sage)
+                        .frame(width: GrainSpacing.x2, height: GrainSpacing.x2)
+                    Text(local ? "All conversations saved" : "All captures saved to computer")
+                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                    Spacer()
+                }
             }
-            Spacer()
         }
         .padding(.horizontal, GrainSpacing.x4)
         .padding(.top, GrainSpacing.x2)

@@ -461,6 +461,11 @@ public final class ActivityRecapModel: ObservableObject {
     @Published public private(set) var weekly: ActivityRecapPresentation?
     /// The selected segment — the view shows exactly one card for it.
     @Published public var mode: Mode = .day
+    /// True while the (on-device) composer is actually running a rebuild that has
+    /// material to summarize — the honest signal the WaitingExperience binds to so a
+    /// recap being generated shows a named wait rather than a blank gap. Never set for
+    /// an empty period (nothing to compose ⇒ no wait shown).
+    @Published public private(set) var isComposing: Bool = false
 
     private let poolProvider: () -> [RecapConversation]
     private let composer: RecapComposer?
@@ -544,8 +549,14 @@ public final class ActivityRecapModel: ObservableObject {
            dailySpanId == spanId, dailySignature == signature {
             return   // unchanged set already rendered — no re-run
         }
-        if let recap = await ConversationRecapEngine.build(span: spans.day, from: pool,
-                                                           composer: composer, calendar: calendar) {
+        // Only a real (on-device) composer over non-empty material is a perceptible
+        // wait; the deterministic fallback is instant and shows no waiting UI.
+        let composing = composer != nil && !pool.isEmpty
+        if composing { isComposing = true }
+        let built = await ConversationRecapEngine.build(span: spans.day, from: pool,
+                                                        composer: composer, calendar: calendar)
+        if composing { isComposing = false }
+        if let recap = built {
             daily = .make(from: recap)
         } else {
             daily = nil
@@ -568,8 +579,12 @@ public final class ActivityRecapModel: ObservableObject {
            weeklySpanId == spanId, weeklySignature == signature {
             return
         }
-        if let recap = await ConversationRecapEngine.build(span: spans.week, from: pool,
-                                                          composer: composer, calendar: calendar) {
+        let composing = composer != nil && !pool.isEmpty
+        if composing { isComposing = true }
+        let built = await ConversationRecapEngine.build(span: spans.week, from: pool,
+                                                        composer: composer, calendar: calendar)
+        if composing { isComposing = false }
+        if let recap = built {
             weekly = .make(from: recap, weekUpdated: false)
         } else {
             weekly = nil
@@ -600,8 +615,12 @@ public final class ActivityRecapModel: ObservableObject {
         let spans = ConversationRecapEngine.currentSpans(calendar: calendar)
         guard case .week(let start) = spans.week else { return }
         let span = RecapSpan.weekToDate(start: start, asOf: Date())
-        if let recap = await ConversationRecapEngine.build(span: span, from: pool,
-                                                          composer: composer, calendar: calendar) {
+        let composing = composer != nil && !pool.isEmpty
+        if composing { isComposing = true }
+        let built = await ConversationRecapEngine.build(span: span, from: pool,
+                                                        composer: composer, calendar: calendar)
+        if composing { isComposing = false }
+        if let recap = built {
             weekUpdated = true
             weekly = .make(from: recap, weekUpdated: true)
             weeklySpanId = ConversationRecapEngine.spanId(span)

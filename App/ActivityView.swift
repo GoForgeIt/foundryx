@@ -85,6 +85,10 @@ struct ActivityView: View {
                 recapModeToggle
                 if let card = (recap.mode == .day ? recap.daily : recap.weekly) {
                     conversationRecapCard(card)
+                } else if recap.isComposing {
+                    // The on-device model is writing this recap — name the wait honestly
+                    // instead of a blank gap (WS-C). Recaps always run on-device.
+                    WaitingExperienceView(model: WaitingExperienceModel(kind: .recap, onDevice: true))
                 }
                 if days.isEmpty {
                     if recap.daily == nil && recap.weekly == nil { emptyState }

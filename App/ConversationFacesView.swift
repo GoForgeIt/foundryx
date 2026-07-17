@@ -435,13 +435,12 @@ struct ConversationFacesView: View {
                 .foregroundStyle(GrainColor.ink)
                 .textSelection(.enabled)
         } else if content?.summarizing == true {
-            // The door/desktop is authoritatively summarizing — that copy wins over the
-            // local on-device fallback so we don't relabel desktop processing.
-            Text("Summarizing on your computer, check back shortly.")
-                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            // The Mac's pipeline is authoritatively titling + summarizing — that wins
+            // over the local fallback so we don't relabel desktop processing (WS-C).
+            WaitingExperienceView(model: WaitingExperienceModel(kind: .title, onDevice: false), compact: true)
         } else if summarizing {
-            Text("Summarizing…")
-                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            // On-device titling + summary synth in flight (WS-C).
+            WaitingExperienceView(model: WaitingExperienceModel(kind: .title, onDevice: true), compact: true)
         } else if transcriptText != nil {
             Text("No summary yet. The transcript face has the full conversation.")
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
@@ -695,13 +694,12 @@ struct ConversationFacesView: View {
                 }
             }
         } else if loading {
-            Text("Loading transcript…")
-                .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
+            // Door fetch over the encrypted relay to the user's Mac (WS-C honest wait).
+            WaitingExperienceView(model: WaitingExperienceModel(kind: .doorFetch, onDevice: local))
         } else if didAttemptFetch, content?.found == false, loadError == nil {
-            Text("Transcript still processing…")
-                .grainTextStyle(.title).foregroundStyle(GrainColor.ink)
-            Text("Your conversation is saved. The transcript shows up here once it's been processed on your computer.")
-                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            // Saved, but the transcript is still being produced (on-device STT / the
+            // Mac's pipeline) — name the wait honestly instead of a bare line.
+            WaitingExperienceView(model: WaitingExperienceModel(kind: .transcription, onDevice: local))
             GrainButton("Check again", variant: .tonal, size: .sm) { Task { await fetchFromDoor() } }
         } else {
             Text("Transcript not loaded")
