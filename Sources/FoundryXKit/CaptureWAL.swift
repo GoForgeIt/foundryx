@@ -147,17 +147,45 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     /// never served. The cache is DISPLAY-ONLY: the upload path still reads the durable
     /// `.upload-watermark` file + the real `.ack` files, so a stale cache can NEVER re-upload an
     /// already-ACK'd segment or lose audio.
+    /// Warm this capture's status once and publish it. Idempotent PER INSTANCE — re-armed
+    /// only when a segment mutation invalidates the durable cache (`invalidateStatusCache`),
+    /// so a re-warm of an UNCHANGED capture (a merge, a refresh, a relaunch scroll) does no
+    /// rescan and no publish. This is the change-token half of the list-open warm-flood fix
+    /// (2026-07-20): "warm only NEW or CHANGED captures, not all N on every pass."
     public func warmStatus() {
-        if let cached = loadStatusCache() {
-            publish(statusFromCache(cached))
-            return
-        }
-        // Cache miss / corrupt → the real one-time scan, then persist a clean cache for next
-        // launch. `ensureWatermarkLoaded` + `computeStatus` are the (now infrequent) scan.
+        guard !hasWarmed else { return }
+        hasWarmed = true
+        publish(warmedSnapshot())
+    }
+
+    /// Whether this instance has already warmed AND nothing has changed since. Flipped back
+    /// to `false` by `invalidateStatusCache()` — the same signal that dirties the durable
+    /// cache on every segment mutation — so a genuinely-changed capture warms again while an
+    /// unchanged one stays a no-op.
+    private var hasWarmed = false
+
+    /// Compute the warm status OFF the main actor WITHOUT publishing. The owner batches many
+    /// of these and applies them in ONE main-actor hop (`applyWarmedStatus`), instead of one
+    /// `DispatchQueue.main.async` @Published write per capture — that per-capture publish
+    /// storm (N SwiftUI card invalidations dispatched onto main in a burst) IS the
+    /// `capture-status-warm-n<N>` main-thread stall MetricKit reports on a big library.
+    /// Cache-hit returns the snapshot; a miss does the one-time scan and persists a clean
+    /// cache, exactly as the publishing path would.
+    public func warmedSnapshot() -> CaptureStatus {
+        if let cached = loadStatusCache() { return statusFromCache(cached) }
         ensureWatermarkLoaded()
         let s = computeStatus()
-        publish(s)
         persistStatusCache(s, watermark: uploadWatermark())
+        return s
+    }
+
+    /// Apply a status computed off-main by `warmedSnapshot()`. Marks the instance warmed and
+    /// publishes — which (see `publish`) writes the `@Published` status ONLY when it actually
+    /// changed, so a batch of unchanged re-warms costs zero SwiftUI invalidations. Intended to
+    /// be called on the main thread inside the owner's single batched main-actor hop.
+    public func applyWarmedStatus(_ s: CaptureStatus) {
+        hasWarmed = true
+        publish(s)
     }
 
     // MARK: durable per-capture status cache (launch warm stat-storm fix, WS-B)
@@ -216,6 +244,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     /// Invalidate (delete) the durable status cache — called at EVERY segment mutation so the
     /// next warm pass rescans instead of serving a stale snapshot. Cheap unlink; no-op if absent.
     private func invalidateStatusCache() {
+        hasWarmed = false   // a real segment change re-arms warmStatus (change-token semantics)
         try? FileManager.default.removeItem(at: statusCacheURL())
     }
 
@@ -686,7 +715,10 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     /// WITHOUT calling `computeStatus`, so no segment enumeration happens).
     private func publish(_ s: CaptureStatus) {
         let apply: () -> Void = { [weak self] in
-            guard let self else { return }
+            // Skip the @Published write (and the SwiftUI invalidation it triggers) when the
+            // status is UNCHANGED — a re-warm/refresh that computed the same snapshot costs
+            // nothing on the main thread. `CaptureStatus` is Equatable.
+            guard let self, s != self.status else { return }
             self.status = s
         }
         if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }

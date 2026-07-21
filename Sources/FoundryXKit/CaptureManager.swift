@@ -3790,7 +3790,14 @@ public final class CaptureManager: ObservableObject {
             // moved work stays visible in telemetry WITHOUT counting against the hydrate
             // budget (the harness matches `capture-hydrate*`, not `capture-status-warm*`).
             let warm = PerfSpan(name: "capture-status-warm")
-            for wal in hydrated { wal.warmStatus() }
+            // Compute every capture's warm status HERE, off the main actor, into a batch —
+            // then apply the whole batch in the SINGLE main-actor hop below. The old
+            // `for wal in hydrated { wal.warmStatus() }` published each status via its own
+            // `DispatchQueue.main.async`, flooding the main thread with N @Published writes
+            // (N SwiftUI card invalidations) in a burst — the `capture-status-warm-n<N>`
+            // main-thread stall on a big library. One batched apply = one runloop tick =
+            // one coalesced list diff. (warmedSnapshot does the cache-hit-or-scan off-main.)
+            let warmed: [(CaptureWAL, CaptureStatus)] = hydrated.map { ($0, $0.warmedSnapshot()) }
             // Retention sweep ALSO off the main actor (was a startup main-thread hang).
             let retention = Self.retentionSweep(ids: picked, baseDir: self.baseDir)
             let warmMs = warm.elapsedMs()
@@ -3799,6 +3806,9 @@ public final class CaptureManager: ObservableObject {
                 // rebuild + widget seed) was invisible (capture-status-warm stops before this
                 // hop). Measure it under its own span so any residual main-thread cost shows.
                 let finishSpan = PerfSpan(name: "capture-startup-finish")
+                // Apply all warmed statuses in this ONE tick; each is a no-op unless it
+                // actually changed the capture's status (publish() skips equal writes).
+                for (wal, s) in warmed { wal.applyWarmedStatus(s) }
                 self.pruneDiscardedFragments()
                 self.finishStartupAfterHydration(retention: retention)
                 self.rebuildVisibleCaptures()   // reflect warmed counts (banner/stats/orphan prune)
