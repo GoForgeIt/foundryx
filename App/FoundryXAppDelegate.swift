@@ -39,6 +39,14 @@ final class FoundryXAppDelegate: NSObject, UIApplicationDelegate {
         // work with the device LOCKED (phone in pocket — the normal case), so it
         // reads the lock-screen-safe persisted sign-in signal, not the keychain.
         guard FoundryAuth.hasPersistedSignIn else { return }
+        // No paired Omi ⇒ nothing to restore. A bluetooth-central relaunch with no saved
+        // device would otherwise re-run the WHOLE DeviceManager/spool setup on the main
+        // thread (the ~1s didFinishLaunching block the field telemetry symbolicated to
+        // OmiRestorationSpool.attach) and re-create a central that can only ever scan for
+        // a device that isn't there. With no saved device the connect flow is dormant, so
+        // bail here BEFORE any of that work. (An owner with no Omi never armed a pending
+        // connect, so this relaunch should not happen — but guard it decisively.)
+        guard DeviceManager.hasSavedDevice else { return }
         let store = UserDefaultsCaptureSourceStore()
         let omiEnabled = store.enabledOverrides[CaptureSourceDescriptor.omiId] ?? true
         guard omiEnabled else { return }

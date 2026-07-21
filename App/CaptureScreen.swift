@@ -1209,7 +1209,10 @@ struct CaptureScreen: View {
             // Keep connection setup available without crowding the title-bar actions.
             if p.showsConnectAffordance {
                 HStack {
-                    GrainButton("Connect your Omi", variant: .filled, size: .sm) { device.start() }
+                    // connectOrPair(): reconnect a remembered device, else a bounded,
+                    // user-initiated pairing scan. start() alone is dormant with no saved
+                    // device (the no-Omi fix), so a first-time user needs the explicit scan.
+                    GrainButton("Connect your Omi", variant: .filled, size: .sm) { device.connectOrPair() }
                     Spacer()
                 }
                 .padding(.horizontal, GrainSpacing.x4)

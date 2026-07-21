@@ -143,7 +143,10 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
 
     private func setBatteryLevel(_ level: Int?) {
         let clamped = level.map { max(0, min(100, $0)) }
-        DispatchQueue.main.async { self.batteryLevel = clamped }
+        DispatchQueue.main.async {
+            guard self.batteryLevel != clamped else { return }   // skip-equal: no redundant objectWillChange
+            self.batteryLevel = clamped
+        }
     }
 
     private let log: DoorLog?
@@ -242,6 +245,25 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     /// saved pairing is kept so re-enabling reconnects hands-free.
     private var autoConnect = true
 
+    // MARK: connect-intent + backoff (the "no Omi ⇒ dormant, absent Omi ⇒ backoff" state)
+
+    /// Set by a USER pairing gesture (startScan/connectOrPair) that had to power the
+    /// central first — consumed once on the next `.poweredOn` so the AUTOMATIC path stays
+    /// dormant while an explicit pairing scan still runs. Cross-thread (set on main, read
+    /// on bleQueue) under the same `@unchecked Sendable` convention as `autoConnect`.
+    private var pendingUserScan = false
+    /// Generation token bounding a pairing scan (main only) — a scan that finds nothing
+    /// auto-stops after `scanWindow` so it never becomes a perpetual background scan (the
+    /// standing scan that persisted CB restoration data and woke the app ~every 15–30s).
+    private var scanGeneration: UInt64 = 0
+    private let scanWindow: TimeInterval = 30
+    /// Exponential backoff for the saved-but-uncached reacquire scan (bleQueue only).
+    private var reacquireBackoff = OmiBackoff()
+    private var reacquireScheduled = false          // bleQueue only
+    private let reacquireScanWindow: TimeInterval = 6
+    /// Consecutive failed-connect attempts (bleQueue only) → exponential retry backoff.
+    private var failToConnectAttempts = 0
+
     private static let savedKey = "foundryx.omi.peripheral-id"
     private static let savedNameKey = "foundryx.omi.peripheral-name"
     private static let savedDateKey = "foundryx.omi.last-connected"
@@ -260,23 +282,39 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     /// scan) — a primary "zero frames / stuck" cause.
     public func start() {
         autoConnect = true
+        // No saved device ⇒ nothing to reconnect to. Stay FULLY DORMANT: don't create a
+        // central, don't scan. A central carrying our restore identifier plus a standing
+        // scan / pending connect is exactly what persisted CB state-restoration data and
+        // made iOS relaunch the app ~every 15–30s (the ~1s main-thread block the field
+        // telemetry symbolicated to OmiRestorationSpool.attach) — for a device that will
+        // never appear. First-time pairing is the explicit startScan()/connectOrPair()
+        // gesture, which powers the central on demand. This method is called broadly and
+        // AUTOMATICALLY (screen onAppear via CaptureManager.startSource, source-switch,
+        // resume), so it must never itself arm a scan.
+        guard Self.hasSavedDevice else { setState(.idle); return }
         guard let c = central else {
-            // Restore identifier ⇒ iOS relaunches us in the background when a pending
-            // connect completes even after the app was killed (willRestoreState path).
-            // iOS-only: macOS (the @ble-hardware test host) has no CB state restoration.
-            #if os(iOS)
-            central = CBCentralManager(delegate: self, queue: bleQueue,
-                                       options: [CBCentralManagerOptionRestoreIdentifierKey: Self.restoreIdentifier])
-            #else
-            central = CBCentralManager(delegate: self, queue: bleQueue)
-            #endif
-            return   // the connect flow resumes once the central reports .poweredOn
+            ensureCentral()   // the connect flow resumes once the central reports .poweredOn
+            return
         }
         guard c.state == .poweredOn else { return }
         switch connectionState {
         case .connected, .connecting: break          // already linked — nothing to do
-        default: autoReconnect()                      // re-initiate (reconnect saved, else scan)
+        default: autoReconnect(userInitiated: false) // re-initiate the saved-device reconnect
         }
+    }
+
+    /// Create the shared central. Restore identifier ⇒ iOS relaunches us in the
+    /// background when a pending connect completes even after the app was killed
+    /// (willRestoreState path). iOS-only: macOS (the @ble-hardware test host) has no CB
+    /// state restoration.
+    private func ensureCentral() {
+        guard central == nil else { return }
+        #if os(iOS)
+        central = CBCentralManager(delegate: self, queue: bleQueue,
+                                   options: [CBCentralManagerOptionRestoreIdentifierKey: Self.restoreIdentifier])
+        #else
+        central = CBCentralManager(delegate: self, queue: bleQueue)
+        #endif
     }
 
     /// AudioFrameSource.stop() = drop the link (capture ends; we keep the saved id).
@@ -286,6 +324,26 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     /// the link AND stops auto-reconnect, so a toggled-off Omi leaves the capture
     /// surface; enabling resumes the hands-free connect flow. The saved pairing persists.
     public func setEnabled(_ on: Bool) { if on { start() } else { suspend() } }
+
+    /// Whether a device has ever been paired (a saved Omi exists). Public so the
+    /// AppDelegate's background-restoration bootstrap can bail BEFORE creating a central
+    /// when there's nothing to reconnect to, and so the connect flow stays dormant with
+    /// no Omi.
+    public static var hasSavedDevice: Bool { loadSaved() != nil }
+
+    /// The capture-page "Connect your Omi" affordance: reconnect a remembered device,
+    /// else begin a bounded, user-initiated pairing scan. (`start()` alone is dormant
+    /// with no saved device, so a first-time user needs this explicit scan.)
+    public func connectOrPair() {
+        if Self.hasSavedDevice { reconnect() } else { startScan() }
+    }
+
+    /// Stop a user-initiated pairing scan (ONLY while actually scanning) — call when the
+    /// pairing UI is dismissed so an abandoned scan never keeps the radio (and CB
+    /// restoration) armed. A no-op mid-connect / connected / dormant.
+    public func stopScanIfScanning() {
+        if case .scanning = connectionState { stopScan() }
+    }
 
     /// User-suspend: drop the link, keep the saved device, and DON'T auto-reconnect
     /// (until `start()`/`setEnabled(true)`). Distinct from `disconnect()`, which keeps
@@ -303,10 +361,28 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     // MARK: connect UI API
 
     public func startScan() {
-        guard let c = central, c.state == .poweredOn else { return }
+        // A USER pairing gesture. Ensure the central exists (a first-time pair can hit
+        // this before anything else powered it on — start() is dormant with no saved
+        // device), then scan once powered on.
+        guard let c = central else { pendingUserScan = true; ensureCentral(); return }
+        guard c.state == .poweredOn else { pendingUserScan = true; return }
         setDiscovered([])
         setState(.scanning)
         c.scanForPeripherals(withServices: [OmiUUID.audioService], options: nil)
+        // BOUND it: a scan that finds nothing must NOT run forever — a perpetual scan is
+        // what persisted CB restoration data and woke the app. Auto-stop after the window
+        // (a later scan bumps the generation so this stale timeout no-ops).
+        scanGeneration &+= 1
+        let gen = scanGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + scanWindow) { [weak self] in
+            guard let self, self.scanGeneration == gen else { return }
+            if case .scanning = self.connectionState {
+                self.central?.stopScan()
+                self.setDiscovered([])
+                self.setState(.idle)
+                self.log?.info("Omi: pairing scan found nothing within \(Int(self.scanWindow))s — stopped")
+            }
+        }
     }
 
     /// Stop an in-progress scan and collapse back to idle (the consolidated header's
@@ -334,7 +410,7 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     public func reconnect() {
         autoConnect = true
         guard let c = central, c.state == .poweredOn else { start(); return }
-        autoReconnect()
+        autoReconnect(userInitiated: true)
     }
 
     /// Drop the current link AND forget the saved device (user-initiated).
@@ -363,20 +439,83 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
 
     private func bind(_ p: CBPeripheral) { peripheral = p; p.delegate = self }
 
-    private func autoReconnect() {
+    /// The auto-reconnect entry. `userInitiated` distinguishes an explicit "Connect"
+    /// gesture (may pair-scan when nothing is saved) from the AUTOMATIC path (central
+    /// powered on, BT toggled on, launch), which must stay DORMANT with no saved device —
+    /// the whole point of the no-Omi fix. See `OmiReconnectPolicy.onAutoConnect`.
+    private func autoReconnect(userInitiated: Bool) {
         // Already linked (or a pending connect is standing)? Leave it alone — a
         // second connect() on top of a restored pending connect is redundant.
         if let p = peripheral, p.state == .connected || p.state == .connecting { return }
-        guard let c = central,
-              let idStr = UserDefaults.standard.string(forKey: Self.savedKey),
-              let id = UUID(uuidString: idStr),
-              let p = c.retrievePeripherals(withIdentifiers: [id]).first else {
-            setState(.idle); startScan(); return
+        guard let c = central else { return }
+        let savedId = UserDefaults.standard.string(forKey: Self.savedKey).flatMap(UUID.init(uuidString:))
+        let cached = savedId.flatMap { c.retrievePeripherals(withIdentifiers: [$0]).first }
+        switch OmiReconnectPolicy.onAutoConnect(hasSaved: savedId != nil,
+                                                handleCached: cached != nil,
+                                                userInitiated: userInitiated) {
+        case .connectSaved:
+            guard let p = cached else { setState(.idle); return }
+            log?.info("Omi: auto-reconnecting saved device \(p.name ?? "?")")
+            bind(p)
+            setState(.connecting(p.name ?? "Omi"))
+            c.connect(p, options: nil)   // event-driven pending connect — no scan, no poll
+        case .reacquireBackoff:
+            // Saved, but the OS handle isn't cached yet — a bounded, exponentially-backed-
+            // off reacquire scan OFF the main thread, NOT a tight loop.
+            setState(.idle)
+            scheduleReacquireScan()
+        case .pairingScan:
+            // A user gesture with nothing saved — a bounded pairing scan.
+            setState(.idle)
+            startScan()
+        case .dormant:
+            // No saved device on the automatic path — do NOTHING (the no-Omi fix). No
+            // scan, no pending connect, so no CB restoration data, so no relaunch churn.
+            setState(.idle)
         }
-        log?.info("Omi: auto-reconnecting saved device \(p.name ?? "?")")
-        bind(p)
-        setState(.connecting(p.name ?? "Omi"))
-        c.connect(p, options: nil)
+    }
+
+    // MARK: reacquire backoff — saved device, OS handle not yet cached (bleQueue only)
+
+    /// Schedule a bounded, exponentially-backed-off reacquire scan for a SAVED device
+    /// whose OS peripheral handle CoreBluetooth hasn't cached yet. All on the bleQueue —
+    /// never main-thread, never a tight loop. No-op unless a device is saved and enabled.
+    private func scheduleReacquireScan() {
+        bleQueue.async { [weak self] in
+            guard let self, self.autoConnect, Self.hasSavedDevice, !self.reacquireScheduled else { return }
+            self.reacquireScheduled = true
+            let delay = self.reacquireBackoff.nextDelay()
+            self.log?.info("Omi: saved device handle uncached — reacquire scan in \(Int(delay))s")
+            self.bleQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.runReacquireScan()
+            }
+        }
+    }
+
+    private func runReacquireScan() {   // bleQueue only
+        reacquireScheduled = false
+        guard autoConnect, Self.hasSavedDevice, let c = central, c.state == .poweredOn else { return }
+        if let p = peripheral, p.state == .connected || p.state == .connecting { reacquireBackoff.reset(); return }
+        // Handle may have appeared → prefer a direct (event-driven) pending connect.
+        if let idStr = UserDefaults.standard.string(forKey: Self.savedKey),
+           let id = UUID(uuidString: idStr),
+           let p = c.retrievePeripherals(withIdentifiers: [id]).first {
+            reacquireBackoff.reset()
+            bind(p); setState(.connecting(p.name ?? "Omi")); c.connect(p, options: nil)
+            return
+        }
+        // Still uncached: a BOUNDED scan window; didDiscover auto-connects the saved id
+        // (OmiAutoConnect). Stop after the window; if still not connected, back off again.
+        setState(.scanning)
+        c.scanForPeripherals(withServices: [OmiUUID.audioService], options: nil)
+        let attemptAtScan = reacquireBackoff.attempt
+        bleQueue.asyncAfter(deadline: .now() + reacquireScanWindow) { [weak self] in
+            guard let self, self.reacquireBackoff.attempt == attemptAtScan else { return }
+            if let p = self.peripheral, p.state == .connected || p.state == .connecting { return }
+            self.central?.stopScan()
+            self.setState(.idle)
+            self.scheduleReacquireScan()   // back off further and retry
+        }
     }
 
     // MARK: offline-cache (ring) sync plumbing — bleQueue only
@@ -491,9 +630,22 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
         }
     }
 
-    // main-thread published mutations
-    private func setState(_ s: DeviceConnectionState) { DispatchQueue.main.async { self.connectionState = s } }
-    private func setDiscovered(_ d: [DiscoveredDevice]) { DispatchQueue.main.async { self.discovered = d } }
+    // main-thread published mutations — skip-equal so a churning state machine (e.g. a
+    // reacquire scan cycling scanning→idle→scanning) publishes only on ACTUAL change, one
+    // coalesced objectWillChange per real transition rather than a burst of redundant
+    // SwiftUI invalidations (the same discipline as the capture-status-warm fix).
+    private func setState(_ s: DeviceConnectionState) {
+        DispatchQueue.main.async {
+            guard self.connectionState != s else { return }
+            self.connectionState = s
+        }
+    }
+    private func setDiscovered(_ d: [DiscoveredDevice]) {
+        DispatchQueue.main.async {
+            guard self.discovered != d else { return }
+            self.discovered = d
+        }
+    }
 
     private func setSaved(_ id: UUID, name: String) {
         let d = UserDefaults.standard
@@ -546,8 +698,13 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
             if let p = restoredPeripheral {
                 restoredPeripheral = nil
                 handleRestoredPeripheral(p, central: c)
+            } else if pendingUserScan {
+                // An explicit pairing gesture powered the central — run the (bounded)
+                // scan on the main queue where its generation bookkeeping lives.
+                pendingUserScan = false
+                DispatchQueue.main.async { [weak self] in self?.startScan() }
             } else if autoConnect {
-                autoReconnect()
+                autoReconnect(userInitiated: false)   // automatic: dormant when no saved device
             }
         case .unauthorized, .poweredOff, .unsupported:
             setState(.poweredOff); emitSourceState(.failed("bluetooth unavailable"))
@@ -613,6 +770,10 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
     private func markConnectingName(_ name: String) { setState(.connecting(name)) }
 
     public func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) {
+        // A real connection clears the retry backoffs so the NEXT outage starts from the
+        // base delay, not the capped ceiling (bleQueue-only state, set here on bleQueue).
+        failToConnectAttempts = 0
+        reacquireBackoff.reset()
         log?.info("Omi: connected \(p.name ?? "?") — discovering audio + storage services")
         // Discover the audio service, the standard battery service (best-effort), and
         // the Omi STORAGE service — if present, gap audio recorded while disconnected
@@ -625,14 +786,17 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
     public func centralManager(_ c: CBCentralManager, didFailToConnect p: CBPeripheral, error: Error?) {
         emitSourceState(.failed("connect failed: \(error?.localizedDescription ?? "?")"))
         // A failed ATTEMPT is not a dead end (previously it was: one failed handshake
-        // and the Omi never came back until the app was foregrounded). Retry shortly —
-        // failure implies the device is in range, so this is rare and event-driven.
-        switch OmiReconnectPolicy.onFailToConnect(autoConnect: autoConnect) {
+        // and the Omi never came back until the app was foregrounded). Retry with
+        // EXPONENTIAL BACKOFF — failure implies the device is in range, so this is rare
+        // and event-driven, but a flapping device must not become a fixed tight loop.
+        switch OmiReconnectPolicy.onFailToConnect(autoConnect: autoConnect, attempt: failToConnectAttempts) {
         case .stayDown:
+            failToConnectAttempts = 0
             setState(.idle)
         case .retryAfterDelay(let delay):
+            failToConnectAttempts += 1
             setState(.disconnected)
-            log?.warn("Omi: connect attempt failed (\(error?.localizedDescription ?? "?")) — retrying in \(Int(delay))s")
+            log?.warn("Omi: connect attempt failed (\(error?.localizedDescription ?? "?")) — retrying in \(Int(delay))s (attempt \(self.failToConnectAttempts))")
             bleQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self, self.autoConnect, let c = self.central, c.state == .poweredOn else { return }
                 guard p.state != .connected && p.state != .connecting else { return }
@@ -858,13 +1022,16 @@ public final class DeviceManager: ObservableObject, AudioFrameSource, @unchecked
     @Published public private(set) var batteryLevel: Int?
     public var isBatteryLow: Bool { (batteryLevel ?? 100) < 20 }
     public init(log: DoorLog? = nil) { _ = log }
+    public static var hasSavedDevice: Bool { false }
     public func start() { onState?(.failed("CoreBluetooth unavailable")) }
     public func stop() { onState?(.stopped) }
     public func setEnabled(_ on: Bool) {}
     public func suspend() { onState?(.stopped) }
     public func startScan() {}
     public func stopScan() {}
+    public func stopScanIfScanning() {}
     public func connect(_ device: DiscoveredDevice) {}
+    public func connectOrPair() {}
     public func reconnect() {}
     public func forget() {}
     public func disconnect() {}

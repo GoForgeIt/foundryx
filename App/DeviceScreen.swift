@@ -36,11 +36,20 @@ struct DeviceScreen: View {
         }
         .grainBackground()
         .navigationBarTitleDisplayMode(.inline)
-        // Power the central and reconnect only while Omi remains an enabled source.
+        // Power the central + auto-reconnect only for a REMEMBERED, enabled Omi. With no
+        // saved device, opening this page arms NOTHING (no scan, no CB restoration) —
+        // first-time pairing is the explicit "Pair your Omi" button (device.startScan()).
+        // start() is itself dormant with no saved device, but gating here avoids even
+        // creating an idle central just to view the page.
         .onAppear {
-            if sources.isEnabled(CaptureSourceDescriptor.omiId) {
+            if device.saved != nil, sources.isEnabled(CaptureSourceDescriptor.omiId) {
                 device.start()
             }
+        }
+        // A user-initiated pairing scan that found nothing must not keep scanning after
+        // the page is dismissed (a lingering scan re-arms the radio + CB restoration).
+        .onDisappear {
+            device.stopScanIfScanning()
         }
         .onChange(of: device.connectionState) { _ in
             syncOmiConnection()
