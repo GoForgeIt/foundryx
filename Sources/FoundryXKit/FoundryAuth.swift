@@ -195,8 +195,11 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
     public static var hasPersistedSignIn: Bool {
         UserDefaults.standard.bool(forKey: AuthStore.signedInMirrorKey) || AuthStore.load() != nil
     }
-    /// Display name when the provider surfaced one (Apple: first auth only).
+    /// Display name when the provider surfaced one (Apple: first auth only; Google/
+    /// Microsoft: parsed from the id_token on sign-in).
     public var signedInName: String? { AuthStore.load()?.name }
+    /// The provider of the signed-in identity ("google"/"microsoft"/"apple").
+    public var signedInProvider: String? { AuthStore.load()?.provider }
 
     // MARK: provider endpoints
 
@@ -276,12 +279,14 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
         let refresh = (obj["refresh_token"] as? String) ?? fallbackRefresh
         let expiresIn = (obj["expires_in"] as? Double) ?? 3300
         let email = Self.emailFromIdToken(idToken)
+        let name = Self.nameFromIdToken(idToken)
         return AuthIdentity(
             provider: provider.rawValue,
             idToken: idToken,
             refreshToken: refresh,
             expiresAt: Date().addingTimeInterval(expiresIn),
-            email: email
+            email: email,
+            name: name
         )
     }
 
@@ -333,14 +338,27 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
     private static func queryValue(_ url: URL, _ name: String) -> String? {
         URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == name }?.value
     }
-    private static func emailFromIdToken(_ jwt: String) -> String? {
+    /// Decode a JWT's payload (claims) without verifying the signature — used only
+    /// to read the already-trusted id_token's email/name for display. The gateway
+    /// verifies the token cryptographically; this is not a trust boundary.
+    private static func claims(from jwt: String) -> [String: Any]? {
         let parts = jwt.split(separator: ".")
         guard parts.count >= 2 else { return nil }
         var b64 = String(parts[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
         while b64.count % 4 != 0 { b64 += "=" }
-        guard let data = Data(base64Encoded: b64),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        guard let data = Data(base64Encoded: b64) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+    private static func emailFromIdToken(_ jwt: String) -> String? {
+        guard let obj = claims(from: jwt) else { return nil }
         return (obj["email"] as? String) ?? (obj["preferred_username"] as? String)
+    }
+    private static func nameFromIdToken(_ jwt: String) -> String? {
+        guard let obj = claims(from: jwt) else { return nil }
+        if let n = (obj["name"] as? String)?.nonEmpty { return n }
+        let full = "\((obj["given_name"] as? String) ?? "") \((obj["family_name"] as? String) ?? "")"
+            .trimmingCharacters(in: .whitespaces)
+        return full.nonEmpty
     }
 }
 

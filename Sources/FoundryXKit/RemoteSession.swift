@@ -45,6 +45,17 @@ public final class RemoteSession: ObservableObject {
     public var providers: [AuthProvider] { AuthProvider.allCases.filter { auth.isConfigured($0) } }
     public var isConfigured: Bool { remote != nil && !providers.isEmpty }
 
+    /// The Settings → Account identity block. Reads the @Published `email` first
+    /// (so sign-out flips the row instantly) and falls back to the persisted
+    /// keychain identity for the email/name/provider at launch — so the real
+    /// account shows even before `restore()` runs.
+    public var accountPresentation: AccountPresentation {
+        AccountPresentation.make(signedIn: email != nil || FoundryAuth.hasPersistedSignIn,
+                                 email: email ?? auth.signedInEmail,
+                                 name: auth.signedInName,
+                                 provider: auth.signedInProvider)
+    }
+
     // ── Server-side diagnostics (M5 R1b) ────────────────────────────────────
     // The sign-in/resolve path runs BEFORE the app can authenticate, so its
     // failures are invisible in-app (you can't reach the in-app log without

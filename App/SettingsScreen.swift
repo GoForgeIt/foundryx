@@ -49,6 +49,9 @@ struct SettingsScreen: View {
     /// disallows purchasing, the "Your Vault" row offers sign-in (open an existing Vault),
     /// never the purchase funnel.
     @State private var showingVaultSignIn = false
+    /// Signed-out Account affordance: the "Sign in" button presents the sign-in
+    /// sheet so a signed-out user can get back in (e.g. to switch accounts).
+    @State private var showingAccountSignIn = false
 
     /// A glanceable one-line status for the Devices row (the deeper page has the detail).
     private var deviceStatusSubtitle: String {
@@ -269,25 +272,55 @@ struct SettingsScreen: View {
             }
 
             Section("Account") {
-                Text(remote.email ?? "Signed in")
-                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-                Button("Sign out") { remote.signOut() }
-                    .foregroundStyle(GrainColor.dangerRed)
-                // Apple-required in-app account deletion (track T-STOREFRONT): three scopes,
-                // each behind a destructive confirmation.
-                NavigationLink {
-                    AccountDeletionView(
-                        model: accountDeletion,
-                        idToken: { remote.idToken },
-                        onDeleted: { scope in
-                            if scope != .hostedVault { remote.signOut() }
-                        })
-                } label: {
-                    Text("Delete account").foregroundStyle(GrainColor.dangerRed)
+                let account = remote.accountPresentation
+                if account.isSignedIn {
+                    // WHO is signed in, right above Sign out (Nick 2026-07-21).
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(account.primary)
+                            .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                        if let secondary = account.secondary {
+                            Text(secondary)
+                                .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                        }
+                        if let providerLine = account.providerLine {
+                            Text(providerLine)
+                                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("account-identity")
+                    // Sign out has VISIBLE effect: the row above flips to "Not signed
+                    // in / Sign in" the instant the session clears (Nick: the button
+                    // "isn't working" — it cleared silently with no on-screen change).
+                    Button("Sign out") { remote.signOut() }
+                        .foregroundStyle(GrainColor.dangerRed)
+                        .accessibilityIdentifier("sign-out")
+                    // Apple-required in-app account deletion (track T-STOREFRONT): three scopes,
+                    // each behind a destructive confirmation.
+                    NavigationLink {
+                        AccountDeletionView(
+                            model: accountDeletion,
+                            idToken: { remote.idToken },
+                            onDeleted: { scope in
+                                if scope != .hostedVault { remote.signOut() }
+                            })
+                    } label: {
+                        Text("Delete account").foregroundStyle(GrainColor.dangerRed)
+                    }
+                } else {
+                    Text(account.primary)   // "Not signed in"
+                        .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
+                        .accessibilityIdentifier("account-identity")
+                    Button("Sign in") { showingAccountSignIn = true }
+                        .accessibilityIdentifier("sign-in")
                 }
             }
         }
         .grainBackground()
+        // Account section "Sign in" (signed-out state) — get back in / switch accounts.
+        .sheet(isPresented: $showingAccountSignIn) {
+            SignInView(remote: remote) { showingAccountSignIn = false }
+        }
         // Storefront sign-in-only Vault entry: open an existing Vault where purchasing is gated.
         .sheet(isPresented: $showingVaultSignIn) {
             SignInView(remote: remote) { showingVaultSignIn = false }
