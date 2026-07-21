@@ -218,9 +218,13 @@ final class DoorConnectionTests: XCTestCase {
             arrivals.append((String(decoding: frame, as: UTF8.self), Date().timeIntervalSince(t0)))
         }
         XCTAssertEqual(arrivals.map { $0.0 }, ["d0", "d1", "d2"], "all frames streamed, in order")
-        // The PROOF: the first delta arrives early and frames are spaced over time. If the
-        // turn buffered to ResponseEnd, all three arrivals would be ~0.36s (collapsed).
-        XCTAssertLessThan(arrivals[0].1, 0.25, "first delta streamed early, not buffered to the end")
+        // The PROOF (load-invariant): a buffered-to-ResponseEnd turn collapses all three
+        // arrivals to ~the same instant; a streamed turn spaces them ~120ms apart. Assert the
+        // first delta lands well before the LAST rather than against a wall-clock deadline —
+        // an absolute `< 0.25s` bound flaked under CI load (observed 0.253s), and the gap
+        // between first and last is stable because load shifts both endpoints together.
+        XCTAssertLessThan(arrivals[0].1, arrivals[2].1 - 0.15,
+                          "first delta arrived well before the last — streamed, not buffered to the end")
         XCTAssertGreaterThanOrEqual(arrivals[2].1 - arrivals[0].1, 0.15,
                                     "frames spaced over time — incremental, not batched")
     }
