@@ -36,4 +36,20 @@ enum RealOmiFrames {
     /// Silence: an empty frame decodes to level 0 (the meter returns 0 for empty input),
     /// which the segmenter reads as silence — deterministic, no DTX guesswork.
     static func silent() -> Data { Data() }
+
+    /// The single VOICED frame, decoded ONCE and cached (decoding the whole fixture per
+    /// call is expensive) — feed a burst of these to trip the speech-onset gate.
+    static let cachedVoiced: Data = voiced()
+
+    /// SPEECH-GATED CONTRACT (2026-07-21): ambient Omi `.streaming` no longer opens a
+    /// conversation on its own — it ARMS a listening window and a conversation opens only
+    /// after a confirmed speech onset (`SpeechOnsetDetector.defaultFramesToOpen` = 10 voiced
+    /// frames). Feed this burst of REAL voiced frames through a source's `onFrame` sink to
+    /// cross that bar and open a session; the default (15) sits comfortably above it. The
+    /// onset→beginSession hop is async, so `await`-poll `mgr.active != nil` afterward.
+    @discardableResult
+    static func openSession(_ onFrame: ((Data) -> Void)?, frames: Int = 15) -> Int {
+        for _ in 0..<frames { onFrame?(cachedVoiced) }
+        return frames
+    }
 }

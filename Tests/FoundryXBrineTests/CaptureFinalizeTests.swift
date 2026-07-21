@@ -94,8 +94,9 @@ final class CaptureFinalizeTests: XCTestCase {
         // injection / real 2-minute wait needed.
         mgr.setSilenceGap(0)
 
-        // Source streams → ambient capture auto-starts.
+        // Source streams → ambient capture ARMS; a real speech onset opens the conversation.
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)
         try await waitUntil { mgr.active != nil }
         let firstCapture = try XCTUnwrap(mgr.active).captureId
 
@@ -167,6 +168,7 @@ final class CaptureFinalizeTests: XCTestCase {
         mgr.setSilenceGap(0)
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         let firstCapture = try XCTUnwrap(mgr.active).captureId
         for _ in 0..<(CaptureManager.minVoicedFramesToUpload + 20) { src.onFrame?(voiceFrame()) }
@@ -200,6 +202,7 @@ final class CaptureFinalizeTests: XCTestCase {
         mgr.setSilenceGap(0)
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         let firstCapture = try XCTUnwrap(mgr.active).captureId
         for _ in 0..<(CaptureManager.minVoicedFramesToUpload + 20) { src.onFrame?(voiceFrame()) }

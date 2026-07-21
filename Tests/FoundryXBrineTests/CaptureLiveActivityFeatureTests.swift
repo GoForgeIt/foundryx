@@ -70,6 +70,7 @@ private final class CLAWorld: @unchecked Sendable {
     /// finalize won't discard it as a junk fragment.
     func beginRecording() async throws {
         source.onState?(.streaming)
+        RealOmiFrames.openSession(source.onFrame)   // speech-gated: a real onset opens the conversation
         try await Self.waitUntil { self.manager.active != nil }
         // Enforce the product invariant "a new recording is never born paused": the Omi
         // fresh-session path doesn't clear a paused flag inherited from a prior scenario's
@@ -130,6 +131,21 @@ private enum CLASteps {
             },
             defineStep("nothing is being captured") { ctx, _, _ in
                 try await MainActor.run { try w.makeManager() }
+                return ctx
+            },
+            defineStep("the Omi is connected and no one is speaking") { ctx, _, _ in
+                // Speech-gated: streaming ARMS a listening window with NO conversation.
+                try await MainActor.run { try w.makeManager() }
+                await MainActor.run { w.source.onState?(.streaming) }
+                try await CLAWorld.waitUntil { w.manager.isListeningForSpeechForTests && w.manager.active == nil }
+                return ctx
+            },
+            defineStep("someone starts speaking") { ctx, _, _ in
+                // A real speech onset opens the conversation; then live voice stamps the
+                // recording instant so the phase reads recording-active.
+                await MainActor.run { RealOmiFrames.openSession(w.source.onFrame) }
+                try await CLAWorld.waitUntil { w.manager.active != nil }
+                await MainActor.run { w.feedVoice() }
                 return ctx
             },
             defineStep("voiced audio is arriving") { ctx, _, _ in

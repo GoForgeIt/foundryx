@@ -1,11 +1,22 @@
 Feature: The capture Live Activity distinguishes recording, paused, and listening
 
   The Live Activity (Dynamic Island + lock screen) must reflect REAL capture activity,
-  not merely that the source is armed. It shows a running elapsed timer and a live
-  "capturing" indicator ONLY while voiced audio is actively being captured. While paused
-  it shows a paused state (no running timer, no "conversation in progress"), and during an
-  extended silence while the device stays connected it shows LISTENING (idle) — never a
-  live conversation with a ticking clock. It also offers two interactive buttons.
+  not merely that the source is armed. Ambient capture is SPEECH-GATED: when the Omi
+  connects and no one is speaking, nothing is recorded — the phone is LISTENING (idle),
+  and a conversation opens only once real speech is heard. The Live Activity shows a
+  running elapsed timer and a live "capturing" indicator ONLY while voiced audio is
+  actively being captured. While paused it shows a paused state (no running timer, no
+  "conversation in progress"), and during an extended silence while the device stays
+  connected it shows LISTENING (idle) — never a live conversation with a ticking clock.
+  It also offers two interactive buttons.
+
+  Scenario: connecting with no one speaking shows LISTENING, not a live conversation
+    Given the Omi is connected and no one is speaking
+    Then the Live Activity phase is idle
+    And the Live Activity shows no running elapsed timer
+    When someone starts speaking
+    Then the Live Activity phase is recording-active
+    And the Live Activity shows a running elapsed timer
 
   Scenario: actively capturing voice shows the RECORDING-ACTIVE phase with a live timer
     Given an ambient capture is recording a conversation

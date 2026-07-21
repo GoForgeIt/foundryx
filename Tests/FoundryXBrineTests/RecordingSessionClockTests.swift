@@ -64,6 +64,7 @@ final class RecordingSessionClockTests: XCTestCase {
         XCTAssertNil(mgr.recordingClock, "no clock before any session")
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         XCTAssertNotNil(mgr.recordingClock, "an ambient session start stamps the session clock")
     }
@@ -86,6 +87,7 @@ final class RecordingSessionClockTests: XCTestCase {
         let src = TestSource()
         let mgr = await makeManager(dir, source: src)
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         let before = mgr.recordingClock
 
@@ -95,29 +97,41 @@ final class RecordingSessionClockTests: XCTestCase {
                        "minimize → restore must NOT touch the clock (a re-present holds no timer)")
     }
 
-    // MARK: (c) an internal silence-gap roll PRESERVES the clock
-
-    func testInternalSilenceRollPreservesClock() async throws {
+    // MARK: (c) an internal silence-gap CLOSE returns to LISTENING and clears the clock
+    //
+    // SPEECH-GATED CONTRACT (2026-07-21): a silence gap no longer rolls straight into a
+    // fresh conversation — it CLOSES the current one and returns to LISTENING, clearing
+    // the session clock; the NEXT speech onset anchors a fresh clock. (Was: the anchor was
+    // the recording SESSION and survived an internal roll — but the quiet BETWEEN
+    // conversations is now idle/listening, not a ticking recording.)
+    func testInternalSilenceCloseReturnsToListeningThenReArmsClockOnNextSpeech() async throws {
         let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let src = TestSource()
         let mgr = await makeManager(dir, source: src)
-        mgr.setSilenceGap(0)   // a silent frame right after voice closes → an internal roll
+        mgr.setSilenceGap(0)   // a silent frame right after voice closes the conversation
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
-        let firstId = try XCTUnwrap(mgr.active).captureId
         let anchor = try XCTUnwrap(mgr.recordingClock?.startedAt)
 
         // Enough voiced frames to CLOSE (≥ minVoicedFramesToClose), then a silent frame
-        // past the 0-gap rolls the conversation: endSession(); beginSession().
+        // past the 0-gap closes the conversation and returns to LISTENING (active == nil).
         for _ in 0..<(SilenceSegmenter.defaultMinVoicedFramesToClose + 20) { src.onFrame?(RealOmiFrames.voiced()) }
         mgr.active?.flushAndWait()
         src.onFrame?(RealOmiFrames.silent())
-        try await waitUntil { mgr.active?.captureId != firstId }
+        try await waitUntil { mgr.active == nil }
 
-        XCTAssertNotNil(mgr.recordingClock, "the clock survives an internal roll")
-        XCTAssertEqual(mgr.recordingClock?.startedAt, anchor,
-                       "an internal silence-gap roll PRESERVES the session anchor (invisible to the user)")
+        XCTAssertNil(mgr.recordingClock,
+                     "a silence-gap close returns to listening — the session clock clears")
+
+        // The NEXT speech onset opens a fresh conversation and anchors a fresh, later clock.
+        try await Task.sleep(nanoseconds: 30_000_000)   // wall-clock advances so the new anchor is observably later
+        RealOmiFrames.openSession(src.onFrame)
+        try await waitUntil { mgr.active != nil }
+        let fresh = try XCTUnwrap(mgr.recordingClock?.startedAt)
+        XCTAssertGreaterThan(fresh, anchor,
+                             "the next speech anchors a FRESH session clock (was: preserved across an internal roll)")
     }
 
     // MARK: (d) explicit split / End-current RESETS the clock
@@ -127,6 +141,7 @@ final class RecordingSessionClockTests: XCTestCase {
         let src = TestSource()
         let mgr = await makeManager(dir, source: src)
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         let firstId = try XCTUnwrap(mgr.active).captureId
         let anchor = try XCTUnwrap(mgr.recordingClock?.startedAt)
@@ -144,6 +159,7 @@ final class RecordingSessionClockTests: XCTestCase {
         let src = TestSource()
         let mgr = await makeManager(dir, source: src)
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         let firstId = try XCTUnwrap(mgr.active).captureId
         let anchor = try XCTUnwrap(mgr.recordingClock?.startedAt)
@@ -180,6 +196,7 @@ final class RecordingSessionClockTests: XCTestCase {
         let src = TestSource()
         let mgr = await makeManager(dir, source: src)
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         let firstId = try XCTUnwrap(mgr.active).captureId
         let anchor = try XCTUnwrap(mgr.recordingClock?.startedAt)
@@ -192,6 +209,7 @@ final class RecordingSessionClockTests: XCTestCase {
         // clock through beginSession's stamp-only-if-nil guard.
         try await Task.sleep(nanoseconds: 30_000_000)
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         let fresh = try XCTUnwrap(mgr.recordingClock?.startedAt)
         XCTAssertGreaterThan(fresh, anchor, "the re-streamed session anchors a fresh clock")
@@ -204,6 +222,7 @@ final class RecordingSessionClockTests: XCTestCase {
         let src = TestSource()
         let mgr = await makeManager(dir, source: src)
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         XCTAssertEqual(mgr.recordingClock?.isPaused, false)
 

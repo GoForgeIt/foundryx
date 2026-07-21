@@ -58,6 +58,7 @@ final class ConversationListHygieneTests: XCTestCase {
         mgr.setSilenceGap(9_999)   // auto-segmenter quiet — the split is ours
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         let closedId = try XCTUnwrap(mgr.active).captureId
         // Enough voice to clear the min-substance upload bar (else the split section is

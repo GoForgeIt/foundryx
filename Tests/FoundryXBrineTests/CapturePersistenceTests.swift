@@ -1,6 +1,6 @@
 import XCTest
 import Foundation
-import FoundryXKit
+@testable import FoundryXKit   // isListeningForSpeechForTests (the speech-gated listening seam)
 
 /// Door-free state-machine tests for the DURABLE pause/listen intent
 /// (track 20260628T1657). Capture's pause flag must survive a full app restart: a
@@ -58,6 +58,7 @@ final class CapturePersistenceTests: XCTestCase {
         let src = TestSource()
         let mgr = makeManager(src, dir: dir)
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
 
         mgr.pause()
@@ -121,14 +122,17 @@ final class CapturePersistenceTests: XCTestCase {
         XCTAssertFalse(mgr.isPaused, "a relaunch with a listening intent must not be paused")
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         let wal = try XCTUnwrap(mgr.active)
         frames(src, 80, 1); wal.flushAndWait()
         XCTAssertGreaterThan(wal.snapshot().totalSegments, 0,
-                             "a listening reconnect resumes capture automatically")
+                             "a listening reconnect resumes capture on the next speech")
     }
 
-    // AC4 — first-ever launch (no stored value) defaults to listening + captures.
+    // AC4 — first-ever launch (no stored value) defaults to LISTENING (not paused).
+    // Speech-gated: streaming ARMS a listening window with NO conversation open; a real
+    // speech onset opens the session and then ambient frames record.
     func testFirstLaunchDefaultsToListening() async throws {
         UserDefaults.standard.removeObject(forKey: desiredStateKey)   // never-set
         XCTAssertEqual(CaptureSettings.omiCaptureDesiredState, .listening)
@@ -136,9 +140,15 @@ final class CapturePersistenceTests: XCTestCase {
         let src = TestSource()
         let mgr = makeManager(src, dir: dir)
 
-        XCTAssertFalse(mgr.isPaused, "first launch defaults to listening (today's behavior)")
+        XCTAssertFalse(mgr.isPaused, "first launch defaults to listening (not paused)")
 
+        // Streaming with no one speaking → LISTENING: armed, metering, NO conversation.
         src.onState?(.streaming)
+        try await waitUntil { mgr.isListeningForSpeechForTests }
+        XCTAssertNil(mgr.active, "listening means armed with no conversation until voice is heard")
+
+        // Real voice trips the speech-onset gate → the session opens and frames record.
+        RealOmiFrames.openSession(src.onFrame)
         try await waitUntil { mgr.active != nil }
         let wal = try XCTUnwrap(mgr.active)
         frames(src, 80, 1); wal.flushAndWait()

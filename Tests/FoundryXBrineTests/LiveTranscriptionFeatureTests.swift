@@ -72,6 +72,7 @@ private final class LiveTranscriptionWorld: @unchecked Sendable {
         mgr.micPermissionOverrideForTests = true
         #endif
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await Self.waitUntil { self.mgr.active != nil }
     }
 

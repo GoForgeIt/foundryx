@@ -66,6 +66,7 @@ final class CaptureStormTests: XCTestCase {
     /// Drive a streaming session with ≥1 flushed (pending, un-ACK'd) segment on disk.
     private func startCaptureWithPendingSegment(_ mgr: CaptureManager, _ src: TestSource) async throws {
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         for _ in 0..<60 { src.onFrame?(voiceFrame()) }
         try XCTUnwrap(mgr.active).flushAndWait()

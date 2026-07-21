@@ -76,9 +76,10 @@ final class CaptureLiveActivityTests: XCTestCase {
         let (mgr, src) = makeManager(dir)
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
 
-        // No voice yet → LISTENING (idle), NOT a live conversation.
+        // No voice through the live path yet → LISTENING (idle), NOT a live conversation.
         XCTAssertEqual(mgr.liveActivityPhase(), .idle, "armed but no voice ⇒ listening, not recording")
 
         // Voiced frames arrive → RECORDING-ACTIVE.
@@ -168,6 +169,7 @@ final class CaptureLiveActivityTests: XCTestCase {
         let perform = installHandler(mgr)
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         let first = try XCTUnwrap(mgr.active).captureId
         for _ in 0..<(CaptureManager.minVoicedFramesToUpload + 20) { src.onFrame?(RealOmiFrames.voiced()) }
@@ -202,6 +204,7 @@ final class CaptureLiveActivityTests: XCTestCase {
         let perform = installHandler(mgr)
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         XCTAssertFalse(mgr.isPaused)
 

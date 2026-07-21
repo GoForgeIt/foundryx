@@ -236,6 +236,7 @@ final class CaptureSubstanceGateTests: XCTestCase {
         mgr.setSilenceGap(0)   // a silent frame right after voice closes the conversation
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         let fragmentId = try XCTUnwrap(mgr.active).captureId
 
@@ -273,6 +274,7 @@ final class CaptureSubstanceGateTests: XCTestCase {
         mgr.setSilenceGap(0)
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         let realId = try XCTUnwrap(mgr.active).captureId
 
@@ -299,6 +301,7 @@ final class CaptureSubstanceGateTests: XCTestCase {
         let mgr = await makeManager(dir, src, rec)
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         let convo = try XCTUnwrap(mgr.active).captureId
         for _ in 0..<50 { src.onFrame?(RealOmiFrames.voiced()) }
@@ -331,6 +334,7 @@ final class CaptureSubstanceGateTests: XCTestCase {
         let mgr = await makeManager(dir, src, rec)
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         let convo = try XCTUnwrap(mgr.active).captureId
         for _ in 0..<(CaptureManager.minVoicedFramesToUpload + 20) { src.onFrame?(RealOmiFrames.voiced()) }

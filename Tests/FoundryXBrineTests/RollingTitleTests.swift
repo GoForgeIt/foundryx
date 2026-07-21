@@ -304,6 +304,7 @@ final class RollingTitleTests: XCTestCase {
                                      modelMinNewWords: 1, modelRefreshSeconds: 0))
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         XCTAssertNil(mgr.liveTitle, "nothing said yet → no name")
 
@@ -340,6 +341,7 @@ final class RollingTitleTests: XCTestCase {
                                      modelMinNewWords: 999, modelRefreshSeconds: 3600))
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         fake.emit(finalSnap("planning the quarterly platform budget with the whole team today"))
         try await waitUntil { mgr.liveTitle != nil }
@@ -369,6 +371,7 @@ final class RollingTitleTests: XCTestCase {
                                  liveTitleBackoff: LiveTitleBackoff(firstDelay: 0, multiplier: 2, ceiling: 1))
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
 
         let context = "okay so the kitchen renovation budget is our topic today for planning cabinets and counters"
@@ -402,6 +405,7 @@ final class RollingTitleTests: XCTestCase {
                                  liveTitleBackoff: LiveTitleBackoff(firstDelay: 0, multiplier: 2, ceiling: 1))
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
 
         // Emit a growing conversation so each new snapshot is an eligible tick.
@@ -442,6 +446,7 @@ final class RollingTitleTests: XCTestCase {
                                  liveTitleBackoff: LiveTitleBackoff(firstDelay: 0, multiplier: 2, ceiling: 1))
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
 
         let context = "planning the quarterly platform budget with the whole team today for the offsite agenda"
@@ -474,6 +479,7 @@ final class RollingTitleTests: XCTestCase {
                                  liveTitleBackoff: LiveTitleBackoff(firstDelay: 0, multiplier: 2, ceiling: 1))
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil && factory.last != nil }
         let convo1 = try XCTUnwrap(mgr.active?.captureId)
         let sentence = "planning the quarterly platform budget with the whole team today for the offsite agenda"

@@ -76,6 +76,7 @@ final class ConversationCardTests: XCTestCase {
         )
         mgr.setSilenceGap(0)
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         let firstCapture = try XCTUnwrap(mgr.active).captureId
         // ≥ the min-substance upload bar so this closes into its own conversation AND

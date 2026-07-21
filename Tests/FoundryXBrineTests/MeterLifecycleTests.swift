@@ -62,6 +62,7 @@ final class MeterLifecycleTests: XCTestCase {
         let mgr = await makeManager(dir, source: src)
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         XCTAssertTrue(mgr.meterIsRunningForTests,
                       "a live ambient session must be metered — beginSession starts the meter")
@@ -74,6 +75,7 @@ final class MeterLifecycleTests: XCTestCase {
         let src = TestSource()
         let mgr = await makeManager(dir, source: src)
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         XCTAssertTrue(mgr.meterIsRunningForTests)
 
@@ -156,6 +158,7 @@ final class MeterLifecycleTests: XCTestCase {
         let src = TestSource()
         let mgr = await makeManager(dir, source: src)
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         mgr.captureSurfaceDidDisappear()   // off the capture surface, session live
         XCTAssertTrue(mgr.meterIsRunningForTests)

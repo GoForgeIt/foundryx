@@ -35,8 +35,10 @@ final class OmiRegressionFixTests: XCTestCase {
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
         let mgr = CaptureManager(target: target, baseDir: dir, source: omi)
 
-        // The Omi "connects" → ambient session begins (no manual Record button).
+        // The Omi "connects" → ambient capture ARMS; a real speech onset opens the
+        // session (no manual Record button).
         omi.onState?(.streaming)
+        RealOmiFrames.openSession(omi.onFrame)
         try await waitUntil { mgr.active != nil }
         let wal = try XCTUnwrap(mgr.active)
 

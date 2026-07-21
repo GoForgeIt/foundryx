@@ -257,10 +257,11 @@ enum OnboardingSteps {
                     }
                     world.manager = mgr
                     world.source = src
-                    src.onState?(.streaming)                      // ambient auto-start
+                    src.onState?(.streaming)                      // ambient: arm for speech
+                    RealOmiFrames.openSession(src.onFrame)        // a real speech onset opens the conversation
                 }
-                // Auto-start hops the main actor — wait for the session like the
-                // ambient lifecycle test does.
+                // The speech onset → beginSession hop is async — wait for the session
+                // like the ambient lifecycle test does.
                 let startDeadline = Date().addingTimeInterval(3)
                 while await MainActor.run(body: { world.manager?.active == nil }) {
                     if Date() > startDeadline { throw StepError("capture did not auto-start") }

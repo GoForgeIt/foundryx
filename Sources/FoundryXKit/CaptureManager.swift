@@ -34,6 +34,18 @@ final class FrameRouter: @unchecked Sendable {
     /// drained into the next `setWAL`. Lock-guarded.
     private var preSessionHold: [Data] = []
     private static let preSessionHoldMax = 6_000   // ~60s of Omi audio
+    // ARMED LISTENING (ambient Omi, no conversation open yet). While `armed`, frames
+    // are metered for the live waveform and kept in a SHORT most-recent-frames ring —
+    // but NOT written to a WAL, segmented, transcribed, or persisted as a card. A
+    // confirmed speech onset (`onsetDetector`) fires `onSpeechOnset` ONCE; the owner
+    // opens the session and `setWAL` drains the ring so nothing said before the gate
+    // tripped is lost. This is what stops silence / one-off noise from minting empty
+    // "Untitled conversation" cards.
+    private var armed = false
+    private var preRollRing: [Data] = []
+    private static let preRollRingMax = 60         // ~1.2s of Omi audio — the onset pre-roll
+    private var onsetDetector = SpeechOnsetDetector()
+    private var onsetSignaled = false
     private let segmenter: SilenceSegmenter
     private let clock: () -> TimeInterval
     // True decoded-amplitude RMS level meter (replaces the byte-size proxy). Stateful
@@ -76,6 +88,9 @@ final class FrameRouter: @unchecked Sendable {
     var onLevel: ((Float) -> Void)?
     /// Off-main conversation boundary; the owner hops to the main actor to act.
     var onSegment: ((SegmentEvent) -> Void)?
+    /// Off-main: a real speech onset was heard while ARMED (ambient, no session yet).
+    /// The owner hops to the main actor and opens the conversation.
+    var onSpeechOnset: (() -> Void)?
     /// Off-main throttled diagnostic line (decode status + level) → the capture log,
     /// so a flat meter / 0-segment capture is debuggable server-side.
     var onDiag: ((String) -> Void)?
@@ -100,11 +115,31 @@ final class FrameRouter: @unchecked Sendable {
         if let w {
             for f in preSessionHold { w.appendFrame(f) }
             preSessionHold.removeAll()
+            // Armed-listening pre-roll → into the session so the speech onset isn't
+            // clipped. (Mutually exclusive with preSessionHold: the armed branch above
+            // fills only the ring; the non-armed pre-session hop fills only the hold.)
+            for f in preRollRing { w.appendFrame(f) }
+            preRollRing.removeAll()
+            armed = false                 // a session is live now → stop arming
+            onsetSignaled = false
+            onsetDetector.reset()
         }
+        lock.unlock()
+    }
+    /// Enter/leave ARMED LISTENING (ambient Omi streaming, no conversation yet). Arming
+    /// resets the onset detector + pre-roll ring so each listening window starts clean.
+    func setArmed(_ b: Bool) {
+        lock.lock()
+        armed = b
+        onsetSignaled = false
+        onsetDetector.reset()
+        preRollRing.removeAll()
         lock.unlock()
     }
     /// Voiced frames captured for the current session (drives the min-substance upload gate).
     func sessionVoicedFrameCount() -> Int { lock.lock(); defer { lock.unlock() }; return sessionVoicedFrames }
+    /// Test seam: whether the router is ARMED (listening for a speech onset, no session yet).
+    func isArmedForTests() -> Bool { lock.lock(); defer { lock.unlock() }; return armed }
     /// Wall-clock instant (reference-date seconds) of the most recent voiced frame, or nil
     /// if no voice yet this session — drives the Live Activity's active-vs-idle phase.
     func lastVoicedInstant() -> TimeInterval? { lock.lock(); defer { lock.unlock() }; return lastVoicedAt }
@@ -153,6 +188,27 @@ final class FrameRouter: @unchecked Sendable {
         if !isPaused {
             frameCount += 1
             lastBytes = frame.count
+        }
+        // ARMED LISTENING: meter the waveform + keep a short pre-roll ring + watch for a
+        // real speech onset. No WAL, no segmenter, no transcription, no durable card — so
+        // silence or a one-off noise never opens an empty conversation. The onset fires
+        // once → the owner opens the session → setWAL drains the ring (no clipped onset).
+        if armed && !isPaused {
+            let lvl = levelMeter.level(for: frame)
+            preRollRing.append(frame)
+            if preRollRing.count > Self.preRollRingMax {
+                preRollRing.removeFirst(preRollRing.count - Self.preRollRingMax)
+            }
+            let voiced = lvl >= segmenter.silenceThreshold
+            var fireOnset = false
+            if !onsetSignaled, onsetDetector.observe(voiced: voiced) {
+                onsetSignaled = true
+                fireOnset = true
+            }
+            lock.unlock()
+            onLevel?(lvl)                 // the "Listening…" waveform still breathes
+            if fireOnset { onSpeechOnset?() }
+            return
         }
         let target = isPaused ? nil : wal
         // No session WAL yet (pre-session window)? HOLD the frame instead of
@@ -1004,6 +1060,10 @@ public final class CaptureManager: ObservableObject {
         router.onSegment = { [weak self] event in
             Task { @MainActor in self?.handleSegment(event) }
         }
+        // Speech onset while armed-listening → open the conversation (→ main to begin).
+        router.onSpeechOnset = { [weak self] in
+            Task { @MainActor in self?.handleSpeechOnset() }
+        }
         // Capture-pipeline diagnostics → the (diag-shipping) log, so a flat meter /
         // 0-segment capture is debuggable server-side.
         router.onDiag = { [weak self] line in
@@ -1507,8 +1567,17 @@ public final class CaptureManager: ObservableObject {
                                                                     silenceGap: silenceGapSeconds),
                    resumeSession(captureId: resumeId) {
                     // resumed the same conversation — no new id minted
+                } else if isPaused {
+                    // Paused desired-state: open the (paused) session as before — it
+                    // captures nothing until the user resumes. Speech-gating is only for
+                    // the LISTENING path; a paused session writes no frames and the
+                    // segmenter isn't fed, so it never rolls into empty cards.
+                    beginSession()
                 } else {
-                    beginSession()   // fresh ambient capture
+                    // Ambient Omi, LISTENING: don't open a conversation on stream-start —
+                    // wait for real speech (armForSpeech). Silence / one-off noise never
+                    // mints an empty "Untitled conversation" (Nick 2026-07-21).
+                    armForSpeech()
                 }
             }
         case .stopped, .failed:
@@ -1532,6 +1601,11 @@ public final class CaptureManager: ObservableObject {
                 // capture watchdog ends it if the device doesn't return within the window.
                 suspendedSession = (wal, Date().timeIntervalSinceReferenceDate)
                 log?.info("capture \(wal.captureId): Omi disconnected — holding for reconnect (ends after \(Int(SilenceSegmenter.defaultSilenceGap))s of voiced silence)")
+            } else if active == nil {
+                // Omi dropped while armed-listening (no conversation open) → stop arming;
+                // the reconnect's `.streaming` re-arms. Nothing to hold or finalize.
+                router.setArmed(false)
+                stopMeterIfIdle()
             }
         case .idle, .scanning:
             break
@@ -1540,9 +1614,10 @@ public final class CaptureManager: ObservableObject {
 
     // MARK: silence-gap auto-segmentation (req 9)
 
-    /// A silence gap closes the current conversation and immediately opens the next,
-    /// so each closed conversation (which by construction contained voice) surfaces
-    /// in the timeline on its own — no pause/stop needed. Capture stays continuous.
+    /// A silence gap closes the current conversation and returns to LISTENING — the next
+    /// conversation opens only when real speech is heard again (armForSpeech), so each
+    /// closed conversation (which by construction contained voice) surfaces on its own and
+    /// the quiet BETWEEN conversations never mints an empty card. Capture stays live.
     private func handleSegment(_ event: SegmentEvent) {
         switch event {
         case .opened:
@@ -1551,10 +1626,34 @@ public final class CaptureManager: ObservableObject {
         case .closed:
             guard active != nil else { return }
             endSession()
-            beginSession()
-            router.resetSegmenter()   // fresh boundary state for the new conversation
-            log?.info("capture: silence gap (\(Int(silenceGapSeconds))s) → new conversation")
+            recordingClock = nil       // the conversation ended → the next anchors on its own speech
+            armForSpeech()             // back to LISTENING — next voice opens a fresh conversation
+            log?.info("capture: silence gap (\(Int(silenceGapSeconds))s) → conversation closed, listening")
         }
+    }
+
+    /// Ambient Omi is streaming but no one is speaking yet: LISTEN (meter the live
+    /// waveform) WITHOUT opening a conversation. A confirmed speech onset
+    /// (`router.onSpeechOnset`) opens the session — so silence and one-off noises never
+    /// mint an empty "Untitled conversation." Ambient-Omi only; the phone-mic path opens
+    /// immediately (an explicit recording is never speech-gated).
+    private func armForSpeech() {
+        guard active == nil, !isPaused else { return }   // paused = idle; a live session isn't re-armed
+        recordingScreenMinimized = false
+        router.resetSegmenter()          // clean boundary state for the session we may open
+        router.resetLevelMeter()         // fresh Opus decoder for an accurate listening meter
+        router.setArmed(true)            // meter + pre-roll ring + onset detection; no WAL/card
+        startMeter()                     // the "Listening…" waveform breathes while we wait
+        log?.info("capture: armed — listening for speech (ambient \(captureSource.rawValue); no conversation until voice)")
+    }
+
+    /// A real speech onset was heard while armed → open the conversation now. The
+    /// router's pre-roll ring drains into the new session on setWAL, so the first words
+    /// aren't clipped.
+    private func handleSpeechOnset() {
+        guard active == nil, !isRecordingMic, !isPaused else { return }   // already recording / mic / paused
+        log?.info("capture: speech onset → opening conversation")
+        beginSession()
     }
 
     // MARK: segmentation watchdog (wall-clock silence + runaway force-split)
@@ -1857,6 +1956,11 @@ public final class CaptureManager: ObservableObject {
     /// timer is currently running — lets the meter-lifecycle tests assert the session-aware
     /// start/stop decisions without reaching into the private timer.
     var meterIsRunningForTests: Bool { meterTimer != nil }
+
+    /// Test seam: ambient LISTENING — the Omi is armed and metering, waiting for a
+    /// speech onset, with NO conversation open. Distinguishes speech-gated listening
+    /// from a live recording (`active != nil`) and from idle.
+    var isListeningForSpeechForTests: Bool { active == nil && router.isArmedForTests() }
 
     private func tickMeter() {
         let peak = isPaused ? 0 : levelBuffer.drainPeak()

@@ -49,6 +49,7 @@ final class ManualSplitTests: XCTestCase {
         mgr.setSilenceGap(9_999)
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         let firstCapture = try XCTUnwrap(mgr.active).captureId
 

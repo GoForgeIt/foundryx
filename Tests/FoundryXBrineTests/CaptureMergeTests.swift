@@ -263,8 +263,10 @@ final class CaptureMergeTests: XCTestCase {
         let src = TestSource()
         let mgr = await makeManager(dir, src: src)
 
-        // Open a LIVE recording — a fresh active capture with an id we don't control.
+        // Open a LIVE recording — a fresh active capture with an id we don't control
+        // (speech-gated: a real speech onset opens the conversation).
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)
         try await waitUntil { mgr.active != nil }
         let activeId = try XCTUnwrap(mgr.active?.captureId)
 

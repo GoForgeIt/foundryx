@@ -32,8 +32,10 @@ final class CaptureAmbientTests: XCTestCase {
 
         func frames(_ n: Int, _ b: UInt8) { for _ in 0..<n { src.onFrame?(Data(repeating: b, count: 40)) } }
 
-        // 1. AMBIENT auto-start: streaming → a session begins (no manual Record).
+        // 1. AMBIENT capture (speech-gated): streaming ARMS a listening window; a real
+        //    speech onset (voiced frames) opens the conversation — no manual Record.
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)
         try await waitUntil { mgr.active != nil }
         let wal = try XCTUnwrap(mgr.active)
 
@@ -94,8 +96,10 @@ extension CaptureAmbientTests {
         mgr.micPermissionOverrideForTests = true  // sim can't drive the real permission prompt
         #endif
 
-        // Omi conversation starts, streams, then BLE drops → held for reconnect grace.
+        // Omi conversation starts (speech-gated: voice opens it), streams, then BLE
+        // drops → held for reconnect grace.
         omi.onState?(.streaming)
+        RealOmiFrames.openSession(omi.onFrame)
         try await waitUntil { mgr.active != nil }
         let omiCaptureId = mgr.active?.captureId
         omi.onState?(.stopped)

@@ -75,6 +75,7 @@ final class LiveTranscriptionTests: XCTestCase {
         let mgr = manager(dir, src, factory)
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil && factory.last != nil }
         let fake = try XCTUnwrap(factory.last)
         try await waitUntil { fake.started }
@@ -96,6 +97,7 @@ final class LiveTranscriptionTests: XCTestCase {
         let mgr = manager(dir, src, factory)
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil && factory.last != nil }
         let fake = try XCTUnwrap(factory.last)
 
@@ -112,6 +114,7 @@ final class LiveTranscriptionTests: XCTestCase {
         let mgr = manager(dir, src, factory)
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil && factory.last != nil }
         let fake = try XCTUnwrap(factory.last)
         fake.emit(LiveTranscript(finalizedText: "hello", volatileTail: "wor"))
@@ -136,6 +139,7 @@ final class LiveTranscriptionTests: XCTestCase {
         let mgr = CaptureManager(target: target, baseDir: dir, source: src, finalize: { _, _ in })
 
         src.onState?(.streaming)
+        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         for _ in 0..<40 { src.onFrame?(RealOmiFrames.voiced()) }
         try XCTUnwrap(mgr.active).flushAndWait()

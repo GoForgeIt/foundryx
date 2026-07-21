@@ -363,10 +363,13 @@ final class CaptureResumeTests: XCTestCase {
         mgr2.setSilenceGap(120)
         await mgr2.hydration?.value
 
+        // Past the gap there is no resumable candidate → speech-gated: streaming ARMS,
+        // and a real speech onset mints the NEW conversation.
         src2.onState?(.streaming)
+        RealOmiFrames.openSession(src2.onFrame)
         try await ResumeRecordingWorld.waitUntil { mgr2.active != nil }
         XCTAssertNotEqual(mgr2.active?.captureId, earlier,
-                          "10 minutes after the newest segment is a real boundary — mint a NEW conversation")
+                          "10 minutes after the newest segment is a real boundary — the next speech mints a NEW conversation")
     }
 
     // Resuming clears a half-shipped finalize marker (so it can't race the resumed
@@ -653,6 +656,7 @@ private enum ResumeRecordingSteps {
                 try await MainActor.run {
                     try w.reset()
                     w.source.onState?(.streaming)
+                    RealOmiFrames.openSession(w.source.onFrame)   // speech onset opens the conversation
                 }
                 await w.awaitHydration()
                 try await ResumeRecordingWorld.waitUntilAsync {
