@@ -185,6 +185,7 @@ struct RootView: View {
                 if let cfg = cells.config,
                    let target = try? CellBackend.resolveTarget(config: cfg, idToken: remote.idToken) {
                     MainTabs(target: target, remote: remote, brains: brains, local: false,
+                             vaultFunnel: vaultFunnel, accountDeletion: accountDeletion,
                              showingAccount: $showingAccount)
                         // A re-pair (new URL/grant) or a refreshed id_token rebuilds
                         // the tabs so every door request uses the fresh bearer.
