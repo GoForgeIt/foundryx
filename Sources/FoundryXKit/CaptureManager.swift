@@ -313,7 +313,7 @@ public final class CaptureManager: ObservableObject {
             let snap = sidecar(for: wal.captureId)
             return wal !== active
                 && wal.status.totalSegments > 0
-                && snap.bestTranscriptText == nil
+                && !snap.hasLocalTranscriptText
                 && !snap.confirmedInLore
         }.count
         statsSummary = makeStatsSummary(for: visible)
@@ -372,15 +372,18 @@ public final class CaptureManager: ObservableObject {
     @Published public private(set) var lastFinalizedAt: Date?
 
     private func makeStatsSummary(for visible: [CaptureWAL]) -> StatsSummary {
-        // Both inputs come from MEMORY: meta from the metaCache (warmed at hydration,
-        // invalidated on every meta write), transcript from the sidecar memo's stripped
-        // stats transcript (text + speakers + extra-slot stubs — byte-identical word +
-        // distinct-speaker counts without retaining the heavy segment/paragraph arrays).
+        // Both inputs come from MEMORY, and both are COUNTS: meta from the metaCache
+        // (warmed at hydration, refreshed off-main on every meta write), word +
+        // distinct-speaker counts from the sidecar memo, derived once off-main at warm.
+        // Nothing here splits, lowercases or traverses transcript text — that per-rebuild
+        // full-library text scan is exactly what made the rebuild O(total transcript bytes).
         let snapshots = visible.map { wal in
-            StatsConversationSnapshot(
+            let snap = sidecar(for: wal.captureId)
+            return StatsConversationSnapshot(
                 captureId: wal.captureId,
-                meta: conversationMeta(for: wal.captureId),
-                transcript: sidecar(for: wal.captureId).statsTranscript
+                meta: cachedMeta(wal.captureId),
+                wordCount: snap.wordCount,
+                speakerIdentities: snap.speakerIdentities
             )
         }
         return StatsSummary.build(from: snapshots)
@@ -416,9 +419,28 @@ public final class CaptureManager: ObservableObject {
         // If we hold judge-able transcript text locally, HIDE empty / near-silent /
         // filler captures — they pollute the timeline with useless noise cards
         // (track 20260628T1654; Omi empty-conversation gates). Data is kept, not shown.
-        if let text = snap.bestTranscriptText {
+        // The verdict is taken over the CACHED meaningful-word count derived off-main at
+        // sidecar warm — no transcript text is scanned on this path, which is what makes
+        // the rebuild independent of total transcript bytes.
+        if snap.hasLocalTranscriptText {
+            // S2 (no lenient flip) — `nil` duration means "unknown → KEEP" to the filter, so a
+            // MISSING meta memo would flip a borderline (exactly-one-meaningful-word, short)
+            // card from hidden to VISIBLE and then hide it again when the warm landed: the
+            // appear→vanish flicker R3 forbids. A missing memo is NOT the same as a memoised
+            // meta that simply has no duration yet (still recording — that stays lenient, as
+            // before). When we hold NO memo at all we resolve conservatively — as a short clip
+            // — which is the same "stay hidden until the real facts land" direction the
+            // `.unwarmed` placeholder takes, and the only direction that cannot flicker.
+            let duration: TimeInterval?
+            if metaCache[id] == nil {
+                scheduleSidecarWarm(id)
+                duration = 0
+            } else {
+                duration = conversationDurationSeconds(id)
+            }
             return ConversationContentFilter.isMeaningful(
-                transcript: text, durationSeconds: conversationDurationSeconds(id))
+                meaningfulWordCount: snap.meaningfulWordCount,
+                durationSeconds: duration)
         }
         // No transcript text yet (still processing): keep the prior visibility rule —
         // show real-audio / tombstoned captures, hide 0-segment empties.
@@ -431,7 +453,7 @@ public final class CaptureManager: ObservableObject {
     /// memoised `metaCache` (warmed at hydration, invalidated on every meta write), so the
     /// filler filter costs no disk on the rebuild path.
     private func conversationDurationSeconds(_ captureId: String) -> TimeInterval? {
-        guard let dur = conversationMeta(for: captureId)?.durationSeconds else { return nil }
+        guard let dur = cachedMeta(captureId)?.durationSeconds else { return nil }
         return TimeInterval(dur)
     }
 
@@ -449,12 +471,68 @@ public final class CaptureManager: ObservableObject {
     private var startTimeCache: [String: TimeInterval] = [:]
     private func startTime(of wal: CaptureWAL) -> TimeInterval {
         if let cached = startTimeCache[wal.captureId] { return cached }
-        if let t = durableStart(captureId: wal.captureId) {
+        // A cold miss here used to be driver #4: `durableStart` BYPASSED the meta memo and
+        // decoded `meta.json`/`card.json` off DISK on the main actor, so the first
+        // post-hydration sort paid N synchronous decodes (370ms at N=175). It now resolves
+        // from MEMORY ONLY — the warm `metaCache` and the sidecar memo's `cardStartedAt`,
+        // both seeded during the off-main hydration hop. If neither memo exists yet (a
+        // capture the manager has never seen) we schedule the off-main warm and answer from
+        // the capture-id's baked-in timestamp; the warm hop clears this memo so the durable
+        // answer replaces it.
+        if metaCache[wal.captureId] == nil { scheduleSidecarWarm(wal.captureId) }
+        if let t = durableStartCached(captureId: wal.captureId) {
             startTimeCache[wal.captureId] = t
             return t
         }
         return wal.status.startedAt.timeIntervalSince1970
     }
+
+    /// `durableStart`'s resolution order (meta → card → capture-id time) taken over MEMORY
+    /// ONLY — the memoised meta + the sidecar memo's cached `card.json` start. Used by the
+    /// sort comparator, which must never touch disk on the main actor.
+    private func durableStartCached(captureId: String) -> TimeInterval? {
+        if let memo = metaCache[captureId], let meta = memo, meta.startedAt > 0 {
+            return TimeInterval(meta.startedAt)
+        }
+        if let started = sidecarCache[captureId]?.cardStartedAt, started > 0 {
+            return TimeInterval(started)
+        }
+        if let idStart = CaptureIdTime.startedAt(fromCaptureId: captureId), idStart > 0 {
+            return TimeInterval(idStart)
+        }
+        return nil
+    }
+
+    /// Test seam: drop the memoised durable-start cache so a subsequent measured rebuild
+    /// re-pays the COLD sort cost (driver #4) in isolation — the first-post-hydration
+    /// `durableStart` disk reads. Mirrors the other `*ForTests` seams; internal (reachable
+    /// only via `@testable import`), no production effect.
+    func invalidateStartTimeCacheForTests() { startTimeCache.removeAll() }
+
+    /// Test seam (review S6): DROP the sidecar memo entirely for `ids`, leaving NO entry at
+    /// all — the genuine COLD-MISS state `sidecar(for:)` handles. Production never reaches
+    /// this state after hydration (`invalidateSidecar` keeps the last-known memo on purpose),
+    /// which is precisely why the disk-free gate needs a seam that does: without it, "the
+    /// rebuild does zero main-actor decodes" is true by construction and the assertion can no
+    /// longer fail for the reason it exists. Internal — reachable only via `@testable import`.
+    func dropSidecarMemoForTests(_ ids: [String]) {
+        for id in ids {
+            sidecarCache[id] = nil
+            metaCache[id] = nil
+            startTimeCache[id] = nil
+        }
+    }
+
+    /// Test seam (review S2): drop ONLY the memoised meta, leaving the sidecar memo warm —
+    /// the state in which a missing duration could flip `isBrowsable` in the LENIENT
+    /// direction and make a hidden card appear and then vanish. Internal.
+    func dropMetaMemoForTests(_ ids: [String]) {
+        for id in ids { metaCache[id] = nil }
+    }
+
+    /// Test seam: how many captures currently hold a WARM sidecar memo — lets a test wait for
+    /// the off-main re-warms scheduled by a cold-miss rebuild to have landed.
+    var warmSidecarMemoCountForTests: Int { sidecarCache.values.filter(\.isWarm).count }
 
     /// The durable (processing-time-proof) start for a capture, or nil if none of the
     /// stable sources are available (only then does the caller fall back to WAL time).
@@ -1130,8 +1208,17 @@ public final class CaptureManager: ObservableObject {
     /// "no meta on disk" answer too (pre-F1 captures would otherwise re-stat forever).
     private var metaCache: [String: ConversationMeta?] = [:]
 
-    /// Drop a capture's memoised meta after writing meta.json (recordStart/recordEnd).
-    private func invalidateMeta(_ captureId: String) { metaCache[captureId] = nil }
+    /// Refresh a capture's memoised meta after writing meta.json (recordStart/recordEnd).
+    ///
+    /// S2 — this does NOT drop the entry. The rebuild's `cachedMeta` has no disk fallback, so
+    /// a dropped entry answers `nil`, and `nil` duration is the LENIENT direction in the
+    /// membership filter: dropping it would make a hidden borderline card appear and then
+    /// vanish when the warm landed. It follows the same R3 rule `invalidateSidecar` follows —
+    /// the LAST-KNOWN value stays authoritative and the fresh one is read OFF the main actor,
+    /// where `applyWarmSidecar` swaps it in (and re-renders only if it actually differs).
+    private func invalidateMeta(_ captureId: String) {
+        scheduleSidecarWarm(captureId, force: true)
+    }
 
     /// The durable conversation metadata (start/end/location) for a capture, for
     /// the timeline card (F1). `nil` for captures recorded before this shipped.
@@ -1142,6 +1229,15 @@ public final class CaptureManager: ObservableObject {
         return loaded
     }
 
+    /// The memoised meta WITHOUT the disk fallback — for the list-rebuild path (membership
+    /// filter, sort, stats), which must do zero synchronous disk on the main actor. A miss
+    /// schedules the off-main warm and answers `nil` for this pass; the warm hop re-renders.
+    private func cachedMeta(_ captureId: String) -> ConversationMeta? {
+        if let hit = metaCache[captureId] { return hit }
+        scheduleSidecarWarm(captureId)
+        return nil
+    }
+
     // MARK: per-capture sidecar memo (R3) — kill the list-rebuild main-thread disk storm
 
     /// A per-capture memo of the DURABLE sidecar state `rebuildVisibleCaptures` reads, so
@@ -1150,31 +1246,93 @@ public final class CaptureManager: ObservableObject {
     /// `captures` didSet + 7 sites and did up to ~3×N full transcript.json decodes + card
     /// loads + marker stats ON MAIN — a same-site, library-size-proportional hang.
     ///
-    /// TEXT + speakers ONLY — never the decoded segment/paragraph arrays (those are the
-    /// memory bulk; membership needs text + markers, stats needs word-count + distinct
-    /// speakers). Seeded OFF the main actor during hydration and INVALIDATED at every
-    /// write site (see `invalidateSidecar`).
+    /// COUNTS AND FLAGS ONLY — never transcript text, and never the decoded
+    /// segment/paragraph arrays (track `rebuild_is_byte_independent_and_disk_free`).
+    /// The memo used to retain the full transcript string and the rebuild re-scanned it per
+    /// capture per rebuild, which made the rebuild O(total transcript bytes) AND held every
+    /// conversation's text resident. Every derived fact the rebuild needs is now computed
+    /// ONCE, off the main actor, in `loadSidecar`.
+    ///
+    /// MEMORY WIN, stated accurately (review N1): the old memo held the transcript under two
+    /// names (`bestTranscriptText` and `statsTranscript.transcript`), but those were the SAME
+    /// `String` instance — Swift strings are COW, so it was ONE retained buffer per capture,
+    /// not two. Dropping it therefore saves ~the corpus size (≈7.9MB at the 7.9MB test
+    /// corpus), NOT double that. Seeded OFF the main actor during hydration and refreshed
+    /// off-main at every write site (see `invalidateSidecar`).
     struct SidecarSnapshot: Sendable {
         /// `.discarded` marker present (sub-substance junk → never shown).
         let isDiscarded: Bool
         /// `.deleted` tombstone present (user-deleted → never shown).
         let isDeleted: Bool
-        /// The best local transcript for the empty/filler membership filter: the cached
-        /// transcript text if non-empty, else the card's provisional body. nil ⇒ no
-        /// readable text yet (still processing) → the caller falls back to audio presence.
-        let bestTranscriptText: String?
+        /// There IS best-local transcript text (cached transcript, else the card's
+        /// provisional body). false ⇒ no readable text yet (still processing) → the caller
+        /// falls back to audio presence. Replaces the retained string.
+        let hasLocalTranscriptText: Bool
+        /// Distinct MEANINGFUL words in that best-local text, capped at the filter's
+        /// decision threshold — the whole input `ConversationContentFilter` needs to judge
+        /// the empty/near-silent/filler membership gate, as an `Int`.
+        let meaningfulWordCount: Int
         /// transcript.json exists (the readable tombstone / "Ready" signal).
         let hasCachedTranscript: Bool
         /// card.json exists (the all-time browsable tombstone).
         let cardExists: Bool
         /// `.lore-confirmed` marker present.
         let confirmedInLore: Bool
-        /// The STRIPPED cached transcript for StatsSummary: text + speakers + stub segments
-        /// carrying ONLY the extra (segment-referenced but speaker-array-absent) slots, so
-        /// the distinct-speaker + word counts are byte-identical to loading the full
-        /// transcript WITHOUT retaining the heavy segment/paragraph arrays. nil when no
-        /// transcript.json decoded (matches the pre-change stats snapshot's nil transcript).
-        let statsTranscript: CachedTranscript?
+        /// Words in the CACHED transcript text (`transcript.json` only — the same text the
+        /// old stats snapshot counted), for `StatsSummary.totalWords`.
+        let wordCount: Int
+        /// The distinct speaker identities this conversation contributes to
+        /// `StatsSummary.totalSpeakersIdentified` — byte-identical to the old per-rebuild
+        /// scan of speakers + extra segment slots, but derived once.
+        let speakerIdentities: [String]
+        /// `card.json`'s durable `started_at`, so the sort's `durableStart` resolves from
+        /// MEMORY instead of re-reading the card off disk on the main actor.
+        let cardStartedAt: UInt64?
+        /// False for the R3 PLACEHOLDER a rebuild renders while a never-seen capture's real
+        /// sidecar is being read off-main. A warm value always wins over a placeholder.
+        let isWarm: Bool
+
+        /// The R3 default for a capture whose sidecar has never been read: "nothing is known
+        /// yet". All markers absent, no text, no tombstones — so `isBrowsable` falls through
+        /// to the streaming / real-audio rule and the capture is only shown once a durable
+        /// reason exists. See `sidecar(for:)` for why this direction is the no-flicker one.
+        static let unwarmed = SidecarSnapshot(
+            isDiscarded: false, isDeleted: false, hasLocalTranscriptText: false,
+            meaningfulWordCount: 0, hasCachedTranscript: false, cardExists: false,
+            confirmedInLore: false, wordCount: 0, speakerIdentities: [],
+            cardStartedAt: nil, isWarm: false)
+
+        /// The same snapshot with a marker the MANAGER ITSELF just wrote applied in memory.
+        /// Used so a discard/delete hides the row in the SAME runloop tick it happens (the
+        /// substance gate + delete are user-visible, immediate operations) without a
+        /// main-actor disk read — the off-main re-warm then confirms it.
+        func marking(discarded: Bool = false, deleted: Bool = false) -> SidecarSnapshot {
+            SidecarSnapshot(
+                isDiscarded: isDiscarded || discarded, isDeleted: isDeleted || deleted,
+                hasLocalTranscriptText: hasLocalTranscriptText,
+                meaningfulWordCount: meaningfulWordCount,
+                hasCachedTranscript: hasCachedTranscript, cardExists: cardExists,
+                confirmedInLore: confirmedInLore, wordCount: wordCount,
+                speakerIdentities: speakerIdentities, cardStartedAt: cardStartedAt,
+                isWarm: isWarm)
+        }
+
+        /// Whether swapping `self` for `other` could change ANYTHING the list renders
+        /// (membership, the processing banner, or the stats tiles). The off-main re-warm
+        /// only triggers a re-render when this is true — an identical warm value must never
+        /// cause a visible list churn (R3).
+        func rendersDifferently(from other: SidecarSnapshot) -> Bool {
+            isDiscarded != other.isDiscarded
+                || isDeleted != other.isDeleted
+                || hasLocalTranscriptText != other.hasLocalTranscriptText
+                || meaningfulWordCount != other.meaningfulWordCount
+                || hasCachedTranscript != other.hasCachedTranscript
+                || cardExists != other.cardExists
+                || confirmedInLore != other.confirmedInLore
+                || wordCount != other.wordCount
+                || cardStartedAt != other.cardStartedAt
+                || Set(speakerIdentities) != Set(other.speakerIdentities)
+        }
     }
 
     private var sidecarCache: [String: SidecarSnapshot] = [:]
@@ -1182,6 +1340,14 @@ public final class CaptureManager: ObservableObject {
     /// Build a capture's sidecar memo from disk. `nonisolated static` so hydration can run
     /// it OFF the main actor (pure disk — touches no actor state, Sendable result).
     nonisolated static func loadSidecar(captureId id: String, baseDir: URL) -> SidecarSnapshot {
+        // GATE INTEGRITY: this is a full transcript decode. It is legitimate OFF the main
+        // actor (hydration + the off-main re-warm) and a bug ON it — that synchronous
+        // main-thread decode is the pathology this whole track removed. Count it HERE, at the
+        // expensive operation itself, so ANY future caller that reintroduces it on the main
+        // thread trips the deterministic gate — not just the callers we happen to know about
+        // today. Without this the counter would only watch `cardMeta` and would be blind to
+        // exactly the regression it exists to catch.
+        if Thread.isMainThread { Self.noteMainThreadDecode() }
         let dir = baseDir.appendingPathComponent(id, isDirectory: true)
         let fm = FileManager.default
         let discarded = fm.fileExists(atPath: dir.appendingPathComponent(".discarded").path)
@@ -1194,28 +1360,22 @@ public final class CaptureManager: ObservableObject {
         if let c = cached, !c.transcript.isEmpty { best = c.transcript }
         else if let body = card?.provisionalTranscript, !body.isEmpty { best = body }
         else { best = nil }
-        // Strip the stats transcript to text + speakers + extra-slot stubs so the heavy
-        // arrays are dropped but StatsSummary.countDistinctSpeakers sees the SAME identities:
-        // it counts speaker-array identities PLUS any segment slot not in the speaker array,
-        // so one empty stub segment per extra slot reproduces the count exactly.
-        let stats: CachedTranscript? = cached.map { full in
-            let knownSlots = Set(full.speakers.map(\.slot))
-            let extraSlots = Set(full.segments.map(\.speaker)).subtracting(knownSlots).subtracting([""])
-            let stubs = extraSlots.enumerated().map {
-                TranscriptSegment(seq: $0.offset, text: "", speaker: $0.element)
-            }
-            return CachedTranscript(transcript: full.transcript, title: nil, summary: nil,
-                                    segments: stubs, speakers: full.speakers,
-                                    paragraphs: [], fetchedAt: 0)
-        }
+        // DERIVE, don't retain (byte-independence): every fact the rebuild needs is reduced
+        // to an Int / Bool / small identity list HERE — off the main actor, once per write —
+        // and the decoded transcript (text + segment/paragraph arrays) is released with this
+        // function's frame. The rebuild then never touches transcript bytes at all.
         return SidecarSnapshot(
             isDiscarded: discarded,
             isDeleted: deleted,
-            bestTranscriptText: best,
+            hasLocalTranscriptText: best != nil,
+            meaningfulWordCount: best.map { ConversationContentFilter.meaningfulWordCount(in: $0) } ?? 0,
             hasCachedTranscript: TranscriptCacheStore.hasCachedTranscript(captureId: id, baseDir: baseDir),
             cardExists: ConversationCardStore.exists(captureId: id, baseDir: baseDir),
             confirmedInLore: TranscriptCacheStore.isConfirmedInLore(captureId: id, baseDir: baseDir),
-            statsTranscript: stats)
+            wordCount: StatsSummary.wordCount(cached?.transcript ?? ""),
+            speakerIdentities: cached.map { StatsSummary.speakerIdentities(in: $0, captureId: id) } ?? [],
+            cardStartedAt: (card?.startedAt).flatMap { $0 > 0 ? $0 : nil },
+            isWarm: true)
     }
 
     /// The memoised sidecar for a capture, loading from disk ONLY on a cold miss. Hydration
@@ -1223,16 +1383,220 @@ public final class CaptureManager: ObservableObject {
     /// a cold miss (a capture added after hydration, or just-invalidated) loads exactly one.
     private func sidecar(for id: String) -> SidecarSnapshot {
         if let hit = sidecarCache[id] { return hit }
-        let snap = Self.loadSidecar(captureId: id, baseDir: baseDir)
-        sidecarCache[id] = snap
-        return snap
+        // R3 — a NEVER-SEEN capture (added after hydration). The rebuild MUST NOT read disk
+        // on the main actor, so it renders the "nothing known yet" placeholder and re-warms
+        // off-main. The placeholder is the CONSERVATIVE direction on purpose: it carries no
+        // durable tombstone, so `isBrowsable` only shows the capture when the WAL itself
+        // justifies it (streaming / real audio). A capture can therefore APPEAR when its warm
+        // value lands, but it can never appear → vanish → reappear, which is the flicker the
+        // list must never show. (Hydration seeds every existing capture before the first
+        // rebuild, and the live capture is shown by the streaming rule, so in practice this
+        // path is only ever taken for a capture the manager just created itself.)
+        sidecarCache[id] = .unwarmed
+        scheduleSidecarWarm(id)
+        return .unwarmed
     }
 
-    /// Drop a capture's memoised sidecar after ANY write to its transcript / card / markers,
-    /// so the next rebuild reflects the change. Liberal invalidation is SAFE (a cold miss
-    /// re-loads one capture); a MISSED one — stale membership/stats — is the only real
-    /// hazard, so every writer (in-manager + the poller + the detail-view cache) calls this.
-    func invalidateSidecar(_ id: String) { sidecarCache[id] = nil }
+    /// Re-read a capture's sidecar (+ meta) OFF the main actor and apply the small `Sendable`
+    /// result back on main. `force` (an invalidation) always starts a fresh read; a cold-miss
+    /// warm coalesces onto whatever is already in flight.
+    private func scheduleSidecarWarm(_ id: String, force: Bool = false) {
+        guard force || warmingSidecars[id] == nil else { return }
+        let generation = (sidecarGeneration[id] ?? 0) + 1
+        sidecarGeneration[id] = generation
+        warmingSidecars[id] = generation
+        let base = baseDir
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let span = PerfSpan(name: "sidecar-rewarm")
+            let snap = CaptureManager.loadSidecar(captureId: id, baseDir: base)
+            let meta = ConversationMetaStore.load(captureId: id, baseDir: base)
+            PerfHook.span("sidecar-rewarm", ms: span.elapsedMs())
+            await MainActor.run {
+                self?.applyWarmSidecar(id, snapshot: snap, meta: meta, generation: generation)
+            }
+        }
+    }
+
+    /// Apply an off-main sidecar re-warm. Ignores a result superseded by a newer invalidation
+    /// (the newer read has its own task in flight), and only asks for a re-render when the
+    /// fresh value would actually change what the list shows — an identical warm value must
+    /// never churn the list.
+    private func applyWarmSidecar(_ id: String, snapshot: SidecarSnapshot,
+                                  meta: ConversationMeta?, generation: Int) {
+        guard sidecarGeneration[id] == generation else { return }
+        warmingSidecars[id] = nil
+        let previous = sidecarCache[id]
+        // S1 — this hop mutates THREE memos the list reads (sidecar, meta, durable start), so
+        // the re-render guard must cover all three. Guarding on the SIDECAR delta alone landed
+        // meta-only changes silently: `recordEnd` writes endedAt/duration while the transcript
+        // and card are untouched, so the "Hours this week"/duration tiles never ticked up when
+        // a conversation ended, the re-resolved durable start never reached the sort, and the
+        // duration branch of `isBrowsable` was never re-evaluated.
+        let previousMeta = metaCache[id] ?? nil
+        let previousStart = startTimeCache[id]
+        sidecarCache[id] = snapshot
+        metaCache[id] = .some(meta)   // memoise "no meta on disk" too (see metaCache)
+        startTimeCache[id] = nil      // recomputed from the warm meta/card on next sort
+        let metaChanged = previousMeta != meta
+        // Only a CHANGED memoised sort key matters: if the sort never memoised one, the next
+        // sort resolves it fresh, so an absent-to-present transition is not a re-render reason.
+        let startChanged = previousStart != nil && durableStartCached(captureId: id) != previousStart
+        guard (previous?.rendersDifferently(from: snapshot) ?? true) || metaChanged || startChanged
+        else { return }
+        scheduleSidecarRebuild()
+    }
+
+    /// Re-read MANY captures' sidecars off the main actor in ONE hop (S7). Bulk invalidations
+    /// — the retention sweep, the stuck-empty prune, orphan reconcile — touch tens to hundreds
+    /// of captures at once; scheduling one `.userInitiated` `Task.detached` per capture fans
+    /// out N concurrent FULL TRANSCRIPT decodes all competing with the main actor for exactly
+    /// the frames this track exists to protect. One `.utility` task, one main-actor apply, one
+    /// coalesced rebuild. (These are background maintenance passes — nothing is waiting on
+    /// them, so `.utility` is the correct QoS.)
+    private func invalidateSidecars(_ ids: [String]) {
+        let unique = Array(Set(ids))
+        guard !unique.isEmpty else { return }
+        var generations: [String: Int] = [:]
+        generations.reserveCapacity(unique.count)
+        for id in unique {
+            let generation = (sidecarGeneration[id] ?? 0) + 1
+            sidecarGeneration[id] = generation
+            warmingSidecars[id] = generation
+            generations[id] = generation
+        }
+        let base = baseDir
+        Task.detached(priority: .utility) { [weak self] in
+            let span = PerfSpan(name: "sidecar-rewarm-batch")
+            var loaded: [(id: String, snap: SidecarSnapshot, meta: ConversationMeta?)] = []
+            loaded.reserveCapacity(unique.count)
+            for id in unique {
+                loaded.append((id,
+                               CaptureManager.loadSidecar(captureId: id, baseDir: base),
+                               ConversationMetaStore.load(captureId: id, baseDir: base)))
+            }
+            PerfHook.span("sidecar-rewarm-batch-n\(unique.count)", ms: span.elapsedMs())
+            await MainActor.run {
+                guard let self else { return }
+                for entry in loaded {
+                    self.applyWarmSidecar(entry.id, snapshot: entry.snap, meta: entry.meta,
+                                          generation: generations[entry.id] ?? 0)
+                }
+            }
+        }
+    }
+
+    /// Generation counter per capture, bumped on every invalidation, so a slow off-main
+    /// re-warm can never clobber a newer one's result.
+    private var sidecarGeneration: [String: Int] = [:]
+    /// The generation of the re-warm currently in flight per capture (nil = none).
+    private var warmingSidecars: [String: Int] = [:]
+
+    /// Mark a capture's memo with a marker the MANAGER ITSELF just wrote to disk, in the same
+    /// runloop tick — discard + delete are immediate, user-visible operations, so they must
+    /// not wait a hop to leave the list. Memory-only; the off-main re-warm confirms it.
+    private func applySidecarMarker(_ id: String, discarded: Bool = false, deleted: Bool = false) {
+        sidecarCache[id] = (sidecarCache[id] ?? .unwarmed).marking(discarded: discarded, deleted: deleted)
+        // N3 — a warm already IN FLIGHT was started from a pre-marker disk state, so letting it
+        // land would silently un-mark the row (the marker is the whole point of this call).
+        // Bumping the generation makes any in-flight result arrive stale and be dropped.
+        discardInFlightSidecarWarm(id)
+    }
+
+    /// Invalidate whatever off-main sidecar warm is currently in flight for `id`: its result
+    /// will fail `applyWarmSidecar`'s generation check and be dropped.
+    private func discardInFlightSidecarWarm(_ id: String) {
+        sidecarGeneration[id] = (sidecarGeneration[id] ?? 0) + 1
+        warmingSidecars[id] = nil
+    }
+
+    /// Refresh a capture's memoised sidecar after ANY write to its transcript / card /
+    /// markers, so a later rebuild reflects the change.
+    ///
+    /// R3 (no flicker): this NO LONGER drops the memo. Dropping it made the next rebuild
+    /// cold-miss into a synchronous `transcript.json` decode ON THE MAIN ACTOR — the measured
+    /// nav-stall — and now that the rebuild may not read disk, dropping it would instead make
+    /// the conversation momentarily render from a placeholder and possibly VANISH. So the
+    /// LAST-KNOWN value stays authoritative (the list keeps rendering exactly what it was
+    /// rendering), the fresh value is read OFF-main, and a re-render is requested only if the
+    /// fresh value actually differs. A stale membership/stats value survives at most one
+    /// re-warm hop, which is the same window the old async writers already had.
+    func invalidateSidecar(_ id: String) {
+        // R2 — the LIVE conversation's rule. The ACTIVE capture's transcript changes
+        // continuously, so re-deriving its facts per write would trade the CPU win for cache
+        // thrash. It doesn't need them either: `isBrowsable` decides the active capture by
+        // `status.streaming` (it is ALWAYS shown) and the processing banner explicitly skips
+        // it, so its cached counts only feed the stats tiles. It is therefore re-warmed at
+        // most once per `liveSidecarRewarmInterval` seconds, off-main, with the last request
+        // in the window coalesced to the end of it. The moment the capture stops being
+        // active — the finalize/endSession invalidations — the throttle no longer applies and
+        // its authoritative facts land immediately.
+        guard id == active?.captureId else {
+            // Not (or no longer) the live capture — no throttle applies, and any window this
+            // capture opened while it WAS live is done with. Drop its throttle state so the
+            // per-capture bookkeeping can't outlive the capture.
+            lastLiveSidecarWarmAt[id] = nil
+            liveSidecarWarmPending.remove(id)
+            return scheduleSidecarWarm(id, force: true)
+        }
+        let now = Date().timeIntervalSince1970
+        // S3 — the throttle is keyed PER CAPTURE. Keyed globally, a window opened by capture X
+        // swallowed capture Y's invalidation and never rescheduled it (the pending task
+        // captured X's id), so Y's derived facts could stay stale indefinitely.
+        let last = lastLiveSidecarWarmAt[id] ?? 0
+        if now - last >= Self.liveSidecarRewarmInterval {
+            lastLiveSidecarWarmAt[id] = now
+            scheduleSidecarWarm(id, force: true)
+            return
+        }
+        guard !liveSidecarWarmPending.contains(id) else { return }   // coalesced into this window
+        liveSidecarWarmPending.insert(id)
+        // N3 — the throttled branch still has to invalidate whatever warm is in flight: a
+        // marker applied in this tick must not be clobbered by a read started before it.
+        discardInFlightSidecarWarm(id)
+        let wait = Self.liveSidecarRewarmInterval - (now - last)
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, wait) * 1_000_000_000))
+            guard let self else { return }
+            self.liveSidecarWarmPending.remove(id)
+            self.lastLiveSidecarWarmAt[id] = Date().timeIntervalSince1970
+            self.scheduleSidecarWarm(id, force: true)
+        }
+    }
+
+    /// How often the ACTIVE (live, still-growing) conversation's sidecar facts are re-derived
+    /// off-main. Tunable; see the R2 rule in `invalidateSidecar`.
+    public nonisolated static let liveSidecarRewarmInterval: TimeInterval = 5
+    /// PER-CAPTURE throttle state (S3) — never global: one capture's window must not swallow
+    /// another capture's invalidation.
+    private var lastLiveSidecarWarmAt: [String: TimeInterval] = [:]
+    private var liveSidecarWarmPending: Set<String> = []
+
+    // MARK: main-actor decode counter (test-only, deterministic) — the CQRS invariant proof
+
+    /// Count of transcript/meta/card decodes that ran SYNCHRONOUSLY on the MAIN ACTOR — the
+    /// disk-on-main pathology a warm rebuild must never do. Incremented at every site that
+    /// still reads a capture sidecar off disk SYNCHRONOUSLY (today only the deliberately
+    /// un-memoized `cardMeta`; `sidecar(for:)` and `startTime` were converted to memory-only
+    /// + off-main re-warm), each GATED on `Thread.isMainThread` so OFF-main warms and the
+    /// off-main warm-index writer never count. Static because the sites span a nonisolated
+    /// static and nonisolated instance method. Makes the CQRS assertion a hard integer
+    /// (0 on a warm library; K>0 under the repro) rather than a wall-clock flake. Mirrors the
+    /// existing `*ForTests` seam idiom; `nonisolated(unsafe)` + NSLock like `PerfHook`.
+    nonisolated(unsafe) private static let _decodeCounterLock = NSLock()
+    nonisolated(unsafe) private static var _mainThreadDecodes = 0
+    /// Increment the main-actor decode counter iff we are ON the main thread (the pathology).
+    nonisolated static func noteMainThreadDecode() {
+        guard Thread.isMainThread else { return }
+        _decodeCounterLock.lock(); _mainThreadDecodes += 1; _decodeCounterLock.unlock()
+    }
+    /// Read the count of synchronous main-actor transcript/meta/card decodes (test-observable).
+    nonisolated static var mainThreadTranscriptDecodesForTests: Int {
+        _decodeCounterLock.lock(); defer { _decodeCounterLock.unlock() }; return _mainThreadDecodes
+    }
+    /// Reset the main-actor decode counter — call immediately before a measured rebuild.
+    nonisolated static func resetMainThreadTranscriptDecodesForTests() {
+        _decodeCounterLock.lock(); _mainThreadDecodes = 0; _decodeCounterLock.unlock()
+    }
 
     /// A COALESCED visible-list rebuild for OUT-OF-MANAGER writers (the status poller's card
     /// merge, the detail-view content cache): several can fire in one runloop tick, so hop
@@ -1257,7 +1621,12 @@ public final class CaptureManager: ObservableObject {
     /// per row (the title/summary a row shows live come from the poller's @Published
     /// state, so a slightly-stale disk read here has no visible effect anyway).
     public nonisolated func cardMeta(for captureId: String) -> ConversationCardMeta? {
-        ConversationCardStore.load(captureId: captureId, baseDir: baseDir)
+        // Deliberately un-memoized (driver #2): `recapConversationPool()` (eager at
+        // RootView) calls this per visible capture, so at N conversations one `recap` pass
+        // is N synchronous `card.json` decodes. When it runs ON the main actor that is
+        // disk-on-main; count it (the gate no-ops for the off-main warm-index writer).
+        Self.noteMainThreadDecode()
+        return ConversationCardStore.load(captureId: captureId, baseDir: baseDir)
     }
 
     /// Per-capture status pollers (the door→Lore stage chip, F11). Lazily created +
@@ -1318,8 +1687,14 @@ public final class CaptureManager: ObservableObject {
             // Also seed the durable card tombstone with the name/description.
             ConversationCardStore.merge(captureId: captureId, baseDir: baseDir,
                                         title: c.title, summary: c.summary, stage: nil)
-            self?.invalidateSidecar(captureId)   // transcript + card just changed on disk
-            self?.rebuildVisibleCaptures()   // a freshly-cached tombstone can change membership
+            // Transcript + card just changed on disk. STALE-COMMENT FIX (N5): the immediate
+            // rebuild here can no longer see that change — `invalidateSidecar` keeps the
+            // last-known memo and re-reads OFF-main, and `applyWarmSidecar` schedules the
+            // re-render when the fresh facts land. Membership from the freshly-cached
+            // tombstone therefore arrives one off-main hop later, by design; the rebuild
+            // below is kept only to republish state that changed on the main actor.
+            self?.invalidateSidecar(captureId)
+            self?.rebuildVisibleCaptures()
         }
     }
 
@@ -1838,6 +2213,10 @@ public final class CaptureManager: ObservableObject {
         // re-filtering) also removes their segments from the sync banner count and
         // their WALs from every later drain/prune iteration.
         var discardedAny = false
+        // S7 — every capture this pass touches (stuck-empty discard, orphan meta bound) is
+        // re-warmed in ONE batched off-main hop at the end, not one `.userInitiated`
+        // full-transcript decode per capture fanned out from inside the loop.
+        var touched: [String] = []
         for wal in captures where wal !== active {
             let id = wal.captureId
             guard !isDiscarded(id) else { continue }   // discarded fragments are never re-queued
@@ -1874,7 +2253,10 @@ public final class CaptureManager: ObservableObject {
                         .write(to: discardMarker(id), options: [.atomic])
                     clearNeedsFinalize(id)
                     retryStates[id] = nil
-                    invalidateSidecar(id)   // `.discarded` now present
+                    // The marker we JUST wrote is applied to the memo in this same tick
+                    // (a discard must hide the row immediately), then confirmed off-main.
+                    applySidecarMarker(id, discarded: true)
+                    touched.append(id)      // `.discarded` now present — confirmed in the batch
                     discardedAny = true
                     log?.info("capture \(id): pruned stuck-empty capture (0 segments, aged out)")
                 }
@@ -1892,10 +2274,11 @@ public final class CaptureManager: ObservableObject {
                 endSecs = nowUnixSecs()
             }
             ConversationMetaStore.recordEnd(captureId: id, baseDir: baseDir, at: endSecs, location: nil)
-            invalidateMeta(id)
+            touched.append(id)      // meta.json changed — re-read in the batch, not per capture
             markNeedsFinalize(id)
             log?.info("capture \(id): orphan reconciled on launch — bounded (ended_at set) + pending finalize")
         }
+        invalidateSidecars(touched)
         if discardedAny {
             captures.removeAll { isDiscarded($0.captureId) }   // didSet republishes the list
         }
@@ -2950,12 +3333,19 @@ public final class CaptureManager: ObservableObject {
         // on-device transcript as PROVISIONAL content so the card shows readable text the
         // INSTANT it's stopped — resilient to slow/failed Kiln transcription (Feature 1).
         let finishedId = finished.captureId
-        seedProvisionalCard(finishedId, transcript: onDeviceNow,
-                            preferredTitle: liveTitleState?.text)
-        endLiveTranscription(seedInto: finishedId)   // stop + (async) refine the seed
+        // S4 — CLEAR `active` FIRST. `seedProvisionalCard` invalidates the sidecar, and
+        // `invalidateSidecar` throttles the ACTIVE capture (R2, up to 5s). Seeding while
+        // `active` was still this capture meant the ended conversation's single most
+        // important invalidation was the one that got throttled: for up to 5s its memo still
+        // read `hasLocalTranscriptText == false`, so it counted in `processingConversationCount`
+        // ("still processing") and contributed 0 words to the stats tiles. Matches the order
+        // the discard branch above and `discardLowSubstance`/`deleteConversation` already use.
         router.setExternalPCM(false)                 // clear the mic's direct-PCM tap mode
         finished.finish()
         active = nil
+        seedProvisionalCard(finishedId, transcript: onDeviceNow,
+                            preferredTitle: liveTitleState?.text)
+        endLiveTranscription(seedInto: finishedId)   // stop + (async) refine the seed
         // A closed conversation must reach the Lore inbox: mark it pending-finalize
         // (durably, so it survives relaunch — mirrors the WAL's waitingForInternet
         // ethos), then drive sync→finalize. The drain timer + app-foreground retry
@@ -3290,6 +3680,9 @@ public final class CaptureManager: ObservableObject {
         try? Data(reason.utf8).write(to: discardMarker(captureId), options: [.atomic])
         clearNeedsFinalize(captureId)
         retryStates[captureId] = nil
+        // Same-tick hide (the substance gate is immediate + user-visible), then the
+        // off-main re-warm confirms the marker from disk.
+        applySidecarMarker(captureId, discarded: true)
         invalidateSidecar(captureId)   // `.discarded` now present → memo must not show it
     }
 
@@ -3365,8 +3758,19 @@ public final class CaptureManager: ObservableObject {
         cachingTranscripts.remove(captureId)
         if let poller = pollers.removeValue(forKey: captureId) { poller.stop() }
         deleteConversationFilesKeepingMarkers(captureId)
+        // N2 — a deleted capture must not LEAK memo entries, and no off-main warm may
+        // repopulate them afterwards. `applySidecarMarker` bumps the generation, so any warm
+        // already in flight is dropped on arrival; everything else per-capture is released
+        // here (meta, durable start, live-throttle state, the in-flight warm handle). Two
+        // things are kept ON PURPOSE and both are a handful of bytes: the `.deleted` marker
+        // snapshot (what keeps the row hidden in the same tick, and hidden again if a
+        // mid-flight hydration re-offers the id) and the generation counter (it must stay
+        // monotonic or a late warm could match a recycled generation).
         metaCache[captureId] = nil
-        invalidateSidecar(captureId)   // `.deleted` marker + files just changed on disk
+        startTimeCache[captureId] = nil
+        lastLiveSidecarWarmAt[captureId] = nil
+        liveSidecarWarmPending.remove(captureId)
+        applySidecarMarker(captureId, deleted: true)   // same-tick hide; no re-warm needed
         captures.removeAll { $0.captureId == captureId }   // didSet republishes immediately
         log?.info("capture \(captureId): deleted locally; remote delete queued")
     }
@@ -3453,7 +3857,9 @@ public final class CaptureManager: ObservableObject {
     private func applyRetentionSweep(_ result: RetentionSweepResult) {
         let touched = Set(result.prunedAudioIds).union(result.prunedTextIds)
         guard !touched.isEmpty else { return }
-        for id in touched { invalidateSidecar(id) }
+        // S7 — ONE batched off-main hop, not N `.userInitiated` full-transcript decodes fanned
+        // out at sweep scale (see `invalidateSidecars`).
+        invalidateSidecars(Array(touched))
         let prunedAudio = Set(result.prunedAudioIds)
         for wal in captures where prunedAudio.contains(wal.captureId) { wal.refreshStatus() }
         rebuildVisibleCaptures()
@@ -3869,22 +4275,57 @@ public final class CaptureManager: ObservableObject {
             let seedSpan = PerfSpan(name: "capture-sidecar-seed")
             var seededSidecars: [String: SidecarSnapshot] = [:]
             var seededMeta: [String: ConversationMeta?] = [:]
+            // Seed the DURABLE START too (requirement 6): the sort comparator's
+            // `startTimeCache` was previously seeded nowhere, so the first post-hydration
+            // sort cold-missed every capture into a main-actor `meta.json`/`card.json`
+            // decode (370ms / 175 decodes at N=175). Resolved HERE, off-main, from the same
+            // meta → card → capture-id order `durableStart` uses.
+            var seededStarts: [String: TimeInterval] = [:]
             seededSidecars.reserveCapacity(picked.count)
             seededMeta.reserveCapacity(picked.count)
+            seededStarts.reserveCapacity(picked.count)
             for id in picked {
-                seededSidecars[id] = Self.loadSidecar(captureId: id, baseDir: self.baseDir)
-                seededMeta[id] = ConversationMetaStore.load(captureId: id, baseDir: self.baseDir)
+                let snap = Self.loadSidecar(captureId: id, baseDir: self.baseDir)
+                let meta = ConversationMetaStore.load(captureId: id, baseDir: self.baseDir)
+                seededSidecars[id] = snap
+                seededMeta[id] = meta
+                if let started = meta?.startedAt, started > 0 {
+                    seededStarts[id] = TimeInterval(started)
+                } else if let started = snap.cardStartedAt, started > 0 {
+                    seededStarts[id] = TimeInterval(started)
+                } else if let idStart = CaptureIdTime.startedAt(fromCaptureId: id), idStart > 0 {
+                    seededStarts[id] = TimeInterval(idStart)
+                }
             }
             let seedMs = seedSpan.elapsedMs()
             await MainActor.run {
                 // Seed BEFORE append so the append's didSet rebuild hits the warm cache.
                 // Keep any entry the main actor already wrote during the async gap (a
                 // capture started mid-hydration) — the disk seed must not clobber live state.
-                self.sidecarCache.merge(seededSidecars) { current, _ in current }
+                // A PLACEHOLDER (`isWarm == false`, written by a pre-hydration rebuild that
+                // cold-missed) must NOT beat the disk seed — only a genuinely warm entry the
+                // main actor already holds wins.
+                // S5 — a MARKED entry always wins too, warm or not. `applySidecarMarker`
+                // builds from `.unwarmed` and `marking()` keeps `isWarm: false`, so an
+                // `isWarm`-only rule let a delete/discard that landed DURING the (off-main,
+                // whole-library) seed loop be overwritten by the pre-delete seeded snapshot:
+                // the just-deleted conversation reappeared and then vanished again when the
+                // confirming re-warm landed.
+                self.sidecarCache.merge(seededSidecars) { current, seeded in
+                    (current.isWarm || current.isDeleted || current.isDiscarded) ? current : seeded
+                }
                 self.metaCache.merge(seededMeta) { current, _ in current }
+                self.startTimeCache.merge(seededStarts) { current, _ in current }
                 // A capture STARTED before hydration finished sits at index 0
                 // (newest); the hydrated backlog appends behind it — order holds.
-                self.captures.append(contentsOf: hydrated)   // one didSet -> one rebuild; swaps NOW
+                // S5 — `picked` was chosen off-main BEFORE this hop, so a capture the user
+                // deleted (or the manager discarded) during the seed loop is still in it.
+                // Re-appending its WAL would resurrect the row; drop it here.
+                let live = hydrated.filter { wal in
+                    let snap = self.sidecarCache[wal.captureId]
+                    return !(snap?.isDeleted ?? false) && !(snap?.isDiscarded ?? false)
+                }
+                self.captures.append(contentsOf: live)   // one didSet -> one rebuild; swaps NOW
             }
             PerfHook.span("capture-hydrate-n\(hydrated.count)", ms: ms)
             PerfHook.span("capture-sidecar-seed-n\(picked.count)", ms: seedMs)

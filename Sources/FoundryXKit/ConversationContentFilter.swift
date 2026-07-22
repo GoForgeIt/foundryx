@@ -38,12 +38,50 @@ public enum ConversationContentFilter {
         guard let raw = transcript?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
             return false   // empty / whitespace → never show
         }
-        let words = meaningfulWords(in: raw)
-        if words.isEmpty { return false }                      // pure filler/acks → always drop
-        if words.count >= minMeaningfulWords { return true }   // real content → keep
+        return isMeaningful(meaningfulWordCount: meaningfulWordCount(in: raw),
+                            durationSeconds: durationSeconds)
+    }
+
+    /// The SAME verdict, taken over an already-computed distinct-meaningful-word count.
+    /// This is the byte-independent seam (track `rebuild_is_byte_independent_and_disk_free`):
+    /// the count is derived ONCE off the main actor when a capture's sidecar is warmed, and
+    /// the list rebuild then re-decides membership from an `Int` instead of re-scanning every
+    /// conversation's whole transcript on every rebuild.
+    public static func isMeaningful(meaningfulWordCount count: Int,
+                                    durationSeconds: TimeInterval?) -> Bool {
+        if count == 0 { return false }                      // pure filler/acks → always drop
+        if count >= minMeaningfulWords { return true }      // real content → keep
         // Exactly one meaningful word (borderline): drop only when the clip is short.
         if let d = durationSeconds, d < shortConversationCeiling { return false }
         return true                                            // long / unknown-length → keep
+    }
+
+    /// How many DISTINCT content words `text` holds, stopping as soon as `cap` distinct ones
+    /// are seen. `isMeaningful` only ever needs to distinguish 0 / 1 / "≥ minMeaningfulWords",
+    /// so the cap turns an unconditional full-transcript scan into an early exit (a 300KB
+    /// meeting transcript settles in its first few words).
+    public static func meaningfulWordCount(in text: String,
+                                           cappedAt cap: Int = minMeaningfulWords) -> Int {
+        guard cap > 0 else { return 0 }
+        var seen = Set<String>()
+        var token = ""
+        // Streamed token-by-token rather than `text.lowercased().split(…)`: the whole-string
+        // lowercase copy + split array is what made this O(total transcript bytes). Here the
+        // work stops at the cap, and only the small token is ever lowercased.
+        func consider() -> Bool {
+            defer { token.removeAll(keepingCapacity: true) }
+            guard token.count >= minWordLength else { return false }
+            let w = token.lowercased()
+            guard !fillerWords.contains(w) else { return false }
+            seen.insert(w)
+            return seen.count >= cap
+        }
+        for ch in text {
+            if ch.isLetter || ch.isNumber { token.append(ch) }
+            else if !token.isEmpty, consider() { return seen.count }
+        }
+        if !token.isEmpty { _ = consider() }
+        return seen.count
     }
 
     /// The DISTINCT content words in `text`: lowercased, punctuation-stripped, dropping

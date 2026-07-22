@@ -164,6 +164,76 @@ final class CaptureSidecarMemoTests: XCTestCase {
                        "the seed span is distinct from capture-hydrate* (budget-grep rule)")
     }
 
+    // REVIEW S1 — a META-ONLY change must re-render. `applyWarmSidecar` mutates the meta and
+    // durable-start memos as well as the sidecar memo, but it used to gate the re-render on a
+    // SIDECAR delta alone. `recordEnd` writes endedAt/duration while transcript + card are
+    // untouched, so the "Hours this week" / duration tiles silently never ticked up when a
+    // conversation ended.
+    func testMetaOnlyChangeStillRerendersTheList() async throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try makeCaptureDir("omi-META", in: dir)
+        TranscriptCacheStore.save(
+            CachedTranscript(transcript: "We walked the whole roadmap and settled the release order.",
+                             title: "Roadmap", summary: nil, fetchedAt: 100),
+            captureId: "omi-META", baseDir: dir)
+        // Started 30 minutes ago, still OPEN — no endedAt, so no duration and no hours yet.
+        let started = UInt64(max(0, Date().timeIntervalSince1970 - 1800))
+        ConversationMetaStore.save(ConversationMeta(startedAt: started),
+                                   captureId: "omi-META", baseDir: dir)
+
+        let mgr = await makeManager(baseDir: dir, source: TestSource())
+        XCTAssertTrue(mgr.visibleCaptures.contains { $0.captureId == "omi-META" })
+        XCTAssertEqual(mgr.statsSummary.hoursThisWeek, 0, accuracy: 0.0001,
+                       "premise: an unfinished conversation contributes no hours")
+
+        // The conversation ENDS: meta.json gains endedAt. Transcript + card are untouched, so
+        // the sidecar snapshot is byte-identical — only the meta changed.
+        ConversationMetaStore.recordEnd(captureId: "omi-META", baseDir: dir,
+                                        at: started + 1800, location: nil)
+        mgr.invalidateSidecar("omi-META")
+
+        try await waitUntil { mgr.statsSummary.hoursThisWeek > 0 }
+        XCTAssertEqual(mgr.statsSummary.hoursThisWeek, 0.5, accuracy: 0.01,
+                       "the meta-only delta reached the stats tiles without any other write")
+    }
+
+    // REVIEW S2 — a MISSING duration must never flip a hidden card VISIBLE. A borderline
+    // capture (exactly one meaningful word, clip shorter than the 120s bar) is hidden. The
+    // membership filter reads `nil` duration as "unknown → keep", so a cold meta memo used to
+    // make that card APPEAR and then VANISH again when the warm landed — the exact
+    // appear→vanish flicker R3 prohibits.
+    func testMissingDurationCannotFlipAHiddenCardVisible() async throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try makeCaptureDir("omi-BORDER", in: dir)
+        // ONE meaningful word ("roadmap"); everything else is filler / under the length bar.
+        TranscriptCacheStore.save(
+            CachedTranscript(transcript: "Okay. Yeah, the roadmap. Uh, okay, thanks.",
+                             title: nil, summary: nil, fetchedAt: 100),
+            captureId: "omi-BORDER", baseDir: dir)
+        // A SHORT clip: 40s < the 120s "higher bar" ceiling.
+        let started = UInt64(max(0, Date().timeIntervalSince1970 - 600))
+        ConversationMetaStore.save(ConversationMeta(startedAt: started, endedAt: started + 40),
+                                   captureId: "omi-BORDER", baseDir: dir)
+
+        let mgr = await makeManager(baseDir: dir, source: TestSource())
+        XCTAssertFalse(mgr.visibleCaptures.contains { $0.captureId == "omi-BORDER" },
+                       "premise: one meaningful word in a 40s clip is filtered out")
+
+        // The meta memo goes cold (what `invalidateMeta` used to do on every recordStart/End).
+        mgr.dropMetaMemoForTests(["omi-BORDER"])
+        mgr.rebuildVisibleCapturesForTests()
+        XCTAssertFalse(mgr.visibleCaptures.contains { $0.captureId == "omi-BORDER" },
+                       "a cold duration must NOT make a hidden borderline card appear")
+
+        // And it stays hidden once the real facts land — no flicker in either direction.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        mgr.rebuildVisibleCapturesForTests()
+        XCTAssertFalse(mgr.visibleCaptures.contains { $0.captureId == "omi-BORDER" },
+                       "still hidden after the off-main warm — membership never flickered")
+    }
+
     private func waitUntil(timeout: TimeInterval = 3, _ cond: @MainActor () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while !cond() {

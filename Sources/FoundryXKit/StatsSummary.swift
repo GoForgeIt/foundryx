@@ -12,15 +12,40 @@ public struct StatsDailyTrend: Sendable, Equatable, Identifiable {
     }
 }
 
+/// One conversation's contribution to the library stats, as COUNTS — never raw text.
+///
+/// Track `rebuild_is_byte_independent_and_disk_free`: `StatsSummary.build` used to re-split
+/// and re-scan every conversation's whole transcript on every list rebuild, which made the
+/// rebuild O(total transcript bytes) — i.e. the app got slower every day it succeeded. The
+/// derived facts (`wordCount`, the distinct-speaker identity keys) are now computed ONCE, off
+/// the main actor, when a capture's sidecar memo is warmed; `build` is an integer reduce.
 public struct StatsConversationSnapshot: Sendable, Equatable {
     public let captureId: String
     public let meta: ConversationMeta?
-    public let transcript: CachedTranscript?
+    /// Whitespace-delimited word count of the conversation's cached transcript text.
+    public let wordCount: Int
+    /// The distinct speaker-identity keys this conversation contributes (already
+    /// capture-qualified where the identity is only slot-local). De-duped ACROSS
+    /// conversations by `build`, exactly as the old per-transcript scan did.
+    public let speakerIdentities: [String]
 
-    public init(captureId: String, meta: ConversationMeta?, transcript: CachedTranscript?) {
+    public init(captureId: String, meta: ConversationMeta?,
+                wordCount: Int, speakerIdentities: [String]) {
         self.captureId = captureId
         self.meta = meta
-        self.transcript = transcript
+        self.wordCount = wordCount
+        self.speakerIdentities = speakerIdentities
+    }
+
+    /// Convenience for callers that still hold a decoded transcript (tests, one-off tools):
+    /// derives the same counts the off-main sidecar warm derives.
+    public init(captureId: String, meta: ConversationMeta?, transcript: CachedTranscript?) {
+        self.init(captureId: captureId,
+                  meta: meta,
+                  wordCount: StatsSummary.wordCount(transcript?.transcript ?? ""),
+                  speakerIdentities: transcript.map {
+                      StatsSummary.speakerIdentities(in: $0, captureId: captureId)
+                  } ?? [])
     }
 }
 
@@ -95,8 +120,10 @@ public struct StatsSummary: Sendable, Equatable {
             totalConversations: conversations.count,
             totalDurationSeconds: totalDuration,
             averageDurationSeconds: averageDuration,
+            // Integer reduce over CACHED counts — no transcript text is split, lowercased
+            // or traversed here (the byte-independence requirement).
             totalSpeakersIdentified: countDistinctSpeakers(in: conversations),
-            totalWords: conversations.reduce(0) { $0 + wordCount($1.transcript?.transcript ?? "") },
+            totalWords: conversations.reduce(0) { $0 + $1.wordCount },
             conversationsPerDay: dailyTrend(counts: dayCounts, now: now,
                                             calendar: calendar, trendDays: trendDays),
             hoursThisWeek: Double(weeklyDuration) / 3600
@@ -115,22 +142,32 @@ public struct StatsSummary: Sendable, Equatable {
         }
     }
 
-    private static func wordCount(_ text: String) -> Int {
+    /// Whitespace-delimited word count. Called ONCE per conversation off the main actor (at
+    /// sidecar warm), never on a render/rebuild path.
+    public static func wordCount(_ text: String) -> Int {
         text.split { $0.isWhitespace || $0.isNewline }.count
+    }
+
+    /// The distinct speaker-identity keys a decoded transcript contributes: every entry in
+    /// the speaker array, PLUS any segment slot the speaker array doesn't mention. Computed
+    /// ONCE per conversation off the main actor (at sidecar warm) — byte-identical to the old
+    /// per-rebuild scan, but paid once instead of on every rebuild.
+    public static func speakerIdentities(in transcript: CachedTranscript, captureId: String) -> [String] {
+        var identities = Set<String>()
+        let knownSlots = Set(transcript.speakers.map(\.slot))
+        for speaker in transcript.speakers {
+            identities.insert(identity(for: speaker, captureId: captureId))
+        }
+        for segment in transcript.segments
+        where !segment.speaker.isEmpty && !knownSlots.contains(segment.speaker) {
+            identities.insert("slot:\(captureId):\(segment.speaker)")
+        }
+        return Array(identities)
     }
 
     private static func countDistinctSpeakers(in conversations: [StatsConversationSnapshot]) -> Int {
         var identities = Set<String>()
-        for conversation in conversations {
-            guard let transcript = conversation.transcript else { continue }
-            let knownSlots = Set(transcript.speakers.map(\.slot))
-            for speaker in transcript.speakers {
-                identities.insert(identity(for: speaker, captureId: conversation.captureId))
-            }
-            for segment in transcript.segments where !segment.speaker.isEmpty && !knownSlots.contains(segment.speaker) {
-                identities.insert("slot:\(conversation.captureId):\(segment.speaker)")
-            }
-        }
+        for conversation in conversations { identities.formUnion(conversation.speakerIdentities) }
         return identities.count
     }
 
