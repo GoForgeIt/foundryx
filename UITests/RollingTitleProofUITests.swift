@@ -11,8 +11,12 @@
 // grows, and the evolved name still carries the conversation's OPENING topic —
 // exactly what the old last-80-words-window title could not do.
 //
-// MIC PRIVACY: grant before launching (the record CTA no-ops without it):
-//     xcrun simctl privacy booted grant microphone com.goforgeit.foundryx
+// MIC IN THE SIMULATOR (track 20260722T1601): the simulator's AVAudioEngine input node
+// reports a degenerate `rate=0.0 ch=0` format, so the real `MicFrameSource` fails with
+// "no microphone input available" and the recording surface never presents there.
+// `-SyntheticMic` (DEBUG-only) feeds real Opus packets through the SAME capture pipeline
+// so this proof runs end-to-end; the transcript itself still comes from the scripted
+// transcriber, exactly as before.
 
 import XCTest
 
@@ -36,7 +40,7 @@ final class RollingTitleProofUITests: XCTestCase {
 
     func testRollingTitleDerivesFromTheWholeConversation() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["-MainPreview", "-RollingTitleDemo"]
+        app.launchArguments = ["-MainPreview", "-RollingTitleDemo", "-SyntheticMic"]
 
         addUIInterruptionMonitor(withDescription: "Microphone permission") { alert in
             for label in ["Allow", "OK", "Allow While Using App"] {

@@ -13,14 +13,16 @@
 //     signal available at the UI-test layer). The meter-lifecycle state machine itself is
 //     proven directly in MeterLifecycleTests (Tests/FoundryXBrineTests).
 //
-// MIC PRIVACY: the recording only begins once mic permission is granted. This test both
-// registers a UIInterruptionMonitor to accept the system prompt AND relies on the runner
-// having pre-granted it. The reliable path is to grant before launching:
-//
-//     xcrun simctl privacy booted grant microphone com.goforgeit.foundryx
-//
-// (bundle id from project.yml → FoundryX target PRODUCT_BUNDLE_IDENTIFIER). Without a
-// grant the record CTA silently no-ops and the recording surface never presents.
+// MIC IN THE SIMULATOR (track 20260722T1601): the simulator has no usable audio input —
+// `AVAudioEngine.inputNode.inputFormat(forBus: 0)` reports `rate=0.0 ch=0` there even
+// with `xcrun simctl privacy … grant microphone com.goforgeit.foundryx` applied and
+// `AVAudioSession.isInputAvailable == true`. `MicFrameSource` correctly refuses that
+// input and emits `.failed("no microphone input available")`, which resets
+// `isRecordingMic` and tears the recording surface down in the turn it presented — which
+// is why this proof was permanently RED. `-SyntheticMic` (DEBUG-only) substitutes a
+// synthetic frame source that feeds real 48k/960 Opus packets through the SAME pipeline
+// (FrameRouter → meter → segmenter → beginSession → WAL → finalize), so everything this
+// test asserts is the real capture path; only the microphone hardware is stood in for.
 
 import XCTest
 
@@ -64,7 +66,7 @@ final class RecordingProofUITests: XCTestCase {
         // -MainPreview mounts the real tabs (phone-only) with a real MicFrameSource, over
         // demo-seeded cards — so the record CTA is on the Capture surface and tapping it
         // drives a genuine mic recording.
-        app.launchArguments = ["-MainPreview"]
+        app.launchArguments = ["-MainPreview", "-SyntheticMic"]
 
         // Accept the mic-permission system alert if it appears (belt-and-suspenders with the
         // simctl pre-grant documented above).
@@ -155,5 +157,74 @@ final class RecordingProofUITests: XCTestCase {
         } else {
             app.buttons["End recording"].firstMatch.tap()
         }
+    }
+
+    /// The acceptance criterion the `live_capture_model_stops_library_rerenders` track
+    /// could not satisfy while this instrument was red: a recording running WHILE the
+    /// conversation list is on screen must not jank the list.
+    ///
+    /// Driver/judge split, the same shape as PerfBudgetNavUITests: this test drives a
+    /// real recording under a stress-seeded library (128 captures) with `-PerfLog`, so
+    /// the app's own MainThreadStallWatchdog emits a `nav-stall` perf span for ANY
+    /// >250ms main-thread block during the scroll storm. It asserts only that the drive
+    /// succeeded — the list stayed interactive and the recording kept running — and
+    /// attaches the screenshots; scripts/sim-perf.sh (and the track's evidence run)
+    /// reads the `nav-stall` span count back from the unified log and requires ZERO.
+    func testRecordingWhileTheConversationListIsVisibleDoesNotJankIt() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-MainPreview", "-SyntheticMic", "-PerfLog",
+                               "-StressSeed", "128", "-StressSegs", "156"]
+        app.launch()
+
+        let captureTab = app.buttons["Capture"].firstMatch
+        XCTAssertTrue(captureTab.waitForExistence(timeout: 120), "app launched to the tab bar")
+        captureTab.tap()
+        // Hydration + the 5s-delayed stall-watchdog arm: everything below runs under
+        // stall surveillance against the FULL seeded library.
+        RunLoop.current.run(until: Date().addingTimeInterval(8))
+
+        // Start recording, then MINIMIZE so the conversation list is the visible surface
+        // while capture keeps running (frames, WAL, segmenter, meter, live title).
+        let recordCTA = app.buttons["record-cta"].firstMatch
+        XCTAssertTrue(recordCTA.waitForExistence(timeout: 15), "record CTA present")
+        recordCTA.tap()
+        let minimize = app.buttons["minimize-recording"].firstMatch
+        XCTAssertTrue(minimize.waitForExistence(timeout: 20), "recording surface presents")
+        minimize.tap()
+        shoot(app, "04-list-visible-while-recording")
+
+        // Scroll storm over the library WHILE recording — the row build/recycle cost and
+        // any capture-driven republish land on the same main thread here.
+        for _ in 1...5 { app.swipeUp(velocity: .fast) }
+        for _ in 1...5 { app.swipeDown(velocity: .fast) }
+        shoot(app, "05-list-scrolled-while-recording")
+
+        // The list is still LIVE (rows render + are hittable after the storm) …
+        let rows = app.staticTexts
+            .matching(NSPredicate(format: "label BEGINSWITH %@", "Conversation "))
+        var hittable: XCUIElement?
+        for _ in 1...3 {
+            hittable = rows.allElementsBoundByIndex.prefix(8).first(where: { $0.isHittable })
+            if hittable != nil { break }
+            app.swipeDown(velocity: .fast)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        }
+        XCTAssertNotNil(hittable, "the conversation list is still interactive during a recording")
+
+        // … and the recording SURVIVED the storm: restore it and read a live clock. On the
+        // Capture tab the pill is suppressed as redundant — the hero LIVE TILE (the element
+        // that contains the Pause control) is the way back. Tap its LEADING edge so the
+        // hit-test can't resolve the trailing Pause child.
+        let heroTile = app.buttons.containing(.button, identifier: "live-hero-pause").firstMatch
+        XCTAssertTrue(heroTile.waitForExistence(timeout: 10),
+                      "the hero live tile is on the capture surface while recording")
+        heroTile.coordinate(withNormalizedOffset: CGVector(dx: 0.12, dy: 0.5)).tap()
+        XCTAssertTrue(minimize.waitForExistence(timeout: 15), "the recording surface restores")
+        let elapsed = waitElapsed(app, timeout: 10)
+        XCTAssertNotNil(elapsed, "the recording was still running through the list scroll")
+        shoot(app, "06-recording-survived-list-scroll")
+
+        let endAndSave = app.buttons["End and save"].firstMatch
+        if endAndSave.waitForExistence(timeout: 5) { endAndSave.tap() }
     }
 }

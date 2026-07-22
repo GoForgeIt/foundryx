@@ -443,6 +443,25 @@ private struct MainTabs: View {
             liveBackoff = LiveTitleBackoff(firstDelay: 4, multiplier: 2, ceiling: 20)
         }
         #endif
+        // The phone's own mic as a second capture source (Record button when the Omi is
+        // disconnected) — flows through the identical Opus/WAL/finalize path.
+        //
+        // DEV-only screen-proof hook (`-SyntheticMic`, track 20260722T1601): the iOS
+        // simulator's AVAudioEngine input node reports a degenerate `rate=0.0 ch=0`
+        // format even with microphone privacy granted, so `MicFrameSource` (correctly)
+        // fails with "no microphone input available" and the recording surface can never
+        // present there. Under the launch argument ONLY, substitute a synthetic frame
+        // source that feeds real 48k/960 Opus packets into the SAME pipeline, so the
+        // simulator proofs exercise the real capture path without mic hardware. No
+        // effect in release builds or on a normal launch.
+        #if DEBUG
+        let syntheticMic = ProcessInfo.processInfo.arguments.contains("-SyntheticMic")
+        let mic: AudioFrameSource = syntheticMic
+            ? SyntheticMicFrameSource(log: log)
+            : MicFrameSource(log: log)
+        #else
+        let mic: AudioFrameSource = MicFrameSource(log: log)
+        #endif
         let mgr: CaptureManager
         if local {
             // "Just my phone" (track 20260705T1100): the SAME capture pipeline, but
@@ -456,7 +475,7 @@ private struct MainTabs: View {
                                        titler: systemTitler)
             mgr = CaptureManager(
                 target: target, backend: backend, log: log, source: dm,
-                micSource: MicFrameSource(log: log),
+                micSource: mic,
                 liveTranscriber: liveFactory,
                 liveTitler: systemTitler,
                 // Production local mode: external OFF (nil) — the on-device title stands
@@ -468,9 +487,7 @@ private struct MainTabs: View {
             localSTT = nil
             mgr = CaptureManager(
                 target: target, log: log, source: dm,
-                // The phone's own mic as a second capture source (Record button when the
-                // Omi is disconnected) — flows through the identical Opus/WAL/finalize path.
-                micSource: MicFrameSource(log: log),
+                micSource: mic,
                 liveTranscriber: liveFactory,
                 // On-device Foundation Models stays the INSTANT placeholder + offline
                 // fallback; the door refresh SHARPENS it externally on the backoff.
@@ -485,6 +502,13 @@ private struct MainTabs: View {
                 },
                 liveTitleBackoff: liveBackoff)
         }
+        #if DEBUG
+        // The synthetic source has no hardware to ask permission for, and the simulator
+        // test runner cannot drive the AVAudioApplication prompt — so use the manager's
+        // EXISTING permission test hatch (the same one MeterLifecycleTests uses) to force
+        // the granted branch. Only ever set under `-SyntheticMic`.
+        if syntheticMic { mgr.micPermissionOverrideForTests = true }
+        #endif
         // Omi hardware button: a DOUBLE-click pauses/resumes the current recording — the
         // same action as the on-screen Pause. Fires only if the paired Omi firmware exposes
         // the button service (see DeviceManager.OmiUUID.buttonService).
