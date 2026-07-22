@@ -404,6 +404,26 @@ private struct MainTabs: View {
         // iOS 16–25; it's additive + ephemeral (Kiln stays authoritative).
         let status = LocalBrainStatus()
         _brainStatus = StateObject(wrappedValue: status)
+        #if DEBUG
+        // DEV-only screen-proof hook (`-BrainSetupFailed`, track 20260722T1244): force the
+        // on-device brain into the FAILED state so the honest-failure banner — warning
+        // glyph, the reason, and a working "Try again" — can be screenshot-verified in the
+        // simulator without stalling a real 150 MB download. Tapping retry clears the
+        // failure, shows recovery progress, and lands on ready (banner gone), which is the
+        // whole point of the control. No effect in release builds or normal launches.
+        if ProcessInfo.processInfo.arguments.contains("-BrainSetupFailed") {
+            status.setFailed("the download stopped at 35% and hasn't moved for 60s",
+                             retry: { [weak status] in
+                                 guard let status else { return }
+                                 let epoch = status.beginAttempt()
+                                 status.setDownloading(0.6, epoch: epoch)
+                                 Task { @MainActor in
+                                     try? await Task.sleep(nanoseconds: 4_000_000_000)
+                                     status.setReady(epoch: epoch)
+                                 }
+                             })
+        }
+        #endif
         // ONE on-device titler serves both the post-recording pipeline (LocalBackend)
         // and the LIVE rolling title's debounced refreshes (track 20260717T1015).
         let systemTitler = makeSystemTitler()
@@ -785,6 +805,11 @@ private struct MainTabs: View {
         // prewarms after the grace, and the first finalize loads regardless.
         .task {
             guard local, let stt = localSTT else { return }
+            #if DEBUG
+            // The `-BrainSetupFailed` screen proof seeds the FAILED state; a real prewarm
+            // would immediately open a new attempt and paint over it. Harness-only.
+            if ProcessInfo.processInfo.arguments.contains("-BrainSetupFailed") { return }
+            #endif
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             guard !Task.isCancelled else { return }
             await stt.prewarm()
@@ -841,8 +866,15 @@ private struct MainTabs: View {
             Text(text).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
             Spacer()
             if let retry = brainStatus.retryAction {
+                // This is the ONE control that unwedges a user whose brain setup failed,
+                // so it gets a real 44pt target (S7) — a bare `.caption` Text in a
+                // `.plain` button is ~11pt tall and easy to miss.
                 Button(action: retry) {
-                    Text(brainStatus.retryLabel).grainTextStyle(.caption)
+                    Text(brainStatus.retryLabel)
+                        .grainTextStyle(.caption)
+                        .padding(.horizontal, GrainSpacing.x2)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(GrainColor.textMain)
@@ -853,6 +885,12 @@ private struct MainTabs: View {
         .padding(.vertical, GrainSpacing.x2)
         .background(GrainColor.surfaceElevated)
         .overlay(alignment: .bottom) { Rectangle().fill(GrainColor.borderHairline).frame(height: 1) }
+        // The banner is an identifiable REGION, so the simulator proof can tell the
+        // failed rendition (warning glyph + reason + Try again) from the spinner one.
+        // `.contain` keeps the text and the retry button individually queryable.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(brainStatus.isFailed ? "brain-setup-banner-failed"
+                                                      : "brain-setup-banner-preparing")
     }
 
     /// Mirror the live BLE connection state onto the registry's Omi row.

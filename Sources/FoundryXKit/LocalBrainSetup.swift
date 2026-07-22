@@ -33,13 +33,51 @@ public struct BrainSetupPolicy: Sendable, Equatable {
     public var buildTimeout: TimeInterval
     /// How often the watchdog checks the heartbeat.
     public var pollInterval: TimeInterval
+    /// How long the download may be silent BEFORE its first byte lands (S2).
+    ///
+    /// `HubApi` only calls the progress handler from inside a per-file download closure:
+    /// two `getFilenames` round trips happen first, and a RESUMED fetch whose first K
+    /// files are already on disk emits nothing at all for them. On a poor link that
+    /// legitimate silence can outrun `stallTimeout` and produce a nonsense
+    /// "stopped at 0% and hasn't moved for 60s". "No callback YET" is not "callbacks
+    /// STOPPED", so it gets its own, longer bound.
+    public var startupGrace: TimeInterval
+    /// How long setup may run before the banner is allowed to appear at all (S5).
+    ///
+    /// A healthy, already-present model resolves in well under this, so the user never
+    /// sees a spurious "Setting up… 0%" flash for work that was never needed.
+    public var revealDelay: TimeInterval
+    /// Each RETRY multiplies `buildTimeout` by this, up to `buildTimeoutCeiling` (S3).
+    ///
+    /// A fixed build bound is a deterministic dead end: CoreML/ANE first-load on an older
+    /// device can legitimately take minutes, and a retry that re-runs the identical bound
+    /// fails identically forever — a button that provably never works. Escalating means
+    /// the retry is a real second chance, not a re-enactment.
+    public var buildTimeoutEscalation: Double
+    /// The ceiling escalation may not pass.
+    public var buildTimeoutCeiling: TimeInterval
 
     public init(stallTimeout: TimeInterval = 60,
                 buildTimeout: TimeInterval = 180,
-                pollInterval: TimeInterval = 2) {
+                pollInterval: TimeInterval = 2,
+                startupGrace: TimeInterval = 180,
+                revealDelay: TimeInterval = 1,
+                buildTimeoutEscalation: Double = 3,
+                buildTimeoutCeiling: TimeInterval = 1800) {
         self.stallTimeout = stallTimeout
         self.buildTimeout = buildTimeout
         self.pollInterval = pollInterval
+        self.startupGrace = startupGrace
+        self.revealDelay = revealDelay
+        self.buildTimeoutEscalation = buildTimeoutEscalation
+        self.buildTimeoutCeiling = buildTimeoutCeiling
+    }
+
+    /// The build bound for attempt `n` (1-based): escalating, capped.
+    public func buildTimeout(forAttempt n: Int) -> TimeInterval {
+        guard n > 1, buildTimeoutEscalation > 1 else { return buildTimeout }
+        let scaled = buildTimeout * pow(buildTimeoutEscalation, Double(n - 1))
+        return min(scaled, buildTimeoutCeiling)
     }
 
     public static let `default` = BrainSetupPolicy()
@@ -61,7 +99,9 @@ public enum BrainSetupError: Error, Equatable, LocalizedError {
             let pct = Int((min(max(fraction, 0), 1) * 100).rounded())
             return "the download stopped at \(pct)% and hasn't moved for \(Int(idle))s"
         case .buildTimedOut(let after):
-            return "preparing the model took longer than \(Int(after))s"
+            // Honest about the escalation (S3): a retry does NOT re-run the same bound,
+            // so "try again" is a real second chance rather than a re-enactment.
+            return "preparing the model took longer than \(Int(after))s — trying again gives it longer"
         }
     }
 }
@@ -80,6 +120,8 @@ public final class ProgressHeartbeat: @unchecked Sendable {
     private let clock: @Sendable () -> TimeInterval
     private var lastAdvance: TimeInterval
     private var best: Double = 0
+    private var beats = 0
+    private var transferComplete = false
 
     public init(clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.clock = clock
@@ -87,18 +129,41 @@ public final class ProgressHeartbeat: @unchecked Sendable {
     }
 
     /// Record real progress. Ignored unless it is strictly ahead of the best seen.
+    ///
+    /// Reaching 1.0 means the TRANSFER is done (S1). The old `guard f > best` saturated
+    /// there — once `best == 1.0` nothing could ever advance again, so post-transfer work
+    /// (the final move, hash verification) running past `stallTimeout` produced the absurd
+    /// "the download stopped at 100% and hasn't moved for 60s". There is nothing left to
+    /// stall-watch at 100%, so the heartbeat goes permanently live instead.
     public func advance(to fraction: Double) {
         let f = min(max(fraction, 0), 1)
         lock.lock(); defer { lock.unlock() }
+        if f >= 1 {
+            beats += 1
+            best = 1
+            transferComplete = true
+            lastAdvance = clock()
+            return
+        }
         guard f > best else { return }
+        beats += 1
         best = f
         lastAdvance = clock()
     }
 
-    /// Seconds since progress last advanced.
+    /// Seconds since progress last advanced. Always 0 once the transfer completed.
     public var idle: TimeInterval {
         lock.lock(); defer { lock.unlock() }
+        if transferComplete { return 0 }
         return max(0, clock() - lastAdvance)
+    }
+
+    /// Whether ANY progress has ever been reported. "No callback yet" (still resolving
+    /// filenames, or skipping already-present files on a resume) is a different thing from
+    /// "callbacks stopped", and gets the longer `startupGrace` bound — S2.
+    public var hasAdvanced: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return beats > 0
     }
 
     /// The furthest fraction actually observed.
@@ -142,14 +207,19 @@ public enum BrainSetupWatchdog {
     /// The loser is CANCELLED but never awaited: a downloader that ignores
     /// cancellation must not be able to hold the user's UI hostage — the point of the
     /// whole change is that the banner clears in bounded time.
+    ///
+    /// `graceTimeout` (default: `timeout`) applies until the FIRST beat lands — the
+    /// pre-transfer / resume window, where silence is normal (S2).
     public static func run<T: Sendable>(
         timeout: TimeInterval,
+        graceTimeout: TimeInterval? = nil,
         pollInterval: TimeInterval,
         heartbeat: ProgressHeartbeat,
         sleep: @escaping @Sendable (TimeInterval) async throws -> Void,
         onStall: @escaping @Sendable (TimeInterval, Double) -> any Error,
         operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
+        let grace = graceTimeout ?? timeout
         let box = FirstOutcome<T>()
 
         let work = Task {
@@ -161,7 +231,8 @@ public enum BrainSetupWatchdog {
                 try await sleep(pollInterval)
                 if Task.isCancelled { return }
                 let idle = heartbeat.idle
-                if idle >= timeout {
+                let bound = heartbeat.hasAdvanced ? timeout : grace
+                if idle >= bound {
                     await box.settle(Outcome(value: nil, error: onStall(idle, heartbeat.fraction)))
                     return
                 }
@@ -212,6 +283,11 @@ public actor LocalBrainPreparer {
 
     private var isReady = false
     private var inFlight: Task<Void, any Error>?
+    /// 1-based attempt counter — drives the escalating build bound (S3).
+    private var attempts = 0
+    /// Mirrors the status' attempt epoch so the (synchronous, arbitrary-thread) progress
+    /// callback can drop a superseded attempt's report AT SOURCE, without a main-actor hop.
+    private let epochBox = EpochBox()
 
     public init(steps: Steps,
                 policy: BrainSetupPolicy = .default,
@@ -250,12 +326,26 @@ public actor LocalBrainPreparer {
     public func retry() async throws { try await prepare() }
 
     private func runOnce() async throws {
+        attempts += 1
+        let attemptNumber = attempts
+        // Every report below is stamped with this attempt's epoch. A previous attempt's
+        // downloader may still be alive (the watchdog cancels but never awaits it); its
+        // reports are now dead on arrival instead of resurrecting the spinner (B1).
+        let epoch = await beginAttempt()
         let heartbeat = ProgressHeartbeat(clock: clock)
-        await report { $0.beginAttempt() }
         let sink = status
+        let box = epochBox
+        let clock = self.clock
+        let start = clock()
+        let reveal = policy.revealDelay
+        // S5: the banner only appears once setup has actually been running a moment. A
+        // healthy, already-present model resolves inside `revealDelay`, so it shows
+        // nothing at all — which is what the spec promises.
+        let visible: @Sendable () -> Bool = { clock() - start >= reveal }
         do {
             try await BrainSetupWatchdog.run(
                 timeout: policy.stallTimeout,
+                graceTimeout: policy.startupGrace,
                 pollInterval: policy.pollInterval,
                 heartbeat: heartbeat,
                 sleep: sleep,
@@ -264,18 +354,24 @@ public actor LocalBrainPreparer {
                 },
                 operation: { [steps] in
                     try await steps.download { fraction in
+                        guard box.current == epoch else { return }   // stale attempt
                         heartbeat.advance(to: fraction)
-                        Task { @MainActor in sink?.setDownloading(fraction) }
+                        guard visible() else { return }
+                        Task { @MainActor in sink?.setDownloading(fraction, epoch: epoch) }
                     }
                 })
 
-            await report { $0.setLoading() }
+            if visible() { await report { $0.setLoading(epoch: epoch) } }
 
             // The build reports no progress, so its heartbeat never advances: the same
-            // watchdog then degenerates into a plain bound of `buildTimeout`.
+            // watchdog then degenerates into a plain bound. That bound ESCALATES per
+            // attempt (S3) so "Try again" is a real second chance on a slow device
+            // rather than a re-run of the same doomed 180s.
+            let buildBound = policy.buildTimeout(forAttempt: attemptNumber)
             let buildBeat = ProgressHeartbeat(clock: clock)
             try await BrainSetupWatchdog.run(
-                timeout: policy.buildTimeout,
+                timeout: buildBound,
+                graceTimeout: buildBound,
                 pollInterval: policy.pollInterval,
                 heartbeat: buildBeat,
                 sleep: sleep,
@@ -283,18 +379,37 @@ public actor LocalBrainPreparer {
                 operation: { [steps] in try await steps.build() })
 
             isReady = true
-            await report { $0.setReady() }
+            await report { $0.setReady(epoch: epoch) }
         } catch {
             let why = error.localizedDescription
             await report { [weak self] s in
-                s.setFailed(why, retry: { Task { try? await self?.retry() } })
+                s.setFailed(why, retry: { Task { try? await self?.retry() } }, epoch: epoch)
             }
             throw error
         }
+    }
+
+    /// Open a new attempt and adopt its epoch (the status is authoritative when present,
+    /// so the sink and the drop-at-source box can never disagree).
+    private func beginAttempt() async -> Int {
+        guard let status else { return epochBox.bump() }
+        let epoch = await MainActor.run { status.beginAttempt() }
+        epochBox.set(epoch)
+        return epoch
     }
 
     private func report(_ body: @escaping @MainActor (LocalBrainStatus) -> Void) async {
         guard let status else { return }
         await MainActor.run { body(status) }
     }
+}
+
+/// A lock-boxed attempt epoch readable from the synchronous, arbitrary-thread progress
+/// callback (an actor would force a hop and reintroduce the ordering race).
+private final class EpochBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    var current: Int { lock.lock(); defer { lock.unlock() }; return value }
+    func bump() -> Int { lock.lock(); defer { lock.unlock() }; value += 1; return value }
+    func set(_ v: Int) { lock.lock(); value = v; lock.unlock() }
 }

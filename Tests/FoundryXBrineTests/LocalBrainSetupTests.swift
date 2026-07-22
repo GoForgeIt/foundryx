@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 @testable import FoundryXKit
 
 // MARK: - Deterministic harness
@@ -17,6 +18,18 @@ private final class AttemptCounter: @unchecked Sendable {
     private let lock = NSLock()
     private(set) var count = 0
     func next() -> Int { lock.lock(); defer { lock.unlock() }; count += 1; return count }
+}
+
+/// Holds on to a live attempt's progress callback so a test can fire it LATER — the
+/// zombie downloader that the stall watchdog cancelled but never awaited.
+private final class CapturedProgress: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fn: (@Sendable (Double) -> Void)?
+    func capture(_ f: @escaping @Sendable (Double) -> Void) { lock.lock(); fn = f; lock.unlock() }
+    func fire(_ fraction: Double) {
+        lock.lock(); let f = fn; lock.unlock()
+        f?(fraction)
+    }
 }
 
 /// The on-device brain's bounded, honest setup (track 20260722T1244). Every seam —
@@ -201,6 +214,347 @@ final class LocalBrainSetupTests: XCTestCase {
         status.setLoading()
         XCTAssertTrue(status.isFailed)
         XCTAssertFalse(status.isPreparing)
+    }
+
+    // MARK: - B1: a settled attempt can never be turned back into a spinner
+
+    /// The MIRROR of the sticky-failure test above, and the one that failed before this
+    /// review: `.ready` must be terminal too. Attempt 1 stalls → `.failed` → the user
+    /// retries → attempt 2 succeeds → and THEN attempt 1's zombie downloader emits one
+    /// last progress report. If that lands, the spinner is back with no retry button and
+    /// nothing running to ever clear it.
+    func testReadyIsStickyAgainstLateProgressReports() {
+        let status = LocalBrainStatus()
+        status.setReady()
+        status.setDownloading(0.2)
+        XCTAssertEqual(status.phase, .ready)
+        status.setLoading()
+        XCTAssertEqual(status.phase, .ready)
+        XCTAssertNil(status.bannerText)
+        XCTAssertFalse(status.isPreparing)
+    }
+
+    /// The general form: reports carry the attempt they were produced under, and a
+    /// superseded attempt's reports are dropped whatever phase we happen to be in.
+    func testStaleEpochReportsAreDropped() {
+        let status = LocalBrainStatus()
+        let first = status.beginAttempt()
+        let second = status.beginAttempt()
+        XCTAssertNotEqual(first, second)
+
+        status.setDownloading(0.87, epoch: first)
+        XCTAssertEqual(status.phase, .idle, "a superseded attempt must not drive the banner")
+        status.setLoading(epoch: first)
+        XCTAssertEqual(status.phase, .idle)
+        status.setFailed("stale failure", retry: {}, epoch: first)
+        XCTAssertEqual(status.phase, .idle, "a superseded attempt must not fail the current one")
+        XCTAssertFalse(status.canRetry)
+
+        // The CURRENT attempt still drives everything.
+        status.setDownloading(0.3, epoch: second)
+        XCTAssertEqual(status.phase, .downloading(0.3))
+        status.setReady(epoch: second)
+        XCTAssertEqual(status.phase, .ready)
+    }
+
+    /// End-to-end B1: a stalled attempt is cancelled but NOT awaited, so its downloader
+    /// can still be alive after the user retried and the retry succeeded. One late
+    /// `progressHandler` from it must not resurrect the banner on a ready brain.
+    func testZombieProgressFromAStalledAttemptCannotResurrectTheBanner() async throws {
+        let clock = FakeSetupClock()
+        let status = LocalBrainStatus()
+        let attempts = AttemptCounter()
+        let zombie = CapturedProgress()
+        let preparer = LocalBrainPreparer(
+            steps: .init(
+                download: { onProgress in
+                    if attempts.next() == 1 {
+                        zombie.capture(onProgress)       // keep attempt 1's callback alive
+                        onProgress(0.1)
+                        try await Task.sleep(nanoseconds: 120_000_000_000)
+                    }
+                    // attempt 2: the connection is back, it lands immediately
+                },
+                build: {}),
+            policy: fastPolicy,
+            status: status,
+            clock: { clock.now },
+            sleep: { d in clock.advance(d); await Task.yield() })
+
+        do {
+            try await preparer.prepare()
+            XCTFail("the first attempt stalls")
+        } catch {}
+        XCTAssertTrue(status.isFailed)
+
+        try await preparer.retry()
+        XCTAssertEqual(status.phase, .ready)
+
+        // The zombie speaks. (The fake clock is now well past `revealDelay`, so nothing
+        // but the epoch stands between this and a permanent spinner.)
+        zombie.fire(0.87)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(status.phase, .ready, "a dead attempt must not put the spinner back")
+        XCTAssertNil(status.bannerText)
+        XCTAssertFalse(status.isPreparing)
+        XCTAssertFalse(status.canRetry)
+    }
+
+    // MARK: - Stall-detection boundaries
+
+    /// The tightest survivable case: 0.1% every 59 seconds against a 60-second stall
+    /// limit. Barely-moving is still moving, and must never be killed.
+    func testBarelyAdvancingDownloadJustInsideTheLimitSurvives() async throws {
+        let clock = FakeSetupClock()
+        let status = LocalBrainStatus()
+        let preparer = LocalBrainPreparer(
+            steps: .init(
+                download: { onProgress in
+                    for i in 1...10 {
+                        clock.advance(59)                // just inside the 60s limit
+                        onProgress(Double(i) * 0.001)    // 0.1% each time
+                        await Task.yield()
+                    }
+                },
+                build: {}),
+            policy: fastPolicy,
+            status: status,
+            clock: { clock.now },
+            sleep: { _ in await Task.yield() })
+
+        try await preparer.prepare()
+        XCTAssertEqual(status.phase, .ready)
+        XCTAssertGreaterThan(clock.now, fastPolicy.stallTimeout * 9)
+    }
+
+    /// Out-of-order / regressing fractions at the PREPARER level: a transfer that keeps
+    /// re-reporting ground it already covered is stalled, and the reported failure names
+    /// the furthest point actually reached (not the last number it shouted).
+    func testRegressingFractionsAreStillAStall() async throws {
+        let clock = FakeSetupClock()
+        let status = LocalBrainStatus()
+        let preparer = LocalBrainPreparer(
+            steps: .init(
+                download: { onProgress in
+                    onProgress(0.5)
+                    for _ in 0..<60 {
+                        clock.advance(3)
+                        onProgress(0.2)                  // backwards: not progress
+                        onProgress(0.5)                  // same place: not progress
+                        await Task.yield()
+                    }
+                    // The watchdog fires long before this loop ends; the cancelled-but-
+                    // never-awaited download simply finishes in the background.
+                },
+                build: { XCTFail("build must not run after a stalled download") }),
+            policy: fastPolicy,
+            status: status,
+            clock: { clock.now },
+            sleep: { _ in await Task.yield() })
+
+        do {
+            try await preparer.prepare()
+            XCTFail("a download that never advances must not succeed")
+        } catch let error as BrainSetupError {
+            guard case .downloadStalled(_, let fraction) = error else {
+                return XCTFail("wrong error: \(error)")
+            }
+            XCTAssertEqual(fraction, 0.5, "the banner should name the furthest point reached")
+        }
+        XCTAssertTrue(status.isFailed)
+    }
+
+    /// S1: reaching 100% means the TRANSFER is done. Post-transfer work (the final move,
+    /// hash verification) taking longer than the stall limit must not be reported as
+    /// "stopped at 100% and hasn't moved for 60s" — there is nothing left to stall-watch.
+    func testPostTransferWorkPast100PercentIsNotAStall() async throws {
+        let clock = FakeSetupClock()
+        let status = LocalBrainStatus()
+        let preparer = LocalBrainPreparer(
+            steps: .init(
+                download: { onProgress in
+                    onProgress(1.0)                       // every byte has landed
+                    for _ in 0..<60 {                     // 180s of moving + verifying
+                        clock.advance(3)
+                        await Task.yield()
+                    }
+                },
+                build: {}),
+            policy: fastPolicy,
+            status: status,
+            clock: { clock.now },
+            sleep: { _ in await Task.yield() })
+
+        try await preparer.prepare()
+        XCTAssertEqual(status.phase, .ready)
+        XCTAssertGreaterThan(clock.now, fastPolicy.stallTimeout)
+    }
+
+    /// S2: silence BEFORE the first byte is not the same as silence after it. `HubApi`
+    /// makes two `getFilenames` round trips first and emits nothing at all for files a
+    /// resume finds already on disk, so that window gets the longer `startupGrace`.
+    func testSilentStartupGetsTheLongerGraceButIsStillBounded() async throws {
+        // Survives 120 silent seconds — past `stallTimeout`, inside `startupGrace`.
+        let clock = FakeSetupClock()
+        let status = LocalBrainStatus()
+        let preparer = LocalBrainPreparer(
+            steps: .init(
+                download: { _ in
+                    for _ in 0..<40 { clock.advance(3); await Task.yield() }   // no callbacks
+                },
+                build: {}),
+            policy: fastPolicy,
+            status: status,
+            clock: { clock.now },
+            sleep: { _ in await Task.yield() })
+        try await preparer.prepare()
+        XCTAssertEqual(status.phase, .ready)
+        XCTAssertGreaterThan(clock.now, fastPolicy.stallTimeout)
+
+        // But it is still BOUNDED: past the grace it fails honestly rather than spinning.
+        let clock2 = FakeSetupClock()
+        let status2 = LocalBrainStatus()
+        let preparer2 = LocalBrainPreparer(
+            steps: .init(
+                download: { _ in try await Task.sleep(nanoseconds: 120_000_000_000) },
+                build: {}),
+            policy: fastPolicy,
+            status: status2,
+            clock: { clock2.now },
+            sleep: { d in clock2.advance(d); await Task.yield() })
+        do {
+            try await preparer2.prepare()
+            XCTFail("a download that never starts must not spin forever")
+        } catch let error as BrainSetupError {
+            guard case .downloadStalled(let idle, _) = error else {
+                return XCTFail("wrong error: \(error)")
+            }
+            XCTAssertGreaterThanOrEqual(idle, fastPolicy.startupGrace)
+        }
+        XCTAssertTrue(status2.isFailed)
+        XCTAssertTrue(status2.canRetry)
+    }
+
+    // MARK: - S3: the build bound escalates, so "Try again" is a real second chance
+
+    func testBuildTimeoutEscalatesPerAttemptAndIsCapped() {
+        let p = BrainSetupPolicy(buildTimeout: 180, buildTimeoutEscalation: 3, buildTimeoutCeiling: 1800)
+        XCTAssertEqual(p.buildTimeout(forAttempt: 1), 180)
+        XCTAssertEqual(p.buildTimeout(forAttempt: 2), 540)
+        XCTAssertEqual(p.buildTimeout(forAttempt: 3), 1620)
+        XCTAssertEqual(p.buildTimeout(forAttempt: 4), 1800, "escalation is capped")
+    }
+
+    /// A build that legitimately needs longer than the first bound (an older device's
+    /// CoreML/ANE first load) SUCCEEDS on retry, instead of re-running the identical
+    /// doomed bound forever.
+    func testSlowBuildThatBlewTheFirstBoundSucceedsOnRetry() async throws {
+        let clock = FakeSetupClock()
+        let status = LocalBrainStatus()
+        let builds = AttemptCounter()
+        let preparer = LocalBrainPreparer(
+            steps: .init(
+                download: { onProgress in onProgress(1.0) },
+                build: {
+                    if builds.next() == 1 {
+                        try await Task.sleep(nanoseconds: 120_000_000_000)   // blows 180s
+                    } else {
+                        // 250 virtual seconds: past the first bound, inside the second (540s).
+                        for _ in 0..<50 { clock.advance(5); await Task.yield() }
+                    }
+                }),
+            policy: fastPolicy,
+            status: status,
+            clock: { clock.now },
+            sleep: { d in clock.advance(d); await Task.yield() })
+
+        do {
+            try await preparer.prepare()
+            XCTFail("the first build blows its bound")
+        } catch let error as BrainSetupError {
+            guard case .buildTimedOut = error else { return XCTFail("wrong error: \(error)") }
+        }
+        XCTAssertTrue(status.isFailed)
+        let banner = try XCTUnwrap(status.bannerText)
+        XCTAssertTrue(banner.contains("trying again gives it longer"),
+                      "the copy must be honest about the escalation: \(banner)")
+
+        try await preparer.retry()
+        XCTAssertEqual(status.phase, .ready, "the retry gets a longer bound and finishes")
+    }
+
+    // MARK: - S5 / concurrency
+
+    /// A healthy, already-present model needs no work, so it must never flash
+    /// "Setting up… 0%". Judged over EVERY transition, not just the final state.
+    func testCachedModelNeverShowsABannerAtAnyPoint() async throws {
+        let status = LocalBrainStatus()
+        var seen: [LocalBrainStatus.Phase] = []
+        let observer = status.$phase.sink { seen.append($0) }
+        defer { observer.cancel() }
+
+        let preparer = LocalBrainPreparer(
+            steps: .init(download: { onProgress in onProgress(1.0) }, build: {}),
+            policy: fastPolicy,
+            status: status,
+            sleep: { _ in await Task.yield() })
+        try await preparer.prepare()
+
+        XCTAssertEqual(status.phase, .ready)
+        let banners = seen.compactMap { LocalBrainStatus.bannerText(for: $0) }
+        XCTAssertTrue(banners.isEmpty, "no banner should ever have appeared: \(banners)")
+    }
+
+    /// Two callers racing into setup (the pill's prewarm and a finalize, or a double-tap
+    /// on "Try again") must join ONE attempt, never run two downloads at once.
+    func testConcurrentPreparesJoinASingleAttempt() async throws {
+        let status = LocalBrainStatus()
+        let downloads = AttemptCounter()
+        let preparer = LocalBrainPreparer(
+            steps: .init(
+                download: { _ in
+                    _ = downloads.next()
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                },
+                build: {}),
+            policy: fastPolicy,
+            status: status,
+            sleep: { _ in await Task.yield() })
+
+        async let a: Void = preparer.prepare()
+        async let b: Void = preparer.prepare()
+        _ = try await (a, b)
+
+        XCTAssertEqual(downloads.count, 1, "a concurrent caller must join, not race")
+        XCTAssertEqual(status.phase, .ready)
+    }
+
+    /// And a concurrent RETRY after a failure is the same story: one attempt, one outcome.
+    func testConcurrentRetriesAfterFailureRunOneAttempt() async throws {
+        let status = LocalBrainStatus()
+        let downloads = AttemptCounter()
+        let preparer = LocalBrainPreparer(
+            steps: .init(
+                download: { _ in
+                    if downloads.next() == 1 { throw URLError(.networkConnectionLost) }
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                },
+                build: {}),
+            policy: fastPolicy,
+            status: status,
+            sleep: { _ in await Task.yield() })
+
+        do { try await preparer.prepare(); XCTFail("first attempt fails") } catch {}
+        XCTAssertTrue(status.isFailed)
+
+        async let a: Void = preparer.retry()
+        async let b: Void = preparer.retry()
+        _ = try await (a, b)
+
+        XCTAssertEqual(downloads.count, 2, "the two retries share one attempt")
+        XCTAssertEqual(status.phase, .ready)
+        XCTAssertFalse(status.canRetry)
     }
 
     /// Only ADVANCING progress counts — repeating the same fraction is what a stalled

@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import Combine
 import BrineSwiftCore
 @testable import FoundryXKit
 
@@ -23,6 +24,11 @@ private final class BrainSetupWorld: @unchecked Sendable {
     /// Flips true after the first failing attempt, so "the connection is back" makes the
     /// SAME preparer succeed on retry.
     let connectionDown = Flag()
+    /// EVERY phase the status passed through, not just the one it ended on (T1). Checking
+    /// only the final `bannerText` cannot see a banner that appeared and then went away —
+    /// which is exactly what "I see no setup banner at all" is about.
+    let seen = PhaseLog()
+    private var observer: AnyCancellable?
 
     final class Flag: @unchecked Sendable {
         private let lock = NSLock()
@@ -31,7 +37,21 @@ private final class BrainSetupWorld: @unchecked Sendable {
         var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
     }
 
-    @MainActor func makeStatus() { status = LocalBrainStatus() }
+    final class PhaseLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var phases: [LocalBrainStatus.Phase] = []
+        func reset() { lock.lock(); phases = []; lock.unlock() }
+        func append(_ p: LocalBrainStatus.Phase) { lock.lock(); phases.append(p); lock.unlock() }
+        var all: [LocalBrainStatus.Phase] { lock.lock(); defer { lock.unlock() }; return phases }
+        /// Every banner the user would have seen, in order.
+        var banners: [String] { all.compactMap { LocalBrainStatus.bannerText(for: $0) } }
+    }
+
+    @MainActor func makeStatus() {
+        status = LocalBrainStatus()
+        seen.reset()
+        observer = status.$phase.sink { [seen] phase in seen.append(phase) }
+    }
 }
 
 private enum LocalBrainSetupSteps {
@@ -175,7 +195,15 @@ private enum LocalBrainSetupSteps {
                 }
             },
 
+            // Judged over the WHOLE attempt, not just its final state (T1): a banner that
+            // flashed and vanished is still a banner the user saw, and the old
+            // final-state-only check could not fail on it.
             defineCheck("I see no setup banner at all") { _, _, _ in
+                if let flashed = w.seen.banners.first {
+                    throw BrineStepError(
+                        "a setup banner appeared during the attempt: \"\(flashed)\" "
+                        + "(phases: \(w.seen.all))")
+                }
                 if let text = await w.status.bannerText {
                     throw BrineStepError("unexpected banner: \(text)")
                 }
