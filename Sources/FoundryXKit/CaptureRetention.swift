@@ -163,8 +163,16 @@ public enum TranscriptCacheStore {
     }
 
     /// True once a transcript has been cached for this capture (the readable tombstone).
+    ///
+    /// GATE INTEGRITY (track `residual_on_main_actor_work`): this is a `fileExists` — a
+    /// synchronous stat. It was read ONCE PER RENDERED ROW (the card's "Ready" chip + the
+    /// on-sight cache guard), which is per-row disk on the main actor. It is legitimate
+    /// OFF the main actor (`loadSidecar`, the retention sweep) and a bug ON it, so it is
+    /// counted at the operation itself — exactly like the transcript decode in
+    /// `CaptureManager.loadSidecar` — and the gate no-ops off-main.
     public static func hasCachedTranscript(captureId: String, baseDir: URL) -> Bool {
-        FileManager.default.fileExists(atPath: transcriptURL(captureId: captureId, baseDir: baseDir).path)
+        CaptureManager.noteMainThreadDecode()
+        return FileManager.default.fileExists(atPath: transcriptURL(captureId: captureId, baseDir: baseDir).path)
     }
 
     /// True once we've durably confirmed this capture reached Lore.

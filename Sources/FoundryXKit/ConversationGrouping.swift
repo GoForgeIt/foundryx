@@ -58,7 +58,43 @@ public enum ConversationGrouping {
                                              now: Date,
                                              calendar: Calendar = .current,
                                              date: (Item) -> Date) -> [ConversationSection<Item>] {
-        let sorted = items.sorted { date($0) > date($1) }
+        groupPresorted(items.sorted { date($0) > date($1) },
+                       now: now, calendar: calendar, date: date)
+    }
+
+    /// The same grouping for a list the caller ALREADY supplies newest-first — the
+    /// conversation list's case: `visibleCaptures` is sorted date-descending at every
+    /// rebuild, and the search/category filters preserve that order, so re-sorting it on
+    /// every body pass was pure redundant work on the main actor (track
+    /// `residual_on_main_actor_work`). `group(_:)` keeps the sort for callers that need it;
+    /// the RENDER path calls this. Given a date-descending input the two are identical —
+    /// `ResidualMainActorWorkTests.testPresortedGroupingIsIdenticalToSortingGrouping` pins
+    /// that over a real hydrated, bucket-spanning library.
+    ///
+    /// PRECONDITION: `sorted` is date-DESCENDING. A real invariant, not a preference: the
+    /// section fold below only closes a section when the title CHANGES, so unsorted input
+    /// silently emits duplicated section titles and mis-ordered rows — a WRONG LIST rather
+    /// than a crash, i.e. exactly the failure a comment alone would let ship. It is checked
+    /// in DEBUG, where the check costs one extra `date()` pass over a list the fold below
+    /// already calls `date()` on once per item.
+    public static func groupPresorted<Item: Sendable>(_ sorted: [Item],
+                                                      now: Date,
+                                                      calendar: Calendar = .current,
+                                                      date: (Item) -> Date) -> [ConversationSection<Item>] {
+        #if DEBUG
+        var previousDate: Date?
+        for item in sorted {
+            let d = date(item)
+            if let previousDate {
+                precondition(d <= previousDate,
+                             "ConversationGrouping.groupPresorted requires date-DESCENDING " +
+                             "input; got \(d) after \(previousDate). Use group(_:) (which " +
+                             "sorts) or fix the caller's ordering — unsorted input silently " +
+                             "produces duplicated, mis-ordered sections.")
+            }
+            previousDate = d
+        }
+        #endif
         var sections: [ConversationSection<Item>] = []
         var currentTitle: String?
         var bucket: [Item] = []
@@ -95,19 +131,65 @@ public enum ConversationGrouping {
     }
 
     private static func weekdayName(of date: Date, calendar: Calendar) -> String {
-        let f = DateFormatter()
-        f.calendar = calendar
-        f.locale = calendar.locale ?? .current
-        f.dateFormat = "EEEE"          // "Monday"
-        return f.string(from: date)
+        formatter(format: "EEEE", calendar: calendar).string(from: date)   // "Monday"
     }
 
     private static func monthName(of date: Date, now: Date, calendar: Calendar) -> String {
         let sameYear = calendar.component(.year, from: date) == calendar.component(.year, from: now)
+        return formatter(format: sameYear ? "LLLL" : "LLLL yyyy",   // "June" / "May 2025"
+                         calendar: calendar).string(from: date)
+    }
+
+    // MARK: formatter cache — never allocate a DateFormatter per row or per section
+
+    /// A `DateFormatter` is one of the most expensive objects in Foundation to build
+    /// (it drags in ICU), and `sectionTitle` is called ONCE PER ROW on the list's render
+    /// path — so allocating one inside it allocated N of them per body pass. They are
+    /// cached instead, keyed by everything that changes their output (format + calendar +
+    /// locale + time zone), so behaviour is identical and the tests that pass explicit
+    /// UTC/locale calendars still get their own instance.
+    ///
+    /// `DateFormatter` is not thread-safe, so the cache AND the `string(from:)` call that
+    /// uses an instance are both under the lock (grouping runs on the main actor in the app,
+    /// but the tests and the off-main warm paths must stay safe).
+    nonisolated(unsafe) private static let formatterLock = NSLock()
+    nonisolated(unsafe) private static var formatters: [String: DateFormatter] = [:]
+
+    /// Test seam: how many `DateFormatter`s the grouping has EVER built. The acceptance
+    /// instrument for "no DateFormatter is allocated per row or per section on a render
+    /// path" — grouping N rows must move this by at most the number of distinct
+    /// (format, calendar) pairs, never by N.
+    static var formatterAllocationsForTests: Int {
+        formatterLock.lock(); defer { formatterLock.unlock() }; return formatters.count
+    }
+
+    private static func formatter(format: String, calendar: Calendar) -> LockedFormatter {
+        let locale = calendar.locale ?? .current
+        let key = "\(format)|\(calendar.identifier)|\(locale.identifier)|\(calendar.timeZone.identifier)"
+        formatterLock.lock()
+        defer { formatterLock.unlock() }
+        if let hit = formatters[key] { return LockedFormatter(hit) }
         let f = DateFormatter()
         f.calendar = calendar
-        f.locale = calendar.locale ?? .current
-        f.dateFormat = sameYear ? "LLLL" : "LLLL yyyy"   // "June" / "May 2025"
-        return f.string(from: date)
+        f.locale = locale
+        // NOTE: `timeZone` is deliberately NOT set — the old per-call formatter didn't set
+        // it either, so leaving it to the formatter's own calendar/system resolution keeps
+        // the output byte-identical. It IS part of the cache key so two calendars that
+        // differ only by zone never share an instance.
+        f.dateFormat = format
+        formatters[key] = f
+        return LockedFormatter(f)
+    }
+
+    /// A cached formatter handle whose only operation takes the shared lock — so two
+    /// threads can never be inside the same (non-thread-safe) `DateFormatter` at once.
+    private struct LockedFormatter {
+        private let formatter: DateFormatter
+        init(_ f: DateFormatter) { formatter = f }
+        func string(from date: Date) -> String {
+            ConversationGrouping.formatterLock.lock()
+            defer { ConversationGrouping.formatterLock.unlock() }
+            return formatter.string(from: date)
+        }
     }
 }

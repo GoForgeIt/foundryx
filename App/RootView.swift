@@ -639,15 +639,37 @@ private struct MainTabs: View {
             NavigationStack {
                 // Deferred off the first-frame path (TARGET 2); still builds the instant
                 // Activity is selected (deep link / intent), so routing is unaffected.
+                //
+                // DELIBERATELY *NOT* narrowed to `router.selected == .activity` (track
+                // `residual_on_main_actor_work`): flipping this whole branch between
+                // `ActivityView` and `Color.clear` changes the branch's VIEW IDENTITY, so
+                // leaving the tab would TEAR DOWN `ActivityView` — destroying its
+                // `@StateObject ActivityRecapModel`, its scroll position and Today|This week
+                // selection, popping any pushed `StatsView`, and dropping its
+                // `.foundryxConversationFinalized` observer. Chat and Settings below stay
+                // mounted for exactly this reason. The expense was never the VIEW existing —
+                // it was `recapConversationPool()`, an O(N) library scan, being evaluated as
+                // an eager argument on every body pass. That is fixed at the seam instead:
+                // it is passed as a PROVIDER, invoked only when the recap model actually
+                // rebuilds (which also fixes a latent bug — an eagerly-passed array was
+                // captured into `@StateObject` on the first body pass, possibly before
+                // hydration, freezing an empty pool forever).
                 if deferredTabsReady || router.selected == .activity {
                     ActivityView(
                         decisionLogURL: AmbientPrefs.decisionLogURL(),
-                        recapPool: manager.recapConversationPool(),
+                        recapPoolProvider: { manager.recapConversationPool() },
                         onOpenChat: { seed in AmbientCardBroker.shared.run(seed: seed) },
                         local: local
                     )
                     .toolbar {
-                        NavigationLink("Stats") { StatsView(summary: manager.statsSummary) }
+                        // LAZY destination: `NavigationLink`'s destination is built eagerly
+                        // with the link itself, so `StatsView(summary:)` was constructed on
+                        // every body pass for a screen nobody had opened. To be precise, that
+                        // construction is CHEAP — `statsSummary` is a stored `@Published`
+                        // value, not a computed scan — so this is hygiene on the render path
+                        // (and insurance against the destination growing costlier), not a
+                        // measured win like the recap pool above.
+                        NavigationLink("Stats") { LazyView { StatsView(summary: manager.statsSummary) } }
                     }
                 } else {
                     Color.clear
@@ -903,4 +925,15 @@ private extension CaptureIndicatorTint {
         case .neutral: return GrainColor.textMuted
         }
     }
+}
+
+/// Defers building a destination view until SwiftUI actually renders it. `NavigationLink`'s
+/// `destination:` is an autoclosure-free @ViewBuilder evaluated WITH the link, so an
+/// expensive destination is constructed on every body pass of the screen carrying the link
+/// (track `residual_on_main_actor_work`). Wrapping it moves that construction to first
+/// render of the destination itself.
+struct LazyView<Content: View>: View {
+    private let build: () -> Content
+    init(@ViewBuilder _ build: @escaping () -> Content) { self.build = build }
+    var body: some View { build() }
 }

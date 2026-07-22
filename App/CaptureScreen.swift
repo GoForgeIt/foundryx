@@ -133,23 +133,13 @@ struct SessionElapsedLabel: View {
     }
 }
 
-/// Activity's parameter wiring, extracted from the old buried Capture
-/// NavigationLink so the top-level Activity TAB (spec §1/§6, track
-/// 20260714T1800) mounts the SAME configured surface: the ambient decision
-/// log, the manager's recap pool, chat handoff via the ambient broker, and the
-/// old Stats readout one tap deeper (subsumed, not lost).
-enum CaptureActivityWiring {
-    @MainActor static func activityView(manager: CaptureManager) -> some View {
-        ActivityView(
-            decisionLogURL: AmbientPrefs.decisionLogURL(),
-            recapPool: manager.recapConversationPool(),
-            onOpenChat: { seed in AmbientCardBroker.shared.run(seed: seed) }
-        )
-        .toolbar {
-            NavigationLink("Stats") { StatsView(summary: manager.statsSummary) }
-        }
-    }
-}
+// `CaptureActivityWiring` lived here: Activity's parameter wiring, extracted from the old
+// buried Capture NavigationLink when Activity became a top-level TAB (track 20260714T1800).
+// DELETED (track `residual_on_main_actor_work`) — it had no callers left; `MainTabs` in
+// RootView.swift is the one place that mounts `ActivityView`. It was also a trap: it kept
+// the eager `recapPool: manager.recapConversationPool()` argument and the eager
+// `StatsView` destination that the Activity tab has since moved off the render path, so
+// anyone reviving it would have silently reintroduced both.
 
 struct CaptureScreen: View {
     @Environment(\.colorScheme) private var colorScheme
@@ -699,7 +689,10 @@ struct CaptureScreen: View {
     /// `ConversationGrouping`; `visibleCaptures` is already date-desc, so sections stay
     /// in order. LazyVStack keeps off-screen cards (and their pollers) inert.
     private var conversationList: some View {
-        let sections = ConversationGrouping.group(filteredCaptures, now: Date()) {
+        // PRESORTED: `visibleCaptures` is sorted date-descending at every rebuild and the
+        // search/category filters preserve order, so the grouping must not re-sort N rows on
+        // every body pass (track `residual_on_main_actor_work`).
+        let sections = ConversationGrouping.groupPresorted(filteredCaptures, now: Date()) {
             manager.conversationStartDate($0)
         }
         // NOT pinned (T1 AC3): a pinned header needs an opaque band to hide the rows

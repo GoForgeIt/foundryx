@@ -58,9 +58,24 @@ struct ActivityView: View {
     /// will actually resolve (never a labeled dead tap; review finding).
     @State private var actionRows: [String: ConversationActionsPresentation.Row] = [:]
 
+    /// `recapPoolProvider` is the mounting screen's LAZY pool seam and the one the app uses
+    /// (track `residual_on_main_actor_work`). Two reasons it is a closure, not an array:
+    ///
+    ///  1. COST. `CaptureManager.recapConversationPool()` is an O(N) scan of the whole
+    ///     library. Passed as an eagerly-evaluated `recapPool:` argument it ran on EVERY body
+    ///     pass of the screen that mounts this view, even though `ActivityRecapModel` reads
+    ///     the pool only when it actually (re)builds a recap.
+    ///  2. FRESHNESS. `@StateObject`'s wrapped value is built once, on the FIRST body pass —
+    ///     so an eagerly-passed array froze whatever the pool was at that instant, which on a
+    ///     cold launch can be BEFORE hydration finishes, i.e. an empty pool that never
+    ///     refreshes. A provider is re-invoked at every rebuild, so the recap always sees the
+    ///     library as it is now.
+    ///
+    /// `recapPool:` is kept for callers (tests, previews) that genuinely have a fixed pool.
     init(decisionLogURL: URL,
          synthesizer: RecapSynthesizer? = makeSystemRecapSynthesizer(),
          recapPool: [RecapConversation] = [],
+         recapPoolProvider: (() -> [RecapConversation])? = nil,
          recapComposer: RecapComposer? = makeSystemRecapComposer(),
          onOpenConversation: ((String) -> Void)? = nil,
          onOpenChat: ((String) -> Void)? = nil,
@@ -70,8 +85,9 @@ struct ActivityView: View {
         self.onOpenConversation = onOpenConversation
         self.onOpenChat = onOpenChat
         self.local = local
+        let provider = recapPoolProvider ?? { recapPool }
         _recap = StateObject(wrappedValue:
-            ActivityRecapModel(poolProvider: { recapPool }, composer: recapComposer,
+            ActivityRecapModel(poolProvider: provider, composer: recapComposer,
                                cacheBaseDir: CaptureWAL.documentsCaptures()))
     }
 

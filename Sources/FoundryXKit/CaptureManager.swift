@@ -298,6 +298,7 @@ public final class CaptureManager: ObservableObject {
     /// pruned-to-transcript tombstone. Order newest-first by the durable conversation start.
     private func rebuildVisibleCaptures() {
         rebuildCountForTests += 1
+        invalidateLastFinishedMemo()   // membership/order/active just moved
         let visible = CaptureManager.deduplicatedByCaptureId(captures)
             .filter { self.isBrowsable($0) }
             .sorted { self.startTime(of: $0) > self.startTime(of: $1) }
@@ -574,8 +575,38 @@ public final class CaptureManager: ObservableObject {
 
     /// True once a transcript has been cached locally for this capture (used to keep a
     /// pruned/tombstoned conversation visible + to drive the card's "Ready" chip).
+    ///
+    /// Served from the per-capture sidecar memo (the fact is derived off-main in
+    /// `loadSidecar`): this is read ONCE PER RENDERED ROW, and a `fileExists` per row per
+    /// render is per-row disk on the main actor. Same freshness rule as `cardMeta` — a
+    /// known-stale memo (a write's re-read still in flight, or a throttled re-read not yet
+    /// started) falls back to the real stat. See `freshMemo(for:)`.
     public func hasCachedTranscript(_ captureId: String) -> Bool {
-        TranscriptCacheStore.hasCachedTranscript(captureId: captureId, baseDir: baseDir)
+        if let snap = freshMemo(for: captureId) { return snap.hasCachedTranscript }
+        return TranscriptCacheStore.hasCachedTranscript(captureId: captureId, baseDir: baseDir)
+    }
+
+    /// The per-capture sidecar memo, but ONLY when it is known-fresh — the single freshness
+    /// rule every memo-served render read shares (`cardMeta`, `hasCachedTranscript`).
+    ///
+    /// Fresh means all three:
+    ///   • WARM (it has actually been derived, not the `.unwarmed` placeholder);
+    ///   • no re-read IN FLIGHT (`warmingSidecars`) — a write already invalidated it and the
+    ///     off-main re-derive has not landed, so the memo is known-stale;
+    ///   • no re-read PENDING BEHIND THE LIVE THROTTLE (`liveSidecarWarmPending`). This third
+    ///     clause is not redundant: `invalidateSidecar`'s throttled branch (the ACTIVE
+    ///     capture, within `liveSidecarRewarmInterval`) calls `discardInFlightSidecarWarm`,
+    ///     which CLEARS `warmingSidecars[id]` while leaving `sidecarCache[id]` warm and
+    ///     known-stale. Without this clause the active capture's card/Ready fact could be
+    ///     served stale for up to the throttle window (5s) after a write — so the "a caller
+    ///     can never observe a value older than the last write" contract would hold for every
+    ///     capture EXCEPT the live one. Cost is bounded: at most one capture (the active one)
+    ///     takes the disk path, only between a write and its throttled re-warm.
+    private func freshMemo(for captureId: String) -> SidecarSnapshot? {
+        guard let snap = sidecarCache[captureId], snap.isWarm,
+              warmingSidecars[captureId] == nil,
+              !liveSidecarWarmPending.contains(captureId) else { return nil }
+        return snap
     }
 
     /// A capture is worth showing if it has ≥1 recorded segment, or is actively streaming
@@ -624,7 +655,11 @@ public final class CaptureManager: ObservableObject {
         @Published public fileprivate(set) var candidates: [AmbientCandidate] = []
         fileprivate init() {}
     }
-    @Published public private(set) var active: CaptureWAL?
+    @Published public private(set) var active: CaptureWAL? {
+        // `lastFinishedConversation()` EXCLUDES the active capture, so which capture is
+        // active is one of its inputs — a session that begins or ends must re-derive it.
+        didSet { invalidateLastFinishedMemo() }
+    }
 
     #if DEBUG
     /// DEV-only: seed a throwaway active session so the recording pill renders in a
@@ -748,6 +783,25 @@ public final class CaptureManager: ObservableObject {
     /// `Text(timerInterval:)`, so we only push to move the level indicator.
     public nonisolated static let liveActivityThrottle: TimeInterval = 2
     private var lastLiveActivityPushAt: TimeInterval = 0
+    /// The last time the HOME-SCREEN WIDGET snapshot was written (a main-actor App-Group
+    /// file write) + its timeline reload hinted. Separate from `lastLiveActivityPushAt` —
+    /// see the throttle comment in `pushLiveState`.
+    private var lastWidgetPushAt: TimeInterval = 0
+
+    /// Count of widget snapshot writes + reload hints (test-observable, deterministic).
+    /// The acceptance instrument for the addendum: N meter ticks during a recording must
+    /// drive AT MOST the throttled number of these, not one per tick.
+    nonisolated(unsafe) private static let _widgetPushLock = NSLock()
+    nonisolated(unsafe) private static var _widgetPushes = 0
+    nonisolated static func noteWidgetPush() {
+        _widgetPushLock.lock(); _widgetPushes += 1; _widgetPushLock.unlock()
+    }
+    nonisolated static var widgetPushesForTests: Int {
+        _widgetPushLock.lock(); defer { _widgetPushLock.unlock() }; return _widgetPushes
+    }
+    nonisolated static func resetWidgetPushesForTests() {
+        _widgetPushLock.lock(); _widgetPushes = 0; _widgetPushLock.unlock()
+    }
     #if canImport(ActivityKit) && os(iOS)
     /// The last ContentState we actually pushed — a coalescing gate so a throttled tick
     /// that produces an IDENTICAL state pushes nothing (no wasted update-budget / battery).
@@ -1247,8 +1301,7 @@ public final class CaptureManager: ObservableObject {
         if !listRows.isEmpty { listRows = [] }
         // Seed the home-screen widget with current (idle / last-conversation) state so it
         // renders correctly before the first capture transition fires.
-        CaptureWidgetSnapshotStore.write(makeWidgetSnapshot())
-        reloadWidgetTimelines()
+        refreshHomeWidget()   // one accounted, un-throttled widget push (see refreshHomeWidget)
     }
 
     /// Memoised meta.json loads: the timeline re-reads conversationMeta up to 3× per
@@ -1309,7 +1362,65 @@ public final class CaptureManager: ObservableObject {
     /// not two. Dropping it therefore saves ~the corpus size (≈7.9MB at the 7.9MB test
     /// corpus), NOT double that. Seeded OFF the main actor during hydration and refreshed
     /// off-main at every write site (see `invalidateSidecar`).
+    /// The `card.json` facts the RENDER path needs, derived once off the main actor.
+    ///
+    /// This is deliberately NOT a `ConversationCardMeta`: the card carries
+    /// `provisionalTranscript`, the FULL on-device transcript body, and memoising that per
+    /// capture would put the whole corpus back in memory — undoing the ≈7.9MB win the
+    /// `rebuild_is_byte_independent_and_disk_free` track just landed. Only a bounded HEAD of
+    /// it is kept (`provisionalHeadChars`), which is everything the two consumers need: the
+    /// first-words fallback title (6 words) and the card's summary line (the view clamps it
+    /// to two lines). The full body is still available on demand from disk, off the render
+    /// path, via `ConversationCardStore.load` / `searchText(for:)`.
+    struct CardFacts: Sendable, Equatable {
+        /// How much of the provisional transcript the memo keeps. Bounded on purpose — see
+        /// the type doc. 400 chars comfortably covers a 6-word title and a 2-line summary.
+        static let provisionalHeadChars = 400
+
+        let title: String?
+        let summary: String?
+        let stage: String?
+        let isProvisional: Bool
+        let updatedAt: UInt64
+        let startedAt: UInt64?
+        /// HEAD ONLY of `provisional_transcript` — never the full body.
+        let provisionalHead: String?
+
+        init(_ card: ConversationCardMeta) {
+            title = card.title
+            summary = card.summary
+            stage = card.stage
+            isProvisional = card.isProvisional
+            updatedAt = card.updatedAt
+            startedAt = card.startedAt
+            provisionalHead = card.provisionalTranscript.map { String($0.prefix(Self.provisionalHeadChars)) }
+        }
+
+        /// Equality is over what the list RENDERS. `updatedAt` is deliberately excluded: it
+        /// is a PROCESSING timestamp that bumps on every poll/re-ingest and nothing displays
+        /// it, so comparing it would make `rendersDifferently` request a list rebuild for a
+        /// card merge that changed nothing visible.
+        static func == (a: CardFacts, b: CardFacts) -> Bool {
+            a.title == b.title && a.summary == b.summary && a.stage == b.stage
+                && a.isProvisional == b.isProvisional && a.startedAt == b.startedAt
+                && a.provisionalHead == b.provisionalHead
+        }
+
+        /// The card the render path sees. Byte-identical to disk except a provisional body
+        /// longer than `provisionalHeadChars`, which is truncated (see the type doc).
+        var renderCard: ConversationCardMeta {
+            ConversationCardMeta(title: title, summary: summary, stage: stage,
+                                 provisionalTranscript: provisionalHead,
+                                 isProvisional: isProvisional,
+                                 updatedAt: updatedAt, startedAt: startedAt)
+        }
+    }
+
     struct SidecarSnapshot: Sendable {
+        /// `card.json`'s render facts (nil = no card on disk). Lets `cardMeta(for:)` answer
+        /// the list's per-row title/summary from MEMORY — the un-memoized `card.json` decode
+        /// per row per render was driver #2 of the nav stall.
+        let card: CardFacts?
         /// `.discarded` marker present (sub-substance junk → never shown).
         let isDiscarded: Bool
         /// `.deleted` tombstone present (user-deleted → never shown).
@@ -1347,7 +1458,7 @@ public final class CaptureManager: ObservableObject {
         /// to the streaming / real-audio rule and the capture is only shown once a durable
         /// reason exists. See `sidecar(for:)` for why this direction is the no-flicker one.
         static let unwarmed = SidecarSnapshot(
-            isDiscarded: false, isDeleted: false, hasLocalTranscriptText: false,
+            card: nil, isDiscarded: false, isDeleted: false, hasLocalTranscriptText: false,
             meaningfulWordCount: 0, hasCachedTranscript: false, cardExists: false,
             confirmedInLore: false, wordCount: 0, speakerIdentities: [],
             cardStartedAt: nil, isWarm: false)
@@ -1358,6 +1469,7 @@ public final class CaptureManager: ObservableObject {
         /// main-actor disk read — the off-main re-warm then confirms it.
         func marking(discarded: Bool = false, deleted: Bool = false) -> SidecarSnapshot {
             SidecarSnapshot(
+                card: card,
                 isDiscarded: isDiscarded || discarded, isDeleted: isDeleted || deleted,
                 hasLocalTranscriptText: hasLocalTranscriptText,
                 meaningfulWordCount: meaningfulWordCount,
@@ -1372,7 +1484,10 @@ public final class CaptureManager: ObservableObject {
         /// only triggers a re-render when this is true — an identical warm value must never
         /// cause a visible list churn (R3).
         func rendersDifferently(from other: SidecarSnapshot) -> Bool {
-            isDiscarded != other.isDiscarded
+            // The card facts are now what every ROW renders (title + summary), so a changed
+            // card is a render reason — it was not one while `cardMeta` re-read disk per row.
+            card != other.card
+                || isDiscarded != other.isDiscarded
                 || isDeleted != other.isDeleted
                 || hasLocalTranscriptText != other.hasLocalTranscriptText
                 || meaningfulWordCount != other.meaningfulWordCount
@@ -1415,6 +1530,10 @@ public final class CaptureManager: ObservableObject {
         // and the decoded transcript (text + segment/paragraph arrays) is released with this
         // function's frame. The rebuild then never touches transcript bytes at all.
         return SidecarSnapshot(
+            // DERIVE, don't retain (see CardFacts): the row's title/summary/stage are kept,
+            // the provisional BODY is reduced to a bounded head, and the decoded card is
+            // released with this frame.
+            card: card.map { CardFacts($0) },
             isDiscarded: discarded,
             isDeleted: deleted,
             hasLocalTranscriptText: best != nil,
@@ -1486,6 +1605,7 @@ public final class CaptureManager: ObservableObject {
         let previousStart = startTimeCache[id]
         sidecarCache[id] = snapshot
         metaCache[id] = .some(meta)   // memoise "no meta on disk" too (see metaCache)
+        invalidateLastFinishedMemo()  // a fresh card title / endedAt can move the answer
         startTimeCache[id] = nil      // recomputed from the warm meta/card on next sort
         let metaChanged = previousMeta != meta
         // Only a CHANGED memoised sort key matters: if the sort never memoised one, the next
@@ -1666,16 +1786,35 @@ public final class CaptureManager: ObservableObject {
     /// the list, even after its transcript text has been pruned. `nil` for a capture
     /// the door hasn't reported a title/summary for yet.
     ///
-    /// NOT memoised: card.json is also written by each capture's status poller (title/
-    /// summary merges) outside the manager's sight, and the render path reads it once
-    /// per row (the title/summary a row shows live come from the poller's @Published
-    /// state, so a slightly-stale disk read here has no visible effect anyway).
-    public nonisolated func cardMeta(for captureId: String) -> ConversationCardMeta? {
-        // Deliberately un-memoized (driver #2): `recapConversationPool()` (eager at
-        // RootView) calls this per visible capture, so at N conversations one `recap` pass
-        // is N synchronous `card.json` decodes. When it runs ON the main actor that is
-        // disk-on-main; count it (the gate no-ops for the off-main warm-index writer).
+    /// MEMOISED (track `residual_on_main_actor_work`) through the SAME per-capture sidecar
+    /// memo everything else on the render path reads. It used to be deliberately un-memoized
+    /// — driver #2 of the nav stall: `recapConversationPool()` and every rendered row called
+    /// it, so one pass at N=175 was 175 synchronous `card.json` decodes ON THE MAIN ACTOR,
+    /// and `lastFinishedConversation()` re-paid that scan 12×/second for the whole duration
+    /// of a recording.
+    ///
+    /// FRESHNESS, unchanged: `card.json` is also written behind the manager's back (each
+    /// capture's status poller merges title/summary), and those writers already call
+    /// `invalidateSidecar`, which starts an off-main re-read. So:
+    ///   • memo FRESH (see `freshMemo(for:)` — warm, no re-read in flight, and none pending
+    ///     behind the live capture's re-warm throttle) → answer from MEMORY (zero disk, the
+    ///     whole point);
+    ///   • memo cold, or KNOWN-STALE (a re-read is in flight, or the ACTIVE capture's
+    ///     re-read is waiting out its throttle window) → read disk and answer from it, so a
+    ///     caller can never observe a value older than the last write — for EVERY capture,
+    ///     the live one included. This is the only branch that touches disk, it is bounded by
+    ///     the number of card WRITES (not renders/ticks), and it keeps every existing
+    ///     freshness contract (e.g. the retention sweep's card merge is visible to the very
+    ///     next read).
+    /// The answer is byte-identical to disk except a >400-char provisional body, which is
+    /// truncated on purpose — see `CardFacts`.
+    public func cardMeta(for captureId: String) -> ConversationCardMeta? {
+        if let snap = freshMemo(for: captureId) { return snap.card?.renderCard }
+        // Count it: a synchronous main-actor card decode is exactly the pathology the gate
+        // watches. Reaching here means a write invalidated the memo and its off-main re-read
+        // has not landed yet (or the capture has never been warmed at all).
         Self.noteMainThreadDecode()
+        if sidecarCache[captureId] == nil { _ = sidecar(for: captureId) }   // schedule the warm
         return ConversationCardStore.load(captureId: captureId, baseDir: baseDir)
     }
 
@@ -1719,7 +1858,9 @@ public final class CaptureManager: ObservableObject {
     /// in flight. Offline-safe: a failed/empty fetch simply caches nothing.
     public func ensureRecentTranscriptCached(_ captureId: String) {
         guard !isDeleted(captureId) else { return }
-        guard !TranscriptCacheStore.hasCachedTranscript(captureId: captureId, baseDir: baseDir) else { return }
+        // Memo-served (see `hasCachedTranscript`): this runs from every row's `onAppear`, so
+        // a raw `fileExists` here is per-row disk on the main actor.
+        guard !hasCachedTranscript(captureId) else { return }
         guard CaptureRetention.isRecentForTranscriptCache(conversationAge: conversationAgeSeconds(captureId)) else { return }
         guard !cachingTranscripts.contains(captureId) else { return }
         cachingTranscripts.insert(captureId)
@@ -2291,11 +2432,21 @@ public final class CaptureManager: ObservableObject {
                 // retention window (nothing is "confirmed in Lore" without a computer).
                 // A card tombstone IS real content: never discard it — it stays
                 // browsable as title + summary, it just can't replay/show full text.
+                // MEMO DELIBERATELY BYPASSED (track `residual_on_main_actor_work`): this
+                // condition is DESTRUCTIVE — writing the `.discarded` marker below makes
+                // `pruneDiscardedFragments` delete the capture's whole folder two days
+                // later — so it must read the REAL filesystem, never a derived memo. The
+                // manager's `hasCachedTranscript(_:)` is memo-served for the RENDER path
+                // (that is where the per-row disk win is); a stale `false` there is a
+                // one-frame cosmetic miss, but here it would re-open the 2026-07-13
+                // silent-data-loss hole documented above. `reconcileOrphanedCaptures` runs
+                // ONCE PER LAUNCH, off the render path, so the real `fileExists` costs
+                // nothing measurable and buys correctness.
                 let started = startTime(of: wal)
                 if !wal.status.streaming,
                    Date().timeIntervalSince1970 - started > Self.stuckEmptyRecordingSecs,
                    !TranscriptCacheStore.isConfirmedInLore(captureId: id, baseDir: baseDir),
-                   !hasCachedTranscript(id),
+                   !TranscriptCacheStore.hasCachedTranscript(captureId: id, baseDir: baseDir),
                    !ConversationCardStore.exists(captureId: id, baseDir: baseDir) {
                     let dir = baseDir.appendingPathComponent(id, isDirectory: true)
                     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -2395,6 +2546,12 @@ public final class CaptureManager: ObservableObject {
     /// from a live recording (`active != nil`) and from idle.
     var isListeningForSpeechForTests: Bool { active == nil && router.isArmedForTests() }
 
+    /// Test seam: drive ONE 12 Hz meter tick through the EXACT path the timer uses, with no
+    /// timer running — so a test can prove that N ticks during a recording do ZERO main-actor
+    /// disk reads and drive at most the throttled number of widget pushes. Internal
+    /// (`@testable` only), mirroring `publishLiveSnapshotForTests`.
+    func tickMeterForTests() { tickMeter() }
+
     private func tickMeter() {
         let peak = isPaused ? 0 : levelBuffer.drainPeak()
         // Idle skip: nothing audible and the ring is already flat → publish NOTHING
@@ -2423,6 +2580,25 @@ public final class CaptureManager: ObservableObject {
     /// same card tombstone + generic-title disambiguation the timeline list renders, so
     /// the surfaces agree. nil when there is no finished conversation with a title yet.
     private func lastFinishedConversation() -> (title: String, at: Date)? {
+        if lastFinishedMemoValid { return lastFinishedMemo }
+        let computed = computeLastFinishedConversation()
+        lastFinishedMemo = computed
+        lastFinishedMemoValid = true
+        return computed
+    }
+
+    /// The memoised answer + its validity flag. Invalidated wherever its INPUTS change: a
+    /// list rebuild (membership/order/active), and an off-main sidecar warm (a card's title
+    /// or a meta's endedAt landing). Without the memo this whole scan ran on every
+    /// `makeWidgetSnapshot` — i.e. 12×/second while recording, before the throttle.
+    private var lastFinishedMemo: (title: String, at: Date)?
+    private var lastFinishedMemoValid = false
+    private func invalidateLastFinishedMemo() {
+        lastFinishedMemoValid = false
+        lastFinishedMemo = nil
+    }
+
+    private func computeLastFinishedConversation() -> (title: String, at: Date)? {
         for wal in visibleCaptures where wal !== active {
             guard let title = cardMeta(for: wal.captureId)?.title,
                   !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
@@ -2552,10 +2728,27 @@ public final class CaptureManager: ObservableObject {
     /// start/update/end the Live Activity correctly; level/elapsed pushes are throttled.
     private enum LivePush { case start, update, throttledUpdate, end }
     private func pushLiveState(_ kind: LivePush) {
-        // Always refresh the home-screen widget snapshot + ask WidgetKit to reload — it's
-        // cheap and the widget has no other way to learn capture changed.
-        CaptureWidgetSnapshotStore.write(makeWidgetSnapshot())
-        reloadWidgetTimelines()
+        // THROTTLED, and this guard is FIRST (track `residual_on_main_actor_work`, addendum).
+        // It used to sit BELOW the widget push, so the 12 Hz meter tick drove a main-actor
+        // App-Group FILE WRITE plus a `WidgetCenter.reloadAllTimelines()` twelve times a
+        // second for the entire duration of every recording. The widget is a best-effort
+        // glance that iOS throttles to a background budget anyway (see
+        // `reloadWidgetTimelines`), so pushing it faster than the Live Activity's cadence
+        // bought nothing and cost the main thread. Lifecycle transitions
+        // (start/update/end) are never throttled.
+        //
+        // The widget keeps its OWN timestamp: the Live Activity's `lastLiveActivityPushAt`
+        // is deliberately NOT advanced when a throttled push coalesces away as equivalent,
+        // so sharing it would let the widget push on every tick again.
+        // Only the WIDGET leg is throttled here — the Live Activity below keeps its own
+        // (unchanged) throttle + content-coalescing rules, so its latency is untouched.
+        let nowSeconds = Date().timeIntervalSince1970
+        if kind != .throttledUpdate || nowSeconds - lastWidgetPushAt >= Self.liveActivityThrottle {
+            lastWidgetPushAt = nowSeconds
+            Self.noteWidgetPush()
+            CaptureWidgetSnapshotStore.write(makeWidgetSnapshot())
+            reloadWidgetTimelines()
+        }
 
         #if canImport(ActivityKit) && os(iOS)
         guard #available(iOS 16.2, *), let controller = liveActivityController else { return }
@@ -2624,6 +2817,11 @@ public final class CaptureManager: ObservableObject {
     /// whenever the widget's inputs (capture status / last-finished title) change OUTSIDE a
     /// `pushLiveState` transition, e.g. the async transcript-refine or a completed finalize.
     private func refreshHomeWidget() {
+        // Same accounting as `pushLiveState`'s widget leg: it IS a widget push (so the
+        // counter sees it and the throttle window restarts), and it is NOT throttled — it
+        // only fires on real, occasional input changes, never on the meter tick.
+        lastWidgetPushAt = Date().timeIntervalSince1970
+        Self.noteWidgetPush()
         CaptureWidgetSnapshotStore.write(makeWidgetSnapshot())
         reloadWidgetTimelines()
     }

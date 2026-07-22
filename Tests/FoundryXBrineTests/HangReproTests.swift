@@ -258,20 +258,17 @@ final class HangReproTests: XCTestCase {
         print("REPRO B: recapPool=\(String(format: "%.1f", ms))ms decodes=\(decodes) " +
               "pool=\(pool.count) (N=\(Self.libraryN))")
 
-        // KNOWN-RED, OWNED ELSEWHERE. `recapConversationPool` / the un-memoized `cardMeta`
-        // are explicitly OUT OF SCOPE for `rebuild_is_byte_independent_and_disk_free` (see
-        // its spec's "Out of scope": "recapConversationPool, grouping, per-row disk — measured
-        // minor, batched into `residual_on_main_actor_work`"). The assertion and its value are
-        // KEPT, not deleted or weakened: XCTExpectFailure is STRICT, so the moment the
-        // `residual_on_main_actor_work` track memoizes / moves this off main, this test starts
-        // FAILING ("expected failure did not occur") and this wrapper must be removed. That is
-        // the intended signal — do not make it non-strict.
-        XCTExpectFailure("recapConversationPool's per-row card.json decode is owned by the " +
-                         "`residual_on_main_actor_work` track; remove this wrapper when it lands") {
-            XCTAssertEqual(decodes, 0,
-                           "recapConversationPool must not decode card.json on main — " +
-                           "RED: un-memoized cardMeta did \(decodes) decodes on main")
-        }
+        // GREEN (track `residual_on_main_actor_work`). This assertion was wrapped in a STRICT
+        // `XCTExpectFailure` while the per-row `card.json` decode was owned by that track and
+        // still un-memoized (175 decodes here). The wrapper existed precisely so that the
+        // moment the memoization landed the test would fail with "expected failure did not
+        // occur" — the designed signal that the fix arrived. It landed: `cardMeta` is now
+        // served from the per-capture sidecar memo (warmed off-main at hydration), so a recap
+        // pass over a warm library reads ZERO bytes on the main actor. The wrapper is gone;
+        // the assertion and its value are UNCHANGED.
+        XCTAssertEqual(decodes, 0,
+                       "recapConversationPool must not decode card.json on main — " +
+                       "un-memoized cardMeta did \(decodes) decodes on main")
         XCTAssertLessThan(ms, 100,
                           "the recap pool must stay under 100ms — " +
                           "RED: \(String(format: "%.1f", ms))ms")
