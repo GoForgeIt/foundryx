@@ -19,15 +19,34 @@ import AVFoundation
 public actor WhisperKitSTT: LocalSTT {
     private let modelName: String
     private var engine: WhisperKit?
+    /// The folder the weights landed in — kept between the download and build steps so
+    /// a retry never re-fetches bytes that are already on disk.
+    private var downloadedFolder: URL?
     /// Main-actor status sink for the "setting up your private on-device brain"
     /// banner (nil = no UI, e.g. background use). Reported to as download/load
     /// proceed; only ever touched on the main actor.
     private let status: LocalBrainStatus?
+    /// How long the setup may be STUCK before it fails honestly (track 20260722T1244).
+    private let policy: BrainSetupPolicy
 
-    public init(model: String = "base", status: LocalBrainStatus? = nil) {
+    public init(model: String = "base",
+                status: LocalBrainStatus? = nil,
+                policy: BrainSetupPolicy = .default) {
         self.modelName = model
         self.status = status
+        self.policy = policy
     }
+
+    /// Bounded, honest setup: the download is stall-watched (progress that stops
+    /// ADVANCING for `stallTimeout` fails), the build is time-bounded, and a failure
+    /// installs a working "Try again" on the banner — no relaunch. A slow-but-moving
+    /// download is never killed.
+    private lazy var preparer: LocalBrainPreparer = LocalBrainPreparer(
+        steps: LocalBrainPreparer.Steps(
+            download: { [self] onProgress in try await self.downloadWeights(onProgress) },
+            build: { [self] in try await self.buildEngine() }),
+        policy: policy,
+        status: status)
 
     /// WhisperKit runs wherever the app runs (iOS 17+ deployment target); the
     /// model download happens on first need (or an explicit `prewarm`).
@@ -39,6 +58,11 @@ public actor WhisperKitSTT: LocalSTT {
     /// next transcribe retries.
     public func prewarm() async {
         _ = try? await loadEngine()
+    }
+
+    enum WhisperKitSTTError: Error, LocalizedError {
+        case engineUnavailable
+        public var errorDescription: String? { "the on-device speech model isn't ready" }
     }
 
     public func transcribe(opusFrames: [Data]) async throws -> String {
@@ -57,30 +81,29 @@ public actor WhisperKitSTT: LocalSTT {
             await report { $0.setReady() }
             return engine
         }
-        do {
-            // Download WITH progress into WhisperKit's default cache, then build
-            // the engine from that local folder (download:false → no re-fetch).
-            // Capture only the (main-actor, Sendable) status — never `self` — so the
-            // progress closure is Sendable for WhisperKit's downloader.
-            let sink = status
-            let folder = try await WhisperKit.download(
-                variant: modelName,
-                progressCallback: { @Sendable progress in
-                    let f = progress.fractionCompleted
-                    Task { @MainActor in sink?.setDownloading(f) }
-                })
-            await report { $0.setLoading() }
-            let config = WhisperKitConfig(model: modelName,
-                                          modelFolder: folder.path,
-                                          download: false)
-            let fresh = try await WhisperKit(config)
-            engine = fresh
-            await report { $0.setReady() }
-            return fresh
-        } catch {
-            await report { $0.setFailed(error.localizedDescription) }
-            throw error
-        }
+        // The preparer owns the phases, the stall watchdog, and the failure/retry
+        // reporting; it throws if setup timed out, so the banner is never immortal.
+        try await preparer.prepare()
+        guard let engine else { throw WhisperKitSTTError.engineUnavailable }
+        return engine
+    }
+
+    /// Download WITH progress into WhisperKit's default cache. Reports every real
+    /// fraction so the stall watchdog can tell "slow" from "stuck".
+    private func downloadWeights(_ onProgress: @escaping @Sendable (Double) -> Void) async throws {
+        if downloadedFolder != nil { return }   // already on disk (e.g. a retry)
+        downloadedFolder = try await WhisperKit.download(
+            variant: modelName,
+            progressCallback: { @Sendable progress in onProgress(progress.fractionCompleted) })
+    }
+
+    /// Build the engine from the local folder (download:false → no re-fetch).
+    private func buildEngine() async throws {
+        if engine != nil { return }
+        let config = WhisperKitConfig(model: modelName,
+                                      modelFolder: downloadedFolder?.path,
+                                      download: false)
+        engine = try await WhisperKit(config)
     }
 
     private func report(_ body: @escaping @MainActor (LocalBrainStatus) -> Void) async {

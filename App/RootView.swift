@@ -826,11 +826,28 @@ private struct MainTabs: View {
     }
 
     /// The "setting up your private on-device brain" banner (model download UX).
+    /// Once setup has FAILED (a stalled download hitting its stall timeout — track
+    /// 20260722T1244) the spinner is replaced by an honest error + a working "Try
+    /// again", so the banner can never be an indefinite spinner.
     @ViewBuilder private func brainSetupBanner(_ text: String) -> some View {
         HStack(spacing: GrainSpacing.x2) {
-            ProgressView()
+            if brainStatus.isFailed {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(GrainColor.textMuted)
+                    .accessibilityHidden(true)
+            } else {
+                ProgressView()
+            }
             Text(text).grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
             Spacer()
+            if let retry = brainStatus.retryAction {
+                Button(action: retry) {
+                    Text(brainStatus.retryLabel).grainTextStyle(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(GrainColor.textMain)
+                .accessibilityIdentifier("brain-setup-retry")
+            }
         }
         .padding(.horizontal, GrainSpacing.x4)
         .padding(.vertical, GrainSpacing.x2)
