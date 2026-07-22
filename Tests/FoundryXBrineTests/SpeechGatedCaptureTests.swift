@@ -16,6 +16,31 @@ import Foundation
 @MainActor
 final class SpeechGatedCaptureTests: XCTestCase {
 
+    /// PRECONDITION, stated rather than assumed: every test here needs the ambient capture
+    /// intent to be LISTENING, because `armForSpeech()` refuses to arm while paused — a paused
+    /// manager never opens a conversation no matter how much voice it is fed.
+    ///
+    /// `CaptureSettings.omiCaptureDesiredState` is backed by UserDefaults, i.e. PROCESS-GLOBAL,
+    /// and it survives across test classes. Seven tests in this package call `manager.pause()`,
+    /// which persists `.paused`, and most capture suites never restore it — so whether this
+    /// suite passes depends on which test happened to run last before it. It has been
+    /// surviving only because alphabetical ordering happened to leave `.listening` behind.
+    /// That is luck, not isolation.
+    ///
+    /// (For the record: this was NOT the cause of the full-suite flake — that turned out to be
+    /// a wait on the wrong signal further down, `snapshot()` vs the `@Published status`. This
+    /// guard closes a real, separate, still-latent hazard.)
+    override func setUp() {
+        super.setUp()
+        CaptureSettings.omiCaptureDesiredState = .listening
+    }
+
+    /// Leave no trace for the next suite, for the same reason.
+    override func tearDown() {
+        CaptureSettings.omiCaptureDesiredState = .listening
+        super.tearDown()
+    }
+
     /// A source the test drives directly (start/stop no-ops; the test fires the
     /// onFrame/onState closures CaptureManager installs).
     private final class TestSource: AudioFrameSource, @unchecked Sendable {
@@ -131,7 +156,14 @@ final class SpeechGatedCaptureTests: XCTestCase {
         // Keep speaking → the live recording streams; the active capture surfaces in the
         // timeline (a visible capture appears).
         for _ in 0..<60 { src.onFrame?(RealOmiFrames.cachedVoiced) }
-        try await waitUntil { mgr.active?.snapshot().streaming == true }
+        // Wait on the field the VISIBILITY RULE actually reads. `isBrowsable` gates on
+        // `wal.status.streaming` — the @Published mirror — whereas `snapshot()` is
+        // `computeStatus()`, a synchronous fresh read from disk. `publish()` hops through
+        // `DispatchQueue.main.async` when it runs off the main thread, so `snapshot()` can
+        // report streaming while `status` has not landed yet. Waiting on `snapshot()` here
+        // let the rebuild run against a stale `status` and the row was legitimately absent —
+        // an ordering-dependent flake that only showed up under full-suite load.
+        try await waitUntil { mgr.active?.status.streaming == true }
         mgr.rebuildVisibleCapturesForTests()
         XCTAssertTrue(mgr.visibleCaptures.contains { $0.captureId == id },
                       "the live conversation is visible in the timeline")
