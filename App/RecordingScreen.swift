@@ -46,12 +46,19 @@ struct RecordingPreview {
 
 struct RecordingScreen: View {
     @ObservedObject var manager: CaptureManager
+    /// The LIVE surface's fast-moving text (transcript · rolling title · candidates).
+    /// Observed here rather than through the manager so the several-times-a-second
+    /// publishes reach THIS surface without invalidating the library behind it
+    /// (track 20260722T1244).
+    @ObservedObject var live: CaptureManager.LiveCaptureModel
     /// The resolved door target (parity with the inline instrument's wiring; kept for
     /// any transcript/detail handoff the foot may grow).
     let target: DoorTarget
-    /// The current ambient suggestions to stack — pass `[]` to render nothing (the
-    /// section collapses when there is no real suggestion).
-    var suggestions: [RecordingSuggestion] = []
+    /// The current ambient suggestions to stack — a CLOSURE, not a snapshot: candidates
+    /// arrive on the live model mid-recording, and this view (not its presenter) is the
+    /// one that re-renders when they do. Returns `[]` to render nothing (the section
+    /// collapses when there is no real suggestion).
+    var suggestions: () -> [RecordingSuggestion] = { [] }
     /// DEV-only frozen data (see `RecordingPreview`); `nil` uses live manager state.
     var preview: RecordingPreview? = nil
     /// End the capture and dismiss (mic → stop; Omi → end the current conversation).
@@ -61,8 +68,10 @@ struct RecordingScreen: View {
     /// replacement.
     var onMinimize: () -> Void = {}
 
-    /// The effective live transcript — the frozen preview, else live manager state.
-    private var liveT: LiveTranscript { preview?.transcript ?? manager.liveTranscript }
+    /// The effective live transcript — the frozen preview, else the live model.
+    private var liveT: LiveTranscript { preview?.transcript ?? live.transcript }
+    /// The effective suggestion rows (evaluated per render — see `suggestions`).
+    private var suggestionRows: [RecordingSuggestion] { suggestions() }
     /// The effective session clock — the frozen preview (DEV screenshot path) mapped to a
     /// clock at its origin, else the manager's session-owned `recordingClock`. DERIVED,
     /// never stored: this view holds no timer, so a minimize → restore re-present cannot
@@ -74,7 +83,8 @@ struct RecordingScreen: View {
     private var statusWord: String { manager.isPaused ? "Paused" : "Recording" }
 
     var body: some View {
-        ZStack(alignment: .top) {
+        let rows = suggestionRows
+        return ZStack(alignment: .top) {
             VStack(spacing: GrainSpacing.x4) {
                 // ONE shared subtree for both layouts, so recordingMain/Title/Transcript
                 // keep a STABLE identity across the fill↔compact shift — the breathing
@@ -83,11 +93,11 @@ struct RecordingScreen: View {
                 // cluster floats generously (prototype); in COMPACT it collapses so the
                 // content rides up and the task cards sit directly below it. The foot
                 // stays pinned at the bottom either way (prototype `margin-top:auto`).
-                Spacer(minLength: 0).frame(maxHeight: suggestions.isEmpty ? .infinity : 0)
+                Spacer(minLength: 0).frame(maxHeight: rows.isEmpty ? .infinity : 0)
                 recordingMain
                 recordingTitle
                 liveTranscript
-                suggestionStack           // renders nothing when there are no candidates
+                suggestionStack(rows)     // renders nothing when there are no candidates
                 Spacer(minLength: 0)
                 recordingFoot
             }
@@ -95,7 +105,7 @@ struct RecordingScreen: View {
             .padding(.top, 54)
             .padding(.horizontal, GrainSpacing.mobileGutter)   // 18
             .padding(.bottom, 15)
-            .animation(.easeOut(duration: 0.4), value: suggestions.isEmpty)
+            .animation(.easeOut(duration: 0.4), value: rows.isEmpty)
 
             // Minimize — top-leading; leaves the recording RUNNING and returns to the app.
             minimizeButton
@@ -212,7 +222,7 @@ struct RecordingScreen: View {
         if let preview {
             return WholeConversationTitle.heuristic(from: preview.transcript.displayText)
         }
-        return manager.liveTitle
+        return live.title
     }
 
     @ViewBuilder private var recordingTitle: some View {
@@ -245,10 +255,10 @@ struct RecordingScreen: View {
 
     // MARK: 5 — suggestion stack (only rows that exist)
 
-    @ViewBuilder private var suggestionStack: some View {
-        if !suggestions.isEmpty {
+    @ViewBuilder private func suggestionStack(_ rows: [RecordingSuggestion]) -> some View {
+        if !rows.isEmpty {
             VStack(spacing: 7) {
-                ForEach(suggestions) { s in
+                ForEach(rows) { s in
                     GrainSuggestionCard(
                         systemImage: s.systemImage,
                         tint: s.tint,

@@ -73,6 +73,36 @@ struct RecordingRingView: View {
     }
 }
 
+/// The hero tile's provisional NAME, isolated in its own observer so a rolling-title
+/// publish invalidates just this label — never the conversation list behind it. The same
+/// law `RecordingRingView` obeys for the 12 Hz meter, applied to the live TEXT that was
+/// left on the hot object (track 20260722T1244).
+private struct LiveHeroTitleLabel: View {
+    @ObservedObject var live: CaptureManager.LiveCaptureModel
+    /// DEBUG screenshot override; nil in a normal launch (then the live model is read).
+    var previewTitle: String? = nil
+
+    @ViewBuilder var body: some View {
+        if let title = previewTitle ?? live.title {
+            Text(title)
+                .grainTextStyle(.body).foregroundStyle(GrainColor.ink).lineLimit(1)
+        }
+    }
+}
+
+/// The hero tile's live transcript ticker, isolated for the same reason as
+/// `LiveHeroTitleLabel`: the transcript publishes several times a second while recording.
+private struct LiveHeroTicker: View {
+    @ObservedObject var live: CaptureManager.LiveCaptureModel
+    /// DEBUG screenshot override; nil in a normal launch.
+    var previewTranscript: LiveTranscript? = nil
+
+    @ViewBuilder var body: some View {
+        let transcript = previewTranscript ?? live.transcript
+        if !transcript.isEmpty { LiveTranscriptTicker(transcript: transcript) }
+    }
+}
+
 /// The session-owned ticking elapsed readout (1 Hz), monospaced so it never wobbles.
 /// STATELESS — it holds NO `@State`: it derives its value from a `RecordingClock` the
 /// manager owns (`clock.elapsed(now:)`, which already excludes paused spans), so a view
@@ -240,8 +270,9 @@ struct CaptureScreen: View {
             set: { _ in })) {
             RecordingScreen(
                 manager: manager,
+                live: manager.live,
                 target: target,
-                suggestions: recordingSuggestions,
+                suggestions: { recordingSuggestions },
                 onEnd: endRecording,
                 onMinimize: { manager.minimizeRecordingScreen() })
         }
@@ -282,8 +313,9 @@ struct CaptureScreen: View {
         .fullScreenCover(isPresented: $deepRecording) {
             RecordingScreen(
                 manager: manager,
+                live: manager.live,
                 target: target,
-                suggestions: recordingSuggestions,
+                suggestions: { recordingSuggestions },
                 preview: RecordingPreview(
                     since: Date().addingTimeInterval(-102),   // reads 01:42, like the prototype
                     transcript: LiveTranscript(
@@ -1056,10 +1088,7 @@ struct CaptureScreen: View {
                     // The provisional name — the manager's ROLLING title, derived from the
                     // WHOLE conversation so far (track 20260717T1015) and stabilized by the
                     // arbiter, so it appears once enough was said and never jitters.
-                    if let title = heroProvisionalTitle {
-                        Text(title)
-                            .grainTextStyle(.body).foregroundStyle(GrainColor.ink).lineLimit(1)
-                    }
+                    LiveHeroTitleLabel(live: manager.live, previewTitle: heroPreviewTitle)
                 }
                 Spacer(minLength: 0)
                 if tile.hasRecorder {
@@ -1070,9 +1099,7 @@ struct CaptureScreen: View {
                     .accessibilityIdentifier("live-hero-pause")
                 }
             }
-            if !heroLiveTranscript.isEmpty {
-                LiveTranscriptTicker(transcript: heroLiveTranscript)
-            }
+            LiveHeroTicker(live: manager.live, previewTranscript: heroPreviewTranscript)
         }
         .padding(GrainSpacing.cardPad)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1106,22 +1133,24 @@ struct CaptureScreen: View {
         return manager.recordingClock
     }
 
-    /// The hero tile's provisional name — the manager's ROLLING title (the same
-    /// whole-conversation source the recording screen reads; fixed at the source,
-    /// track 20260717T1015). The DEBUG screenshot path derives one from its seeded
-    /// transcript.
-    private var heroProvisionalTitle: String? {
+    /// The hero tile's provisional name is the manager's ROLLING title (the same
+    /// whole-conversation source the recording screen reads; fixed at the source, track
+    /// 20260717T1015) — read INSIDE `LiveHeroTitleLabel`, which observes the live model
+    /// alone so a title publish can't invalidate the list. This is only the DEBUG
+    /// screenshot override, derived from the seeded preview transcript; nil in a normal
+    /// launch.
+    private var heroPreviewTitle: String? {
         #if DEBUG
-        if capturePreviewRecording {
-            return WholeConversationTitle.heuristic(from: heroLiveTranscript.displayText)
+        if capturePreviewRecording, let t = heroPreviewTranscript {
+            return WholeConversationTitle.heuristic(from: t.displayText)
         }
         #endif
-        return manager.liveTitle
+        return nil
     }
 
-    /// The live transcript the hero tile renders — the manager's, or a seeded preview one
-    /// under the DEBUG `-CaptureHome recording` screenshot path.
-    private var heroLiveTranscript: LiveTranscript {
+    /// The seeded preview transcript for the DEBUG `-CaptureHome recording` screenshot
+    /// path; nil in a normal launch, where `LiveHeroTicker` reads the live model.
+    private var heroPreviewTranscript: LiveTranscript? {
         #if DEBUG
         if capturePreviewRecording {
             return LiveTranscript(
@@ -1130,7 +1159,7 @@ struct CaptureScreen: View {
                 isComplete: false)
         }
         #endif
-        return manager.liveTranscript
+        return nil
     }
 
     // MARK: header — ambient control when connected, else the auto-connect status + the

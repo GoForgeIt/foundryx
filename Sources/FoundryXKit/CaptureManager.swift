@@ -297,6 +297,7 @@ public final class CaptureManager: ObservableObject {
     /// streaming) — useless empty cards; keep ones with real audio, still-streaming, or a
     /// pruned-to-transcript tombstone. Order newest-first by the durable conversation start.
     private func rebuildVisibleCaptures() {
+        rebuildCountForTests += 1
         let visible = CaptureManager.deduplicatedByCaptureId(captures)
             .filter { self.isBrowsable($0) }
             .sorted { self.startTime(of: $0) > self.startTime(of: $1) }
@@ -356,6 +357,20 @@ public final class CaptureManager: ObservableObject {
     /// the rebuild reads the per-capture sidecar MEMO and not disk (in production a `captures`
     /// mutation is the trigger). Internal — reachable only via `@testable import`.
     func rebuildVisibleCapturesForTests() { rebuildVisibleCaptures() }
+
+    /// Test seam: how many times the visible conversation list has been rebuilt. The
+    /// acceptance instrument for the live/library split (track 20260722T1244) — N live
+    /// transcript/title publishes must move this ZERO. Internal — `@testable` only.
+    private(set) var rebuildCountForTests = 0
+
+    /// Test seam: drive ONE live-transcript tick through the EXACT path the transcriber
+    /// pump uses (`live.transcript` + the rolling-title update), with no transcriber, no
+    /// audio source and no timers running — so a test can prove that a live tick
+    /// invalidates only `live`, never the manager (and so never the conversation list).
+    func publishLiveSnapshotForTests(_ snapshot: LiveTranscript) {
+        live.transcript = snapshot
+        updateLiveTitle(with: snapshot)
+    }
 
     /// How many visible conversations are still being processed (audio captured, no
     /// transcript yet) — drives the top-of-list processing banner. Recomputed only on
@@ -585,6 +600,30 @@ public final class CaptureManager: ObservableObject {
         fileprivate var isFlat = true
         fileprivate init(barCount: Int) { levels = Array(repeating: 0, count: barCount) }
     }
+
+    /// The LIVE recording surface's observable state, deliberately SEPARATE from the
+    /// manager for the same reason `AudioMeterModel` is: these fields are written on
+    /// EVERY transcriber snapshot — several times per second while recording. Left as
+    /// `@Published` vars on the manager, each tick invalidated every view that observes
+    /// the manager: the whole Capture screen, the MainTabs body, and with them the
+    /// conversation LIST — turning a ~2ms list rebuild into a multi-second freeze by
+    /// sheer frequency (track 20260722T1244). The split is live-surface vs LIBRARY:
+    /// list/library state stays on the manager, which no longer changes on a live tick.
+    ///
+    /// `CaptureManager` still READS these directly (R4): the substance gate in
+    /// `endSession` reads `transcript.displayText` to decide whether a conversation is
+    /// real, and the settled title seeds the provisional card. Reading a plain property
+    /// on an injected object is exactly as available as reading a stored one — what
+    /// changes is only WHO gets invalidated on a write.
+    @MainActor public final class LiveCaptureModel: ObservableObject {
+        /// The live, on-device PROVISIONAL transcript for the ACTIVE conversation.
+        @Published public fileprivate(set) var transcript: LiveTranscript = .empty
+        /// The ROLLING live title for the ACTIVE conversation.
+        @Published public fileprivate(set) var title: String?
+        /// Ambient candidates surfaced by the Tier-1 lane DURING the active recording.
+        @Published public fileprivate(set) var candidates: [AmbientCandidate] = []
+        fileprivate init() {}
+    }
     @Published public private(set) var active: CaptureWAL?
 
     #if DEBUG
@@ -607,6 +646,11 @@ public final class CaptureManager: ObservableObject {
     /// ~250 synchronous main-thread file reads PER SECOND (deep-review finding,
     /// 2026-07-07 — the single biggest "app feels slow" cause).
     public let meter: AudioMeterModel
+    /// The LIVE recording surface's fast-moving text state (transcript + rolling title +
+    /// ambient candidates), ISOLATED in its own observable for the same reason as the
+    /// meter: its several-times-a-second publishes must invalidate only the live surface,
+    /// never the conversation list. See `LiveCaptureModel`.
+    public let live: LiveCaptureModel
     /// Silence gap (seconds) that auto-ends a conversation (req 9). Persisted.
     @Published public private(set) var silenceGapSeconds: TimeInterval
 
@@ -615,15 +659,19 @@ public final class CaptureManager: ObservableObject {
     /// open, and the AUTHORITATIVE transcript still comes from Kiln (door → Lore →
     /// Kiln). Stays `.empty` when live transcription is unavailable (older OS / no
     /// model / no factory wired), so the UI simply shows nothing extra.
-    @Published public private(set) var liveTranscript: LiveTranscript = .empty
+    ///
+    /// Stored on `live` (NOT `@Published` here) — reading it costs nothing and keeps every
+    /// existing caller, including the substance gate, working unchanged; writing it no
+    /// longer invalidates the library.
+    public var liveTranscript: LiveTranscript { live.transcript }
     /// The ROLLING live title — derived from the WHOLE conversation to this point
     /// (track 20260717T1015): a cheap whole-context salience heuristic on new
     /// finalized words, upgraded on a debounced cadence by the on-device titler
     /// where one is wired. Stabilized by `LiveTitleArbiter` (a settled name only
     /// changes when meaningfully different). The ONE title both the recording
     /// screen and the capture hero tile render. Ephemeral — the post-recording
-    /// pipeline's title stays authoritative.
-    @Published public private(set) var liveTitle: String?
+    /// pipeline's title stays authoritative. Stored on `live` (see `liveTranscript`).
+    public var liveTitle: String? { live.title }
     /// True while the retry/drain loop is actively trying to move local work toward
     /// the desktop (segment upload, finalize retry, or delete retry). The sync banner
     /// uses this instead of equating "unsynced bytes exist" with "a drain is in flight".
@@ -663,7 +711,8 @@ public final class CaptureManager: ObservableObject {
     /// Ambient candidates surfaced by the Tier-1 lane DURING the active recording —
     /// most-recent-first, deduped by utterance, capped small. The recording screen maps
     /// these to its notification/task rows; cleared when the conversation ends.
-    @Published public private(set) var recordingCandidates: [AmbientCandidate] = []
+    /// Stored on `live` (see `liveTranscript`).
+    public var recordingCandidates: [AmbientCandidate] { live.candidates }
     /// How many recording candidates the surface will stack at once.
     private static let maxRecordingCandidates = 3
     /// Why the last record-tap did nothing, or nil when the last start succeeded / none
@@ -1120,6 +1169,7 @@ public final class CaptureManager: ObservableObject {
         // paused desired-state means the Omi connects but stays paused.
         self.isPaused = (CaptureSettings.omiCaptureDesiredState == .paused)
         self.meter = AudioMeterModel(barCount: Self.meterBarCount)
+        self.live = LiveCaptureModel()
         self.router = FrameRouter(segmenter: SilenceSegmenter(silenceGap: gap))
         // Frame path: serial source queue → router → WAL io queue. No main hop.
         source.onFrame = { [router] frame in router.route(frame) }
@@ -1888,16 +1938,16 @@ public final class CaptureManager: ObservableObject {
     /// so a card mined from a closed/previous conversation never appears on the next one.
     public func noteRecordingCandidate(_ candidate: AmbientCandidate, forCapture captureId: String) {
         guard active?.captureId == captureId else { return }
-        recordingCandidates.removeAll { $0.utterance == candidate.utterance }
-        recordingCandidates.insert(candidate, at: 0)
-        if recordingCandidates.count > Self.maxRecordingCandidates {
-            recordingCandidates = Array(recordingCandidates.prefix(Self.maxRecordingCandidates))
+        live.candidates.removeAll { $0.utterance == candidate.utterance }
+        live.candidates.insert(candidate, at: 0)
+        if live.candidates.count > Self.maxRecordingCandidates {
+            live.candidates = Array(live.candidates.prefix(Self.maxRecordingCandidates))
         }
     }
 
     /// Drop a candidate the user acted on or dismissed from the live surface.
     public func dismissRecordingCandidate(_ candidate: AmbientCandidate) {
-        recordingCandidates.removeAll { $0.utterance == candidate.utterance }
+        live.candidates.removeAll { $0.utterance == candidate.utterance }
         UsageHook.action("dismissed")   // content-free: the enum outcome, never the candidate text
     }
 
@@ -2896,7 +2946,7 @@ public final class CaptureManager: ObservableObject {
         // A fresh conversation surface starts with NO ambient rows (belt-and-suspenders
         // with the captureId guard in noteRecordingCandidate) — a candidate from the
         // just-closed conversation must never bleed onto this one.
-        recordingCandidates = []
+        live.candidates = []
         captures.insert(wal, at: 0)               // newest first (Omi-style timeline)
         // Durably stamp the conversation START (F1) — the card's start time + the
         // door's `capturedAt`. Idempotent (won't clobber an existing record). Also
@@ -2960,7 +3010,7 @@ public final class CaptureManager: ObservableObject {
         }
         let wal = captures.first(where: { $0.captureId == captureId }) ?? makeWAL(captureId: captureId)
         active = wal
-        recordingCandidates = []
+        live.candidates = []
         captures.removeAll { $0.captureId == captureId }   // avoid a duplicate row
         captures.insert(wal, at: 0)                        // newest first
         // A half-shipped finalize must not race the resumed session; drop its intent and
@@ -3005,7 +3055,7 @@ public final class CaptureManager: ObservableObject {
         resetLiveTitleTransient()
         if freshConversation { resetLiveTitleBackoff() }
         guard let make = makeLiveTranscriber, let t = make() else { return }
-        liveTranscript = .empty
+        live.transcript = .empty
         liveTranscriber = t
         #if canImport(AVFoundation)
         liveBox.set(t)
@@ -3013,7 +3063,7 @@ public final class CaptureManager: ObservableObject {
         let pump = Task { @MainActor [weak self] in
             for await snap in t.transcript {
                 guard !Task.isCancelled else { break }
-                self?.liveTranscript = snap
+                self?.live.transcript = snap
                 self?.updateLiveTitle(with: snap)
             }
         }
@@ -3027,7 +3077,7 @@ public final class CaptureManager: ObservableObject {
                 #endif
                 self?.liveTranscriber = nil
                 pump.cancel()
-                self?.liveTranscript = .empty
+                self?.live.transcript = .empty
             }
         }
     }
@@ -3044,7 +3094,7 @@ public final class CaptureManager: ObservableObject {
         liveTranscriber = nil
         liveTranscriptTask?.cancel()
         liveTranscriptTask = nil
-        liveTranscript = .empty
+        live.transcript = .empty
         // Remember the session's settled live title BEFORE clearing: it seeds the
         // provisional card (better than first-words-of-tail) until the authoritative
         // pipeline title lands. Then clear the published title with the preview.
@@ -3069,7 +3119,7 @@ public final class CaptureManager: ObservableObject {
     /// transcriber begins with an empty context. Does NOT touch the conversation-scoped
     /// external backoff schedule.
     private func resetLiveTitleTransient() {
-        liveTitle = nil
+        live.title = nil
         liveTitleState = nil
         titleWordsAtLastHeuristic = 0
         titleWordsAtLastModel = 0
@@ -3219,7 +3269,7 @@ public final class CaptureManager: ObservableObject {
         let merged = LiveTitleArbiter.merged(current: liveTitleState, candidateText: text, tier: tier)
         guard merged != liveTitleState else { return }
         liveTitleState = merged
-        liveTitle = merged?.text
+        live.title = merged?.text
     }
 
     /// Persist the on-device transcript as the capture's PROVISIONAL card content + a
@@ -3286,7 +3336,7 @@ public final class CaptureManager: ObservableObject {
 
     private func endSession() {
         router.setWAL(nil)
-        recordingCandidates = []   // the live surface's rows belong to the closing conversation
+        live.candidates = []   // the live surface's rows belong to the closing conversation
         guard let finished = active else {
             // No active session — still ensure any live preview is torn down.
             endLiveTranscription()
