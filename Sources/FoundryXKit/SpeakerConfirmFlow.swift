@@ -196,9 +196,16 @@ public enum SpeakerConfirmFlow {
     /// `ship` now returns the `ConfirmOutcome` so callers can reconcile the canonical
     /// name/id and surface offers. Extracted from `CaptureManager.retryPendingSpeakerConfirms`
     /// so the behavior is drivable by the brine step-defs without a network.
+    ///
+    /// Every ship is TIME-BOXED (`deadline`), exactly as the interactive `backgroundShip`
+    /// already was. It wasn't: the drain leg inherited whatever the transport felt like
+    /// (30–90s URLSession timeouts; the relay mux leg, none at all), so one wedged round trip
+    /// parked the whole confirm lane. A deadline classifies `.transient`, so the entry stays
+    /// durably queued and the next drain re-ships it — no intent is ever lost by timing out.
     public static func drainPending(
         baseDir: URL,
-        ship: @Sendable (SpeakerConfirmQueue.Entry) async throws -> ConfirmOutcome,
+        deadline: TimeInterval = defaultDeadline,
+        ship: @escaping @Sendable (SpeakerConfirmQueue.Entry) async throws -> ConfirmOutcome,
         onSynced: @Sendable (SpeakerConfirmQueue.Entry, ConfirmOutcome) async -> Void = { _, _ in },
         onRejected: @Sendable (SpeakerConfirmQueue.Entry) async -> Void = { _ in },
         onAuthExpired: @MainActor () -> Void
@@ -207,7 +214,7 @@ public enum SpeakerConfirmFlow {
         guard !entries.isEmpty else { return }
         for e in entries {
             do {
-                let outcome = try await ship(e)
+                let outcome = try await withDeadline(deadline) { try await ship(e) }
                 await Task.detached {
                     SpeakerConfirmQueue.remove(captureId: e.captureId, slot: e.slot,
                                                ifTsMatches: e.ts, baseDir: baseDir)
@@ -235,46 +242,16 @@ public enum SpeakerConfirmFlow {
     /// Race `ship` against a wall-clock deadline. On deadline `DeadlineExceeded` is thrown
     /// (classified `.transient`) and the ship task is cancelled best-effort.
     ///
-    /// Deliberately UNSTRUCTURED (adversarial review P1): a task group cannot return until
-    /// its children finish, so a ship leg parked on a non-cancellable continuation (the
-    /// relay mux turn — the exact b230 lost-response hang) would defeat a group-based race
-    /// and leave a forever-spinner. Here the deadline resumes the caller REGARDLESS; the
-    /// orphaned ship task resolves (or is torn down with the transport) later, and its late
-    /// result is discarded. The confirm is idempotent and stays durably queued, so nothing
-    /// is lost either way.
+    /// The race primitive itself now lives in `AsyncDeadline` so the pending-remote-delete
+    /// drain can share it (same unstructured shape, same semantics — see that file for the
+    /// adversarial-review P1 reasoning). This wrapper keeps the error TYPE the confirm lane's
+    /// `SpeakerShipDisposition.classify` matches on.
     struct DeadlineExceeded: Error {}
     static func withDeadline(
         _ seconds: TimeInterval,
         ship: @escaping @Sendable () async throws -> ConfirmOutcome
     ) async throws -> ConfirmOutcome {
-        let once = ResumeOnce()
-        return try await withCheckedThrowingContinuation { cont in
-            let shipTask = Task {
-                do {
-                    let outcome = try await ship()
-                    await once.resume(cont, with: .success(outcome))
-                } catch {
-                    await once.resume(cont, with: .failure(error))
-                }
-            }
-            Task {
-                try? await Task.sleep(nanoseconds: UInt64(max(0.05, seconds) * 1_000_000_000))
-                await once.resume(cont, with: .failure(DeadlineExceeded()))
-                shipTask.cancel()   // best-effort; a non-cancellable leg just gets orphaned
-            }
-        }
-    }
-
-    /// Single-resume gate for the deadline race — whichever side finishes first wins;
-    /// the loser's result is discarded (never a double resume).
-    private actor ResumeOnce {
-        private var resumed = false
-        func resume(_ cont: CheckedContinuation<ConfirmOutcome, Error>,
-                    with result: Result<ConfirmOutcome, Error>) {
-            guard !resumed else { return }
-            resumed = true
-            cont.resume(with: result)
-        }
+        try await AsyncDeadline.race(seconds, timeoutError: { DeadlineExceeded() }, work: ship)
     }
 }
 

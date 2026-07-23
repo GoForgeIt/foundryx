@@ -1071,6 +1071,9 @@ public final class CaptureManager: ObservableObject {
         authExpired = false
         authExpiredFired = false
         retryStates.removeAll()
+        // The pending-remote-delete lane backs off on an unreachable/failing door; a fresh
+        // token is exactly the event that can make it succeed, so close its breaker too.
+        deleteLaneRetry = RetryState()
         // A re-auth / rebuilt pipeline is a new tunnel-session: re-run the resync
         // handshake per capture instead of trusting a pre-flap seq snapshot.
         resyncedCaptures.removeAll()
@@ -1766,6 +1769,44 @@ public final class CaptureManager: ObservableObject {
     /// Reset the main-actor decode counter — call immediately before a measured rebuild.
     nonisolated static func resetMainThreadTranscriptDecodesForTests() {
         _decodeCounterLock.lock(); _mainThreadDecodes = 0; _decodeCounterLock.unlock()
+    }
+
+    // MARK: pending-remote-delete lane probes (test-only, deterministic)
+
+    /// Two hard integers that pin the build-286 field hang (`retryPendingDeletes` sampled at
+    /// `libsystem_kernel ; Foundation ; …` — a synchronous directory walk ON MAIN — while the
+    /// door was unreachable and every pending delete paid a full network timeout, serially,
+    /// on EVERY 5s drain):
+    ///
+    ///  * `mainThreadPendingDeleteDiskOpsForTests` — blocking filesystem operations the
+    ///    delete lane performed while ON the main thread (the scan + each tombstone teardown).
+    ///    Must be 0: the lane's disk work belongs off the main actor.
+    ///  * `remoteDeleteAttemptsForTests` — door delete calls attempted. Bounds the per-cycle
+    ///    fan-out and proves the unreachable-door breaker stops the cycle after the first
+    ///    failure instead of paying N timeouts.
+    ///
+    /// Same `nonisolated(unsafe)` + NSLock idiom as the decode counter above, so the
+    /// assertions are machine-independent integers rather than wall-clock budgets.
+    nonisolated(unsafe) private static let _deleteLaneLock = NSLock()
+    nonisolated(unsafe) private static var _mainThreadDeleteDiskOps = 0
+    nonisolated(unsafe) private static var _remoteDeleteAttempts = 0
+    /// Increment the delete-lane disk-op counter iff we are ON the main thread (the pathology).
+    nonisolated static func noteDeleteLaneDiskOp() {
+        guard Thread.isMainThread else { return }
+        _deleteLaneLock.lock(); _mainThreadDeleteDiskOps += 1; _deleteLaneLock.unlock()
+    }
+    nonisolated static func noteRemoteDeleteAttempt() {
+        _deleteLaneLock.lock(); _remoteDeleteAttempts += 1; _deleteLaneLock.unlock()
+    }
+    nonisolated static var mainThreadPendingDeleteDiskOpsForTests: Int {
+        _deleteLaneLock.lock(); defer { _deleteLaneLock.unlock() }; return _mainThreadDeleteDiskOps
+    }
+    nonisolated static var remoteDeleteAttemptsForTests: Int {
+        _deleteLaneLock.lock(); defer { _deleteLaneLock.unlock() }; return _remoteDeleteAttempts
+    }
+    nonisolated static func resetPendingDeleteProbesForTests() {
+        _deleteLaneLock.lock(); _mainThreadDeleteDiskOps = 0; _remoteDeleteAttempts = 0
+        _deleteLaneLock.unlock()
     }
 
     /// A COALESCED visible-list rebuild for OUT-OF-MANAGER writers (the status poller's card
@@ -3680,7 +3721,13 @@ public final class CaptureManager: ObservableObject {
         // envelope (F1, F9). Absent (older capture) → an empty body (still valid).
         let meta = ConversationMetaStore.load(captureId: id, baseDir: baseDir)
         do {
-            try await finalizeCapture(id, meta)
+            // TIME-BOXED (audited with the pending-delete lane): the direct-LAN transport
+            // bounds itself at 60s but the relay/mux leg had NO bound at all, so a wedged
+            // round trip could park the finalize lane indefinitely. A deadline lands in the
+            // catch below — "staying pending, will retry" — so the durable `.needs-finalize`
+            // marker is untouched and nothing is lost.
+            let finalize = finalizeCapture
+            try await AsyncDeadline.race(Self.finalizeCallTimeout) { try await finalize(id, meta) }
             clearNeedsFinalize(id)
             // The finalize backend may be the LOCAL brain (LocalBackend), which writes the
             // transcript + card sidecars directly — OUTSIDE the manager's sight. Invalidate
@@ -3958,10 +4005,20 @@ public final class CaptureManager: ObservableObject {
         let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try? Data().write(to: needsDeleteMarker(captureId), options: [.atomic])
+        // The durable marker is the source of truth; the in-memory queue is how the drain
+        // finds it without re-walking the captures dir on the main actor every 5s.
+        enqueuePendingDelete(captureId)
+        // A fresh, deliberate user intent deserves an immediate attempt even if the lane was
+        // backed off from an earlier unreachable-door window.
+        deleteLaneRetry = RetryState()
     }
 
-    private func isPendingDelete(_ captureId: String) -> Bool {
-        FileManager.default.fileExists(atPath: needsDeleteMarker(captureId).path)
+    /// True while a capture still owes the door a remote delete. ONE definition of the
+    /// predicate, shared by the (off-main, `nonisolated`) seed scan — mirrors `isDeletedOnDisk`.
+    nonisolated static func isPendingDeleteOnDisk(_ captureId: String, baseDir: URL) -> Bool {
+        FileManager.default.fileExists(
+            atPath: baseDir.appendingPathComponent(captureId, isDirectory: true)
+                .appendingPathComponent(".needs-delete").path)
     }
 
     private func deleteConversationFilesKeepingMarkers(_ captureId: String) {
@@ -4363,31 +4420,162 @@ public final class CaptureManager: ObservableObject {
 
     /// Retry finalize for every capture still marked pending-finalize. Safe to call
     /// from the drain timer and on app-foreground (mirrors the WAL drain ethos).
+    ///
+    /// AUDITED alongside `retryPendingDeletes` (the build-286 main-thread hang). It shares
+    /// PART of that shape and the audit is recorded here so nobody has to re-derive it:
+    ///
+    ///  * Main-actor disk: the selection is two `fileExists` calls per HYDRATED capture
+    ///    (bounded by `maxCapturesToLoad`), not an unbounded base-dir walk, and `tryFinalize`
+    ///    reads `card`/`meta` for the few captures that pass the gate. Unlike the delete lane
+    ///    there is no `contentsOfDirectory` here, which is the syscall the field stallstack
+    ///    actually caught.
+    ///  * Serial network with no breaker: TRUE, but structurally bounded — finalize is gated
+    ///    on `pendingSegments == 0`, so the exact condition that made the delete lane pay N
+    ///    timeouts (an unreachable door) leaves segments un-ACK'd and gates these captures out
+    ///    BEFORE any network call happens.
+    ///  * No per-call timeout: FIXED — see the deadline in `tryFinalize`.
+    ///
+    /// Moving the selection off the main actor was TRIED and REVERTED: the extra suspension
+    /// point between selecting and finalizing lets a concurrent drain tick interleave, and
+    /// `CaptureSubstanceGateTests` went from 0/10 to 2/10 failures under CPU load. The ~600
+    /// cheap stats it would have saved are not worth a real race in the finalize lane.
     public func retryPendingFinalizes() async {
         for wal in captures where wal !== active && !isDeleted(wal.captureId) && isPendingFinalize(wal.captureId) {
             await tryFinalize(wal)
         }
     }
 
-    /// Retry all durable remote-deletion intents. This enumerates disk rather than
-    /// `captures` because deleted captures intentionally do NOT hydrate into memory.
-    /// On ACK, the whole capture dir is removed; until then only `.deleted` +
-    /// `.needs-delete` remain, so the row cannot resurrect while offline.
-    public func retryPendingDeletes() async {
-        let fm = FileManager.default
-        guard let entries = try? fm.contentsOfDirectory(at: baseDir, includingPropertiesForKeys: nil) else { return }
-        for dir in entries {
+    // MARK: pending remote-delete lane (off-main, bounded, breakered)
+    //
+    // WHAT THIS LANE USED TO DO, AND WHY IT FROZE THE APP (build 286, owner's phone, 212
+    // conversations; 8 MetricKit hangs 598–1939ms, nav-stall spans to 4161ms). The sampler
+    // caught it directly:
+    //
+    //     stallstack ms=501 fr=libsystem_kernel.dylib+0x6844 ; Foundation+0x26ec8 ;
+    //                FoundryX+0xb904c (retryPendingDeletes) ; libswift_Concurrency+0x53b4
+    //
+    // The owner had deleted many junk conversations and the desktop door was unreachable, so
+    // every delete stayed pending and the lane — which the drain loop re-enters every 5s —
+    //   (1) walked the WHOLE captures dir synchronously ON the main actor (the Foundation
+    //       `getattrlistbulk` frame above), plus a `fileExists` per entry;
+    //   (2) then serially awaited one UN-TIMEBOXED door call per pending delete;
+    //   (3) then, on ACK, recursively removed each capture dir (audio included) ON main;
+    //   with no batch bound and no breaker, so a down door cost N full network timeouts and
+    //   the freeze RECURRED on every drain tick.
+    //
+    // The lane now:
+    //   * derives the pending set ONCE per process, OFF the main actor, and maintains it in
+    //     memory thereafter (`deleteConversation` is the only writer of `.needs-delete`), so a
+    //     steady state costs zero syscalls;
+    //   * attempts at most `maxPendingDeletesPerDrain` per cycle;
+    //   * time-boxes every door call (`pendingDeleteCallTimeout`) instead of inheriting a
+    //     30–60s URLSession/relay timeout;
+    //   * STOPS the cycle on the first failure and backs the whole lane off on the SAME
+    //     exponential schedule the upload drain uses (`retryDelay`), so an unreachable door
+    //     costs one bounded call every backoff window rather than N timeouts every 5s;
+    //   * tears the acknowledged tombstone down OFF the main actor.
+    //
+    // TOMBSTONE SEMANTICS ARE UNCHANGED, and that is non-negotiable: a delete is dequeued and
+    // its directory removed ONLY after the door ACKs. Until then `.deleted` + `.needs-delete`
+    // both remain on disk, so the row can never resurrect, and if the in-memory queue is ever
+    // lost (crash, relaunch) the one-time seed scan re-derives it from those markers.
+
+    /// At most this many pending remote-deletes are attempted per drain tick.
+    public nonisolated static let maxPendingDeletesPerDrain = 5
+    /// Wall-clock bound on ONE door delete. A few seconds — a delete that can't be reached
+    /// fast is a delete that stays queued, not one the UI waits on.
+    public nonisolated static let pendingDeleteCallTimeout: TimeInterval = 5
+    /// Wall-clock bound on ONE finalize round trip. Generous (the door assembles + ingests
+    /// behind it) and matched to the direct-LAN transport's own 60s timeout, so the point of
+    /// the bound is to cap the RELAY leg, which had none.
+    public nonisolated static let finalizeCallTimeout: TimeInterval = 60
+
+    /// The pending remote-delete queue, held in MEMORY (seeded once from disk) so the drain
+    /// never re-walks the captures dir. Order = FIFO by intent.
+    private var pendingDeleteIds: [String] = []
+    /// Whether the one-time, off-main seed scan has run for this manager.
+    private var pendingDeleteSeeded = false
+    /// Lane-wide breaker state — an unreachable door fails ALL of these identically, so the
+    /// backoff belongs to the lane, not to each id (mirrors `retryStates` for uploads).
+    private var deleteLaneRetry = RetryState()
+
+    /// Queue a capture for remote deletion in memory (the durable `.needs-delete` marker is
+    /// written by `markNeedsDelete`). Idempotent.
+    private func enqueuePendingDelete(_ captureId: String) {
+        guard !pendingDeleteIds.contains(captureId) else { return }
+        pendingDeleteIds.append(captureId)
+    }
+
+    /// The one-time disk derivation of the pending set — the ONLY base-dir walk this lane ever
+    /// does, and it runs OFF the main actor. `nonisolated static`: touches no actor state.
+    nonisolated static func scanPendingDeleteIds(baseDir: URL) -> [String] {
+        noteDeleteLaneDiskOp()   // 0 unless this ran on main — the pathology being pinned
+        guard let entries = try? FileManager.default
+            .contentsOfDirectory(at: baseDir, includingPropertiesForKeys: nil)
+        else { return [] }
+        return entries.compactMap { dir in
             let id = dir.lastPathComponent
-            guard !id.hasPrefix("."), isPendingDelete(id) else { continue }
+            guard !id.hasPrefix("."), isPendingDeleteOnDisk(id, baseDir: baseDir) else { return nil }
+            return id
+        }.sorted()
+    }
+
+    /// Retry the durable remote-deletion intents. Bounded per cycle, time-boxed per call, and
+    /// stopped + backed off on the first failure. Captures are deleted, never hydrated, so the
+    /// queue is disk-derived once and then maintained in memory.
+    public func retryPendingDeletes() async {
+        if !pendingDeleteSeeded {
+            let base = baseDir
+            let onDisk = await Task.detached(priority: .utility) {
+                Self.scanPendingDeleteIds(baseDir: base)
+            }.value
+            pendingDeleteSeeded = true
+            // Union, not assign: a delete queued while the scan ran is already in memory.
+            for id in onDisk { enqueuePendingDelete(id) }
+        }
+        guard !pendingDeleteIds.isEmpty else { return }
+        let now = Date().timeIntervalSince1970
+        guard now >= deleteLaneRetry.nextEligible else { return }   // breaker OPEN — door is down
+
+        let base = baseDir
+        // An explicit snapshot: the loop dequeues from `pendingDeleteIds` as it ACKs.
+        let batch = Array(pendingDeleteIds.prefix(Self.maxPendingDeletesPerDrain))
+        for id in batch {
             do {
-                try await deleteCaptureRemote(id)
-                try? fm.removeItem(at: dir)
-                log?.info("capture \(id): remote delete acknowledged; local tombstone removed")
+                Self.noteRemoteDeleteAttempt()
+                let remote = deleteCaptureRemote
+                try await AsyncDeadline.race(Self.pendingDeleteCallTimeout) {
+                    try await remote(id)
+                }
             } catch {
-                log?.warn("capture \(id): remote delete failed (\((error as NSError).localizedDescription)) — staying pending")
+                // The door is unreachable / failing. STOP this cycle — the remaining intents
+                // would each pay the same bounded timeout for nothing — and back the lane off
+                // so subsequent drain ticks are free. NOTHING is dequeued: both markers stay.
+                deleteLaneRetry.failures += 1
+                deleteLaneRetry.nextEligible =
+                    now + CaptureManager.retryDelay(forFailures: deleteLaneRetry.failures)
+                log?.warn("capture \(id): remote delete failed (\((error as NSError).localizedDescription)) — " +
+                          "staying pending; \(pendingDeleteIds.count) queued, lane backing off")
+                return
             }
+            // ACKed → safe to dequeue and tear the tombstone down (OFF the main actor). If the
+            // teardown fails the markers survive and the next launch's seed scan re-queues it.
+            pendingDeleteIds.removeAll { $0 == id }
+            deleteLaneRetry = RetryState()
+            let dir = base.appendingPathComponent(id, isDirectory: true)
+            await Task.detached(priority: .utility) {
+                CaptureManager.noteDeleteLaneDiskOp()
+                try? FileManager.default.removeItem(at: dir)
+            }.value
+            log?.info("capture \(id): remote delete acknowledged; local tombstone removed")
         }
     }
+
+    /// Test seams (deterministic, `@testable`-only — mirrors the `*ForTests` idiom): the lane's
+    /// queue depth (proves nothing is dropped while the door is down), and a way to say "the
+    /// backoff window elapsed" without a real drain having to wait it out.
+    var pendingDeleteQueueDepthForTests: Int { pendingDeleteIds.count }
+    func expirePendingDeleteBackoffForTests() { deleteLaneRetry.nextEligible = 0 }
 
     // MARK: persistence (resume across launches)
 

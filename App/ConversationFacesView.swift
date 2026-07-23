@@ -837,7 +837,10 @@ struct ConversationFacesView: View {
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             GrainButton("Load transcript", variant: .filled, size: .sm) { Task { await fetchFromDoor() } }
             if let loadError {
-                Text("Couldn't load transcript: \(loadError)")
+                // `loadError` is already an honest, actionable sentence (DoorFailureMessage) —
+                // it is NOT a transport string, so it needs no "Couldn't load transcript:"
+                // prefix explaining that something failed. The user can see that.
+                Text(loadError)
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.amber)
             }
         }
@@ -1180,7 +1183,16 @@ struct ConversationFacesView: View {
                 cacheIfReady(fetched)
             }
         } catch {
-            if cached == nil { loadError = (error as NSError).localizedDescription }
+            // Say the TRUE, actionable thing — never forward the transport string. A door
+            // fetch that fails because the Mac's door isn't connected to the relay used to
+            // render as "Could not connect to the server", which reads as "your network is
+            // broken" and sent us hunting a phantom phone-connectivity bug for hours on a
+            // phone whose network was perfect. Sign-in is now required to reach this screen
+            // at all, so a transport failure here means exactly one thing: the computer is
+            // not reachable. (DoorFailureMessage, tested.)
+            if cached == nil {
+                loadError = DoorFailureMessage.make(doorTransportFailure: error).line
+            }
         }
         loading = false
         refreshSearchAfterContentChange()

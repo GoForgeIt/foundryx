@@ -1,23 +1,32 @@
 import XCTest
 @testable import FoundryXKit
 
-/// "Take me straight in" (track 20260714T1800 follow-up): a returning user who turned the
-/// welcome/sign-in gate off opens directly into the phone-only tier — whole and offline —
-/// while everyone else still hits the sign-in gate first. Default behavior is unchanged.
+/// "Open straight to the app": an ALREADY-AUTHENTICATED returning user does not have to see
+/// the welcome screen again. It is NOT an auth bypass.
+///
+/// CONTRACT CORRECTED 2026-07-23 (Nick): sign-in is REQUIRED, always. "Local-first" describes
+/// WHERE data lives and is processed — it never meant the app is usable without an identity,
+/// because signing in is what protects that data, including locally on the phone. The previous
+/// contract (pinned by the test below, which was literally named
+/// `testStraightInBypassesTheSignInGateWhenNotSignedIn`) let a signed-out phone use the whole
+/// app; every door-dependent feature then failed with a misleading NETWORK error rather than
+/// "you're signed out", and it contradicted RootGate.swift's own header, "Sign in FIRST".
 final class RootGateStraightInTests: XCTestCase {
 
-    func testStraightInBypassesTheSignInGateWhenNotSignedIn() {
-        // Default (letStraightIn = false): not signed in → the sign-in/connection gate.
+    /// INVERTED 2026-07-23. This test previously asserted that `letStraightIn` bypassed the
+    /// sign-in gate — the exact defect it was named after. Sign-in is required either way;
+    /// `letStraightIn` only decides whether an AUTHENTICATED user sees the welcome.
+    func testSignInIsRequiredEvenWithStraightIn() {
         XCTAssertEqual(
             RootGate.destination(signedIn: false, splashElapsed: true,
                                  brain: .justMyPhone, hostResolved: false),
             .signInGate, "default: not signed in → sign-in gate")
 
-        // Opted in: not signed in → straight into the phone tier (no connection needed).
         XCTAssertEqual(
             RootGate.destination(signedIn: false, splashElapsed: true,
                                  brain: .justMyPhone, hostResolved: false, letStraightIn: true),
-            .phoneBrain, "letStraightIn: open straight to the app, even offline")
+            .signInGate,
+            "straight-in is NOT an auth bypass — a signed-out user still signs in first")
     }
 
     // INVERTED by track 20260715T1502 (Nick 2026-07-16): straight-in means NO gate
@@ -25,10 +34,17 @@ final class RootGateStraightInTests: XCTestCase {
     // before straight-in kicks in") described exactly the bug being fixed: an
     // opted-out user met the old connection page for 2 s on every launch.
     func testStraightInSkipsEvenTheSplashAndSignedInPathIsUnchanged() {
+        // Signed OUT + straight-in + pre-splash: still the sign-in gate (corrected 2026-07-23).
         XCTAssertEqual(
             RootGate.destination(signedIn: false, splashElapsed: false,
                                  brain: .justMyPhone, hostResolved: false, letStraightIn: true),
-            .phoneBrain, "straight-in: zero gate — the app opens immediately")
+            .signInGate, "not signed in → sign-in gate, splash or no splash")
+
+        // What straight-in DOES buy an authenticated user: no waiting on the splash/welcome.
+        XCTAssertEqual(
+            RootGate.destination(signedIn: true, splashElapsed: false,
+                                 brain: .justMyPhone, hostResolved: false, letStraightIn: true),
+            .phoneBrain, "signed in + straight-in: the app opens immediately, no welcome")
 
         // Signed-in routing is untouched: resolved computer brain still wins.
         XCTAssertEqual(

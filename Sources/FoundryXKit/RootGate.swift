@@ -28,17 +28,25 @@ public enum RootGate {
                                    hostResolved: Bool,
                                    letStraightIn: Bool = false,
                                    cellPaired: Bool = false) -> RootDestination {
-        // "Take me straight in" (Nick 2026-07-16, track 20260715T1502): NO gate of any
-        // kind — not the splash, not the welcome, never the old connection page. The app
-        // opens immediately; a chosen computer brain is used the moment it resolves, and
-        // connection status shows IN the app (Settings → Brain), not as an interstitial.
-        if letStraightIn {
-            if signedIn, brain == .myComputer, hostResolved { return .computerBrain }
-            if signedIn, brain == .foundryCloud, cellPaired { return .cellBrain }
-            return .phoneBrain
-        }
-        guard splashElapsed else { return .signInGate }   // the welcome front door leads
+        // SIGN-IN IS REQUIRED — ALWAYS. (Nick, 2026-07-23.)
+        //
+        // "Local-first" describes WHERE a user's data lives and is processed — on their
+        // phone, no egress required. It has never meant the app is usable without an
+        // identity: signing in is what PROTECTS that data, including locally on the phone.
+        //
+        // "Open straight to the app" (`letStraightIn`) means: an ALREADY-AUTHENTICATED user
+        // does not have to see the welcome screen again. It is NOT an auth bypass. The
+        // previous code conflated "no welcome, no splash" with "no sign-in" and fell through
+        // to `.phoneBrain` when `signedIn == false`, so a signed-out phone could use the
+        // whole app while every door-dependent feature (transcripts, chat, context) failed
+        // with a misleading NETWORK error instead of "you're signed out". That cost hours of
+        // chasing a phantom connectivity bug, and it contradicted this file's own header
+        // ("Sign in FIRST — locked decision #5").
         if !signedIn { return .signInGate }
+        // Authenticated. `letStraightIn` now controls only whether the WELCOME leads.
+        if !letStraightIn {
+            guard splashElapsed else { return .signInGate }   // the welcome front door leads
+        }
         if brain == .myComputer, hostResolved { return .computerBrain }
         if brain == .foundryCloud, cellPaired { return .cellBrain }
         return .phoneBrain
