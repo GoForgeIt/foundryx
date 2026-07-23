@@ -418,6 +418,14 @@ private struct MainTabs: View {
         // restoration spool flushes + detaches BEFORE CaptureManager takes the
         // frame/state callbacks; resume-same-id then continues its capture.
         let dm = DeviceManager.shared(log: log)
+        #if DEBUG || PERF_HARNESS
+        // `-SyntheticOmi`: report the (synthetic) Omi as CONNECTED so the ambient capture
+        // UI presents its live tile — `isShowingCapture`/`sourcePresentation` gate on
+        // `device.connectionState`, which a synthetic frame source alone never sets.
+        if ProcessInfo.processInfo.arguments.contains("-SyntheticOmi") {
+            dm.forceConnectionStateForTests(.connected("Synthetic Omi"))
+        }
+        #endif
         FoundryXAppDelegate.handOffRestorationToApp()
         _log = StateObject(wrappedValue: log)
         _device = StateObject(wrappedValue: dm)
@@ -485,6 +493,22 @@ private struct MainTabs: View {
         #else
         let mic: AudioFrameSource = MicFrameSource(log: log)
         #endif
+        // `-SyntheticOmi` (DEBUG/PERF only, same leak-gated class as `-SyntheticMic`):
+        // substitute the AMBIENT source (`source:`, normally the Omi over BLE) with a
+        // synthetic frame source that emits `.streaming` + real voiced Opus packets. This
+        // lets the simulator drive the AMBIENT capture path end-to-end — a speech onset
+        // opens a conversation with NO button tap, then the hero "Listening" tile, the
+        // live transcript and the tap-through to the recording page all run for real. That
+        // path had ZERO UI coverage before (only the phone-mic Record button did), which
+        // is how the 2026-07-23 "records but can't open / no transcript" regression shipped.
+        #if DEBUG || PERF_HARNESS
+        let ambientSource: AudioFrameSource =
+            ProcessInfo.processInfo.arguments.contains("-SyntheticOmi")
+            ? SyntheticMicFrameSource(log: log)
+            : dm
+        #else
+        let ambientSource: AudioFrameSource = dm
+        #endif
         let mgr: CaptureManager
         if local {
             // "Just my phone" (track 20260705T1100): the SAME capture pipeline, but
@@ -497,7 +521,7 @@ private struct MainTabs: View {
                                        stt: stt,
                                        titler: systemTitler)
             mgr = CaptureManager(
-                target: target, backend: backend, log: log, source: dm,
+                target: target, backend: backend, log: log, source: ambientSource,
                 micSource: mic,
                 liveTranscriber: liveFactory,
                 liveTitler: systemTitler,
@@ -509,7 +533,7 @@ private struct MainTabs: View {
         } else {
             localSTT = nil
             mgr = CaptureManager(
-                target: target, log: log, source: dm,
+                target: target, log: log, source: ambientSource,
                 micSource: mic,
                 liveTranscriber: liveFactory,
                 // On-device Foundation Models stays the INSTANT placeholder + offline

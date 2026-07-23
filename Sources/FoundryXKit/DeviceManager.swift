@@ -640,6 +640,14 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
             self.connectionState = s
         }
     }
+
+    #if DEBUG || PERF_HARNESS
+    /// Test seam: force the reported connection state so the `-SyntheticOmi` harness — a
+    /// synthetic ambient frame source with no real BLE radio — can exercise the AMBIENT
+    /// capture UI, whose live-tile gate (`isShowingCapture` → `sourcePresentation`) reads
+    /// `device.connectionState`. Leak-gated; the symbol cannot exist in a shipping build.
+    public func forceConnectionStateForTests(_ s: DeviceConnectionState) { setState(s) }
+    #endif
     private func setDiscovered(_ d: [DiscoveredDevice]) {
         DispatchQueue.main.async {
             guard self.discovered != d else { return }

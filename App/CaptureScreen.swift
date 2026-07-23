@@ -395,7 +395,17 @@ struct CaptureScreen: View {
         // framework. The card-summary fallback (ConversationFacesView.summaryText) fixes the
         // headline "card shows a summary but detail says none" bug without any model call.
         // Power on the Omi only when it's still an enabled source; always drive the meter.
-        .onAppear { if omiEnabled { manager.startSource() }; manager.startMeter() }
+        // `-SyntheticOmi` (DEBUG/PERF-only, leak-gated) stands in for a paired Omi, so it
+        // must start the ambient source even though the preview registry has no real device
+        // enabled — otherwise the ambient E2E can never arm (AmbientRecordingProofUITests).
+        .onAppear {
+            var startAmbient = omiEnabled
+            #if DEBUG || PERF_HARNESS
+            if ProcessInfo.processInfo.arguments.contains("-SyntheticOmi") { startAmbient = true }
+            #endif
+            if startAmbient { manager.startSource() }
+            manager.startMeter()
+        }
         // Presenting the full-screen RecordingScreen cover fires THIS view's onDisappear;
         // stopping the meter unconditionally there kills the recording ring / pill ring /
         // Live Activity level mid-session (Bug 2). Let the manager decide — it only stops

@@ -41,7 +41,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-VALID_PHASES=(swift gates compile leak flake lint)
+VALID_PHASES=(swift gates compile leak flake lint uiproof)
 PHASES=("$@")
 [ ${#PHASES[@]} -eq 0 ] && PHASES=("${VALID_PHASES[@]}")
 DD="${CI_GATES_DD:-build/ci-gates-dd}"
@@ -225,7 +225,7 @@ LEAK_SEAM_TYPES=(DemoSeed StressChurn SyntheticMicFrameSource BenchModel)
 # PRODUCTION code (it suppresses the launch-cost window when the harness owns the sensor),
 # so its presence in Release is correct, not a leak.
 LEAK_SEAM_ARGS=(-SyntheticMic -BrainSetupFailed -StressSeed -StressSegs -StressChurn -StallDemo -MainPreview
-                -WelcomePreview -Screen -RemoteChat)
+                -WelcomePreview -Screen -RemoteChat -SyntheticOmi)
 # -WelcomePreview / -Screen / -RemoteChat were found SHIPPING IN RELEASE alongside -MainPreview.
 # They are listed here, not merely fixed at the call site, because fixing an instance without
 # policing the class is how the first one survived: a seam nobody is checking for is a seam that
@@ -464,6 +464,40 @@ phase_lint() {
     fail "process-global-polluter($bad)"
   else
     echo "  clean — every writer call site is inside a ProcessGlobalStateTestCase subclass"
+  fi
+}
+
+# ---------------------------------------------------------------- uiproof: the recording SURFACE, on a simulator
+# The layer the logic suite CANNOT see: the actual SwiftUI render + navigation of the
+# capture surface, driven through the REAL pipeline. RecordingProof exercises the phone-mic
+# Record button; AmbientRecordingProof exercises the OMI AMBIENT path — a speech onset opens
+# a conversation with no button tap, the "Listening" hero tile carries it, and TAPPING that
+# tile opens the recording page. That ambient flow shipped BROKEN and green on 2026-07-23
+# because nothing rendered it; this phase is the guard so it can't recur. -SyntheticMic /
+# -SyntheticOmi feed real Opus packets through the whole pipeline, so only the radio is
+# stood in for. A missing simulator is a LOUD failure, never a silent skip.
+phase_uiproof() {
+  echo "==> [uiproof] recording-surface UI E2E on a simulator (phone-mic + Omi ambient)"
+  local udid
+  udid=$(xcrun simctl list devices available 2>/dev/null | grep -E "iPhone" | grep -Eo "[0-9A-F-]{36}" | head -1)
+  if [ -z "$udid" ]; then
+    echo "  no available iPhone simulator runtime — the capture-surface E2E cannot run"
+    fail "uiproof-no-simulator"
+    return
+  fi
+  xcrun simctl boot "$udid" >/dev/null 2>&1 || true
+  local out="build/ci-gates-uiproof.log"
+  mkdir -p build
+  if xcodebuild test -project FoundryX.xcodeproj -scheme FoundryXUIProof \
+       -configuration Debug -destination "platform=iOS Simulator,id=$udid" \
+       -derivedDataPath "$DD" \
+       -only-testing:FoundryXUITests/RecordingProofUITests/testPhoneMicRecordingTimerAndSurface \
+       -only-testing:FoundryXUITests/AmbientRecordingProofUITests/testAmbientSpeechOpensATappableRecordingConversation \
+       >"$out" 2>&1; then
+    echo "  uiproof: recording surface (phone-mic + Omi ambient tap-through) PASSED"
+  else
+    tail -50 "$out"
+    fail "uiproof-recording-surface"
   fi
 }
 
