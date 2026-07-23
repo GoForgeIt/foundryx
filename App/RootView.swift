@@ -64,6 +64,12 @@ struct RootView: View {
         //   `-WelcomePreview connecting` the connect gate, still resolving (amber)
         //   `-WelcomePreview connect`    the connect gate, settled (sage, Connected)
         // No effect in normal launches.
+        //
+        // COMPILED OUT OF A SHIPPING BUILD (leak gate). Same class as `-MainPreview`: a launch
+        // argument that renders a front-door surface while BYPASSING AUTH has no business
+        // existing in a shipping binary, whether or not anyone knows the flag. It survived only
+        // because the old `strings`-based scan cannot see a ≤15-byte Swift literal.
+        #if DEBUG || PERF_HARNESS
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "-WelcomePreview") {
             let variant = i + 1 < args.count ? args[i + 1] : ""
@@ -86,6 +92,7 @@ struct RootView: View {
                 return AnyView(PersonaWelcomeStep(onStart: {}, onSkip: {}))
             }
         }
+        #endif
         // DEV-only visual harness: `-MainPreview` mounts the real tabs in phone-only
         // mode (no auth, no door) over the demo cards DemoSeed dropped on disk, so every
         // screen can be screenshot-verified against the prototype. No effect normally.
@@ -112,6 +119,11 @@ struct RootView: View {
         #endif
         // DEV-only: `-Screen answer` mounts the answer/decision-brief with demo data
         // (no manager needed) for screenshot-verification.
+        //
+        // COMPILED OUT OF A SHIPPING BUILD (leak gate) — same class as `-MainPreview` and
+        // `-WelcomePreview`: a launch argument that mounts a surface with seeded data, ahead of
+        // the real destination logic. `#endif` closes after the `-Screen waiting` variant below.
+        #if DEBUG || PERF_HARNESS
         if ProcessInfo.processInfo.arguments.contains("-Screen"),
            ProcessInfo.processInfo.arguments.contains("answer") {
             let demo = AmbientAnswer(
@@ -137,6 +149,7 @@ struct RootView: View {
             return AnyView(WaitingExperienceProof(
                 kind: WaitingExperienceProof.kind(from: ProcessInfo.processInfo.arguments)))
         }
+        #endif
         // The welcome front door leads until the user enters (enterApp); an
         // opted-out user short-circuits inside RootGate — no gate of any kind.
         let dest = RootGate.destination(signedIn: remote.email != nil,

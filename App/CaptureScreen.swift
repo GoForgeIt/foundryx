@@ -290,9 +290,14 @@ struct CaptureScreen: View {
         // RecordingScreen from a FROZEN preview (fixed clock + seeded live transcript +
         // demo suggestions) so every section renders in the simulator without a real mic.
         .onAppear {
+            // COMPILED OUT OF A SHIPPING BUILD (leak gate) — same class as the other `-Screen`
+            // seams: a launch argument that deep-links a surface. No effect on a normal launch
+            // either way; the argument path simply no longer exists in the shipping build.
+            #if DEBUG || PERF_HARNESS
             let a = ProcessInfo.processInfo.arguments
             if a.contains("-Screen"), a.contains("detail") { deepDetail = true }
             if a.contains("-Screen"), a.contains("recording") { deepRecording = true }
+            #endif
             // The live HERO tile on the Capture tab (NOT the full-screen recorder) is forced
             // statelessly from the launch args in `heroSlot` — no seeding needed: the tile
             // renders its ring + fixed elapsed + seeded transcript from the forced slot. We

@@ -224,7 +224,12 @@ LEAK_SEAM_TYPES=(DemoSeed StressChurn SyntheticMicFrameSource BenchModel)
 # NB: `-PerfLog` is deliberately NOT on this list — PerfMetricsSubscriber reads it in
 # PRODUCTION code (it suppresses the launch-cost window when the harness owns the sensor),
 # so its presence in Release is correct, not a leak.
-LEAK_SEAM_ARGS=(-SyntheticMic -BrainSetupFailed -StressSeed -StressSegs -StressChurn -StallDemo -MainPreview)
+LEAK_SEAM_ARGS=(-SyntheticMic -BrainSetupFailed -StressSeed -StressSegs -StressChurn -StallDemo -MainPreview
+                -WelcomePreview -Screen -RemoteChat)
+# -WelcomePreview / -Screen / -RemoteChat were found SHIPPING IN RELEASE alongside -MainPreview.
+# They are listed here, not merely fixed at the call site, because fixing an instance without
+# policing the class is how the first one survived: a seam nobody is checking for is a seam that
+# comes back. If a new dev harness needs a launch argument, it belongs on this list on day one.
 
 # Count symbols naming a seam type in a Mach-O.
 leak_symcount() { nm -a "$1" 2>/dev/null | grep -cF "$2" || true; }
