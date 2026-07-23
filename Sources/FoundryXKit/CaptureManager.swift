@@ -849,6 +849,20 @@ public final class CaptureManager: ObservableObject {
     /// capture while one is already running.
     private var finalizing: Set<String> = []
 
+    /// Whether the AUTOMATIC finalize drivers run — the finished-path finalize on
+    /// conversation-close and the drain timer's `retryPendingFinalizes`. Default true
+    /// (production). Tests that assert the RETRY semantics of `retryPendingFinalizes`
+    /// deterministically set this false so finalize fires ONLY when they call it —
+    /// otherwise the fire-and-forget finished-path finalize races the explicit call
+    /// for the `finalizing` marker (it holds the marker across an off-main snapshot),
+    /// which flakes those tests under a saturated executor. Gating only the automatic
+    /// callers leaves the explicit `retryPendingFinalizes()` path (and all production
+    /// behavior) unchanged.
+    private var autoFinalizeEnabled = true
+    /// Test seam: quiesce the automatic finalize drivers (see `autoFinalizeEnabled`).
+    /// Set right after construction, before any capture is opened.
+    public func setAutoFinalizeForTests(_ enabled: Bool) { autoFinalizeEnabled = enabled }
+
     // MARK: bounded backlog drain + re-auth (anti-storm)
 
     /// Exponential-backoff bounds for a capture whose uploads keep failing — so a
@@ -3661,7 +3675,11 @@ public final class CaptureManager: ObservableObject {
                                             at: nowUnixSecs(), location: fix)
             self?.invalidateMeta(id)
             await finished.sync()                 // snappy first sync
-            await self?.tryFinalize(finished)     // finalize once segments are ACK'd
+            // The drain timer also retries this; skip the eager close-path finalize
+            // when the automatic drivers are quiesced (deterministic finalize tests).
+            if self?.autoFinalizeEnabled == true {
+                await self?.tryFinalize(finished) // finalize once segments are ACK'd
+            }
         }
         // End the Live Activity into a brief idle "last conversation" state + refresh the
         // widget. The provisional card seeded above gives `lastFinishedConversation()` a
@@ -3878,7 +3896,7 @@ public final class CaptureManager: ObservableObject {
         // After syncing, retry any pending-finalize captures whose segments are now
         // all ACK'd — this is the retry path for a finalize that didn't complete at
         // conversation-close (door/Lore was down, or segments weren't ACK'd yet).
-        await retryPendingFinalizes()
+        if autoFinalizeEnabled { await retryPendingFinalizes() }
         await retryPendingDeletes()
         await retryPendingSpeakerConfirms()   // durable speaker-name confirms (hub-blip safe)
         shipAmbientSignalIfDue()   // redacted gate/card signal → desktop door (v3.3)

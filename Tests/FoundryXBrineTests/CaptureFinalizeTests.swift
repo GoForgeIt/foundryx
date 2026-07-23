@@ -88,6 +88,12 @@ final class CaptureFinalizeTests: ProcessGlobalStateTestCase {
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
         let mgr = CaptureManager(target: target, baseDir: dir, source: src,
                                  finalize: { id, _ in try rec.record(id) })
+        // Deterministic finalize: quiesce the automatic drivers (close-path Task +
+        // 5s drain timer) so ONLY the explicit retryPendingFinalizes() below drives
+        // finalize. Otherwise the fire-and-forget close-path finalize races the
+        // explicit call for the `finalizing` marker and flakes exact-count asserts
+        // under a saturated executor (seen in the full-suite run, 2026-07-23).
+        mgr.setAutoFinalizeForTests(false)
 
         // silenceGap 0 → a silence frame right after voice closes the conversation
         // deterministically (the gap is measured from last voice; 0 ≥ 0). No clock
@@ -147,6 +153,12 @@ final class CaptureFinalizeTests: ProcessGlobalStateTestCase {
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
         let mgr = CaptureManager(target: target, baseDir: dir, source: src,
                                  finalize: { id, _ in try rec.record(id) })
+        // Deterministic finalize: quiesce the automatic drivers (close-path Task +
+        // 5s drain timer) so ONLY the explicit retryPendingFinalizes() below drives
+        // finalize. Otherwise the fire-and-forget close-path finalize races the
+        // explicit call for the `finalizing` marker and flakes exact-count asserts
+        // under a saturated executor (seen in the full-suite run, 2026-07-23).
+        mgr.setAutoFinalizeForTests(false)
         await mgr.hydration?.value
 
         await mgr.retryPendingFinalizes()
@@ -165,6 +177,12 @@ final class CaptureFinalizeTests: ProcessGlobalStateTestCase {
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
         let mgr = CaptureManager(target: target, baseDir: dir, source: src,
                                  finalize: { id, _ in try rec.record(id) })
+        // Deterministic finalize: quiesce the automatic drivers (close-path Task +
+        // 5s drain timer) so ONLY the explicit retryPendingFinalizes() below drives
+        // finalize. Otherwise the fire-and-forget close-path finalize races the
+        // explicit call for the `finalizing` marker and flakes exact-count asserts
+        // under a saturated executor (seen in the full-suite run, 2026-07-23).
+        mgr.setAutoFinalizeForTests(false)
         mgr.setSilenceGap(0)
 
         src.onState?(.streaming)
@@ -199,6 +217,12 @@ final class CaptureFinalizeTests: ProcessGlobalStateTestCase {
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
         let mgr = CaptureManager(target: target, baseDir: dir, source: src,
                                  finalize: { id, _ in try rec.record(id) })
+        // Deterministic finalize: quiesce the automatic drivers (close-path Task +
+        // 5s drain timer) so ONLY the explicit retryPendingFinalizes() below drives
+        // finalize. Otherwise the fire-and-forget close-path finalize races the
+        // explicit call for the `finalizing` marker and flakes exact-count asserts
+        // under a saturated executor (seen in the full-suite run, 2026-07-23).
+        mgr.setAutoFinalizeForTests(false)
         mgr.setSilenceGap(0)
 
         src.onState?(.streaming)
@@ -272,6 +296,7 @@ final class CaptureFinalizeTests: ProcessGlobalStateTestCase {
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
         let mgr = CaptureManager(target: target, baseDir: dir, source: src,
                                  finalize: { _, meta in captured.record(meta?.endedAt) })
+        mgr.setAutoFinalizeForTests(false)   // deterministic: only explicit retry drives finalize
         await mgr.hydration?.value
 
         await mgr.retryPendingFinalizes()
