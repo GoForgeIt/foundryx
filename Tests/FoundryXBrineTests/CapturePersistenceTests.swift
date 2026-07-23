@@ -11,7 +11,7 @@ import Foundation
 /// Mirrors `CaptureAmbientTests`: a controllable `TestSource` whose `.streaming`
 /// state stands in for an Omi (re)connect, asserting on-disk WAL segments.
 @MainActor
-final class CapturePersistenceTests: XCTestCase {
+final class CapturePersistenceTests: ProcessGlobalStateTestCase {
 
     /// A source the test drives directly (start/stop are no-ops; the test invokes
     /// the onFrame/onState closures CaptureManager installs).
@@ -22,19 +22,11 @@ final class CapturePersistenceTests: XCTestCase {
         func stop() {}
     }
 
+    // Isolation from the process-global `CaptureSettings` (UserDefaults.standard) is inherited
+    // from `ProcessGlobalStateTestCase`: it hands each test the first-launch defaults and
+    // restores the process state afterwards. This suite deliberately writes `.paused` — that is
+    // its subject — so the restore is what keeps the other 20+ CaptureManager suites honest.
     private let desiredStateKey = "foundryx.capture.omi-desired-state"
-
-    override func setUp() {
-        super.setUp()
-        // Isolate from any leaked global state (CaptureSettings uses UserDefaults.standard).
-        UserDefaults.standard.removeObject(forKey: desiredStateKey)
-    }
-
-    override func tearDown() {
-        // Never leave a non-default intent behind to pollute other tests' managers.
-        UserDefaults.standard.removeObject(forKey: desiredStateKey)
-        super.tearDown()
-    }
 
     private func makeManager(_ src: TestSource, dir: URL) -> CaptureManager {
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")

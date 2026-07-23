@@ -89,6 +89,15 @@ struct RootView: View {
         // DEV-only visual harness: `-MainPreview` mounts the real tabs in phone-only
         // mode (no auth, no door) over the demo cards DemoSeed dropped on disk, so every
         // screen can be screenshot-verified against the prototype. No effect normally.
+        //
+        // COMPILED OUT OF A SHIPPING BUILD (leak gate, review B2). This branch mounts the whole
+        // app with NO auth and NO door on a launch argument — exactly the class of seam
+        // `scripts/ci-gates.sh leak` has always claimed to ban. It shipped anyway because the
+        // old `strings`-based detection cannot see a ≤15-byte Swift literal, so `-MainPreview`
+        // scored zero hits in Release and the gate printed "clean". A normal launch is
+        // byte-for-byte unaffected either way; the argument path simply no longer exists in
+        // the shipping configuration.
+        #if DEBUG || PERF_HARNESS
         if ProcessInfo.processInfo.arguments.contains("-MainPreview") {
             // `-RemoteChat`: mount the computer-tier chat surface (composer always
             // present) so the act-in-chat prefill can be screenshot-verified in the
@@ -100,6 +109,7 @@ struct RootView: View {
                 local: !ProcessInfo.processInfo.arguments.contains("-RemoteChat"),
                 vaultFunnel: vaultFunnel, accountDeletion: accountDeletion, showingAccount: .constant(false)))
         }
+        #endif
         // DEV-only: `-Screen answer` mounts the answer/decision-brief with demo data
         // (no manager needed) for screenshot-verification.
         if ProcessInfo.processInfo.arguments.contains("-Screen"),
@@ -454,7 +464,7 @@ private struct MainTabs: View {
         // source that feeds real 48k/960 Opus packets into the SAME pipeline, so the
         // simulator proofs exercise the real capture path without mic hardware. No
         // effect in release builds or on a normal launch.
-        #if DEBUG
+        #if DEBUG || PERF_HARNESS
         let syntheticMic = ProcessInfo.processInfo.arguments.contains("-SyntheticMic")
         let mic: AudioFrameSource = syntheticMic
             ? SyntheticMicFrameSource(log: log)
@@ -502,12 +512,20 @@ private struct MainTabs: View {
                 },
                 liveTitleBackoff: liveBackoff)
         }
-        #if DEBUG
+        #if DEBUG || PERF_HARNESS
         // The synthetic source has no hardware to ask permission for, and the simulator
         // test runner cannot drive the AVAudioApplication prompt — so use the manager's
         // EXISTING permission test hatch (the same one MeterLifecycleTests uses) to force
         // the granted branch. Only ever set under `-SyntheticMic`.
         if syntheticMic { mgr.micPermissionOverrideForTests = true }
+        #endif
+        #if DEBUG || PERF_HARNESS
+        // PERF-GATE hook (`-StressChurn`, track 20260722T1244): interleave REAL write traffic
+        // (segment append, drain ACK, status-poller card merge, finalize) with navigation so
+        // the list rebuild is measured AFTER a command invalidated the read-model caches —
+        // the CQRS hole every previous gate left open. Inert without the launch argument, and
+        // compiled out of a plain Release build entirely.
+        StressChurn.installIfRequested(manager: mgr)
         #endif
         // Omi hardware button: a DOUBLE-click pauses/resumes the current recording — the
         // same action as the on-screen Pause. Fires only if the paired Omi firmware exposes
@@ -569,10 +587,15 @@ private struct MainTabs: View {
                 }
             }
             // Skip the OS notification prompt under the screen-proof harness so it never
-            // covers a screenshot (no effect on a normal launch).
+            // covers a screenshot (no effect on a normal launch). The shipping build asks
+            // unconditionally — the harness suppression is compiled out entirely (leak gate).
+            #if DEBUG || PERF_HARNESS
             if !ProcessInfo.processInfo.arguments.contains("-MainPreview") {
                 AmbientNotifier.requestAuthorizationIfNeeded()
             }
+            #else
+            AmbientNotifier.requestAuthorizationIfNeeded()
+            #endif
         }
         // Ship the on-device ambient GATE/CARD signal (redacted — DERIVED action +
         // outcome only, NEVER the utterance/window/seed) to the desktop door on the

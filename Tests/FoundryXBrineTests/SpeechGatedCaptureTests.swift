@@ -14,32 +14,26 @@ import Foundation
 /// Drives the REAL CaptureManager door-free via a controllable source, mirroring the
 /// harness in `CaptureSubstanceGateTests`.
 @MainActor
-final class SpeechGatedCaptureTests: XCTestCase {
+final class SpeechGatedCaptureTests: ProcessGlobalStateTestCase {
 
     /// PRECONDITION, stated rather than assumed: every test here needs the ambient capture
     /// intent to be LISTENING, because `armForSpeech()` refuses to arm while paused — a paused
     /// manager never opens a conversation no matter how much voice it is fed.
     ///
     /// `CaptureSettings.omiCaptureDesiredState` is backed by UserDefaults, i.e. PROCESS-GLOBAL,
-    /// and it survives across test classes. Seven tests in this package call `manager.pause()`,
-    /// which persists `.paused`, and most capture suites never restore it — so whether this
-    /// suite passes depends on which test happened to run last before it. It has been
-    /// surviving only because alphabetical ordering happened to leave `.listening` behind.
-    /// That is luck, not isolation.
+    /// and it survives across test classes. Seven suites in this package call `manager.pause()`,
+    /// which persists `.paused` — so whether this suite passed used to depend on which test
+    /// happened to run last before it. It had been surviving only because alphabetical ordering
+    /// happened to leave `.listening` behind. That is luck, not isolation.
+    ///
+    /// That is now handled at the SOURCE: this suite (and every other writer of process-global
+    /// capture settings) inherits `ProcessGlobalStateTestCase`, which hands each test the
+    /// first-launch defaults and restores the process state in tearDown. The bespoke guard that
+    /// used to live here is gone because the discipline lives in one place —
+    /// `scripts/ci-gates.sh lint` fails the build if a new writer skips it.
     ///
     /// (For the record: this was NOT the cause of the full-suite flake — that turned out to be
-    /// a wait on the wrong signal further down, `snapshot()` vs the `@Published status`. This
-    /// guard closes a real, separate, still-latent hazard.)
-    override func setUp() {
-        super.setUp()
-        CaptureSettings.omiCaptureDesiredState = .listening
-    }
-
-    /// Leave no trace for the next suite, for the same reason.
-    override func tearDown() {
-        CaptureSettings.omiCaptureDesiredState = .listening
-        super.tearDown()
-    }
+    /// a wait on the wrong signal further down, `snapshot()` vs the `@Published status`.)
 
     /// A source the test drives directly (start/stop no-ops; the test fires the
     /// onFrame/onState closures CaptureManager installs).

@@ -15,15 +15,34 @@ enum DemoSeed {
     static func seedStressIfRequested() {
         let args = ProcessInfo.processInfo.arguments
         guard let i = args.firstIndex(of: "-StressSeed"),
-              i + 1 < args.count, let n = Int(args[i + 1]), n > 0 else { return }
+              i + 1 < args.count, let n = Int(args[i + 1]), n > 0 else {
+            // SELF-CLEANING (track 20260722T1244 part 2/9): the stress seed used to be purely
+            // ADDITIVE and never cleaned, so a 128-capture perf run left 128 synthetic cards
+            // in the simulator container that the NEXT UITest — which never asked for them —
+            // then had to navigate around. That is a real cross-suite flake we hit. A launch
+            // that does NOT ask for a stress library now gets none: the seeded rows are
+            // removed before any store is read. Only ever touches `stress-*` ids this seeder
+            // wrote; real captures and the `-MainPreview` demo cards are untouched.
+            purgeStressSeed(keeping: 0)
+            return
+        }
         // `-StressSegs <avgPerCapture>` (default 0 → unchanged): also seed realistic segment
         // files + partial .ack markers so the harness can exercise the launch WARM stat-storm
         // class (capture-status-warm) — the old seed wrote card/meta/transcript but ZERO
         // segments, so sim-perf could never see it (warm 89ms in sim vs 180s on device).
         var segAvg = 0
         if let j = args.firstIndex(of: "-StressSegs"), j + 1 < args.count { segAvg = Int(args[j + 1]) ?? 0 }
+        // The EFFECTIVE library size, announced to the log. `sim-perf.sh` reads this back and
+        // fails if it does not match the N the run asked for (review S9): the churn phase used
+        // to hardcode 175 and silently ignore the script's N argument, so `sim-perf.sh … 500`
+        // reported churn numbers for a 175-capture library under a "N=500" heading.
+        NSLog("perf-harness: stress-seed n=%d segs=%d", n, segAvg)
         let base = CaptureWAL.documentsCaptures()
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        // A SMALLER seed than last run's must actually shrink the library, otherwise the
+        // measured N is "whatever the largest run in this container ever asked for" and the
+        // budgets silently drift. Rows with index >= n are removed.
+        purgeStressSeed(keeping: n)
         let now = Int(Date().timeIntervalSince1970)
         var totalSegs = 0
         for k in 0..<n {
@@ -50,6 +69,26 @@ enum DemoSeed {
             if segAvg > 0 { totalSegs += seedSegments(dir: dir, index: k, count: n, avg: segAvg) }
         }
         NSLog("perf-harness: stress-seeded \(n) captures (\(totalSegs) segment files, avg \(segAvg)/capture) at \(base.path)")
+    }
+
+    /// Remove every stress-seeded capture whose index is >= `keeping` (0 = remove them all).
+    /// The seeder owns the `stress-<5 digits>` id space exclusively, so this can never delete
+    /// a real capture or a `-MainPreview` demo card.
+    private static func purgeStressSeed(keeping: Int) {
+        let fm = FileManager.default
+        let base = CaptureWAL.documentsCaptures()
+        guard let names = try? fm.contentsOfDirectory(atPath: base.path) else { return }
+        var removed = 0
+        for name in names where name.hasPrefix("stress-") {
+            guard let idx = Int(name.dropFirst("stress-".count)) else { continue }
+            if idx >= keeping {
+                try? fm.removeItem(at: base.appendingPathComponent(name, isDirectory: true))
+                removed += 1
+            }
+        }
+        if removed > 0 {
+            NSLog("perf-harness: purged \(removed) stale stress-seed captures (keeping \(keeping))")
+        }
     }
 
     /// Seed one capture's WAL segment files (`seg-<seq>.opus`) + a partial contiguous `.ack`

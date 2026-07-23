@@ -14,7 +14,7 @@ import BrineSwiftCore
 /// then resume — the session/captureId is unchanged and the already-WAL'd audio stays on
 /// disk. "App closed before resume" is proven by a fresh manager on the same dir still
 /// finding every segment (the CaptureResumeTests durability model).
-final class MicCaptureResilienceFeatureTests: XCTestCase {
+final class MicCaptureResilienceFeatureTests: ProcessGlobalStateTestCase {
     func testMicCaptureResilienceFeature() async throws {
         let world = MicResWorld()
         try await BrineFeatureRunner.run("mic-capture-resilience",

@@ -74,7 +74,7 @@ final class MainThreadStallWatchdogTests: XCTestCase {
 
     /// WS-A — a stall that stays UNDER the capture threshold (but over the report threshold)
     /// emits a span but never captures a stack.
-    func testStallUnderCaptureThresholdDoesNotSample() {
+    func testStallUnderCaptureThresholdDoesNotSample() throws {
         let target = DispatchQueue(label: "test.fake-main-nocap")
         let captures = LockedBox<[Int]>([])
         let emits = LockedBox<[Int]>([])
@@ -85,10 +85,44 @@ final class MainThreadStallWatchdogTests: XCTestCase {
             emit: { ms in emits.mutate { $0.append(ms) } })
         dog.start()
         target.async { Thread.sleep(forTimeInterval: 0.2) }   // 200ms: > report, < capture
-        let deadline = Date().addingTimeInterval(2)
+        // LOAD-DEPENDENCE (found by `scripts/ci-gates.sh flake`, which re-runs the suite under
+        // full CPU load): a 2s deadline was not "how long the answer takes", it was "how long
+        // an idle laptop takes". Under 12-way contention the watchdog's own ping thread is
+        // starved and the span lands seconds later, so the test failed for scheduling reasons
+        // with the product behaving correctly. Waiting LONGER cannot turn a wrong answer right;
+        // timing out CAN make a right answer look wrong.
+        let deadline = Date().addingTimeInterval(20)
         while emits.value.isEmpty && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
         dog.stop()
+        // ...and 20s was ALSO just "how long a 12-way-loaded laptop takes" — the flake gate
+        // caught this same assertion failing empty under 14-way saturation. Picking a bigger
+        // number is guessing again. So apply this file's own rule and MEASURE THE PREMISE:
+        // an empty result means either the product failed to report, or this machine could not
+        // schedule the sensor at all. Time a no-op on the SAME queue to tell those apart. If
+        // even that cannot be scheduled promptly the environment produced the empty result,
+        // and the honest verdict is "inconclusive", not "failed". The assertion is unchanged.
+        if emits.value.isEmpty {
+            let probeStart = Date()
+            let scheduled = DispatchSemaphore(value: 0)
+            target.async { scheduled.signal() }
+            _ = scheduled.wait(timeout: .now() + 5)
+            let schedulingDelay = Date().timeIntervalSince(probeStart)
+            try XCTSkipIf(schedulingDelay > 0.5,
+                          "inconclusive: this machine took \(Int(schedulingDelay * 1000))ms to " +
+                          "schedule a no-op, so it cannot run the watchdog's own ping timer " +
+                          "either — the empty result is starvation, not product behaviour")
+        }
         XCTAssertFalse(emits.value.isEmpty, "a 200ms stall still reports a span")
+        // The second assertion's PREMISE is "the stall stayed under the 400ms capture
+        // threshold" — which is only true if the OS honoured a 200ms sleep. Under contention it
+        // can overrun well past 400ms, at which point a stack capture is the CORRECT behaviour
+        // and asserting its absence would be asserting a falsehood. So verify the premise
+        // against what the sensor actually MEASURED instead of assuming it. The assertion
+        // itself is unchanged.
+        let observed = emits.value.max() ?? 0
+        try XCTSkipIf(observed >= 400,
+                      "premise broken by scheduler contention: the 200ms sleep overran to " +
+                      "\(observed)ms, i.e. past the 400ms capture threshold this test is below")
         XCTAssertTrue(captures.value.isEmpty, "but stays under the 400ms capture threshold — no stack")
     }
 

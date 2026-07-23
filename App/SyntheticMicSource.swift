@@ -21,11 +21,19 @@
 // live-title pipeline. Nothing about the recording surface, the session clock, the
 // meter or the live text is mocked — only the microphone hardware is stood in for.
 //
-// TEST-ONLY. The whole file is `#if DEBUG`, and RootView only substitutes it when the
-// process was launched with `-SyntheticMic`. Release builds cannot reach it, and a
-// normal DEBUG launch (no launch argument) still gets the real `MicFrameSource`.
+// TEST-ONLY. The whole file is `#if DEBUG || PERF_HARNESS`, and RootView only substitutes
+// it when the process was launched with `-SyntheticMic`. Plain Release builds cannot reach
+// it (proven by BINARY in `scripts/ci-gates.sh leak`, which fails if the launch-argument
+// string appears in the shipping executable), and a normal DEBUG launch without the
+// argument still gets the real `MicFrameSource`.
+//
+// PERF_HARNESS was added for the perf gate (track 20260722T1244): sim-perf builds the
+// PerfRelease configuration, in which the record-start leg of `PerfBudgetNavUITests` could
+// NEVER present — the simulator's AVAudioEngine input node reports a degenerate
+// `rate=0.0 ch=0` format, so the real MicFrameSource correctly refuses. The nav gate was
+// therefore red on its record leg for reasons that had nothing to do with performance.
 
-#if DEBUG
+#if DEBUG || PERF_HARNESS
 import Foundation
 
 final class SyntheticMicFrameSource: AudioFrameSource, @unchecked Sendable {

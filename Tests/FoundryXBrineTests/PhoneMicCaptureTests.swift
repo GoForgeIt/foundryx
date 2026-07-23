@@ -13,7 +13,7 @@ import FoundryXKit
 ///      finalizes the closed capture once, through the normal finalize path.
 ///   3. (AC4) selecting a capture source persists and doesn't auto-start the Omi.
 @MainActor
-final class PhoneMicCaptureTests: XCTestCase {
+final class PhoneMicCaptureTests: ProcessGlobalStateTestCase {
 
     /// A controllable stand-in source (Omi or mic): start/stop are recorded, and the
     /// test fires the onFrame/onState closures CaptureManager installs.

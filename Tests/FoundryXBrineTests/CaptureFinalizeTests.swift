@@ -12,7 +12,7 @@ import FoundryXKit
 /// fires exactly once per closed capture, with the right capture id, AFTER the
 /// segments are ACK'd — and that a failed finalize stays retryable.
 @MainActor
-final class CaptureFinalizeTests: XCTestCase {
+final class CaptureFinalizeTests: ProcessGlobalStateTestCase {
 
     /// A source the test drives directly (start/stop no-ops).
     final class TestSource: AudioFrameSource, @unchecked Sendable {

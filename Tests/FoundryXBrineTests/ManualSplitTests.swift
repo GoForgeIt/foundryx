@@ -10,7 +10,7 @@ import FoundryXKit
 /// active capture replaces it, and the new conversation keeps recording (no dropped
 /// audio). Mirrors CaptureFinalizeTests' injected-boundary approach (no live door).
 @MainActor
-final class ManualSplitTests: XCTestCase {
+final class ManualSplitTests: ProcessGlobalStateTestCase {
 
     final class TestSource: AudioFrameSource, @unchecked Sendable {
         var onFrame: ((Data) -> Void)?

@@ -15,6 +15,23 @@ def asc_api_key
 end
 
 platform :ios do
+  # THE ONE DOCUMENTED ENTRYPOINT for the gate suite (review S7). Concourse's
+  # `foundryx-ios-publish` test job calls `scripts/ci-gates.sh` directly; this lane is the
+  # local/lane-based equivalent so the gates are not "gates only if a human types them".
+  # `beta` runs it first — a build that cannot pass the gates does not reach TestFlight.
+  desc "Run the permanent CI gates (package tests, CQRS invariants, iOS compiles, Release leak, flake, lint)."
+  lane :gates do |options|
+    phases = options[:phases] || ""
+    sh("cd .. && bash scripts/ci-gates.sh #{phases}")
+  end
+
+  desc "Large-library perf budgets on a simulated iPhone (nav + churn-interleaved CQRS phase)."
+  lane :perf do |options|
+    device = options[:device] || "iPhone 17 Pro"
+    n = options[:n] || 175
+    sh("cd .. && bash scripts/sim-perf.sh '#{device}' #{n}")
+  end
+
   desc "First run only: register the bundle id + create the App Store Connect app record."
   lane :register do
     produce(
@@ -27,6 +44,12 @@ platform :ios do
 
   desc "Build FoundryX (Release, app-store) and upload to TestFlight."
   lane :beta do
+    # Gate the ship. Set FX_SKIP_GATES=1 only for an emergency hotfix, and say so out loud.
+    if ENV["FX_SKIP_GATES"] == "1"
+      UI.important("FX_SKIP_GATES=1 — shipping WITHOUT the CI gates. This is a deliberate hole.")
+    else
+      gates
+    end
     api_key = asc_api_key
     # Regenerate the Xcode project from project.yml (xcodeproj is gitignored).
     sh("cd .. && xcodegen generate")

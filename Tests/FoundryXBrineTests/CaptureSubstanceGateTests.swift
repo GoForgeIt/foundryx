@@ -18,7 +18,7 @@ import FoundryXKit
 /// All paths run through the manager's REAL lifecycle via a controllable source + injected
 /// upload/finalize seams — no live door, no network, no hardware.
 @MainActor
-final class CaptureSubstanceGateTests: XCTestCase {
+final class CaptureSubstanceGateTests: ProcessGlobalStateTestCase {
 
     /// A source the test drives directly (start/stop no-ops; the test fires the
     /// onFrame/onState closures CaptureManager installs).

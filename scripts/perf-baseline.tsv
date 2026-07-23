@@ -1,0 +1,18 @@
+# scripts/perf-baseline.tsv — the ledger of KNOWN OPEN PERF GAPS (review S6).
+#
+# Read by scripts/sim-perf.sh. Format (whitespace-separated):
+#
+#     <metric>   <baseline-ms-or-count>   <ticket>   <one-line reason>
+#
+# Semantics — the point is that a tracked gap can never quietly get worse:
+#   value  > baseline           HARD FAIL   ("you regressed a tracked gap")
+#   budget < value <= baseline  LOUD WARN   ("known, tracked, not yours")
+#   value <= budget             PASS        (+ a nag to delete the line: the ratchet closes)
+#
+# A line with NO ticket reference hard-fails. A baseline is a debt with an owner, not a mute
+# button. NEVER raise a number here to make a run green — raise it only with the ticket that
+# explains why the gap is now bigger, or fix the gap.
+#
+# metric              baseline  ticket                 reason
+status-warm           1800      20260722T1244-AC3      cold status warm over a 175-capture / ~31k-segment stress library is a full stat storm. The BUDGET stays the honest 1000ms; measured truth on an iPhone 17 Pro sim is 1538ms idle and 1780ms with another build competing for the machine, so the tracked ceiling is 1800. Closing it needs the warm scan made incremental (the named next target) — never a looser budget.
+nav-stall             2         20260717T0759-record   two main-thread turns over the 250ms sensor threshold in the nav drive (measured 282ms and 363ms). Both sit under the sampler's 400ms stack-capture threshold, so neither carries a backtrace to attribute; they line up with the ONE known >250ms turn in that drive, the record-start fullScreenCover present (measured 408ms, its own separately-tracked budget). Closing it is the presentation pre-warm named in RECORD_BUDGET_MS. A THIRD stall is a hard fail.

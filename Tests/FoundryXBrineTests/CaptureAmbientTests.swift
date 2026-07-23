@@ -8,7 +8,7 @@ import FoundryXKit
 /// auto-starts when the source streams (no Record button), pause() stops feeding
 /// the WAL, resume() resumes, and disconnect ends the session.
 @MainActor
-final class CaptureAmbientTests: XCTestCase {
+final class CaptureAmbientTests: ProcessGlobalStateTestCase {
 
     /// A source the test drives directly (start/stop are no-ops; the test invokes
     /// the onFrame/onState closures CaptureManager installs).

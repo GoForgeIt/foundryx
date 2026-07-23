@@ -17,7 +17,7 @@ import FoundryXKit
 /// All door-free, driven by a controllable source — the same seams the substance-gate /
 /// resume tests use (no new production seam invented).
 @MainActor
-final class RecordingSessionClockTests: XCTestCase {
+final class RecordingSessionClockTests: ProcessGlobalStateTestCase {
 
     /// A source the test drives directly (start/stop no-ops; the test fires the
     /// onFrame/onState closures CaptureManager installs).

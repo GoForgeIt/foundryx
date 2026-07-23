@@ -12,7 +12,7 @@ import BrineSwiftCore
 /// finalize. The one genuinely ActivityKit-only bit (the ContentState coalescing
 /// predicate) is asserted cross-platform via the phase contract and, additionally, via
 /// the real `liveStateEquivalent` predicate under `#if os(iOS)`.
-final class CaptureLiveActivityFeatureTests: XCTestCase {
+final class CaptureLiveActivityFeatureTests: ProcessGlobalStateTestCase {
     func testCaptureLiveActivityFeature() async throws {
         let world = CLAWorld()
         try await BrineFeatureRunner.run("capture-live-activity",

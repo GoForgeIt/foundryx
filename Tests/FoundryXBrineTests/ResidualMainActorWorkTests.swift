@@ -23,7 +23,7 @@ import Foundation
 /// Isolation is NON-NEGOTIABLE: every test uses a FRESH tempDir — the real `~/.foundry` /
 /// `~/.lore` are never touched.
 @MainActor
-final class ResidualMainActorWorkTests: XCTestCase {
+final class ResidualMainActorWorkTests: ProcessGlobalStateTestCase {
 
     private static let libraryN = 175
 

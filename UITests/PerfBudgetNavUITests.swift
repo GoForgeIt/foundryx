@@ -32,10 +32,17 @@ final class PerfBudgetNavUITests: XCTestCase {
 
     func testNormalNavDriveEmitsBudgetSpans() throws {
         let app = XCUIApplication()
-        // Same stress profile as the launch phase: 128 captures, ~156 avg segment files
+        // Same stress profile as the launch phase: 175 captures (the reported stall onset —
+        // NOT the old 128, which sat under the device's real library size), ~156 avg segment files
         // (skewed — a few 1000-4000-segment heavies), perf spans mirrored to the log.
-        app.launchArguments = ["-MainPreview", "-PerfLog",
-                               "-StressSeed", "128", "-StressSegs", "156"]
+        // `-SyntheticMic` (track 20260722T1601's seam, widened to PERF_HARNESS here): the
+        // simulator's AVAudioEngine input node reports a degenerate `rate=0.0 ch=0` format, so
+        // the real MicFrameSource correctly refuses and the recording surface can NEVER present
+        // in a simulator. Without this the record-start leg of this drive failed for a reason
+        // that had nothing to do with performance — "recording surface presents" was red on
+        // every run, so the record-start budget it exists to feed was never actually measured.
+        app.launchArguments = ["-MainPreview", "-PerfLog", "-SyntheticMic",
+                               "-StressSeed", "175", "-StressSegs", "156"]
 
         addUIInterruptionMonitor(withDescription: "Microphone permission") { alert in
             for label in ["Allow While Using App", "Allow", "OK"] {
@@ -97,7 +104,7 @@ final class PerfBudgetNavUITests: XCTestCase {
     func testDeepNavDriveListTranscriptAndSpeakerSheet() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-MainPreview", "-PerfLog",
-                               "-StressSeed", "128", "-StressSegs", "512"]
+                               "-StressSeed", "175", "-StressSegs", "512"]
         app.launch()
 
         let captureTab = app.buttons["Capture"].firstMatch
@@ -146,6 +153,96 @@ final class PerfBudgetNavUITests: XCTestCase {
 
         // Settle so trailing spans flush to the unified log before termination.
         RunLoop.current.run(until: Date().addingTimeInterval(2))
+    }
+
+    /// THE CHURN-INTERLEAVED DRIVE (track 20260722T1244 — the CQRS hole).
+    ///
+    /// Every other drive in this file navigates a STATIC, pre-warmed, read-only library: pure
+    /// QUERY side. The device pathology is a rebuild that runs a beat AFTER a COMMAND
+    /// invalidated the read-model memos. This drive runs the commands — `-StressChurn` writes
+    /// real segment appends, drain ACKs, status-poller card merges and finalizes against the
+    /// seeded library every 200ms — WHILE navigating at N=175 on the skewed-heavy
+    /// distribution. `scripts/sim-perf.sh` reads the resulting spans back and FAILS on any
+    /// `nav-stall` over the ceiling (250ms — the production sensor's own threshold).
+    ///
+    /// SENSOR MECHANICS (spec R5): the `MainThreadStallWatchdog` is armed +5s after launch and
+    /// rate-limited to ≤1 sample / 5s, ≤60 / session. The churn therefore starts at +6s and the
+    /// drive below runs ~45s of continuous navigation under churn — long enough to clear the
+    /// arm and to give a dozen sampling windows. A shorter drive could pass by never sampling.
+    ///
+    /// Same driver/judge split as the rest of the file: this test only asserts the drive
+    /// happened; the budgets live in one place, in the harness script.
+    func testChurnInterleavedNavDriveEmitsNoStalls() throws {
+        let app = XCUIApplication()
+        // S9 (review): the library size is the HARNESS's to choose. `scripts/sim-perf.sh` passes
+        // it as `TEST_RUNNER_FX_STRESS_N`; the app announces the size it actually seeded
+        // (`perf-harness: stress-seed n=…`) and the harness FAILS if it differs from the N the
+        // run asked for — so a propagation failure is red, never a silent fallback to 175.
+        let stressN = ProcessInfo.processInfo.environment["FX_STRESS_N"] ?? "175"
+        // `-SyntheticMic` (S8): the churn drive starts a REAL recording, so `manager.active` is
+        // non-nil for the whole drive and `invalidateSidecar`'s LIVE/throttled branch — the
+        // highest-traffic write path during recording, and the one the "stale card up to 5s"
+        // defect actually lived in — is exercised every tick. The simulator's AVAudioEngine
+        // input reports a degenerate format, so without the synthetic source no recording can
+        // ever start there and that branch stays uncovered.
+        app.launchArguments = ["-MainPreview", "-PerfLog", "-SyntheticMic",
+                               "-StressSeed", stressN, "-StressSegs", "156",
+                               "-StressChurn", "200"]
+        app.launch()
+
+        let captureTab = app.buttons["Capture"].firstMatch
+        XCTAssertTrue(captureTab.waitForExistence(timeout: 180), "app launched to the tab bar")
+        captureTab.tap()
+
+        // Hydration + the +5s watchdog arm + the +6s churn arm.
+        RunLoop.current.run(until: Date().addingTimeInterval(9))
+
+        // Start a recording and minimise it, so the nav laps below run with a LIVE capture
+        // under continuous churn. The harness asserts a minimum `churn-write-live` span count,
+        // so a recording that fails to start makes the gate red rather than quietly reducing
+        // coverage back to the query-only case.
+        let recordCTA = app.buttons["record-cta"].firstMatch
+        if recordCTA.waitForExistence(timeout: 20) {
+            recordCTA.tap()
+            let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+            let alert = springboard.alerts.firstMatch
+            if alert.waitForExistence(timeout: 3) {
+                for label in ["Allow While Using App", "Allow", "OK"] where alert.buttons[label].exists {
+                    alert.buttons[label].tap()
+                    break
+                }
+            }
+            let minimize = app.buttons["minimize-recording"].firstMatch
+            if minimize.waitForExistence(timeout: 20) { minimize.tap() }
+            RunLoop.current.run(until: Date().addingTimeInterval(2))
+            shoot(app, "churn-recording-live")
+        }
+
+        // ~45s of interleaved navigation under continuous write traffic. Each lap touches the
+        // three surfaces a cold-miss rebuild can stall: the tab switch (whole list rebuild),
+        // the capture-list scroll (row build/recycle), and a detail open/close (recap pool +
+        // sidecar reads). Nothing here asserts timing — the app's own sensor does.
+        let deadline = Date().addingTimeInterval(45)
+        var laps = 0
+        while Date() < deadline {
+            laps += 1
+            for name in ["Activity", "Chat", "Settings", "Capture"] {
+                let tab = app.buttons[name].firstMatch
+                if tab.exists { tab.tap() }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+            }
+            app.swipeUp(velocity: .fast)
+            app.swipeUp(velocity: .fast)
+            app.swipeDown(velocity: .fast)
+            app.swipeDown(velocity: .fast)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+            if laps == 1 { shoot(app, "churn-lap1") }
+        }
+        XCTAssertGreaterThanOrEqual(laps, 3, "the churn drive ran multiple nav laps")
+        shoot(app, "churn-final")
+
+        // Settle so trailing spans flush to the unified log before termination.
+        RunLoop.current.run(until: Date().addingTimeInterval(3))
     }
 
     /// The SPEAKER-SHEET leg of the deep-nav hunt, driven deterministically via the

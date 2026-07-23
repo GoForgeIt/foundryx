@@ -12,7 +12,7 @@ import FoundryXKit
 /// and app-restarts (a fresh WAL on the same dir), then reaching pending == 0.
 ///
 /// All door-free: the WAL's per-segment upload is injected, no network.
-final class CaptureResumeTests: XCTestCase {
+final class CaptureResumeTests: ProcessGlobalStateTestCase {
 
     func testResumeRecordingFeature() async throws {
         let url = URL(fileURLWithPath: #filePath)

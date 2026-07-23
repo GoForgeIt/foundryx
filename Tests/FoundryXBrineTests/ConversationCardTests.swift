@@ -10,7 +10,7 @@ import FoundryXKit
 /// door — stopping at a terminal stage. No live Foundry.app door is touched: the
 /// finalize boundary + the status fetch are injected.
 @MainActor
-final class ConversationCardTests: XCTestCase {
+final class ConversationCardTests: ProcessGlobalStateTestCase {
 
     // MARK: shared fixtures (mirror CaptureFinalizeTests)
 

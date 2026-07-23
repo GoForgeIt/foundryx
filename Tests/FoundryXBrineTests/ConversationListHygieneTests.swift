@@ -6,7 +6,7 @@ import Foundation
 ///  • empty / near-silent / filler captures are HIDDEN from the visible list (data kept),
 ///  • a closed conversation always has `ended_at` set (real bounds) after finalize.
 @MainActor
-final class ConversationListHygieneTests: XCTestCase {
+final class ConversationListHygieneTests: ProcessGlobalStateTestCase {
 
     final class TestSource: AudioFrameSource, @unchecked Sendable {
         var onFrame: ((Data) -> Void)?

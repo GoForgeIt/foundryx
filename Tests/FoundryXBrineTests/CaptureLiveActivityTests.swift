@@ -10,7 +10,7 @@ import Foundation
 ///  3. The interactive-button wiring: the SAME broker→manager mapping RootView installs
 ///     for the two App Intents (End Current, Pause/Resume).
 @MainActor
-final class CaptureLiveActivityTests: XCTestCase {
+final class CaptureLiveActivityTests: ProcessGlobalStateTestCase {
 
     final class TestSource: AudioFrameSource, @unchecked Sendable {
         var onFrame: ((Data) -> Void)?
