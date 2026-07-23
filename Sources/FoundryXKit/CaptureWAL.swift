@@ -636,6 +636,34 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     /// Synchronous status from disk — no `@Published` write. For tests + sync().
     public func snapshot() -> CaptureStatus { computeStatus() }
 
+    // MARK: main-thread segment-enumeration probe (build-286 drain-hang regression seam)
+    //
+    // The dominant remaining field hang (15/22 build-286 `stallstack` samples, dSYM
+    // 60BD8356): the drain GATE called `snapshot()` — i.e. `computeStatus()`, a full
+    // on-disk segment enumeration (`allSegmentURLs()`) — for EVERY capture on the main
+    // actor, every 5s tick. On a 212-capture backlogged library that O(captures ×
+    // segments) directory/stat storm pinned `com.apple.main-thread` with nav-stalls to
+    // 4161ms. The fix reads the already-@Published, in-memory `status.pendingSegments`
+    // in the gate instead, so it does ZERO disk enumeration per capture. This counter
+    // pins the pathology as a HARD INTEGER — `computeStatus()` calls made while ON the
+    // main thread — exactly like CaptureManager's `mainThread*DiskOpsForTests` probes
+    // (nonisolated + NSLock, machine-independent, can't flake into green).
+    nonisolated(unsafe) private static let _computeStatusProbeLock = NSLock()
+    nonisolated(unsafe) private static var _mainThreadComputeStatus = 0
+    private static func noteMainThreadComputeStatus() {
+        guard Thread.isMainThread else { return }
+        _computeStatusProbeLock.lock(); _mainThreadComputeStatus += 1; _computeStatusProbeLock.unlock()
+    }
+    /// Count of synchronous `computeStatus()` (segment-enumeration) calls made on the main
+    /// thread. The drain gate must hold this at 0 across a full drain cycle.
+    nonisolated static var mainThreadComputeStatusCallsForTests: Int {
+        _computeStatusProbeLock.lock(); defer { _computeStatusProbeLock.unlock() }; return _mainThreadComputeStatus
+    }
+    /// Reset the probe — call immediately before a measured drain cycle.
+    nonisolated static func resetMainThreadComputeStatusCallsForTests() {
+        _computeStatusProbeLock.lock(); _mainThreadComputeStatus = 0; _computeStatusProbeLock.unlock()
+    }
+
     /// Recompute + republish the status from disk. Used after the retention pass
     /// prunes a capture's segment files, so the card reflects the pruned state.
     public func refreshStatus() { publish() }
@@ -650,6 +678,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     private let statusCacheLock = NSLock()
 
     private func computeStatus() -> CaptureStatus {
+        CaptureWAL.noteMainThreadComputeStatus()   // regression probe: the drain gate must make ZERO of these on main
         let all = allSegmentURLs()
         let wm = uploadWatermark()
         statusCacheLock.lock()

@@ -359,6 +359,15 @@ public final class CaptureManager: ObservableObject {
     /// mutation is the trigger). Internal — reachable only via `@testable import`.
     func rebuildVisibleCapturesForTests() { rebuildVisibleCaptures() }
 
+    /// Test seam: attach a live, mid-stream WAL as the active capture (inserted at the head of
+    /// `captures`, exactly where `beginSession` puts a real one) WITHOUT wiring the audio
+    /// source / segmenter. Lets the drain-gate streaming-eligibility path be driven
+    /// deterministically. Internal — reachable only via `@testable import`.
+    func attachStreamingWALForTests(_ wal: CaptureWAL) {
+        active = wal
+        captures.insert(wal, at: 0)
+    }
+
     /// Test seam: how many times the visible conversation list has been rebuilt. The
     /// acceptance instrument for the live/library split (track 20260722T1244) — N live
     /// transcript/title publishes must move this ZERO. Internal — `@testable` only.
@@ -3693,13 +3702,28 @@ public final class CaptureManager: ObservableObject {
     private func tryFinalize(_ wal: CaptureWAL) async {
         let id = wal.captureId
         guard isPendingFinalize(id), !finalizing.contains(id) else { return }
-        let snap = wal.snapshot()
+        // Claim the concurrency marker BEFORE the first suspension point below. Finalize reads
+        // the DURABLE on-disk truth (`.ack` markers) off the main actor (see next comment), and
+        // that `await` would otherwise let a second caller (the finished-capture path / the next
+        // retry tick) slip past the `!finalizing.contains` guard and finalize the same capture
+        // TWICE. Any early return past this point must release it (the `else` below + the defer).
+        finalizing.insert(id)
+        // Finalize is gated on the DURABLE on-disk truth (`.ack` markers), so it reads
+        // `snapshot()` — NOT the in-memory `status`, which lags here: `sync()`'s 200-ACK
+        // `publish()` hops to main ASYNC, so `wal.status` is often still pre-ACK when this runs
+        // synchronously on the main actor right after the sync loop. Reading the stale count
+        // could WRONGLY defer a fully-synced finalize (or, worse in principle, mis-gate it). But
+        // `snapshot()` is a full segment enumeration, and doing it per pending-finalize capture
+        // ON the main actor is the same class of stall as the drain-gate hang — so run it OFF
+        // the main actor (the single-drain guard means no concurrent `sync()`/`computeStatus`
+        // races this WAL). Correctness is preserved (disk truth); the main thread does no I/O.
+        let snap = await Task.detached { wal.snapshot() }.value
         // Gate: audio must be durably on the desktop before finalize.
         guard snap.totalSegments > 0, snap.pendingSegments == 0 else {
+            finalizing.remove(id)   // released — not a real attempt, retry next tick
             log?.info("capture \(id): finalize deferred — \(snap.pendingSegments) segment(s) not yet ACK'd")
             return
         }
-        finalizing.insert(id)
         defer { finalizing.remove(id) }
         // P2 — the recorded end must never predate this capture's newest audio. Omi
         // delivers buffered catch-up segments AFTER a BLE gap (faster than real time),
@@ -3865,7 +3889,26 @@ public final class CaptureManager: ObservableObject {
         var batch: [CaptureWAL] = []
         batch.reserveCapacity(Self.maxCapturesPerDrain)
         for wal in captures {
-            guard wal.snapshot().pendingSegments > 0 else { continue }
+            // HANG FIX (build-286, 15/22 stallstacks): read the already-@Published, in-memory
+            // `status.pendingSegments` — NOT `snapshot()`/`computeStatus()`, which is a full
+            // synchronous on-disk segment enumeration (`allSegmentURLs`) that, run per capture
+            // on the main actor every 5s, pinned the main thread on a 212-capture library
+            // (nav-stalls to 4161ms). `pendingSegments == max(0, total − synced)` needs no disk.
+            //
+            // NEVER LOSE AUDIO — why the in-memory count can't wrongly skip a capture with real
+            // pending uploads:
+            //  • synced only ever RISES on a real 200 ACK / bulk-ACK / watermark (each publishes
+            //    a fresh count), and total is derived from disk truth at every publish — so the
+            //    count is never fabricated in a direction that hides pending work, EXCEPT
+            //  • the actively-STREAMING capture, whose mid-stream flushes write segments to disk
+            //    WITHOUT publishing, so its in-memory `total` can lag. That one is kept eligible
+            //    unconditionally via `status.streaming`; `sync()` then reads the real on-disk
+            //    pending set (`pendingSegmentURLs`) and uploads it. A non-streaming capture gets
+            //    no new segments after `finish()`/warm published its count, so its count is exact.
+            //  • a just-reloaded capture is warmed (its count published) during startup before
+            //    steady-state drains; a pre-warm tick simply defers it one cycle (audio is kept
+            //    and retried forever), never a loss.
+            guard wal.status.pendingSegments > 0 || wal.status.streaming else { continue }
             let id = wal.captureId
             if isAbandoned(id) { continue }
             if isDiscarded(id) { continue }   // a sub-substance junk fragment never uploads
