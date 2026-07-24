@@ -10,8 +10,10 @@ import AVFoundation
 /// assert the PRESENTATION invariants that drive the hero tile, the elapsed clock,
 /// the live transcript, and the RecordingScreen cover binding — exactly what breaks
 /// when the display wiring regresses while the WAL/finalize layer stays correct.
+// Inherits ProcessGlobalStateTestCase: these tests call setSilenceGap(), which persists
+// process-global CaptureSettings — the base restores it in tearDown so no ordering leak.
 @MainActor
-final class RecordingSurfaceE2ETests: XCTestCase {
+final class RecordingSurfaceE2ETests: ProcessGlobalStateTestCase {
 
     final class TestSource: AudioFrameSource, @unchecked Sendable {
         var onFrame: ((Data) -> Void)?
