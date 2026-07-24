@@ -52,8 +52,14 @@ public enum WelcomeFrontDoor {
     public static func surface(signedIn: Bool,
                                letStraightIn: Bool,
                                entered: Bool) -> Surface {
-        if letStraightIn { return .none }
+        // SIGN-IN IS REQUIRED FIRST (locked decision #5, mirrors RootGate — Nick
+        // 2026-07-24). `letStraightIn` ("Open straight to the app" / "Skip the
+        // welcome") only skips the WELCOME for an ALREADY-authenticated user; it must
+        // never short-circuit a signed-OUT gate to `.none`. Build 288 checked
+        // letStraightIn first, so signing out after skipping the welcome left a DEAD
+        // front door — no provider buttons, no working action, no way back in.
         if !signedIn { return .welcomeSignIn }
+        if letStraightIn { return .none }
         return entered ? .none : .welcomeConnectGate
     }
 

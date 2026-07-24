@@ -49,6 +49,16 @@ Feature: The welcome is the front door — the old connection page never gates
     Then the welcome page fronts the app with the sign-in choices
     And the old connection page is not shown
 
+  # Regression (build 288): after "skip the welcome" (letStraightIn), signing out
+  # left a DEAD gate — the front door returned .none, so neither the provider
+  # buttons nor a working action showed and there was no way back in. Sign-in is
+  # required FIRST, before letStraightIn is honored (mirrors the RootGate fix).
+  Scenario: signing out returns to the sign-in choices even after skipping the welcome
+    Given I am signed in and have used the app before
+    When I choose to skip the welcome from now on
+    And I sign out from settings
+    Then the welcome page fronts the app with the sign-in choices again
+
   Scenario: a fresh install continues into onboarding without seeing the welcome twice
     Given a fresh install that has never signed in
     And the sign-in welcome is fronting the app

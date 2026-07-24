@@ -24,11 +24,18 @@ final class WelcomeFrontDoorTests: XCTestCase {
     }
 
     func testOptedOutOrEnteredMeansNoGateAtAll() {
-        for signedIn in [true, false] {
-            XCTAssertEqual(
-                WelcomeFrontDoor.surface(signedIn: signedIn, letStraightIn: true, entered: false),
-                WelcomeFrontDoor.Surface.none, "straight-in: zero gate (signedIn=\(signedIn))")
-        }
+        // "Open straight to the app" (letStraightIn) skips the welcome for an
+        // ALREADY-SIGNED-IN user only.
+        XCTAssertEqual(
+            WelcomeFrontDoor.surface(signedIn: true, letStraightIn: true, entered: false),
+            WelcomeFrontDoor.Surface.none, "straight-in for a signed-in user: zero gate")
+        // But sign-in is REQUIRED FIRST (locked decision #5) — a signed-OUT user with
+        // letStraightIn set must STILL get the sign-in choices, never a dead `.none`
+        // gate. (Build 288 returned `.none` here: signing out after skipping the
+        // welcome dead-ended login. Fixed 2026-07-24, mirroring the RootGate rule.)
+        XCTAssertEqual(
+            WelcomeFrontDoor.surface(signedIn: false, letStraightIn: true, entered: false),
+            .welcomeSignIn, "straight-in must NOT bypass sign-in for a signed-out user")
         XCTAssertEqual(
             WelcomeFrontDoor.surface(signedIn: true, letStraightIn: false, entered: true),
             .none, "after entry the gate never comes back mid-session")
