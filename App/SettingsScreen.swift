@@ -70,7 +70,7 @@ struct SettingsScreen: View {
                     HStack(spacing: GrainSpacing.x2) {
                         Image(systemName: "earbuds")
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Devices & connections").grainTextStyle(.body)
+                            Text(SettingsSheetPresentation.deviceEntryLabel).grainTextStyle(.body)
                             Text(deviceStatusSubtitle)
                                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
                         }

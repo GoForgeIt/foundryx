@@ -44,6 +44,10 @@ public enum AppTab: String, CaseIterable, Hashable, Sendable {
 /// now the 4th bottom-nav tab (Nick 2026-07-15); this just carries its title.
 public enum SettingsSheetPresentation {
     public static let title = "Settings"
+    /// Device management lives INSIDE Settings (no competing Device tab, Nick
+    /// 2026-07-14) as this entry, which opens the device page. Single source of
+    /// truth so the shell test and `SettingsScreen` agree on the label.
+    public static let deviceEntryLabel = "Devices & connections"
 }
 
 /// B5 — joining the Foundry Cloud waitlist never silently no-ops. A tokenless
