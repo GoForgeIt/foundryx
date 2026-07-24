@@ -247,7 +247,7 @@ struct SettingsScreen: View {
                     PersonaWelcomeExplorer()
                 } label: {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Welcome & who it's for").grainTextStyle(.body)
+                        Text(PersonaWelcomeLayout.settingsRowLabel).grainTextStyle(.body)
                         Text(personaSubtitle)
                             .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                     }

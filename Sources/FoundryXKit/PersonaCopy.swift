@@ -92,6 +92,9 @@ public enum PersonaWelcomeLayout {
     public static let primaryAction = "Continue"
     public static let quietAction = "Set up later"
     public static let privacyLine = PersonaCopy.canonicalLockLine
+    /// The Settings row that reopens the persona welcome (it stays reachable
+    /// forever). Single source of truth so the row and its test agree.
+    public static let settingsRowLabel = "Welcome & who it's for"
 }
 
 // MARK: - The welcome-seen gate (B2)
