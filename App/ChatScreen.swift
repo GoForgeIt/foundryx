@@ -13,6 +13,9 @@ struct ChatScreen: View {
     let target: DoorTarget
     /// The durable conversation list — owned by MainTabs so it survives tab switches.
     @ObservedObject var store: ChatConversationStore
+    /// Identity generation that created this chat surface. Every streamed completion
+    /// must still match it before touching UI or durable ledgers.
+    let accountBinding: CaptureAccountScope.AccountBinding
     @StateObject private var model = ChatViewModel()
     @ObservedObject var log: DoorLog
 
@@ -80,8 +83,6 @@ struct ChatScreen: View {
                 let steps = activities.count
                 let first = activities.first?.name ?? "tools"
                 let detail = "Ran \(steps) step\(steps == 1 ? "" : "s") · \(first)"
-                let url = CaptureWAL.documentsCaptures()
-                    .appendingPathComponent("ambient-answers.jsonl")
                 let line = (try? JSONSerialization.data(withJSONObject: [
                     "ts": Int(Date().timeIntervalSince1970),
                     "kind": "agent_run",
@@ -90,12 +91,16 @@ struct ChatScreen: View {
                 guard !line.isEmpty else { return }
                 var out = line
                 out.append(UInt8(ascii: "\n"))
-                if let h = try? FileHandle(forWritingTo: url) {
-                    defer { try? h.close() }
-                    _ = try? h.seekToEnd()
-                    try? h.write(contentsOf: out)
-                } else {
-                    try? out.write(to: url)
+                CaptureAccountScope.perform(as: accountBinding) { binding in
+                    let url = binding.root.appendingPathComponent(
+                        "ambient-answers.jsonl")
+                    if let h = try? FileHandle(forWritingTo: url) {
+                        defer { try? h.close() }
+                        _ = try? h.seekToEnd()
+                        try? h.write(contentsOf: out)
+                    } else {
+                        try? out.write(to: url)
+                    }
                 }
             }
         }
@@ -225,12 +230,13 @@ struct ChatScreen: View {
         // the durable action↔chat link (EXT2) so the action leads back here.
         if let run = prefillRun {
             if run.chatId == active.id {
-                AmbientCardBroker.prefillSent(seed: run.runSeed)
+                AmbientCardBroker.prefillSent(
+                    seed: run.runSeed, binding: accountBinding)
                 UsageHook.action("run")   // content-free: acted on a surfaced action (no seed text)
                 if let captureId = run.captureId, let utterance = run.utterance {
                     ActionChatLinkStore.link(captureId: captureId, utterance: utterance,
                                              chatId: run.chatId,
-                                             baseDir: CaptureWAL.documentsCaptures())
+                                             baseDir: accountBinding.root)
                 }
             }
             prefillRun = nil
@@ -250,10 +256,20 @@ struct ChatScreen: View {
             var sawEvent = false
             do {
                 for try await ev in client.events(for: req) {
-                    if !sawEvent { sawEvent = true; await MainActor.run { model.setConnection(.streaming) } }
-                    if case .session(let sid) = ev { sessionId = sid }
-                    if case .done(let reason) = ev { await MainActor.run { model.setConnection(.completed(reason: reason)) } }
-                    await MainActor.run { model.apply(ev) }
+                    guard CaptureAccountScope.perform(
+                        as: accountBinding,
+                        { _ in
+                            if !sawEvent {
+                                sawEvent = true
+                                model.setConnection(.streaming)
+                            }
+                            if case .session(let sid) = ev { sessionId = sid }
+                            if case .done(let reason) = ev {
+                                model.setConnection(.completed(reason: reason))
+                            }
+                            model.apply(ev)
+                            return true
+                        }) == true else { return }
                 }
                 if !sawEvent {
                     // The thread stays calm; the engineering truth goes to the log.
@@ -275,8 +291,12 @@ struct ChatScreen: View {
             // Snapshot the rendered turn back into the durable store (only if we're still
             // on the same conversation — the user may have switched away mid-stream).
             await MainActor.run {
-                if store.activeId == chatId { store.setMessages(model.snapshot(), for: chatId) }
-                streaming = false
+                CaptureAccountScope.perform(as: accountBinding) { _ in
+                    if store.activeId == chatId {
+                        store.setMessages(model.snapshot(), for: chatId)
+                    }
+                    streaming = false
+                }
             }
         }
     }

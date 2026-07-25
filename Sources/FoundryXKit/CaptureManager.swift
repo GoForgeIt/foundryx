@@ -725,6 +725,9 @@ public final class CaptureManager: ObservableObject {
     public static let meterBarCount = 48
 
     private let target: DoorTarget
+    /// Identity generation captured with this manager. App-Group and Live Activity
+    /// producers must never publish after this generation is replaced.
+    private let accountBinding: CaptureAccountScope.AccountBinding?
     /// Internal (not private) so organizer helpers in the module can reach the
     /// same capture tree (search text, segment sizes, category store).
     let baseDir: URL
@@ -1190,7 +1193,15 @@ public final class CaptureManager: ObservableObject {
         self.liveTitleCadence = liveTitleCadence
         self.liveTitleExternal = liveTitleExternal
         self.liveTitleBackoff = liveTitleBackoff
-        self.baseDir = baseDir ?? CaptureWAL.documentsCaptures()
+        // A manager handed an explicit container still binds — to THAT root. Binding
+        // only to the account root left every producer (widget, Live Activity, ambient)
+        // silently dead whenever the two differed.
+        let resolved = CaptureAccountScope.currentAccountBinding()
+        let root = baseDir ?? resolved?.root ?? CaptureWAL.documentsCaptures()
+        self.accountBinding = resolved?.root == root
+            ? resolved
+            : CaptureAccountScope.binding(forExplicitRoot: root)
+        self.baseDir = root
         self.log = log
         self.source = source
         self.micSource = micSource
@@ -1305,14 +1316,35 @@ public final class CaptureManager: ObservableObject {
                 self?.scheduleSidecarRebuild()
             }
         }
+        identityObserver = NotificationCenter.default.addObserver(
+            forName: CaptureAccountScope.identityDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.clearLiveActivityForIdentityTransition()
+            }
+        }
     }
 
     /// The `.foundryxSidecarChanged` observer token — removed in deinit so a torn-down
     /// manager (each test builds a fresh one) leaves no dangling registration.
     private nonisolated(unsafe) var sidecarObserver: NSObjectProtocol?
+    private nonisolated(unsafe) var identityObserver: NSObjectProtocol?
 
     deinit {
         if let sidecarObserver { NotificationCenter.default.removeObserver(sidecarObserver) }
+        if let identityObserver { NotificationCenter.default.removeObserver(identityObserver) }
+    }
+
+    private func clearLiveActivityForIdentityTransition() {
+        guard let accountBinding, !accountBinding.isCurrent else { return }
+        #if canImport(ActivityKit) && os(iOS)
+        if #available(iOS 16.2, *) {
+            lastPushedState = nil
+            liveActivityController?.endImmediately()
+        }
+        #endif
     }
 
     /// Startup work that NEEDS the hydrated timeline (orphan reconcile, retention
@@ -2807,41 +2839,48 @@ public final class CaptureManager: ObservableObject {
         // Only the WIDGET leg is throttled here — the Live Activity below keeps its own
         // (unchanged) throttle + content-coalescing rules, so its latency is untouched.
         let nowSeconds = Date().timeIntervalSince1970
-        if kind != .throttledUpdate || nowSeconds - lastWidgetPushAt >= Self.liveActivityThrottle {
-            lastWidgetPushAt = nowSeconds
-            Self.noteWidgetPush()
-            CaptureWidgetSnapshotStore.write(makeWidgetSnapshot())
-            reloadWidgetTimelines()
+        if let accountBinding,
+           kind != .throttledUpdate
+                || nowSeconds - lastWidgetPushAt >= Self.liveActivityThrottle {
+            let snapshot = makeWidgetSnapshot()
+            if CaptureWidgetSnapshotStore.write(snapshot, as: accountBinding) {
+                lastWidgetPushAt = nowSeconds
+                Self.noteWidgetPush()
+                reloadWidgetTimelines()
+            }
         }
 
         #if canImport(ActivityKit) && os(iOS)
-        guard #available(iOS 16.2, *), let controller = liveActivityController else { return }
+        guard #available(iOS 16.2, *),
+              let accountBinding,
+              let controller = liveActivityController else { return }
         let state = makeActivityState()
-        switch kind {
-        case .start:
-            lastLiveActivityPushAt = Date().timeIntervalSince1970
-            lastPushedState = state
-            controller.start(state)
-        case .update:
-            // A lifecycle transition (pause/resume/source-switch) — push unconditionally,
-            // but still record it so the next throttled tick can coalesce against it.
-            lastLiveActivityPushAt = Date().timeIntervalSince1970
-            lastPushedState = state
-            controller.update(state)
-        case .throttledUpdate:
-            let now = Date().timeIntervalSince1970
-            guard now - lastLiveActivityPushAt >= Self.liveActivityThrottle else { return }
-            // Coalesce: if the meaningful content is unchanged since the last push, skip —
-            // the elapsed timer ticks ON-DEVICE, so an identical phase/level/transcript
-            // never needs a re-push. This keeps the update cadence to "only when something
-            // the user sees actually changed", so battery impact stays negligible.
-            if let last = lastPushedState, Self.liveStateEquivalent(last, state) { return }
-            lastLiveActivityPushAt = now
-            lastPushedState = state
-            controller.update(state)
-        case .end:
-            lastPushedState = nil
-            controller.end(final: state)
+        CaptureAccountScope.perform(as: accountBinding) { binding in
+            switch kind {
+            case .start:
+                lastLiveActivityPushAt = Date().timeIntervalSince1970
+                lastPushedState = state
+                controller.start(state, as: binding)
+            case .update:
+                // A lifecycle transition (pause/resume/source-switch) — push unconditionally,
+                // but still record it so the next throttled tick can coalesce against it.
+                lastLiveActivityPushAt = Date().timeIntervalSince1970
+                lastPushedState = state
+                controller.update(state, as: binding)
+            case .throttledUpdate:
+                let now = Date().timeIntervalSince1970
+                guard now - lastLiveActivityPushAt >= Self.liveActivityThrottle else { return }
+                // Coalesce: if the meaningful content is unchanged since the last push, skip —
+                // the elapsed timer ticks ON-DEVICE, so an identical phase/level/transcript
+                // never needs a re-push.
+                if let last = lastPushedState, Self.liveStateEquivalent(last, state) { return }
+                lastLiveActivityPushAt = now
+                lastPushedState = state
+                controller.update(state, as: binding)
+            case .end:
+                lastPushedState = nil
+                controller.end(final: state, as: binding)
+            }
         }
         #endif
     }
@@ -2884,10 +2923,13 @@ public final class CaptureManager: ObservableObject {
         // Same accounting as `pushLiveState`'s widget leg: it IS a widget push (so the
         // counter sees it and the throttle window restarts), and it is NOT throttled — it
         // only fires on real, occasional input changes, never on the meter tick.
-        lastWidgetPushAt = Date().timeIntervalSince1970
-        Self.noteWidgetPush()
-        CaptureWidgetSnapshotStore.write(makeWidgetSnapshot())
-        reloadWidgetTimelines()
+        guard let accountBinding else { return }
+        let snapshot = makeWidgetSnapshot()
+        if CaptureWidgetSnapshotStore.write(snapshot, as: accountBinding) {
+            lastWidgetPushAt = Date().timeIntervalSince1970
+            Self.noteWidgetPush()
+            reloadWidgetTimelines()
+        }
     }
 
     /// Build a WAL, threading the (test-only) per-segment upload override so every

@@ -109,9 +109,9 @@ public final class ChatConversationStore: ObservableObject {
     public let platform: String
     public let org: String
 
-    /// `storageURL == nil` ⇒ ephemeral (tests). The production app passes the default
-    /// Application Support location via `defaultStorageURL()`. Seeds one empty
-    /// conversation when there's nothing persisted so the UI always has an active chat.
+    /// `storageURL == nil` ⇒ ephemeral (tests). The production app passes the
+    /// account-private location via `defaultStorageURL()`. Seeds one empty conversation
+    /// when there's nothing persisted so the UI always has an active chat.
     public init(storageURL: URL? = nil, platform: String = "foundryx", org: String = "acme") {
         self.storageURL = storageURL
         self.platform = platform
@@ -267,11 +267,15 @@ public final class ChatConversationStore: ObservableObject {
         try? data.write(to: url, options: .atomic)
     }
 
-    /// The default on-device location for the conversation list.
+    /// The default account-private on-device location for the conversation list.
     public static func defaultStorageURL() -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        return base.appendingPathComponent("FoundryX/chat-conversations.json")
+        CaptureAccountScope.privateURL(for: .chatConversations)
+    }
+
+    /// Bind a store to an already-captured account root. Async/account-owned work
+    /// must never re-resolve a different current identity later.
+    public static func storageURL(inAccountRoot root: URL) -> URL {
+        root.appendingPathComponent("chat-conversations.json")
     }
 }
 

@@ -1173,14 +1173,23 @@ struct ConversationFacesView: View {
     }
 
     private func fetchFromDoor() async {
+        guard let workBinding = CaptureAccountScope.currentAccountBinding() else {
+            loading = false
+            return
+        }
         if cached == nil { loading = true }
         loadError = nil
         didAttemptFetch = true
         do {
             let fetched = try await DoorClient(target: target).captureContent(captureId: captureId)
             if cached == nil || contentDiffersFromCache(fetched) {
-                content = fetched
-                cacheIfReady(fetched)
+                guard CaptureAccountScope.perform(
+                    as: workBinding,
+                    { binding in
+                        content = fetched
+                        cacheIfReady(fetched, binding: binding)
+                        return true
+                    }) == true else { return }
             }
         } catch {
             // Say the TRUE, actionable thing — never forward the transport string. A door
@@ -1206,8 +1215,13 @@ struct ConversationFacesView: View {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             if let refreshed = try? await DoorClient(target: target).captureContent(captureId: captureId) {
                 if cached == nil || contentDiffersFromCache(refreshed) {
-                    content = refreshed
-                    cacheIfReady(refreshed)
+                    guard CaptureAccountScope.perform(
+                        as: workBinding,
+                        { binding in
+                            content = refreshed
+                            cacheIfReady(refreshed, binding: binding)
+                            return true
+                        }) == true else { return }
                     refreshSearchAfterContentChange()
                     loadFaceData()
                 }
@@ -1332,9 +1346,11 @@ struct ConversationFacesView: View {
         lateOffer = nil
     }
 
-    private func cacheIfReady(_ c: CaptureContent?) {
+    private func cacheIfReady(
+        _ c: CaptureContent?,
+        binding: CaptureAccountScope.AccountBinding
+    ) {
         guard let c, c.found, !c.transcript.isEmpty else { return }
-        let baseDir = CaptureWAL.documentsCaptures()
         let entry = CachedTranscript(transcript: c.transcript, title: c.title,
                                      summary: c.summary, segments: c.segments, speakers: c.speakers,
                                      fetchedAt: UInt64(max(0, Date().timeIntervalSince1970)))
@@ -1349,15 +1365,26 @@ struct ConversationFacesView: View {
         let title = c.title
         let summary = c.summary
         Task.detached(priority: .utility) {
-            TranscriptCacheStore.save(entry, captureId: capId, baseDir: baseDir)
-            ConversationCardStore.merge(captureId: capId, baseDir: baseDir,
-                                        title: title, summary: summary, stage: nil)
+            guard CaptureAccountScope.perform(
+                as: binding,
+                { captured in
+                    TranscriptCacheStore.save(
+                        entry, captureId: capId, baseDir: captured.root)
+                    ConversationCardStore.merge(
+                        captureId: capId, baseDir: captured.root,
+                        title: title, summary: summary, stage: nil)
+                    return true
+                }) == true else { return }
             // We just wrote transcript.json + card.json OUTSIDE the CaptureManager's sight;
             // tell it to invalidate its per-capture sidecar memo so the list's membership +
             // stats (distinct speakers) reflect this write (track 20260717T0448).
             await MainActor.run {
-                NotificationCenter.default.post(name: .foundryxSidecarChanged, object: nil,
-                                                userInfo: ["captureId": capId])
+                CaptureAccountScope.perform(as: binding) { _ in
+                    NotificationCenter.default.post(
+                        name: .foundryxSidecarChanged,
+                        object: nil,
+                        userInfo: ["captureId": capId])
+                }
             }
         }
     }

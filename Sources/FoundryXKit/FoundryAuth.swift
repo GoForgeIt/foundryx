@@ -50,6 +50,38 @@ public struct AuthIdentity: Sendable, Codable {
         email = try c.decodeIfPresent(String.self, forKey: .email)
         name = try c.decodeIfPresent(String.self, forKey: .name)
     }
+
+    /// The provider's stable OIDC subject. Unlike email, this remains present for
+    /// later Apple authorizations and survives address changes.
+    public var stableSubject: String? {
+        (Self.claims(from: idToken)?["sub"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nonEmpty
+    }
+
+    /// Minimal provider-qualified material used by CaptureAccountScope. JWT parsing
+    /// stays here beside the persisted identity; storage never decodes tokens itself.
+    public var accountKeyMaterial: String? {
+        guard let provider = AuthProvider(rawValue: provider) else { return nil }
+        if let stableSubject {
+            return "\(provider.rawValue)|sub|\(stableSubject)"
+        }
+        let fallback = email?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nonEmpty
+        return fallback.map { "\(provider.rawValue)|email|\($0)" }
+    }
+
+    static func claims(from jwt: String) -> [String: Any]? {
+        let parts = jwt.split(separator: ".")
+        guard parts.count >= 2 else { return nil }
+        var base64 = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        while base64.count % 4 != 0 { base64 += "=" }
+        guard let data = Data(base64Encoded: base64) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
 }
 
 public enum AuthError: Error, LocalizedError {
@@ -57,6 +89,7 @@ public enum AuthError: Error, LocalizedError {
     case cancelled
     case providerError(String)
     case noIdToken
+    case persistence(String)
 
     public var errorDescription: String? {
         switch self {
@@ -64,6 +97,7 @@ public enum AuthError: Error, LocalizedError {
         case .cancelled: return "Sign-in was cancelled"
         case .providerError(let s): return "Sign-in failed: \(s)"
         case .noIdToken: return "Provider returned no id_token"
+        case .persistence(let s): return "Sign-in could not secure local data: \(s)"
         }
     }
 }
@@ -141,7 +175,7 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
     public func signIn(_ provider: AuthProvider) async throws -> AuthIdentity {
         if provider == .apple {
             let id = try await AppleSignInCoordinator().run()
-            AuthStore.save(id)
+            try AuthStore.save(id)
             return id
         }
         guard let clientID = config.clientID(for: provider) else {
@@ -162,14 +196,14 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
             throw AuthError.providerError(Self.queryValue(callback, "error") ?? "no authorization code")
         }
         let token = try await exchange(provider, clientID: clientID, code: code, verifier: verifier, redirect: redirect)
-        AuthStore.save(token)
+        try AuthStore.save(token)
         return token
     }
 
     /// A currently-valid id_token for the signed-in account, refreshing via the
     /// stored refresh token when expired. `nil` when signed out / unrefreshable.
-    public func currentIdToken() async -> String? {
-        guard let id = AuthStore.load() else { return nil }
+    public func currentIdToken() async throws -> String? {
+        guard let id = try AuthStore.loadFallibly() else { return nil }
         if id.expiresAt > Date().addingTimeInterval(60) {
             return id.idToken
         }
@@ -178,22 +212,31 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
               let refresh = id.refreshToken else { return nil }
         do {
             let fresh = try await refreshToken(provider, clientID: clientID, refresh: refresh)
-            AuthStore.save(fresh)
+            try AuthStore.save(fresh)
             return fresh.idToken
         } catch {
             log?.error("id_token refresh failed: \(error)")
-            return nil
+            throw error
         }
     }
 
-    public func signOut() { AuthStore.clear() }
+    public func signOut() throws { try AuthStore.clear() }
     public var signedInEmail: String? { AuthStore.load()?.email }
+    public var signedInIdentity: AuthIdentity? { AuthStore.load() }
+    public func restorePersistedIdentity() throws -> AuthIdentity? {
+        guard let identity = try AuthStore.loadFallibly() else {
+            try CaptureAccountScope.confirmSignedOutAfterReadableKeychain()
+            return nil
+        }
+        try CaptureAccountScope.restorePersistedIdentity(identity)
+        return identity
+    }
     /// Lock-screen-safe "is anyone signed in?" — the UserDefaults mirror first (the
     /// keychain is unreadable while the device is locked, exactly when a bluetooth
     /// background relaunch needs the answer), keychain as the fallback for installs
     /// that signed in before the mirror existed.
     public static var hasPersistedSignIn: Bool {
-        UserDefaults.standard.bool(forKey: AuthStore.signedInMirrorKey) || AuthStore.load() != nil
+        CaptureAccountScope.hasPersistedActiveScope
     }
     /// Display name when the provider surfaced one (Apple: first auth only; Google/
     /// Microsoft: parsed from the id_token on sign-in).
@@ -338,23 +381,12 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
     private static func queryValue(_ url: URL, _ name: String) -> String? {
         URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == name }?.value
     }
-    /// Decode a JWT's payload (claims) without verifying the signature — used only
-    /// to read the already-trusted id_token's email/name for display. The gateway
-    /// verifies the token cryptographically; this is not a trust boundary.
-    private static func claims(from jwt: String) -> [String: Any]? {
-        let parts = jwt.split(separator: ".")
-        guard parts.count >= 2 else { return nil }
-        var b64 = String(parts[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-        while b64.count % 4 != 0 { b64 += "=" }
-        guard let data = Data(base64Encoded: b64) else { return nil }
-        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-    }
     private static func emailFromIdToken(_ jwt: String) -> String? {
-        guard let obj = claims(from: jwt) else { return nil }
+        guard let obj = AuthIdentity.claims(from: jwt) else { return nil }
         return (obj["email"] as? String) ?? (obj["preferred_username"] as? String)
     }
     private static func nameFromIdToken(_ jwt: String) -> String? {
-        guard let obj = claims(from: jwt) else { return nil }
+        guard let obj = AuthIdentity.claims(from: jwt) else { return nil }
         if let n = (obj["name"] as? String)?.nonEmpty { return n }
         let full = "\((obj["given_name"] as? String) ?? "") \((obj["family_name"] as? String) ?? "")"
             .trimmingCharacters(in: .whitespaces)
@@ -382,34 +414,78 @@ enum AuthStore {
     /// stamps it.
     static let signedInMirrorKey = "foundryx.auth.signed-in"
 
-    static func save(_ id: AuthIdentity) {
-        guard let data = try? JSONEncoder().encode(id) else { return }
+    static func save(_ id: AuthIdentity) throws {
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(id)
+        } catch {
+            throw AuthError.persistence("identity encoding failed: \(error.localizedDescription)")
+        }
+        let activation = try CaptureAccountScope.beginActivation(for: id)
         let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrService as String: service,
                                     kSecAttrAccount as String: account]
-        SecItemDelete(base as CFDictionary)
-        var add = base; add[kSecValueData as String] = data
-        SecItemAdd(add as CFDictionary, nil)
-        UserDefaults.standard.set(true, forKey: signedInMirrorKey)
+        let update = [kSecValueData as String: data]
+        var status = SecItemUpdate(base as CFDictionary, update as CFDictionary)
+        if status == errSecItemNotFound {
+            var add = base
+            add[kSecValueData as String] = data
+            status = SecItemAdd(add as CFDictionary, nil)
+        }
+        guard status == errSecSuccess else {
+            CaptureAccountScope.rollbackActivation(activation)
+            throw securityError(operation: "saving identity", status: status)
+        }
+        // Filesystem ownership and chat/capture migration must finish before ACTIVE
+        // is published. A failure intentionally leaves the durable state pending.
+        try CaptureAccountScope.completeActivation(activation)
     }
+
+    /// Optional presentation lookup. Security-sensitive restoration uses
+    /// `loadFallibly()` so a locked keychain is never confused with sign-out.
     static func load() -> AuthIdentity? {
+        try? loadFallibly()
+    }
+
+    static func loadFallibly() throws -> AuthIdentity? {
         let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                 kSecAttrService as String: service,
                                 kSecAttrAccount as String: account,
                                 kSecReturnData as String: true]
         var item: CFTypeRef?
-        guard SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess,
-              let d = item as? Data else { return nil }
-        guard let id = try? JSONDecoder().decode(AuthIdentity.self, from: d) else { return nil }
-        UserDefaults.standard.set(true, forKey: signedInMirrorKey)   // heal the mirror
-        return id
+        let status = SecItemCopyMatching(q as CFDictionary, &item)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else {
+            throw securityError(operation: "reading identity", status: status)
+        }
+        guard let data = item as? Data else {
+            throw AuthError.persistence("reading identity returned invalid keychain data")
+        }
+        do {
+            return try JSONDecoder().decode(AuthIdentity.self, from: data)
+        } catch {
+            throw AuthError.persistence(
+                "decoding identity failed: \(error.localizedDescription)")
+        }
     }
-    static func clear() {
+
+    static func clear() throws {
+        let previous = try CaptureAccountScope.beginSignOut()
         let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrService as String: service,
                                     kSecAttrAccount as String: account]
-        SecItemDelete(base as CFDictionary)
-        UserDefaults.standard.set(false, forKey: signedInMirrorKey)
+        let status = SecItemDelete(base as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            CaptureAccountScope.rollbackSignOut(previousScope: previous)
+            throw securityError(operation: "clearing identity", status: status)
+        }
+        try CaptureAccountScope.completeSignOut()
+    }
+
+    private static func securityError(operation: String, status: OSStatus) -> AuthError {
+        let detail = SecCopyErrorMessageString(status, nil) as String?
+            ?? "OSStatus \(status)"
+        return .persistence("\(operation) failed: \(detail)")
     }
 }
 

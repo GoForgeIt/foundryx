@@ -39,7 +39,7 @@ struct RootView: View {
     /// 20260715T1502 re-cut, Nick 2026-07-16: the welcome IS the front door — the
     /// old SignInView connection page never gates, on any path).
     private var frontDoorSurface: WelcomeFrontDoor.Surface {
-        WelcomeFrontDoor.surface(signedIn: remote.email != nil,
+        WelcomeFrontDoor.surface(signedIn: remote.isSignedIn,
                                  letStraightIn: WelcomePrefs.letStraightIn(),
                                  entered: enteredApp)
     }
@@ -152,7 +152,7 @@ struct RootView: View {
         #endif
         // The welcome front door leads until the user enters (enterApp); an
         // opted-out user short-circuits inside RootGate — no gate of any kind.
-        let dest = RootGate.destination(signedIn: remote.email != nil,
+        let dest = RootGate.destination(signedIn: remote.isSignedIn,
                                         splashElapsed: enteredApp,
                                         brain: brains.choice,
                                         hostResolved: remote.makeDoorTarget() != nil,
@@ -191,7 +191,8 @@ struct RootView: View {
                         // A resolved-host change OR a refreshed bearer (after a token-expiry
                         // re-auth) rebuilds the tabs (+ their clients) so every door request
                         // uses the fresh id_token — never a stale, expired one.
-                        .id((target.relay?.tunnelId ?? "remote") + "#" + target.bearer.suffix(12))
+                        .id((target.relay?.tunnelId ?? "remote") + "#"
+                            + target.bearer.suffix(12) + "#acct-\(remote.identityRevision)")
                         // Point the content-free usage sink at THIS resolved door (base +
                         // fresh bearer) so product-usage reaches POST /foundryx/telemetry/usage.
                         // The `.id` above re-mounts on a bearer refresh, so this re-fires with
@@ -212,7 +213,8 @@ struct RootView: View {
                              showingAccount: $showingAccount)
                         // A re-pair (new URL/grant) or a refreshed id_token rebuilds
                         // the tabs so every door request uses the fresh bearer.
-                        .id("cell#" + cfg.url + "#" + target.bearer.suffix(12))
+                        .id("cell#" + cfg.url + "#" + target.bearer.suffix(12)
+                            + "#acct-\(remote.identityRevision)")
                         .sheet(isPresented: $showingAccount) {
                             SignInView(remote: remote) { showingAccount = false }
                         }
@@ -223,7 +225,7 @@ struct RootView: View {
                                             bearer: "local"),
                          remote: remote, brains: brains, local: true,
                          vaultFunnel: vaultFunnel, accountDeletion: accountDeletion, showingAccount: $showingAccount)
-                    .id("local-brain")
+                    .id("local-brain#acct-\(remote.identityRevision)")
                     .sheet(isPresented: $showingAccount) {
                         SignInView(remote: remote) { showingAccount = false }
                     }
@@ -249,6 +251,15 @@ struct RootView: View {
             }
         }
         .onChange(of: remote.idToken) { VaultAuthTokenBox.shared.token = $0 }
+        // Clear process-global/account-glanceable state at the actual storage
+        // boundary. The scope posts both when a transition begins (fail closed)
+        // and when its new owner becomes active.
+        .onReceive(NotificationCenter.default.publisher(
+            for: CaptureAccountScope.identityDidChangeNotification
+        )) { _ in
+            AmbientCardBroker.shared.clearForIdentityTransition()
+            AmbientNotifier.clearForIdentityTransition()
+        }
         // The return deep link is convenience only (it triggers an immediate reconcile).
         .onOpenURL { url in
             if url.scheme == "foundryx", url.host == "vault" {
@@ -376,8 +387,11 @@ private struct MainTabs: View {
     @StateObject private var sources: CaptureSourceRegistry
     @StateObject private var log: DoorLog
     // The durable, resumable chat conversation list — owned here so it persists across
-    // tab switches and app foregrounding (its own Application Support JSON file).
-    @StateObject private var chats = ChatConversationStore(storageURL: ChatConversationStore.defaultStorageURL())
+    // tab switches and app foregrounding, bound to this MainTabs account generation.
+    @StateObject private var chats: ChatConversationStore
+    /// The immutable owner/root this entire tab tree started under. Delayed work uses
+    /// this binding and is dropped if the identity generation changes.
+    private let accountBinding: CaptureAccountScope.AccountBinding?
     @StateObject private var router = TabRouter()
     /// The ambient broker: pendingSeed (chat) + pendingAnswer (answer surface).
     @ObservedObject private var broker = AmbientCardBroker.shared
@@ -408,6 +422,12 @@ private struct MainTabs: View {
         self.vaultFunnel = vaultFunnel
         self.accountDeletion = accountDeletion
         _showingAccount = showingAccount
+        let accountBinding = CaptureAccountScope.currentAccountBinding()
+        self.accountBinding = accountBinding
+        _chats = StateObject(wrappedValue: ChatConversationStore(
+            storageURL: accountBinding.map {
+                ChatConversationStore.storageURL(inAccountRoot: $0.root)
+            }))
         let log = DoorLog()
         // Ship the phone's BLE/audio/capture/chat log to the relay diag sink so
         // it's observable server-side (no copying logs off the device).
@@ -517,7 +537,8 @@ private struct MainTabs: View {
             // The STT reports download/load into `status` for the setup banner.
             let stt = WhisperKitSTT(status: status)
             localSTT = stt
-            let backend = LocalBackend(baseDir: CaptureWAL.documentsCaptures(),
+            let backend = LocalBackend(baseDir: accountBinding?.root
+                                           ?? CaptureWAL.documentsCaptures(),
                                        stt: stt,
                                        titler: systemTitler)
             mgr = CaptureManager(
@@ -586,6 +607,8 @@ private struct MainTabs: View {
             // routed outcome. Door unreachable / phone-only tier → an honest local
             // notification of the raw moment (never silence, never a fake answer).
             mgr.onAmbientCandidate = { [weak mgr] candidate in
+                guard let workBinding = accountBinding,
+                      workBinding.isCurrent else { return }
                 let window = mgr?.liveTranscript.displayText ?? ""
                 let captureId = mgr?.active?.captureId ?? ""
                 // OWNER GATE payload: when the window addresses the named agent,
@@ -601,7 +624,7 @@ private struct MainTabs: View {
                     var audioB64: String?
                     if mentionsAgent, !captureId.isEmpty {
                         let frames = LocalBackend.loadFrames(
-                            captureId: captureId, baseDir: CaptureWAL.documentsCaptures())
+                            captureId: captureId, baseDir: workBinding.root)
                         if !frames.isEmpty {
                             audioB64 = CaptureWAL.encodeSegment(Array(frames.suffix(500)))
                                 .base64EncodedString()
@@ -619,8 +642,10 @@ private struct MainTabs: View {
                             window: window,
                             windowAudioB64: audioB64)
                     }
+                    guard workBinding.isCurrent else { return }
                     AmbientNotifier.post(candidate: candidate, outcome: outcome,
-                                         captureId: captureId.isEmpty ? nil : captureId)
+                                         captureId: captureId.isEmpty ? nil : captureId,
+                                         binding: workBinding)
                 }
             }
             // Skip the OS notification prompt under the screen-proof harness so it never
@@ -787,8 +812,14 @@ private struct MainTabs: View {
                     if deferredTabsReady || router.selected == .chat {
                         if local {
                             LocalChatScreen(baseDir: CaptureWAL.documentsCaptures(), remote: remote)
+                        } else if let accountBinding {
+                            ChatScreen(
+                                target: target,
+                                store: chats,
+                                accountBinding: accountBinding,
+                                log: log)
                         } else {
-                            ChatScreen(target: target, store: chats, log: log)
+                            Color.clear
                         }
                     } else {
                         Color.clear

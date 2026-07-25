@@ -280,10 +280,8 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     }
 
     public static func documentsCaptures() -> URL {
-        let docs = (try? FileManager.default.url(for: .documentDirectory, in: .userDomainMask,
-                                                 appropriateFor: nil, create: true))
-            ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        return docs.appendingPathComponent("foundryx-captures", isDirectory: true)
+        // The root is account-scoped; CaptureAccountScope owns resolution and migration.
+        CaptureAccountScope.currentRoot()
     }
 
     // MARK: capture lifecycle

@@ -20,11 +20,17 @@ public final class RemoteSession: ObservableObject {
     }
 
     @Published public private(set) var status: Status = .signedOut
+    /// Authentication state is independent of email. Apple commonly returns email
+    /// only on the first authorization, while its stable subject remains signed in.
+    @Published public private(set) var isSignedIn = false
     @Published public private(set) var email: String?
     @Published public private(set) var relay: RelayConfig?
     /// The current verified id_token — sent to the door as the bearer (the door
     /// verifies it; no manual door bearer needed in remote-only mode).
     @Published public private(set) var idToken: String?
+    /// Changes only after the account storage boundary transitions. RootView keys
+    /// account-owned state objects with this revision.
+    @Published public private(set) var identityRevision: UInt64 = 0
 
     private let auth: FoundryAuth
     private let remote: RemoteConfig?
@@ -34,11 +40,14 @@ public final class RemoteSession: ObservableObject {
         self.auth = FoundryAuth(log: log)
         self.remote = RemoteConfig.fromBundle()
         self.log = log
-        self.email = auth.signedInEmail
+        let identity = auth.signedInIdentity
+        self.email = Self.identityLabel(identity)
+        self.isSignedIn = FoundryAuth.hasPersistedSignIn
+        self.identityRevision = CaptureAccountScope.identityGeneration
         if remote == nil {
             status = .unconfigured
         } else {
-            status = auth.signedInEmail == nil ? .signedOut : .resolving
+            status = isSignedIn ? .resolving : .signedOut
         }
     }
 
@@ -50,8 +59,8 @@ public final class RemoteSession: ObservableObject {
     /// keychain identity for the email/name/provider at launch — so the real
     /// account shows even before `restore()` runs.
     public var accountPresentation: AccountPresentation {
-        AccountPresentation.make(signedIn: email != nil || FoundryAuth.hasPersistedSignIn,
-                                 email: email ?? auth.signedInEmail,
+        AccountPresentation.make(signedIn: isSignedIn,
+                                 email: auth.signedInEmail,
                                  name: auth.signedInName,
                                  provider: auth.signedInProvider)
     }
@@ -85,31 +94,70 @@ public final class RemoteSession: ObservableObject {
 
     /// On launch / appear: if already signed in, resolve the host silently.
     public func restore() async {
-        guard remote != nil, auth.signedInEmail != nil else { return }
-        await resolve()
+        do {
+            guard let identity = try auth.restorePersistedIdentity() else {
+                // A locked launch cannot read the keychain. A fully ACTIVE opaque
+                // scope remains authorized for background capture; a pending/missing
+                // scope does not.
+                isSignedIn = FoundryAuth.hasPersistedSignIn
+                status = remote == nil ? .unconfigured
+                    : (isSignedIn ? .resolving : .signedOut)
+                return
+            }
+            isSignedIn = true
+            email = Self.identityLabel(identity)
+            identityRevision = CaptureAccountScope.identityGeneration
+            guard remote != nil else {
+                status = .unconfigured
+                return
+            }
+            await resolve()
+        } catch {
+            isSignedIn = FoundryAuth.hasPersistedSignIn
+            identityRevision = CaptureAccountScope.identityGeneration
+            relay = nil
+            idToken = nil
+            status = .error(error.localizedDescription)
+            note("restore FAILED: \(error.localizedDescription)")
+        }
     }
 
     public func signIn(_ provider: AuthProvider) async {
-        guard let remote else { status = .unconfigured; return }
+        guard remote != nil else { status = .unconfigured; return }
         note("signIn(\(provider.rawValue)) start")
         do {
             let id = try await auth.signIn(provider)
-            email = id.email
+            isSignedIn = true
+            email = Self.identityLabel(id)
+            identityRevision = CaptureAccountScope.identityGeneration
             note("signIn(\(provider.rawValue)) OK email=\(id.email ?? "-")")
             await resolve()
         } catch AuthError.cancelled {
             note("signIn cancelled")
         } catch {
+            isSignedIn = FoundryAuth.hasPersistedSignIn
+            identityRevision = CaptureAccountScope.identityGeneration
             status = .error(error.localizedDescription)
             note("signIn FAILED: \(error.localizedDescription)")
         }
     }
 
     public func signOut() {
-        auth.signOut()
-        email = nil
-        relay = nil
-        status = remote == nil ? .unconfigured : .signedOut
+        do {
+            try auth.signOut()
+            isSignedIn = false
+            email = nil
+            relay = nil
+            idToken = nil
+            identityRevision = CaptureAccountScope.identityGeneration
+            status = remote == nil ? .unconfigured : .signedOut
+        } catch {
+            isSignedIn = FoundryAuth.hasPersistedSignIn
+            identityRevision = CaptureAccountScope.identityGeneration
+            status = .error(error.localizedDescription)
+            note("signOut FAILED: \(error.localizedDescription)")
+            return
+        }
         // A signed-out phone must not keep an ambient-recording BLE link (or its
         // standing pending reconnect) alive — the shared DeviceManager would
         // otherwise persist past the UI teardown and keep capturing/reconnecting
@@ -123,7 +171,17 @@ public final class RemoteSession: ObservableObject {
         guard let remote else { status = .unconfigured; return }
         status = .resolving
         note("resolve start (gateway=\(remote.gatewayHTTPURL.absoluteString))")
-        guard let token = await auth.currentIdToken() else {
+        let resolvedToken: String?
+        do {
+            resolvedToken = try await auth.currentIdToken()
+        } catch {
+            relay = nil
+            idToken = nil
+            status = .error(error.localizedDescription)
+            note("resolve: identity refresh/storage failed: \(error.localizedDescription)")
+            return
+        }
+        guard let token = resolvedToken else {
             relay = nil
             idToken = nil
             status = .signedOut
@@ -137,7 +195,7 @@ public final class RemoteSession: ObservableObject {
         // retries on the next sign-in/restore. Fire-and-forget; never blocks
         // resolve. (Name flows in with Apple sign-in — Apple only surfaces it on
         // the very first authorization.)
-        if let account = email ?? auth.signedInEmail,
+        if let account = auth.signedInIdentity?.accountKeyMaterial,
            AccountClient.shouldPostSignup(account: account) {
             let client = AccountClient(baseURL: remote.gatewayHTTPURL)
             Task {
@@ -175,7 +233,16 @@ public final class RemoteSession: ObservableObject {
         reauthInFlight = true
         defer { reauthInFlight = false }
         note("door rejected id_token as expired — silent refresh once")
-        let fresh = await auth.currentIdToken()
+        let fresh: String?
+        do {
+            fresh = try await auth.currentIdToken()
+        } catch {
+            relay = nil
+            idToken = nil
+            status = .error(error.localizedDescription)
+            note("re-auth FAILED: \(error.localizedDescription)")
+            return
+        }
         if let fresh, fresh != idToken {
             idToken = fresh
             note("re-auth: obtained a fresh id_token (door target rebuilds, uploads resume)")
@@ -197,6 +264,22 @@ public final class RemoteSession: ObservableObject {
         // the gateway URL so it's a valid URL.
         return DoorTarget(baseURL: remote.gatewayHTTPURL, bearer: token, relay: relay,
                           useMux: FoundryXFeatures.mux)
+    }
+
+    private static func identityLabel(_ identity: AuthIdentity?) -> String? {
+        guard let identity else { return nil }
+        if let email = identity.email?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !email.isEmpty {
+            return email
+        }
+        guard let provider = AuthProvider(rawValue: identity.provider) else {
+            return "Signed-in account"
+        }
+        switch provider {
+        case .apple: return "Apple account"
+        case .google: return "Google account"
+        case .microsoft: return "Microsoft account"
+        }
     }
 }
 

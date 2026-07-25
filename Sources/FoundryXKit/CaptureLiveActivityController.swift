@@ -44,7 +44,10 @@ public final class CaptureLiveActivityController {
 
     /// Start (or, if one is somehow already live, refresh) the capture Live Activity.
     /// No-op when the user has Live Activities disabled.
-    public func start(_ state: CaptureActivityAttributes.ContentState) {
+    public func start(
+        _ state: CaptureActivityAttributes.ContentState,
+        as binding: CaptureAccountScope.AccountBinding
+    ) {
         guard areActivitiesEnabled else { return }
         // If we lost our handle but one is still around (relaunch / defensive restart),
         // adopt it rather than stacking a second activity.
@@ -52,7 +55,7 @@ public final class CaptureLiveActivityController {
             activity = existing
         }
         if let activity {
-            update(state)   // already running — just push the new state
+            update(state, as: binding)   // already running — just push the new state
             _ = activity
             return
         }
@@ -75,10 +78,13 @@ public final class CaptureLiveActivityController {
     /// Push a new content state to the live activity. If the session is still recording
     /// but the activity has gone (ended/stale-expired), defensively re-request so a long
     /// session keeps a visible indicator.
-    public func update(_ state: CaptureActivityAttributes.ContentState) {
+    public func update(
+        _ state: CaptureActivityAttributes.ContentState,
+        as binding: CaptureAccountScope.AccountBinding
+    ) {
         guard areActivitiesEnabled else { return }
         guard let activity else {
-            if state.isRecording { start(state) }   // resurrect a dropped activity
+            if state.isRecording { start(state, as: binding) }   // resurrect a dropped activity
             return
         }
         // `Activity` is a non-Sendable class, so capturing it into the @Sendable Task
@@ -86,20 +92,31 @@ public final class CaptureLiveActivityController {
         // internally thread-safe, so opt the handle out with `nonisolated(unsafe)`.
         nonisolated(unsafe) let handle = activity
         Task {
+            guard binding.isCurrent else { return }
             await handle.update(
                 .init(state: state, staleDate: Date().addingTimeInterval(Self.staleAfter)))
+            if !binding.isCurrent {
+                await handle.end(nil, dismissalPolicy: .immediate)
+            }
         }
     }
 
     /// End the Live Activity, optionally leaving a final "last conversation" state on
     /// screen briefly (the system dismisses it per `dismissalPolicy`). Call on capture
     /// stop / finalize.
-    public func end(final state: CaptureActivityAttributes.ContentState,
-                    dismissAfter: TimeInterval = 30) {
+    public func end(
+        final state: CaptureActivityAttributes.ContentState,
+        as binding: CaptureAccountScope.AccountBinding,
+        dismissAfter: TimeInterval = 30
+    ) {
         guard let activity else { return }
         nonisolated(unsafe) let handle = activity
         self.activity = nil
         Task {
+            guard binding.isCurrent else {
+                await handle.end(nil, dismissalPolicy: .immediate)
+                return
+            }
             await handle.end(
                 .init(state: state, staleDate: nil),
                 dismissalPolicy: .after(Date().addingTimeInterval(dismissAfter)))

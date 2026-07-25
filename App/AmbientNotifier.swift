@@ -37,6 +37,13 @@ final class AmbientNotificationPresenter: NSObject, UNUserNotificationCenterDele
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let info = response.notification.request.content.userInfo
+        let ownerScope = info["accountScope"] as? String
+        let ownerGeneration = (info["accountGeneration"] as? NSNumber)?.uint64Value
+        guard let responseBinding = AmbientNotifier.currentBinding(
+            scope: ownerScope, generation: ownerGeneration) else {
+            completionHandler()
+            return
+        }
         let seed = info["seed"] as? String
         switch response.actionIdentifier {
         case AmbientNotifier.runAction, UNNotificationDefaultActionIdentifier:
@@ -46,17 +53,26 @@ final class AmbientNotificationPresenter: NSObject, UNUserNotificationCenterDele
                 let answer = AmbientAnswer(
                     title: info["answerTitle"] as? String ?? "From your memory",
                     text: answerText)
-                Task { @MainActor in AmbientCardBroker.shared.showAnswer(answer) }
+                Task { @MainActor in
+                    CaptureAccountScope.perform(as: responseBinding) { _ in
+                        AmbientCardBroker.shared.showAnswer(answer)
+                    }
+                }
             } else if let seed {
                 // The payload carries the source conversation — the seeded
                 // chat's provenance keeps it (EXT3).
                 let captureId = info["captureId"] as? String
                 Task { @MainActor in
-                    AmbientCardBroker.shared.run(seed: seed, captureId: captureId)
+                    AmbientCardBroker.shared.run(
+                        seed: seed, captureId: captureId,
+                        binding: responseBinding)
                 }
             }
         case AmbientNotifier.dismissAction, UNNotificationDismissActionIdentifier:
-            if let seed { AmbientCardBroker.dismissed(seed: seed) }
+            if let seed {
+                AmbientCardBroker.dismissed(
+                    seed: seed, binding: responseBinding)
+            }
         default:
             break
         }
@@ -68,6 +84,40 @@ enum AmbientNotifier {
     static let cardCategory = "AMBIENT_CARD"
     static let runAction = "AMBIENT_RUN"
     static let dismissAction = "AMBIENT_DISMISS"
+    private static let ownerScopeKey = "accountScope"
+    private static let ownerGenerationKey = "accountGeneration"
+
+    /// Withdraw every queued or already-visible account notification immediately.
+    /// Any callback already in flight also rechecks its captured AccountBinding.
+    static func clearForIdentityTransition() {
+        let center = UNUserNotificationCenter.current()
+        center.removeAllPendingNotificationRequests()
+        center.removeAllDeliveredNotifications()
+    }
+
+    static func isCurrentOwner(_ userInfo: [AnyHashable: Any]) -> Bool {
+        isCurrentOwner(
+            scope: userInfo[ownerScopeKey] as? String,
+            generation: (userInfo[ownerGenerationKey] as? NSNumber)?.uint64Value)
+    }
+
+    static func isCurrentOwner(scope: String?, generation: UInt64?) -> Bool {
+        currentBinding(scope: scope, generation: generation) != nil
+    }
+
+    static func currentBinding(
+        scope: String?, generation: UInt64?
+    ) -> CaptureAccountScope.AccountBinding? {
+        guard let expectedScope = scope,
+              let expectedGeneration = generation,
+              let binding = CaptureAccountScope.currentAccountBinding() else {
+            return nil
+        }
+        guard binding.scope == expectedScope
+            && binding.generation == expectedGeneration
+            && binding.isCurrent else { return nil }
+        return binding
+    }
 
     /// Ask once for notification permission (banner + sound), install the foreground
     /// presenter, and register the confirm-card category (Run/Dismiss). Best-effort —
@@ -102,7 +152,9 @@ enum AmbientNotifier {
     /// become CONFIRM CARDS — "Want me to X?" with Run/Dismiss; Run seeds a kiln
     /// chat with the moment (nothing executes without it).
     static func post(candidate: AmbientCandidate, outcome: AmbientRouteOutcome?,
-                     captureId: String? = nil) {
+                     captureId: String? = nil,
+                     binding: CaptureAccountScope.AccountBinding) {
+        guard binding.isCurrent else { return }
         let title: String
         let body: String
         var seed: String?
@@ -116,7 +168,7 @@ enum AmbientNotifier {
             // The delivery is a real event: remember it in the activity ledger
             // (features/ambient-answer-loop.feature).
             logAnswerDelivered(answer: answer, utterance: candidate.utterance,
-                               captureId: captureId)
+                               captureId: captureId, binding: binding)
         case ("lookup", nil):
             title = "FoundryX"
             body = "You wanted to look something up — I checked your memory but didn't find it: “\(candidate.utterance)”"
@@ -125,7 +177,9 @@ enum AmbientNotifier {
             // owner is offered to NO ONE (a bystander/TV saying the agent's name
             // commands nothing). Suppressed silently, logged for the council.
             guard outcome?.ownerVerified == true else {
-                AmbientCardBroker.dismissed(seed: "owner-unverified: \(candidate.utterance)")
+                AmbientCardBroker.dismissed(
+                    seed: "owner-unverified: \(candidate.utterance)",
+                    binding: binding)
                 return
             }
             title = "You called your agent"
@@ -156,15 +210,16 @@ enum AmbientNotifier {
             body = "\(candidate.summary.isEmpty ? "Something I can help with" : candidate.summary) — “\(candidate.utterance)”"
             seed = chatSeed(candidate)
         }
+        guard binding.isCurrent else { return }
         deliver(title: title, body: body, preview: false, seed: seed,
-                answerText: answerPayload)
+                answerText: answerPayload, captureId: captureId, binding: binding)
     }
 
     /// One JSONL line per delivered answer — what the activity ledger reads
     /// (ActivityStore.answersLogURL; same append pattern as the other logs).
     private static func logAnswerDelivered(answer: String, utterance: String,
-                                           captureId: String?) {
-        let url = CaptureWAL.documentsCaptures().appendingPathComponent("ambient-answers.jsonl")
+                                           captureId: String?,
+                                           binding: CaptureAccountScope.AccountBinding) {
         var obj: [String: Any] = [
             "ts": Int(Date().timeIntervalSince1970),
             "kind": "answer",
@@ -175,12 +230,15 @@ enum AmbientNotifier {
         guard let line = try? JSONSerialization.data(withJSONObject: obj) else { return }
         var out = line
         out.append(UInt8(ascii: "\n"))
-        if let h = try? FileHandle(forWritingTo: url) {
-            defer { try? h.close() }
-            _ = try? h.seekToEnd()
-            try? h.write(contentsOf: out)
-        } else {
-            try? out.write(to: url)
+        CaptureAccountScope.perform(as: binding) { captured in
+            let url = captured.root.appendingPathComponent("ambient-answers.jsonl")
+            if let h = try? FileHandle(forWritingTo: url) {
+                defer { try? h.close() }
+                _ = try? h.seekToEnd()
+                try? h.write(contentsOf: out)
+            } else {
+                try? out.write(to: url)
+            }
         }
     }
 
@@ -201,38 +259,61 @@ enum AmbientNotifier {
         // A persona-relatable sample (family for individual, a client for the
         // expert, a team pattern for the firm) so the nudge lands for whoever
         // is here — not a generic placeholder.
+        guard let binding = CaptureAccountScope.currentAccountBinding() else { return }
         let ex = PersonaCopy.notificationExample(for: PersonaPrefs.persona())
-        deliver(title: ex.title, body: ex.body, preview: true)
+        deliver(title: ex.title, body: ex.body, preview: true, binding: binding)
     }
 
     private static func deliver(title: String, body: String, preview: Bool,
-                                seed: String? = nil, answerText: String? = nil) {
+                                seed: String? = nil, answerText: String? = nil,
+                                captureId: String? = nil,
+                                binding: CaptureAccountScope.AccountBinding) {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains(where: { $0.hasSuffix("Preview") }) { return }   // screen-proof: no OS prompts
         #endif
         let center = UNUserNotificationCenter.current()
         let fire: () -> Void = {
-            let content = UNMutableNotificationContent()
-            content.title = title
-            content.body = body
-            content.sound = .default
-            content.userInfo = ["ambient": true, "preview": preview]
-            if let seed {
-                content.categoryIdentifier = cardCategory   // Run/Dismiss actions
-                content.userInfo["seed"] = seed
+            CaptureAccountScope.perform(as: binding) { captured in
+                let content = UNMutableNotificationContent()
+                content.title = title
+                content.body = body
+                content.sound = .default
+                content.userInfo = [
+                    "ambient": true,
+                    "preview": preview,
+                    ownerScopeKey: captured.scope,
+                    ownerGenerationKey: NSNumber(value: captured.generation),
+                ]
+                if let captureId, !captureId.isEmpty {
+                    content.userInfo["captureId"] = captureId
+                }
+                if let seed {
+                    content.categoryIdentifier = cardCategory
+                    content.userInfo["seed"] = seed
+                }
+                if let answerText {
+                    content.userInfo["answerText"] = answerText
+                    content.userInfo["answerTitle"] = title
+                }
+                let req = UNNotificationRequest(
+                    identifier: "ambient-\(UUID().uuidString)",
+                    content: content,
+                    trigger: UNTimeIntervalNotificationTrigger(
+                        timeInterval: 0.5, repeats: false))
+                center.add(req) { _ in
+                    // `add` is asynchronous. If a transition raced the request after
+                    // the transition's bulk clear, withdraw this exact stale request.
+                    guard !binding.isCurrent else { return }
+                    center.removePendingNotificationRequests(
+                        withIdentifiers: [req.identifier])
+                    center.removeDeliveredNotifications(
+                        withIdentifiers: [req.identifier])
+                }
             }
-            if let answerText {
-                // Tap opens the full answer surface (not a chat seed).
-                content.userInfo["answerText"] = answerText
-                content.userInfo["answerTitle"] = title
-            }
-            let req = UNNotificationRequest(
-                identifier: "ambient-\(UUID().uuidString)",
-                content: content,
-                trigger: UNTimeIntervalNotificationTrigger(timeInterval: 0.5, repeats: false))
-            center.add(req)
         }
         center.getNotificationSettings { settings in
+            guard CaptureAccountScope.perform(
+                as: binding, { _ in true }) == true else { return }
             switch settings.authorizationStatus {
             case .authorized, .provisional, .ephemeral:
                 fire()

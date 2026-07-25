@@ -11,6 +11,10 @@
 
 import Foundation
 
+#if canImport(WidgetKit) && os(iOS)
+import WidgetKit
+#endif
+
 /// The minimal capture status the home-screen widget shows.
 public struct CaptureWidgetSnapshot: Codable, Equatable, Sendable {
     /// The DISTINCT capture phase (RECORDING-ACTIVE / PAUSED / IDLE) — the same
@@ -66,25 +70,100 @@ public enum CaptureWidgetSnapshotStore {
     /// `com.apple.security.application-groups` entitlement in BOTH targets.
     public static let appGroupID = "group.com.goforgeit.foundryx"
 
-    private static let key = "foundryx.capture.widget-snapshot"
+    // These are `internal`, not `private`, because the account-bound WRITE path lives in
+    // CaptureAccountScope.swift. The widget extension target compiles this file but NOT
+    // that one, so the binding-dependent half must stay out of here or the extension
+    // fails to build — which is exactly how this shipped red once (Nick 2026-07-25).
+    static let key = "foundryx.capture.widget-snapshot"
+    static let activeOwnerKey = "foundryx.capture.widget-snapshot.active-owner"
 
-    private static var defaults: UserDefaults? {
-        UserDefaults(suiteName: appGroupID)
+    /// The snapshot and its account owner travel together. In particular, a legacy
+    /// untagged `CaptureWidgetSnapshot` cannot decode as this envelope and therefore
+    /// fails closed instead of exposing its last-finished title to another account.
+    struct Envelope: Codable {
+        let owner: String
+        let snapshot: CaptureWidgetSnapshot
     }
 
-    /// Persist the latest snapshot for the widget to read. Cheap (one small JSON blob).
-    public static func write(_ snapshot: CaptureWidgetSnapshot) {
-        guard let defaults, let data = try? JSONEncoder().encode(snapshot) else { return }
-        defaults.set(data, forKey: key)
+    static let stateLock = NSLock()
+    /// Test-only replacement for the App-Group suite. Access is serialized by
+    /// `stateLock`; production leaves this nil.
+    nonisolated(unsafe) static var injectedDefaults: UserDefaults?
+
+    static var defaults: UserDefaults? {
+        injectedDefaults ?? UserDefaults(suiteName: appGroupID)
     }
 
     /// The last snapshot the app wrote, or `.idle` when none exists yet / the group is
-    /// unavailable.
+    /// unavailable. The envelope must belong to the currently active account.
     public static func read() -> CaptureWidgetSnapshot {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         guard let defaults,
+              let activeOwner = defaults.string(forKey: activeOwnerKey),
+              !activeOwner.isEmpty,
               let data = defaults.data(forKey: key),
-              let snap = try? JSONDecoder().decode(CaptureWidgetSnapshot.self, from: data)
+              let envelope = try? JSONDecoder().decode(Envelope.self, from: data),
+              envelope.owner == activeOwner
         else { return .idle }
-        return snap
+        return envelope.snapshot
+    }
+
+    /// Bind future widget snapshots to an opaque account owner. Every identity
+    /// transition first withdraws the prior owner and then clears its payload, including
+    /// sign-out (`nil`), so new writes fail closed throughout an account switch.
+    public static func transition(toOwner owner: String?) {
+        stateLock.lock()
+        if let defaults {
+            defaults.removeObject(forKey: activeOwnerKey)
+            defaults.removeObject(forKey: key)
+            if let owner, !owner.isEmpty {
+                defaults.set(owner, forKey: activeOwnerKey)
+            }
+            // This boundary is consumed by another process (the widget), so make
+            // the withdrawal/rebind visible before activation is published.
+            _ = defaults.synchronize()
+        }
+        stateLock.unlock()
+        reloadWidgetTimelines()
+    }
+
+    /// Publish the already-resolved current scope without manufacturing an identity
+    /// transition. This covers first use of the signed-out on-device scope and locked
+    /// restoration. A mismatched prior owner is withdrawn and cleared before rebinding;
+    /// a matching owner preserves its current snapshot.
+    static func publishActiveOwner(_ owner: String) {
+        stateLock.lock()
+        var changed = false
+        if let defaults,
+           defaults.string(forKey: activeOwnerKey) != owner {
+            defaults.removeObject(forKey: activeOwnerKey)
+            defaults.removeObject(forKey: key)
+            defaults.set(owner, forKey: activeOwnerKey)
+            _ = defaults.synchronize()
+            changed = true
+        }
+        stateLock.unlock()
+        if changed { reloadWidgetTimelines() }
+    }
+
+    /// Hermetic-test seam: route reads and writes to a unique ephemeral suite.
+    static func setDefaultsForTesting(_ defaults: UserDefaults) {
+        stateLock.lock()
+        injectedDefaults = defaults
+        stateLock.unlock()
+    }
+
+    /// Restore production App-Group resolution after a test.
+    static func resetDefaultsForTesting() {
+        stateLock.lock()
+        injectedDefaults = nil
+        stateLock.unlock()
+    }
+
+    private static func reloadWidgetTimelines() {
+        #if canImport(WidgetKit) && os(iOS)
+        WidgetCenter.shared.reloadAllTimelines()
+        #endif
     }
 }
