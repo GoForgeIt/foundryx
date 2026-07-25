@@ -38,6 +38,23 @@ final class AccountDataIsolationFeatureTests: XCTestCase {
         try world.cleanup()
     }
 
+    /// The free on-device tier on a BRAND-NEW phone: no activation record, no
+    /// identity. This is the case build 300 shipped broken — "no record" was read as
+    /// "unresolvable", so the capture root became a fail-closed path and nothing could
+    /// record before sign-in. The existing signed-out scenario could not catch it
+    /// because it seeds a signedOut record first.
+    func testFreshInstallCanRecordBeforeAnyoneSignsIn() throws {
+        let world = try AccountDataIsolationWorld()
+        do {
+            try world.prepareFreshInstallWithNoActivationRecord()
+            try world.assertFreshInstallCanRecord()
+        } catch {
+            try? world.cleanup()
+            throw error
+        }
+        try world.cleanup()
+    }
+
     /// Isolation is a storage invariant. A new private store must not silently
     /// bypass CaptureAccountScope by resolving its own durable container.
     func testUserPrivateStoragePathsStayBehindTheAccountScopeGate() throws {
@@ -1346,6 +1363,49 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         guard remaining.isEmpty else {
             throw BrineStepError(
                 "identity notification left pending values: \(remaining.sorted())")
+        }
+    }
+
+    /// A REAL fresh install: no activation record at all, and no identity. Distinct
+    /// from `prepareSignedOutOnDeviceCapture`, which seeds a signedOut record — that
+    /// seeding is precisely why the free tier could be fail-closed on a new phone while
+    /// this suite stayed green (build 300, Nick 2026-07-25).
+    func prepareFreshInstallWithNoActivationRecord() throws {
+        try queue.sync {
+            try beginScenarioLocked()
+            scopeDefaults.removeObject(forKey: "foundryx.capture-account-activation.v2")
+            scopeDefaults.removeObject(forKey: "foundryx.auth.signed-in")
+            CaptureAccountScope.resetProcessCacheForTests()
+        }
+    }
+
+    /// A new phone must be able to RECORD before anyone signs in: a writable root
+    /// inside the real container, and a binding so every producer (widget, Live
+    /// Activity, ambient) still works. Resolving `.blocked` here sent the capture root
+    /// to an unwritable fail-closed path and killed the whole free tier.
+    func assertFreshInstallCanRecord() throws {
+        try queue.sync {
+            let root = CaptureWAL.documentsCaptures()
+            guard root.lastPathComponent == CaptureAccountScope.signedOutScope else {
+                throw BrineStepError(
+                    "a fresh install resolved \(root.path) instead of the on-device scope")
+            }
+            guard root.path.hasPrefix(captureContainer.path) else {
+                throw BrineStepError(
+                    "a fresh install resolved outside its container: \(root.path)")
+            }
+            // Writable in fact, not just in name — the regression produced a path
+            // under /dev/null that every write would have failed against.
+            try FileManager.default.createDirectory(
+                at: root, withIntermediateDirectories: true)
+            let probe = root.appendingPathComponent(".fresh-install-write-probe")
+            try Data("ok".utf8).write(to: probe)
+            try FileManager.default.removeItem(at: probe)
+            guard CaptureAccountScope.currentAccountBinding() != nil else {
+                throw BrineStepError(
+                    "a fresh install produced no AccountBinding, so every bound "
+                        + "producer (widget, Live Activity, ambient) silently no-ops")
+            }
         }
     }
 
