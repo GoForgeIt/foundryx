@@ -41,7 +41,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-VALID_PHASES=(swift gates compile leak flake lint uiproof)
+VALID_PHASES=(swift gates compile leak flake lint iosbrine uiproof)
 PHASES=("$@")
 [ ${#PHASES[@]} -eq 0 ] && PHASES=("${VALID_PHASES[@]}")
 DD="${CI_GATES_DD:-build/ci-gates-dd}"
@@ -498,6 +498,38 @@ phase_uiproof() {
   else
     tail -50 "$out"
     fail "uiproof-recording-surface"
+  fi
+}
+
+# ---------------------------------------------------------------- iosbrine: the same suite, on the iOS RUNTIME
+# `swift test` runs the logic suite on macOS. That is NOT the platform we ship, and the
+# two genuinely disagree: on 2026-07-25 the account-scope resolver read the keychain, which
+# answers errSecMissingEntitlement (-34018) in the iOS test host but succeeds on macOS — so
+# the free on-device tier fail-closed to an unwritable root on iOS while macOS was 1029/0
+# green and this script printed CI GATES PASS. Only the pipeline's iOS lane caught it.
+# This phase pulls that lane local so a green ci-gates cannot mean a red iOS runtime.
+phase_iosbrine() {
+  echo "==> [iosbrine] the logic suite on the iOS simulator runtime (not macOS)"
+  local udid
+  udid=$(xcrun simctl list devices available 2>/dev/null | grep -E "iPhone" | grep -Eo "[0-9A-F-]{36}" | head -1)
+  if [ -z "$udid" ]; then
+    echo "  no available iPhone simulator runtime — the iOS Brine lane cannot run"
+    fail "iosbrine-no-simulator"
+    return
+  fi
+  local out="build/ci-gates-iosbrine.log"
+  mkdir -p build
+  if xcodebuild test -project FoundryX.xcodeproj -scheme FoundryX \
+       -destination "id=$udid" CODE_SIGNING_ALLOWED=NO \
+       >"$out" 2>&1; then
+    # Report the WHOLE-suite line, not whichever per-suite summary happens to print
+    # last — a trailing 5-test sub-suite reads like the run was tiny.
+    local total
+    total=$(grep -Eo 'Executed [0-9]+ tests' "$out" | grep -Eo '[0-9]+' | sort -n | tail -1)
+    echo "  iosbrine: executed ${total:-?} tests on the iOS runtime, 0 failures — PASSED"
+  else
+    grep -E "Failing tests|error:.*XCTAssert" "$out" | head -20
+    fail "iosbrine-suite"
   fi
 }
 

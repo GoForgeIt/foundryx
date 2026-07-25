@@ -447,6 +447,36 @@ enum AuthStore {
         try? loadFallibly()
     }
 
+    /// Whether an identity is stored, distinguishing the reasons the keychain may not
+    /// say. Presence alone is not enough: "no identity" and "cannot read the identity"
+    /// have opposite safe answers, and a DEVICE-LOCKED keychain must never be mistaken
+    /// for sign-out (that strands authenticated audio in the signed-out scope).
+    enum IdentityPresence {
+        /// errSecItemNotFound — genuinely never signed in on this install.
+        case absent
+        /// An identity is stored and readable.
+        case present
+        /// The device is locked; an identity may well exist. Fail closed.
+        case unreadableLocked
+        /// The keychain cannot answer at all for a non-lock reason — notably
+        /// errSecMissingEntitlement (-34018) in a test host. Not a locked device.
+        case unreadable(OSStatus)
+    }
+
+    static func identityPresence() -> IdentityPresence {
+        let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                kSecAttrService as String: service,
+                                kSecAttrAccount as String: account,
+                                kSecReturnData as String: true]
+        var item: CFTypeRef?
+        switch SecItemCopyMatching(q as CFDictionary, &item) {
+        case errSecSuccess: return .present
+        case errSecItemNotFound: return .absent
+        case errSecInteractionNotAllowed, errSecAuthFailed: return .unreadableLocked
+        case let status: return .unreadable(status)
+        }
+    }
+
     static func loadFallibly() throws -> AuthIdentity? {
         let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                 kSecAttrService as String: service,

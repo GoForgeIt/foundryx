@@ -973,16 +973,30 @@ public enum CaptureAccountScope {
                     // every capture root became the fail-closed path and no producer
                     // could bind (Nick 2026-07-25). The mirror is readable while the
                     // device is locked; the keychain is not.
+                    // The mirror is the authority on "someone is signed in" — it is a
+                    // UserDefaults boolean, so it is readable even while the device is
+                    // locked, and it is stamped on every successful save/load.
                     if currentDefaults().bool(forKey: AuthStore.signedInMirrorKey) {
                         return .blocked
                     }
-                    do {
-                        // errSecItemNotFound ⇒ genuinely never signed in ⇒ free tier.
-                        // Anything else (notably a LOCKED keychain) stays blocked so
-                        // authenticated audio is never stranded in `acct-none`.
-                        return try AuthStore.loadFallibly() == nil ? .signedOut : .blocked
-                    } catch {
+                    switch AuthStore.identityPresence() {
+                    case .absent:
+                        // Genuinely never signed in — the free on-device tier.
+                        return .signedOut
+                    case .present:
+                        // An identity exists but was never activated (a pre-scope
+                        // install): claim ownership first, do not expose a root.
                         return .blocked
+                    case .unreadableLocked:
+                        // Locked device: an identity may exist. Fail closed rather
+                        // than strand authenticated audio in `acct-none`.
+                        return .blocked
+                    case .unreadable:
+                        // The keychain cannot answer for a non-lock reason, e.g.
+                        // errSecMissingEntitlement in a test host. The mirror has
+                        // already said nobody is signed in, and blocking here made the
+                        // free tier fail closed on the whole iOS runtime.
+                        return .signedOut
                     }
                 }
                 switch record.phase {
