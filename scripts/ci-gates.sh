@@ -510,6 +510,14 @@ phase_uiproof() {
 # This phase pulls that lane local so a green ci-gates cannot mean a red iOS runtime.
 phase_iosbrine() {
   echo "==> [iosbrine] the logic suite on the iOS simulator runtime (not macOS)"
+  command -v xcodegen >/dev/null || {
+    fail "iosbrine(xcodegen-missing)"
+    return
+  }
+  xcodegen generate >/dev/null 2>&1 || {
+    fail "iosbrine(xcodegen-failed)"
+    return
+  }
   local udid
   udid=$(xcrun simctl list devices available 2>/dev/null | grep -E "iPhone" | grep -Eo "[0-9A-F-]{36}" | head -1)
   if [ -z "$udid" ]; then
@@ -530,6 +538,24 @@ phase_iosbrine() {
   else
     grep -E "Failing tests|error:.*XCTAssert" "$out" | head -20
     fail "iosbrine-suite"
+  fi
+
+  echo "==> [iosbrine] signed minimal host — real account-qualified iOS Keychain"
+  local keychain_out="build/ci-gates-ios-keychain.log"
+  if xcodebuild test -project FoundryX.xcodeproj \
+       -scheme FoundryXKeychainProof \
+       -destination "id=$udid" \
+       -only-testing:PairingKeychainIntegrationTests \
+       >"$keychain_out" 2>&1; then
+    if grep -q "Executed 1 test, with 0 failures" "$keychain_out"; then
+      echo "  ios-keychain: executed 1 hosted real-Keychain test, 0 failures — PASSED"
+    else
+      echo "  hosted Keychain command returned success without the required test"
+      fail "ios-keychain-test-missing"
+    fi
+  else
+    grep -E "Failing tests|error:|Signing" "$keychain_out" | head -20
+    fail "ios-keychain-hosted-proof"
   fi
 }
 

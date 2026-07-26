@@ -28,6 +28,10 @@ public final class RemoteSession: ObservableObject {
     /// The current verified id_token — sent to the door as the bearer (the door
     /// verifies it; no manual door bearer needed in remote-only mode).
     @Published public private(set) var idToken: String?
+    /// The same token bound to the account generation that requested it. Consumers
+    /// of account-scoped state use this instead of relabeling a delayed token with
+    /// whatever identity happens to be current when the await finishes.
+    @Published public private(set) var boundIdToken: AccountBoundToken?
     /// Changes only after the account storage boundary transitions. RootView keys
     /// account-owned state objects with this revision.
     @Published public private(set) var identityRevision: UInt64 = 0
@@ -117,6 +121,7 @@ public final class RemoteSession: ObservableObject {
             identityRevision = CaptureAccountScope.identityGeneration
             relay = nil
             idToken = nil
+            boundIdToken = nil
             status = .error(error.localizedDescription)
             note("restore FAILED: \(error.localizedDescription)")
         }
@@ -127,6 +132,9 @@ public final class RemoteSession: ObservableObject {
         note("signIn(\(provider.rawValue)) start")
         do {
             let id = try await auth.signIn(provider)
+            relay = nil
+            idToken = nil
+            boundIdToken = nil
             isSignedIn = true
             email = Self.identityLabel(id)
             identityRevision = CaptureAccountScope.identityGeneration
@@ -149,6 +157,7 @@ public final class RemoteSession: ObservableObject {
             email = nil
             relay = nil
             idToken = nil
+            boundIdToken = nil
             identityRevision = CaptureAccountScope.identityGeneration
             status = remote == nil ? .unconfigured : .signedOut
         } catch {
@@ -169,26 +178,38 @@ public final class RemoteSession: ObservableObject {
     /// Mint a fresh id_token and resolve the designated host into a RelayConfig.
     public func resolve() async {
         guard let remote else { status = .unconfigured; return }
+        let requestedGeneration = CaptureAccountScope.identityGeneration
         status = .resolving
         note("resolve start (gateway=\(remote.gatewayHTTPURL.absoluteString))")
         let resolvedToken: String?
         do {
             resolvedToken = try await auth.currentIdToken()
         } catch {
+            guard requestedGeneration == CaptureAccountScope.identityGeneration else {
+                return
+            }
             relay = nil
             idToken = nil
+            boundIdToken = nil
             status = .error(error.localizedDescription)
             note("resolve: identity refresh/storage failed: \(error.localizedDescription)")
+            return
+        }
+        guard requestedGeneration == CaptureAccountScope.identityGeneration else {
             return
         }
         guard let token = resolvedToken else {
             relay = nil
             idToken = nil
+            boundIdToken = nil
             status = .signedOut
             note("resolve: no valid id_token (signed out / refresh failed)")
             return
         }
         idToken = token
+        boundIdToken = AccountBoundToken(
+            value: token,
+            generation: requestedGeneration)
         // Account signup (track 20260705T1100, decision #5): the forced login IS
         // the account creation — ship the identity-only signup event ONCE per
         // account. Self-healing: the flag is set only on a 2xx, so a failed POST
@@ -206,14 +227,23 @@ public final class RemoteSession: ObservableObject {
         }
         do {
             let cfg = try await HostResolver(remote: remote, log: log).resolveRelayConfig(idToken: token)
+            guard requestedGeneration == CaptureAccountScope.identityGeneration else {
+                return
+            }
             relay = cfg
             status = .connected(host: cfg.tunnelId)
             note("resolve OK tunnel=\(cfg.tunnelId) relay=\(cfg.relayURL.absoluteString) pinned=\(cfg.expectedDoorStatic != nil)")
         } catch HostResolveError.noHostDesignated {
+            guard requestedGeneration == CaptureAccountScope.identityGeneration else {
+                return
+            }
             relay = nil
             status = .noHost
             note("resolve: NO host designated for this account")
         } catch {
+            guard requestedGeneration == CaptureAccountScope.identityGeneration else {
+                return
+            }
             relay = nil
             status = .error(error.localizedDescription)
             note("resolve FAILED: \(error.localizedDescription)")
@@ -230,6 +260,7 @@ public final class RemoteSession: ObservableObject {
     public func handleAuthExpired() async {
         guard remote != nil else { status = .unconfigured; return }
         guard !reauthInFlight else { return }
+        let requestedGeneration = CaptureAccountScope.identityGeneration
         reauthInFlight = true
         defer { reauthInFlight = false }
         note("door rejected id_token as expired — silent refresh once")
@@ -237,14 +268,24 @@ public final class RemoteSession: ObservableObject {
         do {
             fresh = try await auth.currentIdToken()
         } catch {
+            guard requestedGeneration == CaptureAccountScope.identityGeneration else {
+                return
+            }
             relay = nil
             idToken = nil
+            boundIdToken = nil
             status = .error(error.localizedDescription)
             note("re-auth FAILED: \(error.localizedDescription)")
             return
         }
+        guard requestedGeneration == CaptureAccountScope.identityGeneration else {
+            return
+        }
         if let fresh, fresh != idToken {
             idToken = fresh
+            boundIdToken = AccountBoundToken(
+                value: fresh,
+                generation: requestedGeneration)
             note("re-auth: obtained a fresh id_token (door target rebuilds, uploads resume)")
             return
         }
@@ -252,6 +293,7 @@ public final class RemoteSession: ObservableObject {
         // the login screen so the user re-authenticates and mints a fresh id_token.
         relay = nil
         idToken = nil
+        boundIdToken = nil
         status = .signedOut
         note("re-auth: no fresh id_token → signed out (login required)")
     }
@@ -259,10 +301,14 @@ public final class RemoteSession: ObservableObject {
     /// The door target for the resolved remote host: the relay tunnel + the
     /// id_token as bearer (the door verifies it). `nil` until connected.
     public func makeDoorTarget() -> DoorTarget? {
-        guard let relay, let token = idToken, let remote else { return nil }
+        guard let relay,
+              let boundIdToken,
+              boundIdToken.generation == CaptureAccountScope.identityGeneration,
+              idToken == boundIdToken.value,
+              let remote else { return nil }
         // baseURL is nominal in relay mode (RelayTransport drives the tunnel); use
         // the gateway URL so it's a valid URL.
-        return DoorTarget(baseURL: remote.gatewayHTTPURL, bearer: token, relay: relay,
+        return DoorTarget(baseURL: remote.gatewayHTTPURL, bearer: boundIdToken.value, relay: relay,
                           useMux: FoundryXFeatures.mux)
     }
 

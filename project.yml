@@ -156,6 +156,45 @@ targets:
         # Bundle.module-style lookups resolve on-device like they do under SPM.
         TARGETED_DEVICE_FAMILY: "1,2"
 
+  # Minimal app host for the one proof that must exercise the real iOS Keychain.
+  # It is deliberately separate from FoundryX and the hostless logic suite: the
+  # signed simulator lane below proves Security.framework behavior without
+  # launching production services or making every unit test app-hosted.
+  PairingKeychainTestHost:
+    type: application
+    platform: iOS
+    sources:
+      - TestSupport/PairingKeychainTestHost
+    info:
+      path: TestSupport/PairingKeychainTestHost/Info.plist
+      properties:
+        CFBundleDisplayName: Pairing Keychain Test Host
+        UILaunchScreen: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.goforgeit.foundryx.pairing-keychain-test-host
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+
+  PairingKeychainIntegrationTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/PairingKeychainIntegrationTests
+    dependencies:
+      - target: PairingKeychainTestHost
+      - package: FoundryXKitPackage
+        product: FoundryXKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.goforgeit.foundryx.pairing-keychain-tests
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/PairingKeychainTestHost.app/PairingKeychainTestHost"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        TARGETED_DEVICE_FAMILY: "1,2"
+
   # UI-proof lane (track 20260715T1500 addendum): XCUITests that drive the REAL
   # app through the demo-seeded screens (`-MainPreview`) by accessibility
   # identifier and attach screenshots — the simulator proof for interaction
@@ -247,3 +286,12 @@ schemes:
       config: Debug
       targets:
         - FoundryXUITests
+
+  FoundryXKeychainProof:
+    build:
+      targets:
+        PairingKeychainTestHost: all
+    test:
+      config: Debug
+      targets:
+        - PairingKeychainIntegrationTests

@@ -206,6 +206,7 @@ public enum CaptureAccountScope {
         Notification.Name("foundryx.capture-account-identity-did-change")
 
     private static let stateLock = NSLock()
+    private static let resolutionProbeLock = NSLock()
     private static let persistenceQueue =
         DispatchQueue(label: "foundryx.capture-account-persistence")
     private static let migrationQueue =
@@ -220,6 +221,7 @@ public enum CaptureAccountScope {
         (cell: String, door: String)?
     nonisolated(unsafe) private static var lastValidatedContainer: URL?
     nonisolated(unsafe) private static var markerSyncFailureForTests = false
+    nonisolated(unsafe) private static var resolutionPersistenceEntriesForTests = 0
 
     // MARK: - Stable provider-qualified key
 
@@ -556,16 +558,6 @@ public enum CaptureAccountScope {
     /// unresolved and fails closed; this accessor never initializes resolution by
     /// hopping onto `persistenceQueue`.
     public static func currentScopedPreferences() -> ScopedPreferences? {
-        // Force resolution first, exactly as `currentAccountBinding()` does. Reading
-        // `cachedResolution` alone returns nil whenever nothing has resolved the scope
-        // yet in this process, so the FIRST scoped read fails closed for no reason —
-        // which made a Vault pairing impossible to complete from a cold start.
-        //
-        // This does not violate "the read path never touches persistenceQueue"
-        // (D1): `currentResolution()` only enters that queue while the cache is COLD,
-        // and any identity-change observer runs after `installResolution` has already
-        // populated the cache, so the re-entrant path returns from cache.
-        guard resolvedScope(currentResolution()) != nil else { return nil }
         stateLock.lock()
         defer { stateLock.unlock() }
         guard let scope = resolvedScope(cachedResolution) else { return nil }
@@ -1143,6 +1135,9 @@ public enum CaptureAccountScope {
         }
         stateLock.unlock()
 
+        resolutionProbeLock.withLock {
+            resolutionPersistenceEntriesForTests += 1
+        }
         let resolved: Resolution = persistenceQueue.sync {
             do {
                 guard let record = try decodeActivationRecord() else {
@@ -1344,6 +1339,18 @@ public enum CaptureAccountScope {
         stateLock.unlock()
     }
 
+    static func resetResolutionPersistenceEntriesForTests() {
+        resolutionProbeLock.withLock {
+            resolutionPersistenceEntriesForTests = 0
+        }
+    }
+
+    static var resolutionPersistenceEntryCountForTests: Int {
+        resolutionProbeLock.withLock {
+            resolutionPersistenceEntriesForTests
+        }
+    }
+
     /// Compatibility with the round-one driver while it is being migrated.
     public static func setAccountForTests(email: String?) {
         if let email {
@@ -1378,6 +1385,7 @@ public enum CaptureAccountScope {
         markerSyncFailureForTests = false
         generation &+= 1
         stateLock.unlock()
+        resetResolutionPersistenceEntriesForTests()
     }
 }
 

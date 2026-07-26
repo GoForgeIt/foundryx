@@ -357,6 +357,29 @@ public final class VaultFunnelModel: ObservableObject {
         state = .idle
         connectedVault = nil
         cellStore.reloadForIdentityTransition()
+        deriveConnectedVault()
+    }
+
+    /// Re-derive an id-token pairing when the token for the active account arrives
+    /// after the identity boundary itself.
+    public func refreshForAvailableToken(expectedGeneration: UInt64) {
+        guard expectedGeneration == CaptureAccountScope.identityGeneration else {
+            return
+        }
+        if let config = cellStore.config, case .idToken = config.auth {
+            connectedVault = nil
+        }
+        deriveConnectedVault()
+    }
+
+    public func clearUnavailableIdentityToken(expectedGeneration: UInt64) {
+        guard expectedGeneration == CaptureAccountScope.identityGeneration,
+              let config = cellStore.config,
+              case .idToken = config.auth else { return }
+        connectedVault = nil
+    }
+
+    private func deriveConnectedVault() {
         guard let config = cellStore.config,
               let target = try? CellBackend.resolveTarget(
                 config: config,

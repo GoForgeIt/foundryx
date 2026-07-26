@@ -139,21 +139,6 @@ final class AccountDataIsolationFeatureTests: XCTestCase {
         try world.cleanup()
     }
 
-    func testRootOwnerResetsVaultRouterAndStoresOnIdentityChange() throws {
-        let root = try String(
-            contentsOf: Self.repositoryRoot.appendingPathComponent("App/RootView.swift"),
-            encoding: .utf8)
-        XCTAssertTrue(
-            root.contains("cells.reloadForIdentityTransition()"),
-            "RootView must reload the account-scoped CellStore at the identity owner")
-        XCTAssertTrue(
-            root.contains("accountStores.resetBrainForIdentityTransition()"),
-            "RootView must replace the account-scoped BrainStore at the identity owner")
-        XCTAssertTrue(
-            root.contains("vaultFunnel.resetForIdentityTransition()"),
-            "RootView must clear and re-derive the Vault entitlement router")
-    }
-
     @MainActor
     func testVaultRouterDerivesReplacementAccountAfterReset() async throws {
         try XCTSkipUnless(
@@ -299,15 +284,6 @@ final class AccountDataIsolationFeatureTests: XCTestCase {
                 broker.contains("\(field) = nil"),
                 "AmbientCardBroker.clearForIdentityTransition must clear \(field)")
         }
-
-        let root = try String(
-            contentsOf: repository.appendingPathComponent("App/RootView.swift"),
-            encoding: .utf8)
-        XCTAssertTrue(root.contains("CaptureAccountScope.identityDidChangeNotification"))
-        XCTAssertTrue(root.contains("AmbientCardBroker.shared.clearForIdentityTransition()"))
-        XCTAssertTrue(root.contains("AmbientNotifier.clearForIdentityTransition()"))
-        XCTAssertTrue(root.contains("let workBinding = accountBinding"))
-        XCTAssertTrue(root.contains("binding: workBinding"))
 
         let notifier = try String(
             contentsOf: repository.appendingPathComponent("App/AmbientNotifier.swift"),
@@ -458,6 +434,8 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
     private let doorKeychainService: String
     private var scenarioNumber = 0
     private var state = State()
+    private var pairingHarness: PairingScenarioHarness?
+    private var accountVaultRouter: VaultFunnelModel?
 
     private var firstEmail: String { "first-\(token)@example.com" }
     private var secondEmail: String { "second-\(token)@example.com" }
@@ -499,6 +477,8 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
 
     func cleanup() throws {
         queue.sync {
+            pairingHarness?.cleanup()
+            pairingHarness = nil
             for service in [cellKeychainService, doorKeychainService] {
                 let query: [String: Any] = [
                     kSecClass as String: kSecClassGenericPassword,
@@ -617,21 +597,23 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         }
     }
 
-    func firstAccountVaultEntitlementRouterIsLive() throws {
-        try firstAccountPairedVaultWithPrivateBearer()
+    @MainActor
+    func firstAccountVaultEntitlementRouterIsLive() async throws {
+        accountVaultRouter = try await makeFirstAccountVaultRouterLive()
     }
 
+    @MainActor
     func secondAccountSignsInWithoutVault() throws {
         try secondAccountSignsInOnSamePhone()
+        accountVaultRouter?.resetForIdentityTransition()
     }
 
+    @MainActor
     func assertVaultRouterShowsSecondAccountIsOff() throws {
-        let root = try String(
-            contentsOf: repositoryRoot.appendingPathComponent("App/RootView.swift"),
-            encoding: .utf8)
-        guard root.contains("vaultFunnel.resetForIdentityTransition()") else {
+        guard accountVaultRouter?.entitlement == .off,
+              accountVaultRouter?.state == .idle else {
             throw BrineStepError(
-                "the RootView owner leaves the first account's Vault entitlement live")
+                "the identity coordinator left the first account's Vault entitlement live")
         }
     }
 
@@ -659,6 +641,124 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
                 "the first account's Vault router did not become live")
         }
         return model
+    }
+
+    // MARK: - Pairing failure and delayed-token behavior
+
+    func seedColdVaultAndDoorPairings() throws {
+        let harness = try replacePairingHarness()
+        try harness.seedColdPairings()
+    }
+
+    func leavePairingsColdForLaunch() throws {
+        guard let pairingHarness else {
+            throw BrineStepError("the cold pairing scenario was not prepared")
+        }
+        pairingHarness.makePairingsCold()
+    }
+
+    @MainActor
+    func raceAccountChangeWithPairingRefresh() throws {
+        guard let pairingHarness else {
+            throw BrineStepError("the cold pairing scenario was not prepared")
+        }
+        pairingHarness.raceColdReadWithMaintenance()
+    }
+
+    func assertAccountChangeDidNotWaitForPairingMaintenance() throws {
+        try requiredPairingHarness().assertColdReadFinished()
+    }
+
+    func assertPairingRefreshChangedNothing() throws {
+        try requiredPairingHarness().assertColdPairingsUnchanged()
+    }
+
+    func failSecureVaultReplacement() throws {
+        let harness = try replacePairingHarness()
+        try harness.failVaultReplacement()
+    }
+
+    func failSecureVaultUnpair() throws {
+        let harness = try replacePairingHarness()
+        try harness.failVaultUnpair()
+    }
+
+    func assertVaultSecureOperationFailed() throws {
+        try requiredPairingHarness().assertVaultOperationFailed()
+    }
+
+    func assertCurrentVaultRemainsWhole() throws {
+        try requiredPairingHarness().assertCurrentVaultRemainsWhole()
+    }
+
+    func assertReopenedVaultRemainsWhole() throws {
+        try requiredPairingHarness().assertReopenedVaultRemainsWhole()
+    }
+
+    func seedWorkingDoorForFailure() throws {
+        let harness = try replacePairingHarness()
+        try harness.seedWorkingDoor()
+    }
+
+    @MainActor
+    func failSecureDoorReplacement() throws {
+        try requiredPairingHarness().failDoorReplacement()
+    }
+
+    func assertDoorSaveFailureIsVisible() throws {
+        try requiredPairingHarness().assertDoorFailureIsVisible()
+    }
+
+    func assertWorkingDoorRemainsWhole() throws {
+        try requiredPairingHarness().assertDoorRemainsWhole()
+    }
+
+    @MainActor
+    func seedDelayedTokenVault() throws {
+        let harness = try replacePairingHarness()
+        try harness.seedDelayedTokenVault()
+    }
+
+    @MainActor
+    func publishDelayedVaultToken() throws {
+        try requiredPairingHarness().publishDelayedToken()
+    }
+
+    @MainActor
+    func assertDelayedVaultTokenIsUnavailable() throws {
+        try requiredPairingHarness().assertDelayedTokenIsUnavailable()
+    }
+
+    @MainActor
+    func assertDelayedTokenVaultIsLive() throws {
+        try requiredPairingHarness().assertDelayedVaultIsLive()
+    }
+
+    func assertPriorVaultNeverReconnected() throws {
+        try requiredPairingHarness().assertStaleVaultNeverReconnected()
+    }
+
+    func seedBearerVaultForAuthChange() throws {
+        let harness = try replacePairingHarness()
+        try harness.seedBearerVaultForAuthChange()
+    }
+
+    func failSecureIdTokenChange() throws {
+        try requiredPairingHarness().failIdTokenChange()
+    }
+
+    private func replacePairingHarness() throws -> PairingScenarioHarness {
+        pairingHarness?.cleanup()
+        let harness = try PairingScenarioHarness()
+        pairingHarness = harness
+        return harness
+    }
+
+    private func requiredPairingHarness() throws -> PairingScenarioHarness {
+        guard let pairingHarness else {
+            throw BrineStepError("the pairing failure scenario was not prepared")
+        }
+        return pairingHarness
     }
 
     // MARK: - Legacy pairing adoption
@@ -2179,6 +2279,8 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
     // MARK: - Hermetic support
 
     private func beginScenarioLocked() throws {
+        pairingHarness?.cleanup()
+        pairingHarness = nil
         state.transitionProbe?.stop()
         state.transitionProbe = nil
         for service in [cellKeychainService, doorKeychainService] {
@@ -3013,18 +3115,18 @@ private enum AccountDataIsolationSteps {
             },
             defineStep("the first account's Vault entitlement router is live") {
                 ctx, _, _ in
-                try w.firstAccountVaultEntitlementRouterIsLive()
+                try await w.firstAccountVaultEntitlementRouterIsLive()
                 return ctx
             },
             defineStep("the second account signs in without a Vault") {
                 ctx, _, _ in
-                try w.secondAccountSignsInWithoutVault()
+                try await w.secondAccountSignsInWithoutVault()
                 return ctx
             },
             defineCheck(
                 "the Vault entitlement router shows the second account is off"
             ) { _, _, _ in
-                try w.assertVaultRouterShowsSecondAccountIsOff()
+                try await w.assertVaultRouterShowsSecondAccountIsOff()
             },
             defineStep(
                 "a Vault and Door pairing exist from before account scoping"
@@ -3059,6 +3161,126 @@ private enum AccountDataIsolationSteps {
                 "the unclaimed pairing remains available for its verified owner"
             ) { _, _, _ in
                 try w.assertLegacyPairingRemainsUnclaimed()
+            },
+            defineStep("my account already owns a Vault and Door pairing") {
+                ctx, _, _ in
+                try w.seedColdVaultAndDoorPairings()
+                return ctx
+            },
+            defineStep("FoundryX has not loaded that pairing in this launch") {
+                ctx, _, _ in
+                try w.leavePairingsColdForLaunch()
+                return ctx
+            },
+            defineStep(
+                "an account change and pairing refresh happen at the same time"
+            ) { ctx, _, _ in
+                try await w.raceAccountChangeWithPairingRefresh()
+                return ctx
+            },
+            defineCheck(
+                "the account change completes without waiting for pairing maintenance"
+            ) { _, _, _ in
+                try w.assertAccountChangeDidNotWaitForPairingMaintenance()
+            },
+            defineCheck(
+                "no existing or legacy pairing is claimed or changed"
+            ) { _, _, _ in
+                try w.assertPairingRefreshChangedNothing()
+            },
+            defineStep("securely saving a replacement Vault bearer fails") {
+                ctx, _, _ in
+                try w.failSecureVaultReplacement()
+                return ctx
+            },
+            defineCheck(
+                "the current session keeps using the original complete Vault pairing"
+            ) { _, _, _ in
+                try w.assertCurrentVaultRemainsWhole()
+            },
+            defineCheck(
+                "reopening FoundryX restores that same complete Vault pairing"
+            ) { _, _, _ in
+                try w.assertReopenedVaultRemainsWhole()
+            },
+            defineStep("securely removing that Vault bearer fails") {
+                ctx, _, _ in
+                try w.failSecureVaultUnpair()
+                return ctx
+            },
+            defineCheck(
+                "FoundryX reports that the Vault could not be unpaired"
+            ) { _, _, _ in
+                try w.assertVaultSecureOperationFailed()
+            },
+            defineCheck(
+                "the current session and a reopened app both retain the original pairing"
+            ) { _, _, _ in
+                try w.assertCurrentVaultRemainsWhole()
+                try w.assertReopenedVaultRemainsWhole()
+            },
+            defineStep("my account has a working saved Door connection") {
+                ctx, _, _ in
+                try w.seedWorkingDoorForFailure()
+                return ctx
+            },
+            defineStep(
+                "I save a replacement Door connection and its bearer cannot be stored"
+            ) { ctx, _, _ in
+                try await w.failSecureDoorReplacement()
+                return ctx
+            },
+            defineCheck(
+                "the connection screen tells me the replacement was not saved"
+            ) { _, _, _ in
+                try w.assertDoorSaveFailureIsVisible()
+            },
+            defineCheck(
+                "the current session and a reopened app both retain the working Door"
+            ) { _, _, _ in
+                try w.assertWorkingDoorRemainsWhole()
+            },
+            defineStep(
+                "the second account owns a Vault pairing that uses its sign-in"
+            ) { ctx, _, _ in
+                try await w.seedDelayedTokenVault()
+                return ctx
+            },
+            defineStep(
+                "its refreshed sign-in token is not ready when the account changes"
+            ) { ctx, _, _ in
+                try await w.assertDelayedVaultTokenIsUnavailable()
+                return ctx
+            },
+            defineStep(
+                "the second account's refreshed sign-in token becomes available"
+            ) { ctx, _, _ in
+                try await w.publishDelayedVaultToken()
+                return ctx
+            },
+            defineCheck("the second account's Vault becomes live") {
+                _, _, _ in
+                try await w.assertDelayedTokenVaultIsLive()
+            },
+            defineCheck("the first account's Vault never reconnects") {
+                _, _, _ in
+                try w.assertPriorVaultNeverReconnected()
+            },
+            defineStep("my account paired a Vault with a private bearer") {
+                ctx, _, _ in
+                try w.seedBearerVaultForAuthChange()
+                return ctx
+            },
+            defineStep(
+                "I change that Vault to use my sign-in but its old bearer cannot be removed"
+            ) { ctx, _, _ in
+                try w.failSecureIdTokenChange()
+                return ctx
+            },
+            defineCheck(
+                "FoundryX reports that the authentication change did not complete"
+            ) { _, _, _ in
+                try w.assertVaultSecureOperationFailed()
             },
         ]
     }

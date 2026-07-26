@@ -4,6 +4,7 @@ import Grain
 struct ConnectionConfigView: View {
     @State private var urlText: String
     @State private var token: String
+    @StateObject private var saveModel = DoorConnectionSaveModel()
     var onSave: (DoorConfig) -> Void
 
     init(initial: DoorConfig?, onSave: @escaping (DoorConfig) -> Void) {
@@ -39,13 +40,19 @@ struct ConnectionConfigView: View {
 
                 GrainButton("Save & Connect", variant: .filled, size: .lg) {
                     guard let c = DoorConfig(url: urlText, bearer: token) else { return }
-                    DoorConfigStore.save(c)
-                    onSave(c)
+                    saveModel.save(c, onSaved: onSave)
                 }
                 .frame(maxWidth: .infinity)
                 .disabled(!isValid)
                 .opacity(isValid ? 1 : 0.5)
                 .accessibilityIdentifier("save-connect-button")
+
+                if let errorMessage = saveModel.errorMessage {
+                    Text(errorMessage)
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("door-save-error")
+                }
             }
             .padding(GrainSpacing.x6)
         }

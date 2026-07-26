@@ -44,3 +44,47 @@ Feature: My Vault pairing belongs to my account, secret included
     When FoundryX remains signed out for free on-device use
     Then the free tier has no Vault or Door pairing
     And the unclaimed pairing remains available for its verified owner
+
+
+  Scenario: a cold pairing read never stalls an account change
+    Given my account already owns a Vault and Door pairing
+    And FoundryX has not loaded that pairing in this launch
+    When an account change and pairing refresh happen at the same time
+    Then the account change completes without waiting for pairing maintenance
+    And no existing or legacy pairing is claimed or changed
+
+
+  Scenario: a failed bearer replacement keeps the prior Vault pairing whole
+    Given the first account paired a Vault with a private bearer
+    When securely saving a replacement Vault bearer fails
+    Then the current session keeps using the original complete Vault pairing
+    And reopening FoundryX restores that same complete Vault pairing
+
+
+  Scenario: a failed unpair keeps one coherent Vault pairing
+    Given the first account paired a Vault with a private bearer
+    When securely removing that Vault bearer fails
+    Then FoundryX reports that the Vault could not be unpaired
+    And the current session and a reopened app both retain the original pairing
+
+
+  Scenario: a failed Door save remains visible and preserves the working Door
+    Given my account has a working saved Door connection
+    When I save a replacement Door connection and its bearer cannot be stored
+    Then the connection screen tells me the replacement was not saved
+    And the current session and a reopened app both retain the working Door
+
+
+  Scenario: a delayed sign-in token restores the new account's Vault
+    Given the second account owns a Vault pairing that uses its sign-in
+    And its refreshed sign-in token is not ready when the account changes
+    When the second account's refreshed sign-in token becomes available
+    Then the second account's Vault becomes live
+    And the first account's Vault never reconnects
+
+
+  Scenario: changing to sign-in authentication never leaves a stale bearer
+    Given my account paired a Vault with a private bearer
+    When I change that Vault to use my sign-in but its old bearer cannot be removed
+    Then FoundryX reports that the authentication change did not complete
+    And the current session and a reopened app both retain the original pairing

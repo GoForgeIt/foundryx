@@ -33,6 +33,7 @@ struct RootView: View {
 
     @StateObject private var accountStores = RootAccountStores()
     @StateObject private var cells = CellStore()
+    @StateObject private var identityCoordinator = AccountIdentityCoordinator()
 
     /// The Vault activation funnel (track T-IOS-FUNNEL): paid-intent trigger → browser
     /// hand-off → server reconciliation → live Vault. Presented over the app whenever its
@@ -218,7 +219,9 @@ struct RootView: View {
                 // Same MainTabs as the computer brain, but the target is the cell's
                 // URL + resolved grant (id_token or pasted bearer) — no relay.
                 if let cfg = cells.config,
-                   let target = try? CellBackend.resolveTarget(config: cfg, idToken: remote.idToken) {
+                   let target = try? CellBackend.resolveTarget(
+                    config: cfg,
+                    idToken: identityCoordinator.currentToken?.value) {
                     MainTabs(target: target, remote: remote, brains: brains, local: false,
                              vaultFunnel: vaultFunnel, accountDeletion: accountDeletion,
                              showingAccount: $showingAccount)
@@ -254,25 +257,18 @@ struct RootView: View {
         // id_token box fresh for the reconcile/checkout Bearer.
         .onChange(of: scenePhase) { phase in
             if phase == .active {
-                VaultAuthTokenBox.shared.token = remote.idToken
+                VaultAuthTokenBox.shared.token =
+                    identityCoordinator.currentToken?.value
                 // Refresh the App Store storefront (T-STOREFRONT) so the purchase gate reflects
                 // the current country before the funnel or the Settings Vault row is shown.
                 Task { await VaultStorefrontBox.shared.refresh() }
                 Task { await vaultFunnel.reconcileOnForeground() }
             }
         }
-        .onChange(of: remote.idToken) { VaultAuthTokenBox.shared.token = $0 }
-        // Clear process-global/account-glanceable state at the actual storage
-        // boundary. The scope posts both when a transition begins (fail closed)
-        // and when its new owner becomes active.
-        .onReceive(NotificationCenter.default.publisher(
-            for: CaptureAccountScope.identityDidChangeNotification
-        )) { _ in
-            cells.reloadForIdentityTransition()
-            accountStores.resetBrainForIdentityTransition()
-            vaultFunnel.resetForIdentityTransition()
-            AmbientCardBroker.shared.clearForIdentityTransition()
-            AmbientNotifier.clearForIdentityTransition()
+        .onChange(of: remote.boundIdToken) { boundToken in
+            identityCoordinator.tokenDidChange(
+                boundToken,
+                generation: remote.identityRevision)
         }
         // The return deep link is convenience only (it triggers an immediate reconcile).
         .onOpenURL { url in
@@ -280,7 +276,34 @@ struct RootView: View {
                 Task { await vaultFunnel.handleReturn(url: url) }
             }
         }
-        .task { await remote.restore() }
+        .task {
+            identityCoordinator.bind(
+                onIdentityTransition: { _ in
+                    resetAccountDerivedState()
+                },
+                onRestoreCompleted: { _ in
+                    resetAccountDerivedState()
+                },
+                onTokenAvailable: { token in
+                    VaultAuthTokenBox.shared.token = token?.value
+                    if let token {
+                        vaultFunnel.refreshForAvailableToken(
+                            expectedGeneration: token.generation)
+                    } else {
+                        vaultFunnel.clearUnavailableIdentityToken(
+                            expectedGeneration:
+                                CaptureAccountScope.identityGeneration)
+                    }
+                })
+            identityCoordinator.start()
+            await remote.restore()
+            identityCoordinator.restoreCompleted(
+                generation: remote.identityRevision)
+            identityCoordinator.tokenDidChange(
+                remote.boundIdToken,
+                generation: remote.identityRevision)
+        }
+        .onDisappear { identityCoordinator.stop() }
         .task { await VaultStorefrontBox.shared.refresh() }
         // The fixed 2 s splash task is GONE (track 20260715T1502 re-cut): the
         // welcome front door replaces the branded splash for gated users (its own
@@ -352,6 +375,15 @@ struct RootView: View {
         case .none:
             break
         }
+    }
+
+    private func resetAccountDerivedState() {
+        VaultAuthTokenBox.shared.token = nil
+        cells.reloadForIdentityTransition()
+        accountStores.resetBrainForIdentityTransition()
+        vaultFunnel.resetForIdentityTransition()
+        AmbientCardBroker.shared.clearForIdentityTransition()
+        AmbientNotifier.clearForIdentityTransition()
     }
 }
 

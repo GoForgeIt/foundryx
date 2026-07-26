@@ -9,7 +9,6 @@
 // UserDefaults; a pasted bearer is a secret and lives in the Keychain.
 
 import Foundation
-import Security
 
 /// How the phone authenticates to its cell's door.
 public enum CellAuth: Equatable, Sendable {
@@ -49,6 +48,7 @@ public final class CellStore: ObservableObject, @unchecked Sendable {
 
     private let defaults: UserDefaults
     private let keychainService: String
+    private let secretStore: any PairingSecretStore
 
     /// The currently paired cell, or nil when unpaired.
     @Published public private(set) var config: CellConfig?
@@ -59,7 +59,26 @@ public final class CellStore: ObservableObject, @unchecked Sendable {
     ) {
         self.defaults = defaults
         self.keychainService = keychainService
-        self.config = Self.load(defaults: defaults, keychainService: keychainService)
+        let secretStore = SystemPairingSecretStore()
+        self.secretStore = secretStore
+        self.config = Self.load(
+            defaults: defaults,
+            keychainService: keychainService,
+            secretStore: secretStore)
+    }
+
+    init(
+        defaults: UserDefaults,
+        keychainService: String,
+        secretStore: any PairingSecretStore
+    ) {
+        self.defaults = defaults
+        self.keychainService = keychainService
+        self.secretStore = secretStore
+        self.config = Self.load(
+            defaults: defaults,
+            keychainService: keychainService,
+            secretStore: secretStore)
     }
 
     /// True when a cell is paired (rung 3 is the active/available brain).
@@ -74,20 +93,14 @@ public final class CellStore: ObservableObject, @unchecked Sendable {
         }
         switch config.auth {
         case .idToken:
-            // Best-effort cleanup of any stale bearer for THIS scope. There is no
-            // secret to store in idToken mode, so a failed delete of a possibly
-            // absent item must not fail the pairing — doing so made a live Vault
-            // unreachable on any host whose Keychain returns an error at all.
-            // Anything left behind is this same account's own scoped item and is
-            // never read in idToken mode.
-            _ = Self.keychainDelete(
+            guard secretStore.remove(
                 service: keychainService,
-                scope: scoped.scope)
+                account: scoped.scope) else { return false }
         case .bearer(let token):
-            guard Self.keychainSet(
+            guard secretStore.replace(
                 token,
                 service: keychainService,
-                scope: scoped.scope) else { return false }
+                account: scoped.scope) else { return false }
         }
         defaults.set(config.url, forKey: scoped.key(Self.urlKey))
         defaults.set(config.auth.mode, forKey: scoped.key(Self.modeKey))
@@ -102,11 +115,11 @@ public final class CellStore: ObservableObject, @unchecked Sendable {
         guard let scoped = CaptureAccountScope.currentScopedPreferences() else {
             return false
         }
+        guard secretStore.remove(
+            service: keychainService,
+            account: scoped.scope) else { return false }
         defaults.removeObject(forKey: scoped.key(Self.urlKey))
         defaults.removeObject(forKey: scoped.key(Self.modeKey))
-        guard Self.keychainDelete(
-            service: keychainService,
-            scope: scoped.scope) else { return false }
         config = nil
         return true
     }
@@ -116,14 +129,16 @@ public final class CellStore: ObservableObject, @unchecked Sendable {
     public func reloadForIdentityTransition() {
         config = Self.load(
             defaults: defaults,
-            keychainService: keychainService)
+            keychainService: keychainService,
+            secretStore: secretStore)
     }
 
     // MARK: - persistence
 
     private static func load(
         defaults: UserDefaults,
-        keychainService: String
+        keychainService: String,
+        secretStore: any PairingSecretStore
     ) -> CellConfig? {
         guard let scoped = CaptureAccountScope.currentScopedPreferences(),
               let url = defaults.string(forKey: scoped.key(urlKey)),
@@ -134,52 +149,13 @@ public final class CellStore: ObservableObject, @unchecked Sendable {
         case "idToken":
             return CellConfig(url: url, auth: .idToken)
         case "bearer":
-            guard let token = keychainGet(
+            guard let token = secretStore.read(
                 service: keychainService,
-                scope: scoped.scope) else { return nil }
+                account: scoped.scope) else { return nil }
             return CellConfig(url: url, auth: .bearer(token))
         default:
             return nil
         }
     }
 
-    // MARK: - Keychain (same shape as DoorConfigStore)
-
-    private static func keychainGet(service: String, scope: String) -> String? {
-        let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                kSecAttrService as String: service,
-                                kSecAttrAccount as String: scope,
-                                kSecMatchLimit as String: kSecMatchLimitOne,
-                                kSecReturnData as String: true]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess,
-              let d = item as? Data, let s = String(data: d, encoding: .utf8) else { return nil }
-        return s
-    }
-
-    private static func keychainSet(
-        _ token: String,
-        service: String,
-        scope: String
-    ) -> Bool {
-        let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                    kSecAttrService as String: service,
-                                    kSecAttrAccount as String: scope]
-        let deleteStatus = SecItemDelete(base as CFDictionary)
-        guard deleteStatus == errSecSuccess || deleteStatus == errSecItemNotFound
-        else { return false }
-        var add = base; add[kSecValueData as String] = Data(token.utf8)
-        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
-    }
-
-    private static func keychainDelete(
-        service: String,
-        scope: String
-    ) -> Bool {
-        let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                    kSecAttrService as String: service,
-                                    kSecAttrAccount as String: scope]
-        let status = SecItemDelete(base as CFDictionary)
-        return status == errSecSuccess || status == errSecItemNotFound
-    }
 }
