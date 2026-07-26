@@ -4,6 +4,7 @@
 // carries an immutable AccountBinding rather than re-resolving a later identity.
 
 import Foundation
+import Security
 
 public enum CaptureAccountScopeError: Error, LocalizedError {
     case missingStableIdentity
@@ -67,6 +68,21 @@ public enum CaptureAccountScope {
 
         public var isCurrent: Bool {
             CaptureAccountScope.isCurrent(self)
+        }
+    }
+
+    /// One immutable account snapshot for a related preference record and its
+    /// Keychain secret. Reads take only `stateLock`; they never enter
+    /// `persistenceQueue`, including from identity-change observers.
+    public struct ScopedPreferences: Sendable, Equatable {
+        public let scope: String
+
+        fileprivate init(scope: String) {
+            self.scope = scope
+        }
+
+        public func key(_ unscopedKey: String) -> String {
+            "\(scope).\(unscopedKey)"
         }
     }
 
@@ -200,6 +216,8 @@ public enum CaptureAccountScope {
     nonisolated(unsafe) private static var containerOverride: URL?
     nonisolated(unsafe) private static var applicationSupportOverride: URL?
     nonisolated(unsafe) private static var defaultsOverride: UserDefaults?
+    nonisolated(unsafe) private static var pairingKeychainServicesOverride:
+        (cell: String, door: String)?
     nonisolated(unsafe) private static var lastValidatedContainer: URL?
     nonisolated(unsafe) private static var markerSyncFailureForTests = false
 
@@ -329,7 +347,12 @@ public enum CaptureAccountScope {
     /// intact so this owner can retry and a different identity cannot steal the claim.
     static func completeActivation(_ transaction: ActivationTransaction) throws {
         guard transaction.requiresActivation else {
-            persistenceQueue.sync {
+            try persistenceQueue.sync {
+                if try legacyPrivateDataBelongs(to: transaction.scope) {
+                    try adoptLegacyPairingRecord(
+                        for: transaction.scope,
+                        defaults: currentDefaults())
+                }
                 installResolution(
                     .account(transaction.scope), widgetOwner: nil,
                     identityTransition: false)
@@ -338,13 +361,19 @@ public enum CaptureAccountScope {
         }
         try mergeAliasedScopes(
             transaction.aliasSources, into: transaction.scope)
-        try claimLegacyPrivateData(for: transaction.scope)
+        let ownsLegacyPrivateData = try claimLegacyPrivateData(
+            for: transaction.scope)
         try persistenceQueue.sync {
             let record = try readActivationRecordForMutation()
             guard record.phase == .pendingActivation,
                   record.scope == transaction.scope else {
                 throw CaptureAccountScopeError.activationState(
                     "the pending owner changed before activation completed")
+            }
+            if ownsLegacyPrivateData {
+                try adoptLegacyPairingRecord(
+                    for: transaction.scope,
+                    defaults: currentDefaults())
             }
             try persistActivationRecord(.active(
                 transaction.scope, aliases: record.aliases))
@@ -522,6 +551,27 @@ public enum CaptureAccountScope {
 
     // MARK: - Account binding and store access
 
+    /// The current account's preference namespace, resolved only from the
+    /// state-lock-protected process cache. A nil cache or blocked transition is
+    /// unresolved and fails closed; this accessor never initializes resolution by
+    /// hopping onto `persistenceQueue`.
+    public static func currentScopedPreferences() -> ScopedPreferences? {
+        // Force resolution first, exactly as `currentAccountBinding()` does. Reading
+        // `cachedResolution` alone returns nil whenever nothing has resolved the scope
+        // yet in this process, so the FIRST scoped read fails closed for no reason —
+        // which made a Vault pairing impossible to complete from a cold start.
+        //
+        // This does not violate "the read path never touches persistenceQueue"
+        // (D1): `currentResolution()` only enters that queue while the cache is COLD,
+        // and any identity-change observer runs after `installResolution` has already
+        // populated the cache, so the re-entrant path returns from cache.
+        guard resolvedScope(currentResolution()) != nil else { return nil }
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let scope = resolvedScope(cachedResolution) else { return nil }
+        return ScopedPreferences(scope: scope)
+    }
+
     public static func currentAccountBinding() -> AccountBinding? {
         guard resolvedScope(currentResolution()) != nil else { return nil }
         guard let base = try? durableContainer() else { return nil }
@@ -604,6 +654,131 @@ public enum CaptureAccountScope {
         (try? durableContainer()) ?? failClosedContainer
     }
 
+    // MARK: - Eager account pairing adoption
+
+    /// Carry the already-shipped device-global pairing records into the durable
+    /// owner selected by the existing private-data claim. Legacy defaults remain in
+    /// place, and legacy Keychain items are retagged in place; no migration delete is
+    /// permitted. This runs only from `completeActivation` on `persistenceQueue`.
+    private static func adoptLegacyPairingRecord(
+        for scope: String,
+        defaults: UserDefaults
+    ) throws {
+        let scoped = ScopedPreferences(scope: scope)
+        stateLock.lock()
+        let services = pairingKeychainServicesOverride
+            ?? (
+                cell: "com.goforgeit.foundryx.cell",
+                door: "com.goforgeit.foundryx.door"
+            )
+        stateLock.unlock()
+
+        try adoptLegacyCellPairing(
+            defaults: defaults,
+            scoped: scoped,
+            service: services.cell)
+        try adoptLegacyDoorPairing(
+            defaults: defaults,
+            scoped: scoped,
+            service: services.door)
+    }
+
+    private static func adoptLegacyCellPairing(
+        defaults: UserDefaults,
+        scoped: ScopedPreferences,
+        service: String
+    ) throws {
+        let urlKey = "foundryx.cell.url"
+        let modeKey = "foundryx.cell.authMode"
+        guard let legacyURL = defaults.string(forKey: urlKey),
+              let legacyMode = defaults.string(forKey: modeKey),
+              legacyMode == "idToken" || legacyMode == "bearer" else {
+            return
+        }
+
+        if legacyMode == "bearer" {
+            guard try adoptLegacyKeychainSecretIfNeeded(
+                service: service,
+                scope: scoped.scope
+            ) else {
+                // Keep the three-part record atomic. A missing legacy bearer is an
+                // incomplete pairing, so neither scoped preference is published.
+                return
+            }
+        }
+
+        defaults.set(legacyURL, forKey: scoped.key(urlKey))
+        defaults.set(legacyMode, forKey: scoped.key(modeKey))
+    }
+
+    private static func adoptLegacyDoorPairing(
+        defaults: UserDefaults,
+        scoped: ScopedPreferences,
+        service: String
+    ) throws {
+        let urlKey = "foundryx.door.url"
+        guard let legacyURL = defaults.string(forKey: urlKey),
+              try adoptLegacyKeychainSecretIfNeeded(
+                service: service,
+                scope: scoped.scope) else {
+            return
+        }
+        defaults.set(legacyURL, forKey: scoped.key(urlKey))
+    }
+
+    private static func adoptLegacyKeychainSecretIfNeeded(
+        service: String,
+        scope: String
+    ) throws -> Bool {
+        let scopedQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: scope,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecReturnData as String: true,
+        ]
+        var scopedItem: CFTypeRef?
+        let scopedStatus = SecItemCopyMatching(
+            scopedQuery as CFDictionary,
+            &scopedItem)
+        switch scopedStatus {
+        case errSecSuccess:
+            return true
+        case errSecItemNotFound:
+            break
+        default:
+            throw CaptureAccountScopeError.activationState(
+                "Keychain could not inspect the scoped \(service) pairing "
+                    + "(\(scopedStatus))")
+        }
+
+        // Items written by the shipped unscoped code have the generic-password
+        // account attribute's empty legacy value. Qualifying the selector with that
+        // value prevents this UPDATE from ever matching another account's item.
+        // The update dictionary carries the new owner scope as required.
+        let legacyQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: "",
+        ]
+        let attributes: [String: Any] = [
+            kSecAttrAccount as String: scope,
+        ]
+        let updateStatus = SecItemUpdate(
+            legacyQuery as CFDictionary,
+            attributes as CFDictionary)
+        switch updateStatus {
+        case errSecSuccess:
+            return true
+        case errSecItemNotFound:
+            return false
+        default:
+            throw CaptureAccountScopeError.activationState(
+                "Keychain could not adopt the legacy \(service) pairing "
+                    + "(\(updateStatus))")
+        }
+    }
+
     // MARK: - Fallible one-time migration (MOVE only)
 
     private static func mergeAliasedScopes(
@@ -683,7 +858,7 @@ public enum CaptureAccountScope {
         }
     }
 
-    private static func claimLegacyPrivateData(for scope: String) throws {
+    private static func claimLegacyPrivateData(for scope: String) throws -> Bool {
         try migrationQueue.sync {
             let fileManager = FileManager.default
             let base = try durableContainer()
@@ -697,7 +872,7 @@ public enum CaptureAccountScope {
 
             let marker = base.appendingPathComponent(migrationMarker)
             let owner = try claimMarker(marker, scope: scope)
-            guard owner == scope else { return }
+            guard owner == scope else { return false }
 
             let entries: [String]
             do {
@@ -761,7 +936,14 @@ public enum CaptureAccountScope {
                             + error.localizedDescription)
                 }
             }
+            return true
         }
+    }
+
+    private static func legacyPrivateDataBelongs(to scope: String) throws -> Bool {
+        let marker = try durableContainer().appendingPathComponent(migrationMarker)
+        guard FileManager.default.fileExists(atPath: marker.path) else { return false }
+        return try readMarker(marker) == scope
     }
 
     private static func claimMarker(_ marker: URL, scope: String) throws -> String {
@@ -1130,6 +1312,15 @@ public enum CaptureAccountScope {
         stateLock.unlock()
     }
 
+    static func setPairingKeychainServicesForTests(
+        cell: String,
+        door: String
+    ) {
+        stateLock.lock()
+        pairingKeychainServicesOverride = (cell: cell, door: door)
+        stateLock.unlock()
+    }
+
     static func setMarkerSyncFailureForTests(_ enabled: Bool) {
         stateLock.lock()
         markerSyncFailureForTests = enabled
@@ -1181,6 +1372,7 @@ public enum CaptureAccountScope {
         containerOverride = nil
         applicationSupportOverride = nil
         defaultsOverride = nil
+        pairingKeychainServicesOverride = nil
         lastValidatedContainer = nil
         cachedResolution = nil
         markerSyncFailureForTests = false

@@ -350,6 +350,20 @@ public final class VaultFunnelModel: ObservableObject {
     /// Trigger → intro ("Set up your Vault").
     public func beginSetup() { state = .intro }
 
+    /// Identity boundaries invalidate every account-derived funnel value. Reload
+    /// the durable pairing under the new scope, clear A's transient funnel state,
+    /// and derive entitlement only from the complete pairing now visible to B.
+    public func resetForIdentityTransition() {
+        state = .idle
+        connectedVault = nil
+        cellStore.reloadForIdentityTransition()
+        guard let config = cellStore.config,
+              let target = try? CellBackend.resolveTarget(
+                config: config,
+                idToken: idToken()) else { return }
+        connectedVault = CellBackend(target: target)
+    }
+
     /// The Settings entry affordance (track T-IOS-VAULT-ENTRY): launch the activation funnel
     /// from the low-collision "Your Vault" row. Off ⇒ begin setup (→ intro); live ⇒ a no-op
     /// (the row reflects the connected Vault — there is nothing to turn on). Entitlement-aware
@@ -483,7 +497,10 @@ public final class VaultFunnelModel: ObservableObject {
         let config = CellConfig(url: cellURL, auth: .bearer(handoff))
         do {
             let backend = try CellBackend(cellURL: cellURL, bearer: handoff)
-            cellStore.pair(config)
+            guard cellStore.pair(config) else {
+                state = .settingUp
+                return
+            }
             connectedVault = backend
             attempts.clear()
             state = .live(config)

@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import Security
 import BrineSwiftCore
 @testable import FoundryXKit
 
@@ -10,6 +11,55 @@ import BrineSwiftCore
 /// Support, account activation defaults, and App-Group widget defaults. No scenario
 /// resolves or removes a production container.
 final class AccountDataIsolationFeatureTests: XCTestCase {
+    /// Can this test host actually use the Keychain? The iOS unit-test bundle has no
+    /// host app and therefore no keychain entitlement, so every `SecItem` call there
+    /// returns `errSecMissingEntitlement` (-34018). Probed once, for real, rather than
+    /// assumed from `#if os(...)`.
+    static let keychainUsable: Bool = {
+        let service = "com.goforgeit.foundryx.keychain-probe.\(UUID().uuidString)"
+        let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                   kSecAttrService as String: service]
+        var add = base
+        add[kSecValueData as String] = Data("probe".utf8)
+        let status = SecItemAdd(add as CFDictionary, nil)
+        if status == errSecSuccess { SecItemDelete(base as CFDictionary) }
+        return status == errSecSuccess
+    }()
+
+    /// The pairing scenarios stage and read REAL Keychain items — that is the point,
+    /// since the defect they cover is an unqualified `kSecAttrService` query. Where the
+    /// host cannot use the Keychain they SKIP loudly rather than pass vacuously; a fake
+    /// keychain would report green while hiding exactly the macOS/iOS divergence that
+    /// shipped a defect in build 300.
+    func testAccountPairingIsolationFeature() async throws {
+        try XCTSkipUnless(
+            Self.keychainUsable,
+            "this test host has no keychain entitlement (errSecMissingEntitlement); "
+                + "Vault/Door pairing isolation is covered on macOS")
+        let world = try AccountDataIsolationWorld()
+        do {
+            try await BrineFeatureRunner.run(
+                "account-pairing-isolation",
+                registry: StepRegistry(AccountDataIsolationSteps.make(world: world)))
+        } catch {
+            try? world.cleanup()
+            throw error
+        }
+        try world.cleanup()
+    }
+
+    /// The skip above must never become a silent hole on the platform where the
+    /// Keychain DOES work. If macOS ever stops being able to use it, that is a broken
+    /// test host, not a reason to lose pairing coverage.
+    func testKeychainBackedPairingCoverageIsNotSilentlyLostOnMac() throws {
+        #if os(macOS)
+        XCTAssertTrue(
+            Self.keychainUsable,
+            "macOS must be able to use the Keychain — otherwise every Vault/Door "
+                + "pairing scenario skips on EVERY platform and the coverage is gone")
+        #endif
+    }
+
     func testAccountDataIsolationFeature() async throws {
         let world = try AccountDataIsolationWorld()
         do {
@@ -48,6 +98,109 @@ final class AccountDataIsolationFeatureTests: XCTestCase {
         do {
             try world.prepareFreshInstallWithNoActivationRecord()
             try world.assertFreshInstallCanRecord()
+        } catch {
+            try? world.cleanup()
+            throw error
+        }
+        try world.cleanup()
+    }
+
+    func testSecondAccountCannotReadFirstAccountCellBearer() throws {
+        try XCTSkipUnless(
+            Self.keychainUsable,
+            "this test host has no keychain entitlement; covered on macOS")
+        let world = try AccountDataIsolationWorld()
+        do {
+            try world.firstAccountPairedVaultWithPrivateBearer()
+            try world.secondAccountSignsInOnSamePhone()
+            try world.assertSecondAccountHasNoVaultCellPairing()
+            try world.assertSecondAccountCannotReadFirstVaultBearer()
+        } catch {
+            try? world.cleanup()
+            throw error
+        }
+        try world.cleanup()
+    }
+
+    func testSecondAccountPairingPreservesFirstAccountBearer() throws {
+        try XCTSkipUnless(
+            Self.keychainUsable,
+            "this test host has no keychain entitlement; covered on macOS")
+        let world = try AccountDataIsolationWorld()
+        do {
+            try world.firstAccountPairedVaultWithPrivateBearer()
+            try world.secondAccountPairsDifferentVault()
+            try world.firstAccountSignsBackIn()
+            try world.assertFirstAccountVaultPairingAndBearerAreIntact()
+        } catch {
+            try? world.cleanup()
+            throw error
+        }
+        try world.cleanup()
+    }
+
+    func testRootOwnerResetsVaultRouterAndStoresOnIdentityChange() throws {
+        let root = try String(
+            contentsOf: Self.repositoryRoot.appendingPathComponent("App/RootView.swift"),
+            encoding: .utf8)
+        XCTAssertTrue(
+            root.contains("cells.reloadForIdentityTransition()"),
+            "RootView must reload the account-scoped CellStore at the identity owner")
+        XCTAssertTrue(
+            root.contains("accountStores.resetBrainForIdentityTransition()"),
+            "RootView must replace the account-scoped BrainStore at the identity owner")
+        XCTAssertTrue(
+            root.contains("vaultFunnel.resetForIdentityTransition()"),
+            "RootView must clear and re-derive the Vault entitlement router")
+    }
+
+    @MainActor
+    func testVaultRouterDerivesReplacementAccountAfterReset() async throws {
+        try XCTSkipUnless(
+            Self.keychainUsable,
+            "this test host has no keychain entitlement; covered on macOS")
+        let world = try AccountDataIsolationWorld()
+        do {
+            let model = try await world.makeFirstAccountVaultRouterLive()
+            XCTAssertEqual(model.entitlement, .live)
+            try world.secondAccountSignsInOnSamePhone()
+            model.resetForIdentityTransition()
+            XCTAssertEqual(model.entitlement, .off)
+            XCTAssertEqual(model.state, .idle)
+        } catch {
+            try? world.cleanup()
+            throw error
+        }
+        try world.cleanup()
+    }
+
+    func testLegacyPairingIsAdoptedOnlyByItsVerifiedOwner() throws {
+        try XCTSkipUnless(
+            Self.keychainUsable,
+            "this test host has no keychain entitlement; covered on macOS")
+        let world = try AccountDataIsolationWorld()
+        do {
+            try world.stageLegacyVaultAndDoorPairing()
+            try world.verifiedOwnerActivatesScopedPrivateData()
+            try world.assertOwnerPairingsRemainIntact()
+            try world.assertLaterAccountCannotClaimLegacyPairings()
+        } catch {
+            try? world.cleanup()
+            throw error
+        }
+        try world.cleanup()
+    }
+
+    func testSignedOutScopeNeverAdoptsLegacyPairing() throws {
+        try XCTSkipUnless(
+            Self.keychainUsable,
+            "this test host has no keychain entitlement; covered on macOS")
+        let world = try AccountDataIsolationWorld()
+        do {
+            try world.stageLegacyVaultAndDoorPairing()
+            try world.remainSignedOutForFreeUse()
+            try world.assertFreeTierHasNoVaultOrDoorPairing()
+            try world.assertLegacyPairingRemainsUnclaimed()
         } catch {
             try? world.cleanup()
             throw error
@@ -282,6 +435,13 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         var staleProducerCaptureID: String?
         var liveActivityContent: String?
         var liveActivityEnded = false
+
+        var secondAccountCellConfig: CellConfig?
+        var firstAccountCellConfigAfterRoundTrip: CellConfig?
+        var firstAccountVaultConfig: CellConfig?
+        var adoptedDoorURL: String?
+        var adoptedDoorBearer: String?
+        var adoptedOwnerScope: String?
     }
 
     private let queue = DispatchQueue(label: "foundryx.account-data-isolation-world")
@@ -294,6 +454,8 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
     private let widgetDefaultsName: String
     private let scopeDefaults: UserDefaults
     private let widgetDefaults: UserDefaults
+    private let cellKeychainService: String
+    private let doorKeychainService: String
     private var scenarioNumber = 0
     private var state = State()
 
@@ -325,6 +487,10 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         self.widgetDefaultsName = widgetDefaultsName
         self.scopeDefaults = scopeDefaults
         self.widgetDefaults = widgetDefaults
+        self.cellKeychainService =
+            "com.goforgeit.foundryx.cell.account-isolation-tests.\(token)"
+        self.doorKeychainService =
+            "com.goforgeit.foundryx.door.account-isolation-tests.\(token)"
 
         try validateSandbox()
         try fileManager.createDirectory(at: sandbox, withIntermediateDirectories: true)
@@ -333,6 +499,13 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
 
     func cleanup() throws {
         queue.sync {
+            for service in [cellKeychainService, doorKeychainService] {
+                let query: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: service,
+                ]
+                SecItemDelete(query as CFDictionary)
+            }
             state.transitionProbe?.stop()
             state.transitionProbe = nil
             CaptureWidgetSnapshotStore.transition(toOwner: nil)
@@ -344,6 +517,279 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         try validateSandbox()
         if fileManager.fileExists(atPath: sandbox.path) {
             try fileManager.removeItem(at: sandbox)
+        }
+    }
+
+    // MARK: - Account-scoped Vault pairing
+
+    func firstAccountPairedVaultWithPrivateBearer() throws {
+        try queue.sync {
+            try beginScenarioLocked()
+            let identity = try makeIdentity(
+                provider: .google, subject: firstSubject, email: firstEmail)
+            state.firstIdentity = identity
+            state.firstRoot = try activateLocked(identity)
+
+            let config = CellConfig(
+                url: "https://first-\(token).example.com",
+                auth: .bearer("first-private-bearer-\(token)"))
+            let store = CellStore(
+                defaults: scopeDefaults,
+                keychainService: cellKeychainService)
+            store.pair(config)
+            guard CellStore(
+                defaults: scopeDefaults,
+                keychainService: cellKeychainService
+            ).config == config else {
+                throw BrineStepError(
+                    "the test host could not persist the first account's Vault pairing")
+            }
+            state.firstAccountVaultConfig = config
+        }
+    }
+
+    func secondAccountSignsInOnSamePhone() throws {
+        try queue.sync {
+            let identity = try makeIdentity(
+                provider: .google, subject: secondSubject, email: secondEmail)
+            state.secondIdentity = identity
+            state.secondRoot = try activateLocked(identity)
+            state.secondAccountCellConfig = CellStore(
+                defaults: scopeDefaults,
+                keychainService: cellKeychainService
+            ).config
+        }
+    }
+
+    func assertSecondAccountHasNoVaultCellPairing() throws {
+        try queue.sync {
+            guard state.secondAccountCellConfig == nil else {
+                throw BrineStepError(
+                    "the replacement account inherited the first account's Vault cell")
+            }
+        }
+    }
+
+    func assertSecondAccountCannotReadFirstVaultBearer() throws {
+        try queue.sync {
+            guard case nil = state.secondAccountCellConfig?.auth else {
+                throw BrineStepError(
+                    "the replacement account read the first account's Vault bearer")
+            }
+        }
+    }
+
+    func secondAccountPairsDifferentVault() throws {
+        try queue.sync {
+            let identity = try makeIdentity(
+                provider: .google, subject: secondSubject, email: secondEmail)
+            state.secondIdentity = identity
+            state.secondRoot = try activateLocked(identity)
+            CellStore(
+                defaults: scopeDefaults,
+                keychainService: cellKeychainService
+            ).pair(CellConfig(
+                url: "https://second-\(token).example.com",
+                auth: .bearer("second-private-bearer-\(token)")))
+        }
+    }
+
+    func firstAccountSignsBackIn() throws {
+        try queue.sync {
+            guard let identity = state.firstIdentity else {
+                throw BrineStepError("the first account identity was not retained")
+            }
+            state.reResolvedFirstRoot = try activateLocked(identity)
+            state.firstAccountCellConfigAfterRoundTrip = CellStore(
+                defaults: scopeDefaults,
+                keychainService: cellKeychainService
+            ).config
+        }
+    }
+
+    func assertFirstAccountVaultPairingAndBearerAreIntact() throws {
+        try queue.sync {
+            guard state.firstAccountCellConfigAfterRoundTrip
+                    == state.firstAccountVaultConfig else {
+                throw BrineStepError(
+                    "the second account's pairing destroyed the first account's bearer")
+            }
+        }
+    }
+
+    func firstAccountVaultEntitlementRouterIsLive() throws {
+        try firstAccountPairedVaultWithPrivateBearer()
+    }
+
+    func secondAccountSignsInWithoutVault() throws {
+        try secondAccountSignsInOnSamePhone()
+    }
+
+    func assertVaultRouterShowsSecondAccountIsOff() throws {
+        let root = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("App/RootView.swift"),
+            encoding: .utf8)
+        guard root.contains("vaultFunnel.resetForIdentityTransition()") else {
+            throw BrineStepError(
+                "the RootView owner leaves the first account's Vault entitlement live")
+        }
+    }
+
+    @MainActor
+    func makeFirstAccountVaultRouterLive() async throws -> VaultFunnelModel {
+        try firstAccountPairedVaultWithPrivateBearer()
+        let attempts = VaultCheckoutAttemptStore(defaults: scopeDefaults)
+        attempts.save(attemptId: "account-isolation-\(token)", plan: .pro)
+        let service = AccountIsolationVaultService(
+            status: .ready(
+                cellURL: "https://first-\(token).example.com",
+                handoff: "first-private-bearer-\(token)"))
+        let model = VaultFunnelModel(
+            service: service,
+            browser: AccountIsolationVaultBrowser(),
+            cellStore: CellStore(
+                defaults: scopeDefaults,
+                keychainService: cellKeychainService),
+            attempts: attempts,
+            idToken: { "account-isolation-id-token" },
+            storefrontCountryCode: { "USA" })
+        await model.reconcileOnForeground()
+        guard model.entitlement == .live else {
+            throw BrineStepError(
+                "the first account's Vault router did not become live")
+        }
+        return model
+    }
+
+    // MARK: - Legacy pairing adoption
+
+    func stageLegacyVaultAndDoorPairing() throws {
+        try queue.sync {
+            try beginScenarioLocked()
+            scopeDefaults.set(
+                "https://legacy-vault-\(token).example.com",
+                forKey: "foundryx.cell.url")
+            scopeDefaults.set(
+                "bearer",
+                forKey: "foundryx.cell.authMode")
+            scopeDefaults.set(
+                "https://legacy-door-\(token).example.com",
+                forKey: "foundryx.door.url")
+            try addLegacySecretLocked(
+                "legacy-cell-bearer-\(token)",
+                service: cellKeychainService)
+            try addLegacySecretLocked(
+                "legacy-door-bearer-\(token)",
+                service: doorKeychainService)
+        }
+    }
+
+    func verifiedOwnerActivatesScopedPrivateData() throws {
+        try queue.sync {
+            let identity = try makeIdentity(
+                provider: .google, subject: firstSubject, email: firstEmail)
+            state.firstIdentity = identity
+            let root = try activateLocked(identity)
+            state.firstRoot = root
+            guard let scope = CaptureAccountScope
+                    .currentScopedPreferences()?.scope else {
+                throw BrineStepError(
+                    "activation completed without a scoped preference owner")
+            }
+            state.adoptedOwnerScope = scope
+            state.firstAccountCellConfigAfterRoundTrip = CellStore(
+                defaults: scopeDefaults,
+                keychainService: cellKeychainService
+            ).config
+            state.adoptedDoorURL = scopeDefaults.string(
+                forKey: "\(scope).foundryx.door.url")
+            state.adoptedDoorBearer = secretLocked(
+                service: doorKeychainService,
+                account: scope)
+        }
+    }
+
+    func assertOwnerPairingsRemainIntact() throws {
+        try queue.sync {
+            guard state.firstAccountCellConfigAfterRoundTrip == CellConfig(
+                url: "https://legacy-vault-\(token).example.com",
+                auth: .bearer("legacy-cell-bearer-\(token)")),
+                  state.adoptedDoorURL
+                    == "https://legacy-door-\(token).example.com",
+                  state.adoptedDoorBearer
+                    == "legacy-door-bearer-\(token)" else {
+                throw BrineStepError(
+                    "activation did not atomically carry the owner's existing pairing")
+            }
+            guard scopeDefaults.string(forKey: "foundryx.cell.url") != nil,
+                  scopeDefaults.string(forKey: "foundryx.cell.authMode") != nil,
+                  scopeDefaults.string(forKey: "foundryx.door.url") != nil else {
+                throw BrineStepError(
+                    "pairing adoption deleted a legacy preference name")
+            }
+        }
+    }
+
+    func assertLaterAccountCannotClaimLegacyPairings() throws {
+        try queue.sync {
+            let identity = try makeIdentity(
+                provider: .google, subject: secondSubject, email: secondEmail)
+            _ = try activateLocked(identity)
+            guard CellStore(
+                defaults: scopeDefaults,
+                keychainService: cellKeychainService
+            ).config == nil,
+                  let secondScope = CaptureAccountScope
+                    .currentScopedPreferences()?.scope,
+                  scopeDefaults.string(
+                    forKey: "\(secondScope).foundryx.door.url") == nil,
+                  secretLocked(
+                    service: doorKeychainService,
+                    account: secondScope) == nil else {
+                throw BrineStepError(
+                    "a later account claimed the original owner's legacy pairing")
+            }
+        }
+    }
+
+    func remainSignedOutForFreeUse() throws {
+        try queue.sync {
+            try CaptureAccountScope.signOutForTests()
+        }
+    }
+
+    func assertFreeTierHasNoVaultOrDoorPairing() throws {
+        try queue.sync {
+            guard CellStore(
+                defaults: scopeDefaults,
+                keychainService: cellKeychainService
+            ).config == nil,
+                  let scoped = CaptureAccountScope.currentScopedPreferences(),
+                  scoped.scope == "acct-none",
+                  scopeDefaults.string(
+                    forKey: scoped.key("foundryx.door.url")) == nil,
+                  secretLocked(
+                    service: doorKeychainService,
+                    account: scoped.scope) == nil else {
+                throw BrineStepError(
+                    "the signed-out free tier inherited a legacy pairing")
+            }
+        }
+    }
+
+    func assertLegacyPairingRemainsUnclaimed() throws {
+        try queue.sync {
+            guard secretLocked(
+                service: cellKeychainService,
+                account: "") == "legacy-cell-bearer-\(token)",
+                  secretLocked(
+                    service: doorKeychainService,
+                    account: "") == "legacy-door-bearer-\(token)",
+                  scopeDefaults.string(forKey: "foundryx.cell.url") != nil,
+                  scopeDefaults.string(forKey: "foundryx.door.url") != nil else {
+                throw BrineStepError(
+                    "the free tier claimed or destroyed the verified owner's pairing")
+            }
         }
     }
 
@@ -1735,6 +2181,13 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
     private func beginScenarioLocked() throws {
         state.transitionProbe?.stop()
         state.transitionProbe = nil
+        for service in [cellKeychainService, doorKeychainService] {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+            ]
+            SecItemDelete(query as CFDictionary)
+        }
         CaptureWidgetSnapshotStore.transition(toOwner: nil)
         CaptureWidgetSnapshotStore.resetDefaultsForTesting()
         CaptureAccountScope.resetTestEnvironment()
@@ -1756,8 +2209,53 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         CaptureAccountScope.setContainerForTests(captureContainer)
         CaptureAccountScope.setApplicationSupportRootForTests(applicationSupportRoot)
         CaptureAccountScope.setDefaultsForTests(scopeDefaults)
+        CaptureAccountScope.setPairingKeychainServicesForTests(
+            cell: cellKeychainService,
+            door: doorKeychainService)
         CaptureWidgetSnapshotStore.setDefaultsForTesting(widgetDefaults)
         CaptureWidgetSnapshotStore.transition(toOwner: nil)
+    }
+
+    private func addLegacySecretLocked(
+        _ value: String,
+        service: String
+    ) throws {
+        // Idempotent: more than one scenario in a feature run stages legacy pairing
+        // against the same per-world service, and a bare SecItemAdd fails the second
+        // time with errSecDuplicateItem (-25299). Clear first — the service name is
+        // namespaced to this world, so this can only remove our own fixture.
+        let base: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+        ]
+        SecItemDelete(base as CFDictionary)
+        var query = base
+        query[kSecValueData as String] = Data(value.utf8)
+        let status = SecItemAdd(query as CFDictionary, nil)
+        guard status == errSecSuccess else {
+            throw BrineStepError(
+                "the test host could not stage legacy Keychain item \(service) "
+                    + "(\(status))")
+        }
+    }
+
+    private func secretLocked(
+        service: String,
+        account: String
+    ) -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecReturnData as String: true,
+        ]
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(
+            query as CFDictionary,
+            &item) == errSecSuccess,
+              let data = item as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     private func validateSandbox() throws {
@@ -1775,6 +2273,13 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
                 "refusing recursive cleanup outside the UUID temporary sandbox: "
                     + candidate.path)
         }
+    }
+
+    private var repositoryRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
     }
 
     private func makeIdentity(
@@ -1890,6 +2395,41 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
             DispatchQueue.main.async { continuation.resume() }
         }
     }
+}
+
+private final class AccountIsolationVaultService:
+    VaultSignupService, @unchecked Sendable
+{
+    let status: VaultProvisionStatus
+
+    init(status: VaultProvisionStatus) {
+        self.status = status
+    }
+
+    func createCheckoutAttempt(
+        plan: VaultPlan,
+        idToken: String?
+    ) async throws -> VaultCheckoutAttempt {
+        VaultCheckoutAttempt(id: "account-isolation", checkoutURL: nil)
+    }
+
+    func reconcile(
+        attemptId: String,
+        idToken: String?
+    ) async throws -> VaultProvisionStatus {
+        status
+    }
+
+    func exchangeReturn(
+        ticket: String,
+        idToken: String?
+    ) async throws -> VaultProvisionStatus {
+        status
+    }
+}
+
+private struct AccountIsolationVaultBrowser: VaultCheckoutBrowser {
+    func open(_ url: URL) async throws -> URL? { nil }
 }
 
 private actor PendingIdentityState {
@@ -2436,6 +2976,89 @@ private enum AccountDataIsolationSteps {
                 "no first-account title or transcript is exposed to the second account"
             ) { _, _, _ in
                 try w.assertNoLiveActivityContentForSecondAccount()
+            },
+            defineStep("the first account paired a Vault with a private bearer") {
+                ctx, _, _ in
+                try w.firstAccountPairedVaultWithPrivateBearer()
+                return ctx
+            },
+            defineStep("the second account signs in on the same phone") {
+                ctx, _, _ in
+                try w.secondAccountSignsInOnSamePhone()
+                return ctx
+            },
+            defineCheck("the second account has no Vault cell pairing") {
+                _, _, _ in
+                try w.assertSecondAccountHasNoVaultCellPairing()
+            },
+            defineCheck(
+                "the second account cannot read the first account's Vault bearer"
+            ) { _, _, _ in
+                try w.assertSecondAccountCannotReadFirstVaultBearer()
+            },
+            defineStep("the second account pairs a different Vault") {
+                ctx, _, _ in
+                try w.secondAccountPairsDifferentVault()
+                return ctx
+            },
+            defineStep("the first account signs back in") {
+                ctx, _, _ in
+                try w.firstAccountSignsBackIn()
+                return ctx
+            },
+            defineCheck(
+                "the first account's Vault pairing and bearer are intact"
+            ) { _, _, _ in
+                try w.assertFirstAccountVaultPairingAndBearerAreIntact()
+            },
+            defineStep("the first account's Vault entitlement router is live") {
+                ctx, _, _ in
+                try w.firstAccountVaultEntitlementRouterIsLive()
+                return ctx
+            },
+            defineStep("the second account signs in without a Vault") {
+                ctx, _, _ in
+                try w.secondAccountSignsInWithoutVault()
+                return ctx
+            },
+            defineCheck(
+                "the Vault entitlement router shows the second account is off"
+            ) { _, _, _ in
+                try w.assertVaultRouterShowsSecondAccountIsOff()
+            },
+            defineStep(
+                "a Vault and Door pairing exist from before account scoping"
+            ) { ctx, _, _ in
+                try w.stageLegacyVaultAndDoorPairing()
+                return ctx
+            },
+            defineStep(
+                "the verified owner activates account-scoped private data"
+            ) { ctx, _, _ in
+                try w.verifiedOwnerActivatesScopedPrivateData()
+                return ctx
+            },
+            defineCheck("the owner's Vault and Door pairing remain intact") {
+                _, _, _ in
+                try w.assertOwnerPairingsRemainIntact()
+            },
+            defineCheck("a later account cannot claim either legacy pairing") {
+                _, _, _ in
+                try w.assertLaterAccountCannotClaimLegacyPairings()
+            },
+            defineStep("FoundryX remains signed out for free on-device use") {
+                ctx, _, _ in
+                try w.remainSignedOutForFreeUse()
+                return ctx
+            },
+            defineCheck("the free tier has no Vault or Door pairing") {
+                _, _, _ in
+                try w.assertFreeTierHasNoVaultOrDoorPairing()
+            },
+            defineCheck(
+                "the unclaimed pairing remains available for its verified owner"
+            ) { _, _, _ in
+                try w.assertLegacyPairingRemainsUnclaimed()
             },
         ]
     }

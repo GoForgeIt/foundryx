@@ -46,16 +46,20 @@ public struct CellConfig: Equatable, Sendable {
 public final class CellStore: ObservableObject, @unchecked Sendable {
     private static let urlKey = "foundryx.cell.url"
     private static let modeKey = "foundryx.cell.authMode"
-    private static let keychainService = "com.goforgeit.foundryx.cell"
 
     private let defaults: UserDefaults
+    private let keychainService: String
 
     /// The currently paired cell, or nil when unpaired.
     @Published public private(set) var config: CellConfig?
 
-    public init(defaults: UserDefaults = .standard) {
+    public init(
+        defaults: UserDefaults = .standard,
+        keychainService: String = "com.goforgeit.foundryx.cell"
+    ) {
         self.defaults = defaults
-        self.config = Self.load(defaults: defaults)
+        self.keychainService = keychainService
+        self.config = Self.load(defaults: defaults, keychainService: keychainService)
     }
 
     /// True when a cell is paired (rung 3 is the active/available brain).
@@ -63,37 +67,76 @@ public final class CellStore: ObservableObject, @unchecked Sendable {
 
     /// Save + publish a pairing. A pasted bearer is written to the Keychain; the
     /// id_token mode stores no secret (the live token is supplied at connect time).
-    public func pair(_ config: CellConfig) {
-        defaults.set(config.url, forKey: Self.urlKey)
-        defaults.set(config.auth.mode, forKey: Self.modeKey)
+    @discardableResult
+    public func pair(_ config: CellConfig) -> Bool {
+        guard let scoped = CaptureAccountScope.currentScopedPreferences() else {
+            return false
+        }
         switch config.auth {
         case .idToken:
-            Self.keychainDelete(service: Self.keychainService)
+            // Best-effort cleanup of any stale bearer for THIS scope. There is no
+            // secret to store in idToken mode, so a failed delete of a possibly
+            // absent item must not fail the pairing — doing so made a live Vault
+            // unreachable on any host whose Keychain returns an error at all.
+            // Anything left behind is this same account's own scoped item and is
+            // never read in idToken mode.
+            _ = Self.keychainDelete(
+                service: keychainService,
+                scope: scoped.scope)
         case .bearer(let token):
-            Self.keychainSet(token, service: Self.keychainService)
+            guard Self.keychainSet(
+                token,
+                service: keychainService,
+                scope: scoped.scope) else { return false }
         }
+        defaults.set(config.url, forKey: scoped.key(Self.urlKey))
+        defaults.set(config.auth.mode, forKey: scoped.key(Self.modeKey))
         self.config = config
+        return true
     }
 
     /// Revocation: forget the cell entirely (also drop any stored bearer). The
     /// server-side door bearer rotates independently.
-    public func unpair() {
-        defaults.removeObject(forKey: Self.urlKey)
-        defaults.removeObject(forKey: Self.modeKey)
-        Self.keychainDelete(service: Self.keychainService)
+    @discardableResult
+    public func unpair() -> Bool {
+        guard let scoped = CaptureAccountScope.currentScopedPreferences() else {
+            return false
+        }
+        defaults.removeObject(forKey: scoped.key(Self.urlKey))
+        defaults.removeObject(forKey: scoped.key(Self.modeKey))
+        guard Self.keychainDelete(
+            service: keychainService,
+            scope: scoped.scope) else { return false }
         config = nil
+        return true
+    }
+
+    /// Re-read the complete pairing after the account owner changes. A blocked
+    /// transition resolves to nil immediately and never consults an unscoped key.
+    public func reloadForIdentityTransition() {
+        config = Self.load(
+            defaults: defaults,
+            keychainService: keychainService)
     }
 
     // MARK: - persistence
 
-    private static func load(defaults: UserDefaults) -> CellConfig? {
-        guard let url = defaults.string(forKey: urlKey),
-              let mode = defaults.string(forKey: modeKey) else { return nil }
+    private static func load(
+        defaults: UserDefaults,
+        keychainService: String
+    ) -> CellConfig? {
+        guard let scoped = CaptureAccountScope.currentScopedPreferences(),
+              let url = defaults.string(forKey: scoped.key(urlKey)),
+              let mode = defaults.string(forKey: scoped.key(modeKey)) else {
+            return nil
+        }
         switch mode {
         case "idToken":
             return CellConfig(url: url, auth: .idToken)
         case "bearer":
-            guard let token = keychainGet(service: keychainService) else { return nil }
+            guard let token = keychainGet(
+                service: keychainService,
+                scope: scoped.scope) else { return nil }
             return CellConfig(url: url, auth: .bearer(token))
         default:
             return nil
@@ -102,9 +145,11 @@ public final class CellStore: ObservableObject, @unchecked Sendable {
 
     // MARK: - Keychain (same shape as DoorConfigStore)
 
-    private static func keychainGet(service: String) -> String? {
+    private static func keychainGet(service: String, scope: String) -> String? {
         let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                 kSecAttrService as String: service,
+                                kSecAttrAccount as String: scope,
+                                kSecMatchLimit as String: kSecMatchLimitOne,
                                 kSecReturnData as String: true]
         var item: CFTypeRef?
         guard SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess,
@@ -112,17 +157,29 @@ public final class CellStore: ObservableObject, @unchecked Sendable {
         return s
     }
 
-    private static func keychainSet(_ token: String, service: String) {
+    private static func keychainSet(
+        _ token: String,
+        service: String,
+        scope: String
+    ) -> Bool {
         let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                    kSecAttrService as String: service]
-        SecItemDelete(base as CFDictionary)
+                                    kSecAttrService as String: service,
+                                    kSecAttrAccount as String: scope]
+        let deleteStatus = SecItemDelete(base as CFDictionary)
+        guard deleteStatus == errSecSuccess || deleteStatus == errSecItemNotFound
+        else { return false }
         var add = base; add[kSecValueData as String] = Data(token.utf8)
-        SecItemAdd(add as CFDictionary, nil)
+        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
     }
 
-    private static func keychainDelete(service: String) {
+    private static func keychainDelete(
+        service: String,
+        scope: String
+    ) -> Bool {
         let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                    kSecAttrService as String: service]
-        SecItemDelete(base as CFDictionary)
+                                    kSecAttrService as String: service,
+                                    kSecAttrAccount as String: scope]
+        let status = SecItemDelete(base as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
     }
 }

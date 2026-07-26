@@ -1,6 +1,15 @@
 import SwiftUI
 import Grain
 
+@MainActor
+private final class RootAccountStores: ObservableObject {
+    @Published private(set) var brains = BrainStore()
+
+    func resetBrainForIdentityTransition() {
+        brains = BrainStore()
+    }
+}
+
 // M5 R1b: login-gated, remote-managed. You must sign in (Google/Microsoft) and
 // have a designated desktop host before entering the app — there are no manual
 // door controls; the connection is always the resolved remote door over the
@@ -22,7 +31,7 @@ struct RootView: View {
     /// welcome never repeats.
     @State private var enteredApp = false
 
-    @StateObject private var brains = BrainStore()
+    @StateObject private var accountStores = RootAccountStores()
     @StateObject private var cells = CellStore()
 
     /// The Vault activation funnel (track T-IOS-FUNNEL): paid-intent trigger → browser
@@ -34,6 +43,8 @@ struct RootView: View {
     /// In-app account deletion (track T-STOREFRONT) — Apple-required, three scopes.
     @StateObject private var accountDeletion = AccountDeletionModel.live()
     @Environment(\.scenePhase) private var scenePhase
+
+    private var brains: BrainStore { accountStores.brains }
 
     /// The front-door rendition for the `.signInGate` destination (track
     /// 20260715T1502 re-cut, Nick 2026-07-16: the welcome IS the front door — the
@@ -257,6 +268,9 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(
             for: CaptureAccountScope.identityDidChangeNotification
         )) { _ in
+            cells.reloadForIdentityTransition()
+            accountStores.resetBrainForIdentityTransition()
+            vaultFunnel.resetForIdentityTransition()
             AmbientCardBroker.shared.clearForIdentityTransition()
             AmbientNotifier.clearForIdentityTransition()
         }

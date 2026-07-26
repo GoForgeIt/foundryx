@@ -17,28 +17,38 @@ enum DoorConfigStore {
     private static let urlKey = "foundryx.door.url"
 
     static func load() -> DoorConfig? {
-        guard let url = UserDefaults.standard.string(forKey: urlKey),
-              let bearer = keychainGet() else { return nil }
+        guard let scoped = CaptureAccountScope.currentScopedPreferences(),
+              let url = UserDefaults.standard.string(
+                forKey: scoped.key(urlKey)),
+              let bearer = keychainGet(scope: scoped.scope) else { return nil }
         return DoorConfig(url: url, bearer: bearer)
     }
-    static func save(_ c: DoorConfig) {
-        UserDefaults.standard.set(c.url, forKey: urlKey)
-        keychainSet(c.bearer)
+    @discardableResult
+    static func save(_ c: DoorConfig) -> Bool {
+        guard let scoped = CaptureAccountScope.currentScopedPreferences(),
+              keychainSet(c.bearer, scope: scoped.scope) else { return false }
+        UserDefaults.standard.set(c.url, forKey: scoped.key(urlKey))
+        return true
     }
-    private static func keychainGet() -> String? {
+    private static func keychainGet(scope: String) -> String? {
         let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                 kSecAttrService as String: service,
+                                kSecAttrAccount as String: scope,
+                                kSecMatchLimit as String: kSecMatchLimitOne,
                                 kSecReturnData as String: true]
         var item: CFTypeRef?
         guard SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess,
               let d = item as? Data, let s = String(data: d, encoding: .utf8) else { return nil }
         return s
     }
-    private static func keychainSet(_ token: String) {
+    private static func keychainSet(_ token: String, scope: String) -> Bool {
         let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                   kSecAttrService as String: service]
-        SecItemDelete(base as CFDictionary)
+                                   kSecAttrService as String: service,
+                                   kSecAttrAccount as String: scope]
+        let deleteStatus = SecItemDelete(base as CFDictionary)
+        guard deleteStatus == errSecSuccess || deleteStatus == errSecItemNotFound
+        else { return false }
         var add = base; add[kSecValueData as String] = Data(token.utf8)
-        SecItemAdd(add as CFDictionary, nil)
+        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
     }
 }
