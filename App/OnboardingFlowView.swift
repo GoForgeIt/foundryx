@@ -19,8 +19,16 @@ import Grain
 enum OnboardingPrefs {
     static let completedKey = "foundryx.onboarding.completed"
     static var completed: Bool {
-        get { UserDefaults.standard.bool(forKey: completedKey) }
-        set { UserDefaults.standard.set(newValue, forKey: completedKey) }
+        get {
+            AccountPreferenceCompatibilityStore()
+                .read(AccountPreferenceCatalog.onboardingCompleted)
+                == .value(true)
+        }
+        set {
+            _ = AccountPreferenceCompatibilityStore().write(
+                newValue,
+                for: AccountPreferenceCatalog.onboardingCompleted)
+        }
     }
 
     /// Migration: a user with recordings predates this flow — mark them onboarded
@@ -506,11 +514,11 @@ struct OnboardingAmbientStep: View {
                     .padding(.bottom, GrainSpacing.x4)
             } else {
                 GrainButton("Turn it on", variant: .filled, size: .regular) {
-                    UserDefaults.standard.set(true, forKey: AmbientPrefs.enabledKey)
+                    _ = AmbientPrefs.setEnabled(true)
                     // The agent answers to "Foundry" out of the box (renameable in
                     // Settings) — a named agent is the invocation ritual.
-                    if UserDefaults.standard.string(forKey: AmbientPrefs.agentNameKey) == nil {
-                        UserDefaults.standard.set("Foundry", forKey: AmbientPrefs.agentNameKey)
+                    if AmbientPrefs.agentName() == nil {
+                        _ = AmbientPrefs.setAgentName("Foundry")
                     }
                     // Deterministic first-feel: fire the sample nudge NOW, while
                     // they're looking, so the first real one is familiar.

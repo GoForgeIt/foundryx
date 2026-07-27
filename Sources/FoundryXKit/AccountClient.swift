@@ -25,13 +25,35 @@ public struct AccountClient: Sendable {
     /// retried on the next launch via the once-flag staying unset).
     @discardableResult
     public func postSignup(idToken: String, name: String?) async -> Bool {
-        await post("account/signup", idToken: idToken, name: name)
+        await postSignup(
+            idToken: idToken,
+            name: name,
+            generation: 0)
+    }
+
+    @discardableResult
+    public func postSignup(
+        idToken: String,
+        name: String?,
+        generation: UInt64
+    ) async -> Bool {
+        _ = generation
+        return await post("account/signup", idToken: idToken, name: name)
     }
 
     /// POST /account/waitlist — the one-tap upgrade-intent flag (no form).
     @discardableResult
     public func postWaitlist(idToken: String) async -> Bool {
-        await post("account/waitlist", idToken: idToken, name: nil)
+        await postWaitlist(idToken: idToken, generation: 0)
+    }
+
+    @discardableResult
+    public func postWaitlist(
+        idToken: String,
+        generation: UInt64
+    ) async -> Bool {
+        _ = generation
+        return await post("account/waitlist", idToken: idToken, name: nil)
     }
 
     /// POST /account/delete — the Apple-required in-app account deletion (track T-STOREFRONT).
@@ -87,19 +109,52 @@ public struct AccountClient: Sendable {
 
     // ── once-per-account gating (pure, tested) ──────────────────────────────
 
-    /// UserDefaults key marking that this account's signup event was durably
-    /// accepted by the relay. Unset ⇒ post (again) on the next sign-in/restore —
-    /// a failed POST self-heals.
-    public static func signupPostedKey(for account: String) -> String {
-        "foundryx.account.signup-posted.\(account.lowercased())"
-    }
-
     /// True when a signup POST should fire for this sign-in.
     public static func shouldPostSignup(account: String, defaults: UserDefaults = .standard) -> Bool {
-        !defaults.bool(forKey: signupPostedKey(for: account))
+        shouldPostSignup(
+            account: account,
+            compatibility: .init(defaults: defaults),
+            generation: 0)
+    }
+
+    public static func shouldPostSignup(
+        account: String,
+        compatibility: AccountPreferenceCompatibilityStore,
+        generation: UInt64
+    ) -> Bool {
+        _ = generation
+        return !compatibility.legacySignupPosted(for: account)
     }
 
     public static func markSignupPosted(account: String, defaults: UserDefaults = .standard) {
-        defaults.set(true, forKey: signupPostedKey(for: account))
+        _ = markSignupPosted(
+            account: account,
+            compatibility: .init(defaults: defaults),
+            generation: 0)
+    }
+
+    @discardableResult
+    public static func markSignupPosted(
+        account: String,
+        compatibility: AccountPreferenceCompatibilityStore,
+        generation: UInt64
+    ) -> AccountPreferenceWriteResult {
+        _ = generation
+        return compatibility.markLegacySignupPosted(for: account)
+    }
+
+    @discardableResult
+    public static func completeSignupPost(
+        succeeded: Bool,
+        account: String,
+        compatibility: AccountPreferenceCompatibilityStore =
+            AccountPreferenceCompatibilityStore(),
+        generation: UInt64
+    ) -> AccountPreferenceWriteResult {
+        guard succeeded else { return .rejected }
+        return markSignupPosted(
+            account: account,
+            compatibility: compatibility,
+            generation: generation)
     }
 }

@@ -21,7 +21,7 @@ struct LocalChatScreen: View {
     /// prefills that must never log one (answer/user rows).
     @State private var prefillSeed: String?
     @State private var waitlistJoined =
-        UserDefaults.standard.bool(forKey: "foundryx.waitlist.joined")
+        WaitlistPrefs.joined()
 
     private var engine: LocalChatEngine? {
         guard let model = makeSystemChatModel() else { return nil }
@@ -133,10 +133,16 @@ struct LocalChatScreen: View {
         guard let token = remote.idToken else { return }
         let base = RemoteConfig.fromBundle()?.gatewayHTTPURL
         guard let base else { return }
+        let generation = remote.identityRevision
         Task {
-            if await AccountClient(baseURL: base).postWaitlist(idToken: token) {
+            let succeeded = await AccountClient(baseURL: base).postWaitlist(
+                idToken: token,
+                generation: generation)
+            if succeeded {
+                _ = WaitlistPrefs.completePost(
+                    succeeded: true,
+                    generation: generation)
                 waitlistJoined = true
-                UserDefaults.standard.set(true, forKey: "foundryx.waitlist.joined")
             }
         }
     }

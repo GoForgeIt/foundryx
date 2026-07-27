@@ -307,7 +307,10 @@ struct ChatScreen: View {
             // Refresh the live picker and rewrite the warm cache so the next open paints
             // this list instantly (AC1/AC3). First-launch caches its first fetch too (AC2).
             await MainActor.run { models = fetched }
-            ModelCache.save(fetched)
+            _ = ModelCache.save(
+                fetched,
+                compatibility: AccountPreferenceCompatibilityStore(),
+                generation: accountBinding.generation)
         } catch {
             log.warn("model list fetch failed: \(error.localizedDescription)")
         }

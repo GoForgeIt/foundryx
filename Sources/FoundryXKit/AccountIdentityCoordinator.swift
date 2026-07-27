@@ -11,12 +11,24 @@ public struct AccountBoundToken: Equatable, Sendable {
     }
 }
 
+/// Generation carried by the dormant Task-2 preference-store refresh seam.
+/// It intentionally contains no scoped snapshot or activation authority.
+public struct AccountPreferenceCompatibilityRefresh: Equatable, Sendable {
+    public let generation: UInt64
+
+    public init(generation: UInt64) {
+        self.generation = generation
+    }
+}
+
 /// Owns the process-level identity notification and fans the boundary out to the
 /// account-derived stores held by the app root.
 @MainActor
 public final class AccountIdentityCoordinator: ObservableObject {
     public typealias TransitionHandler = @MainActor (UInt64) -> Void
     public typealias TokenHandler = @MainActor (AccountBoundToken?) -> Void
+    public typealias CompatibilityStoreRefreshHandler =
+        @MainActor (AccountPreferenceCompatibilityRefresh) -> Void
 
     @Published public private(set) var currentToken: AccountBoundToken?
 
@@ -26,6 +38,8 @@ public final class AccountIdentityCoordinator: ObservableObject {
     private var onIdentityTransition: TransitionHandler = { _ in }
     private var onRestoreCompleted: TransitionHandler = { _ in }
     private var onTokenAvailable: TokenHandler = { _ in }
+    private var onCompatibilityStoreRefresh:
+        CompatibilityStoreRefreshHandler = { _ in }
 
     public init(
         notificationCenter: NotificationCenter = .default,
@@ -38,11 +52,14 @@ public final class AccountIdentityCoordinator: ObservableObject {
     public func bind(
         onIdentityTransition: @escaping TransitionHandler,
         onRestoreCompleted: @escaping TransitionHandler,
-        onTokenAvailable: @escaping TokenHandler
+        onTokenAvailable: @escaping TokenHandler,
+        onCompatibilityStoreRefresh:
+            @escaping CompatibilityStoreRefreshHandler = { _ in }
     ) {
         self.onIdentityTransition = onIdentityTransition
         self.onRestoreCompleted = onRestoreCompleted
         self.onTokenAvailable = onTokenAvailable
+        self.onCompatibilityStoreRefresh = onCompatibilityStoreRefresh
     }
 
     public func start() {
@@ -73,6 +90,7 @@ public final class AccountIdentityCoordinator: ObservableObject {
               generation == CaptureAccountScope.identityGeneration else {
             return
         }
+        onCompatibilityStoreRefresh(.init(generation: generation))
         onRestoreCompleted(generation)
     }
 
@@ -96,6 +114,7 @@ public final class AccountIdentityCoordinator: ObservableObject {
         activeGeneration = generation
         currentToken = nil
         onTokenAvailable(nil)
+        onCompatibilityStoreRefresh(.init(generation: generation))
         onIdentityTransition(generation)
     }
 

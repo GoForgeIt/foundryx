@@ -32,13 +32,82 @@ enum AmbientPrefs {
         defaults: UserDefaults = .standard,
         ownerVoiceBaseDir: URL = CaptureWAL.documentsCaptures()
     ) -> Bool {
-        if defaults.object(forKey: gradingKey) != nil {
-            return defaults.bool(forKey: gradingKey)
-        }
+        fullContextGrading(
+            compatibility: .init(defaults: defaults),
+            ownerVoiceBaseDir: ownerVoiceBaseDir)
+    }
+
+    static func fullContextGrading(
+        compatibility: AccountPreferenceCompatibilityStore,
+        ownerVoiceBaseDir: URL = CaptureWAL.documentsCaptures()
+    ) -> Bool {
+        let enrolled: Bool
         if case .enrolled = OwnerVoiceStore.state(baseDir: ownerVoiceBaseDir) {
-            return true
+            enrolled = true
+        } else {
+            enrolled = false
         }
-        return false
+        guard case .value(let grading) = compatibility.read(
+            AccountPreferenceCatalog.ambientGrading,
+            context: .init(ownerVoiceEnrolled: enrolled)) else {
+            return false
+        }
+        return grading
+    }
+
+    static func enabled(
+        compatibility: AccountPreferenceCompatibilityStore =
+            AccountPreferenceCompatibilityStore()
+    ) -> Bool {
+        compatibility.read(AccountPreferenceCatalog.ambientEnabled)
+            == .value(true)
+    }
+
+    @discardableResult
+    static func setEnabled(
+        _ enabled: Bool,
+        compatibility: AccountPreferenceCompatibilityStore =
+            AccountPreferenceCompatibilityStore()
+    ) -> AccountPreferenceWriteResult {
+        compatibility.write(
+            enabled,
+            for: AccountPreferenceCatalog.ambientEnabled)
+    }
+
+    static func agentName(
+        compatibility: AccountPreferenceCompatibilityStore =
+            AccountPreferenceCompatibilityStore()
+    ) -> String? {
+        guard case .value(let name) = compatibility.read(
+            AccountPreferenceCatalog.ambientAgentName) else {
+            return nil
+        }
+        return name
+    }
+
+    @discardableResult
+    static func setAgentName(
+        _ name: String?,
+        compatibility: AccountPreferenceCompatibilityStore =
+            AccountPreferenceCompatibilityStore()
+    ) -> AccountPreferenceWriteResult {
+        if let name {
+            return compatibility.write(
+                name,
+                for: AccountPreferenceCatalog.ambientAgentName)
+        }
+        return compatibility.remove(AccountPreferenceCatalog.ambientAgentName)
+    }
+
+    @discardableResult
+    static func setFullContextGrading(
+        _ enabled: Bool,
+        compatibility: AccountPreferenceCompatibilityStore =
+            AccountPreferenceCompatibilityStore()
+    ) -> AccountPreferenceWriteResult {
+        compatibility.write(
+            enabled,
+            for: AccountPreferenceCatalog.ambientGrading)
     }
 
     /// The Tier-1 gate decision log (shared by the lane wiring, the debug readout,

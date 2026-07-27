@@ -16,7 +16,18 @@ public enum ModelCache {
 
     /// The last-known model list, or `[]` on a cold cache / decode failure.
     public static func load(_ defaults: UserDefaults = .standard) -> [ModelOption] {
-        guard let data = defaults.data(forKey: key),
+        load(
+            compatibility: .init(defaults: defaults),
+            generation: 0)
+    }
+
+    public static func load(
+        compatibility: AccountPreferenceCompatibilityStore,
+        generation: UInt64
+    ) -> [ModelOption] {
+        _ = generation
+        guard case .value(let data) = compatibility.read(
+            AccountPreferenceCatalog.modelsCache),
               let models = try? JSONDecoder().decode([ModelOption].self, from: data)
         else { return [] }
         return models
@@ -25,7 +36,24 @@ public enum ModelCache {
     /// Persist a freshly-fetched list. A no-op on encode failure (the live `models` state is
     /// still refreshed in memory regardless).
     public static func save(_ models: [ModelOption], _ defaults: UserDefaults = .standard) {
-        guard let data = try? JSONEncoder().encode(models) else { return }
-        defaults.set(data, forKey: key)
+        _ = save(
+            models,
+            compatibility: .init(defaults: defaults),
+            generation: 0)
+    }
+
+    @discardableResult
+    public static func save(
+        _ models: [ModelOption],
+        compatibility: AccountPreferenceCompatibilityStore,
+        generation: UInt64
+    ) -> AccountPreferenceWriteResult {
+        _ = generation
+        guard let data = try? JSONEncoder().encode(models) else {
+            return .unresolved
+        }
+        return compatibility.write(
+            data,
+            for: AccountPreferenceCatalog.modelsCache)
     }
 }

@@ -25,11 +25,11 @@ struct SettingsScreen: View {
     @ObservedObject var accountDeletion: AccountDeletionModel
     @State private var actionChoice = ActionButtonChoice.current
     @State private var waitlistJoined =
-        UserDefaults.standard.bool(forKey: "foundryx.waitlist.joined")
+        WaitlistPrefs.joined()
     @State private var ambientEnabled =
-        UserDefaults.standard.bool(forKey: AmbientPrefs.enabledKey)
+        AmbientPrefs.enabled()
     @State private var agentName =
-        UserDefaults.standard.string(forKey: AmbientPrefs.agentNameKey) ?? ""
+        AmbientPrefs.agentName() ?? ""
     @State private var fullContextGrading = AmbientPrefs.fullContextGrading()
     /// Intelligent Action: surface OTHER people's action lines inline (ON) vs
     /// collect them under "Heard from others" (OFF, the owner-first default).
@@ -145,7 +145,7 @@ struct SettingsScreen: View {
             Section {
                 Toggle("Act on conversations", isOn: $ambientEnabled)
                     .onChange(of: ambientEnabled) { on in
-                        UserDefaults.standard.set(on, forKey: AmbientPrefs.enabledKey)
+                        _ = AmbientPrefs.setEnabled(on)
                     }
                 Text(ambientEnabled
                      ? "While recording, your phone privately watches for moments like “I'll have to look that up” and offers to help. Everything stays on this phone until you accept."
@@ -160,9 +160,8 @@ struct SettingsScreen: View {
                             .autocorrectionDisabled()
                             .onChange(of: agentName) { name in
                                 let trimmed = name.trimmingCharacters(in: .whitespaces)
-                                UserDefaults.standard.set(
-                                    trimmed.isEmpty ? nil : trimmed,
-                                    forKey: AmbientPrefs.agentNameKey)
+                                _ = AmbientPrefs.setAgentName(
+                                    trimmed.isEmpty ? nil : trimmed)
                             }
                     }
                     Text("Say this name in a conversation to ask your agent for something. Only offered — nothing runs without your confirmation.")
@@ -173,8 +172,7 @@ struct SettingsScreen: View {
                     // what YOU said becomes an action automatically.
                     Toggle("Actions from others", isOn: $othersInline)
                         .onChange(of: othersInline) { on in
-                            UserDefaults.standard.set(
-                                on, forKey: ActionSurfacePolicy.othersInlineKey)
+                            _ = ActionSurfacePolicy.setOthersInline(on)
                         }
                         .accessibilityIdentifier("actions-from-others")
                     Text(othersInline
@@ -187,7 +185,7 @@ struct SettingsScreen: View {
                             get: { fullContextGrading },
                             set: { on in
                                 fullContextGrading = on
-                                UserDefaults.standard.set(on, forKey: AmbientPrefs.gradingKey)
+                                _ = AmbientPrefs.setFullContextGrading(on)
                             }
                         )) {
                             Text("Full-context grading")
@@ -435,10 +433,16 @@ struct SettingsScreen: View {
     private func postWaitlist() {
         guard let token = remote.idToken,
               let base = RemoteConfig.fromBundle()?.gatewayHTTPURL else { return }
+        let generation = remote.identityRevision
         Task {
-            if await AccountClient(baseURL: base).postWaitlist(idToken: token) {
+            let succeeded = await AccountClient(baseURL: base).postWaitlist(
+                idToken: token,
+                generation: generation)
+            if succeeded {
+                _ = WaitlistPrefs.completePost(
+                    succeeded: true,
+                    generation: generation)
                 waitlistJoined = true
-                UserDefaults.standard.set(true, forKey: "foundryx.waitlist.joined")
             }
         }
     }

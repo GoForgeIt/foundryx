@@ -474,7 +474,7 @@ struct CaptureScreen: View {
     /// thing — hands the moment to a seeded chat (the wired RUN path) — after minimizing
     /// the surface so the chat is visible; the row is dismissed either way.
     private func candidateSuggestion(_ c: AmbientCandidate) -> RecordingSuggestion {
-        let agentName = UserDefaults.standard.string(forKey: AmbientPrefs.agentNameKey) ?? ""
+        let agentName = AmbientPrefs.agentName() ?? ""
         let isAgent = !agentName.isEmpty
             && (c.utterance.range(of: agentName, options: .caseInsensitive) != nil
                 || c.summary.range(of: agentName, options: .caseInsensitive) != nil)

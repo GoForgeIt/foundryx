@@ -294,6 +294,12 @@ struct RootView: View {
                             expectedGeneration:
                                 CaptureAccountScope.identityGeneration)
                     }
+                },
+                onCompatibilityStoreRefresh: { refresh in
+                    // Task 2 carries the initiating generation only. Typed owners
+                    // still read the inactive legacy adapter; Task 6 installs the
+                    // account-scoped snapshot refresh.
+                    _ = refresh.generation
                 })
             identityCoordinator.start()
             await remote.restore()
@@ -642,11 +648,11 @@ private struct MainTabs: View {
         // call, so Settings flips apply immediately. A surfaced candidate posts a
         // local notification (Tier-3 preview slice).
         if let gate = makeSystemGate(agentName: {
-            UserDefaults.standard.string(forKey: AmbientPrefs.agentNameKey)
+            AmbientPrefs.agentName()
         }) {
             mgr.ambientLane = AmbientLane(
                 gate: gate,
-                isEnabled: { UserDefaults.standard.bool(forKey: AmbientPrefs.enabledKey) },
+                isEnabled: { AmbientPrefs.enabled() },
                 decisionLogURL: AmbientPrefs.decisionLogURL())
             // Tier 2: route the candidate through the door (lookup answers come from
             // the user's OWN memory — lore search + local compile) and notify with the
@@ -661,7 +667,7 @@ private struct MainTabs: View {
                 // ship the last ~10s of captured audio so the door can verify WHO
                 // spoke (lore identify vs the confirmed enrolled corpus) before any
                 // agent card is offered.
-                let agentName = UserDefaults.standard.string(forKey: AmbientPrefs.agentNameKey)
+                let agentName = AmbientPrefs.agentName()
                 let mentionsAgent = agentName.map {
                     !$0.isEmpty && (window.range(of: $0, options: .caseInsensitive) != nil
                         || candidate.utterance.range(of: $0, options: .caseInsensitive) != nil)
@@ -715,7 +721,7 @@ private struct MainTabs: View {
                 decisionsURL: AmbientPrefs.decisionLogURL(),
                 cardsURL: ActivityStore.cardsLogURL(besides: AmbientPrefs.decisionLogURL()),
                 watermarkURL: AmbientPrefs.signalWatermarkURL(),
-                isEnabled: { UserDefaults.standard.bool(forKey: AmbientPrefs.enabledKey) },
+                isEnabled: { AmbientPrefs.enabled() },
                 send: { records in try await DoorClient(target: target).ambientLog(records: records) })
         }
         // When a capture upload is rejected as token-expired (401), refresh the id_token

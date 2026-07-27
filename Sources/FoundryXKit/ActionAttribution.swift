@@ -212,7 +212,25 @@ public enum ActionSurfacePolicy {
     public static let othersInlineKey = "foundryx.ambient.othersInline"
 
     public static func othersInline(defaults: UserDefaults = .standard) -> Bool {
-        defaults.bool(forKey: othersInlineKey)
+        othersInline(compatibility: .init(defaults: defaults))
+    }
+
+    public static func othersInline(
+        compatibility: AccountPreferenceCompatibilityStore
+    ) -> Bool {
+        compatibility.read(AccountPreferenceCatalog.ambientOthersInline)
+            == .value(true)
+    }
+
+    @discardableResult
+    public static func setOthersInline(
+        _ enabled: Bool,
+        compatibility: AccountPreferenceCompatibilityStore =
+            AccountPreferenceCompatibilityStore()
+    ) -> AccountPreferenceWriteResult {
+        compatibility.write(
+            enabled,
+            for: AccountPreferenceCatalog.ambientOthersInline)
     }
 
     /// Whether an action belongs in the collapsed "Heard from others" group.

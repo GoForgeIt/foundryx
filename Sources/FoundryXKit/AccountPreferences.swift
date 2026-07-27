@@ -709,6 +709,34 @@ public final class AccountPreferenceCompatibilityStore: @unchecked Sendable {
         return .saved
     }
 
+    public func writeLegacyCheckoutAttempt(
+        id: String,
+        plan: String
+    ) -> AccountPreferenceWriteResult {
+        let idKey = AccountPreferenceCatalog.vaultCheckoutAttemptID.canonicalKey
+        let planKey =
+            AccountPreferenceCatalog.vaultCheckoutAttemptPlan.canonicalKey
+        let priorID = defaults.object(forKey: idKey)
+        let priorPlan = defaults.object(forKey: planKey)
+        guard fault == nil else { return .failed }
+        defaults.set(id, forKey: idKey)
+        defaults.set(plan, forKey: planKey)
+        guard defaults.synchronize(),
+              defaults.string(forKey: idKey) == id,
+              defaults.string(forKey: planKey) == plan else {
+            restore(priorID, forKey: idKey, synchronize: false)
+            restore(priorPlan, forKey: planKey)
+            return .failed
+        }
+        return .saved
+    }
+
+    public func hasLegacyStringValue(
+        for key: AccountPreferenceKey<String>
+    ) -> Bool {
+        defaults.string(forKey: key.canonicalKey) != nil
+    }
+
     public func legacySignupPosted(for account: String) -> Bool {
         defaults.bool(forKey: legacySignupKey(for: account))
     }
@@ -871,5 +899,125 @@ public final class AccountPreferenceCompatibilityStore: @unchecked Sendable {
         if synchronize {
             _ = defaults.synchronize()
         }
+    }
+}
+
+/// The legacy dynamic signup marker is quarantined behind verified capability
+/// values. Normal Task-2 signup still uses the compatibility helper above; this
+/// migration remains dormant until account-preference activation.
+struct LegacySignupMarkerMigration {
+    struct VerifiedIdentity: Sendable, Equatable {
+        fileprivate let historicalCanonicalIdentity: String
+
+        private init(historicalCanonicalIdentity: String) {
+            self.historicalCanonicalIdentity =
+                historicalCanonicalIdentity
+        }
+    }
+
+    struct DurableLegacyOwnerProof: Sendable, Equatable {
+        fileprivate let scope: String
+        fileprivate let generation: UInt64
+        fileprivate let historicalCanonicalIdentity: String
+
+        private init(
+            scope: String,
+            generation: UInt64,
+            historicalCanonicalIdentity: String
+        ) {
+            self.scope = scope
+            self.generation = generation
+            self.historicalCanonicalIdentity =
+                historicalCanonicalIdentity
+        }
+    }
+
+    struct DeletionTombstoneProof: Sendable, Equatable {
+        fileprivate let scope: String
+        fileprivate let generation: UInt64
+
+        private init(scope: String, generation: UInt64) {
+            self.scope = scope
+            self.generation = generation
+        }
+    }
+
+    private static let historicalPrefix =
+        "foundryx.account.signup-posted."
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    func snapshot(
+        identity: VerifiedIdentity,
+        ownerProof: DurableLegacyOwnerProof
+    ) -> AccountPreferencePresence<Bool> {
+        guard identity.historicalCanonicalIdentity
+                == ownerProof.historicalCanonicalIdentity,
+              defaults.object(forKey: historicalKey(identity)) != nil else {
+            return .absent
+        }
+        return .value(defaults.bool(forKey: historicalKey(identity)))
+    }
+
+    func retire(
+        identity: VerifiedIdentity,
+        ownerProof: DurableLegacyOwnerProof,
+        deletionTombstone: DeletionTombstoneProof
+    ) -> AccountPreferenceWriteResult {
+        guard identity.historicalCanonicalIdentity
+                == ownerProof.historicalCanonicalIdentity,
+              ownerProof.scope == deletionTombstone.scope,
+              ownerProof.generation == deletionTombstone.generation else {
+            return .rejected
+        }
+        let key = historicalKey(identity)
+        defaults.removeObject(forKey: key)
+        guard defaults.synchronize(),
+              defaults.object(forKey: key) == nil else {
+            return .failed
+        }
+        return .saved
+    }
+
+    private func historicalKey(_ identity: VerifiedIdentity) -> String {
+        Self.historicalPrefix + identity.historicalCanonicalIdentity
+    }
+}
+
+public enum WaitlistPrefs {
+    public static func joined(
+        compatibility: AccountPreferenceCompatibilityStore =
+            AccountPreferenceCompatibilityStore()
+    ) -> Bool {
+        compatibility.read(AccountPreferenceCatalog.waitlistJoined)
+            == .value(true)
+    }
+
+    @discardableResult
+    public static func markJoined(
+        compatibility: AccountPreferenceCompatibilityStore =
+            AccountPreferenceCompatibilityStore(),
+        generation: UInt64
+    ) -> AccountPreferenceWriteResult {
+        _ = generation
+        return compatibility.write(
+            true,
+            for: AccountPreferenceCatalog.waitlistJoined)
+    }
+
+    @discardableResult
+    public static func completePost(
+        succeeded: Bool,
+        compatibility: AccountPreferenceCompatibilityStore =
+            AccountPreferenceCompatibilityStore(),
+        generation: UInt64
+    ) -> AccountPreferenceWriteResult {
+        guard succeeded else { return .rejected }
+        return markJoined(
+            compatibility: compatibility,
+            generation: generation)
     }
 }

@@ -112,19 +112,50 @@ public enum WelcomePrefs {
     public static let letStraightInKey = "foundryx.welcome.letStraightIn"
 
     public static func seen(defaults: UserDefaults = .standard) -> Bool {
-        defaults.bool(forKey: seenKey)
+        seen(compatibility: .init(defaults: defaults))
+    }
+
+    public static func seen(
+        compatibility: AccountPreferenceCompatibilityStore
+    ) -> Bool {
+        compatibility.read(AccountPreferenceCatalog.welcomeSeen)
+            == .value(true)
     }
 
     public static func markSeen(defaults: UserDefaults = .standard) {
-        defaults.set(true, forKey: seenKey)
+        _ = markSeen(compatibility: .init(defaults: defaults))
+    }
+
+    @discardableResult
+    public static func markSeen(
+        compatibility: AccountPreferenceCompatibilityStore
+    ) -> AccountPreferenceWriteResult {
+        compatibility.write(true, for: AccountPreferenceCatalog.welcomeSeen)
     }
 
     public static func letStraightIn(defaults: UserDefaults = .standard) -> Bool {
-        defaults.bool(forKey: letStraightInKey)
+        letStraightIn(compatibility: .init(defaults: defaults))
+    }
+
+    public static func letStraightIn(
+        compatibility: AccountPreferenceCompatibilityStore
+    ) -> Bool {
+        compatibility.read(AccountPreferenceCatalog.welcomeLetStraightIn)
+            == .value(true)
     }
 
     public static func setLetStraightIn(_ on: Bool, defaults: UserDefaults = .standard) {
-        defaults.set(on, forKey: letStraightInKey)
+        _ = setLetStraightIn(on, compatibility: .init(defaults: defaults))
+    }
+
+    @discardableResult
+    public static func setLetStraightIn(
+        _ on: Bool,
+        compatibility: AccountPreferenceCompatibilityStore
+    ) -> AccountPreferenceWriteResult {
+        compatibility.write(
+            on,
+            for: AccountPreferenceCatalog.welcomeLetStraightIn)
     }
 }
 
@@ -172,12 +203,31 @@ public enum PersonaPrefs {
     public static let key = "foundryx.onboarding.persona"
 
     public static func persona(defaults: UserDefaults = .standard) -> OnboardingPersona {
-        guard let raw = defaults.string(forKey: key),
-              let p = OnboardingPersona(rawValue: raw) else { return .individual }
-        return p
+        persona(compatibility: .init(defaults: defaults))
+    }
+
+    public static func persona(
+        compatibility: AccountPreferenceCompatibilityStore
+    ) -> OnboardingPersona {
+        guard case .value(let raw) = compatibility.read(
+            AccountPreferenceCatalog.onboardingPersona),
+              let persona = OnboardingPersona(rawValue: raw) else {
+            return .individual
+        }
+        return persona
     }
 
     public static func set(_ persona: OnboardingPersona, defaults: UserDefaults = .standard) {
-        defaults.set(persona.rawValue, forKey: key)
+        _ = set(persona, compatibility: .init(defaults: defaults))
+    }
+
+    @discardableResult
+    public static func set(
+        _ persona: OnboardingPersona,
+        compatibility: AccountPreferenceCompatibilityStore
+    ) -> AccountPreferenceWriteResult {
+        compatibility.write(
+            persona.rawValue,
+            for: AccountPreferenceCatalog.onboardingPersona)
     }
 }

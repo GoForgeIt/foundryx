@@ -232,8 +232,15 @@ public struct VaultCheckoutAttemptStore {
     private static let idKey = "foundryx.vault.checkoutAttempt.id"
     private static let planKey = "foundryx.vault.checkoutAttempt.plan"
 
-    private let defaults: UserDefaults
-    public init(defaults: UserDefaults = .standard) { self.defaults = defaults }
+    private let compatibility: AccountPreferenceCompatibilityStore
+
+    public init(defaults: UserDefaults = .standard) {
+        compatibility = .init(defaults: defaults)
+    }
+
+    public init(compatibility: AccountPreferenceCompatibilityStore) {
+        self.compatibility = compatibility
+    }
 
     public struct Pending: Equatable, Sendable {
         public let attemptId: String
@@ -245,19 +252,52 @@ public struct VaultCheckoutAttemptStore {
     }
 
     public func save(attemptId: String, plan: VaultPlan) {
-        defaults.set(attemptId, forKey: Self.idKey)
-        defaults.set(plan.rawValue, forKey: Self.planKey)
+        _ = save(attemptId: attemptId, plan: plan, generation: 0)
+    }
+
+    @discardableResult
+    public func save(
+        attemptId: String,
+        plan: VaultPlan,
+        generation: UInt64
+    ) -> AccountPreferenceWriteResult {
+        _ = generation
+        return compatibility.writeLegacyCheckoutAttempt(
+            id: attemptId,
+            plan: plan.rawValue)
     }
 
     public func load() -> Pending? {
-        guard let id = defaults.string(forKey: Self.idKey), !id.isEmpty else { return nil }
-        let plan = defaults.string(forKey: Self.planKey).flatMap(VaultPlan.init) ?? .pro
+        load(generation: 0)
+    }
+
+    public func load(generation: UInt64) -> Pending? {
+        _ = generation
+        guard case .value(let id) = compatibility.read(
+            AccountPreferenceCatalog.vaultCheckoutAttemptID),
+              !id.isEmpty else {
+            return nil
+        }
+        let plan: VaultPlan
+        if case .value(let raw) = compatibility.read(
+            AccountPreferenceCatalog.vaultCheckoutAttemptPlan) {
+            plan = VaultPlan(rawValue: raw) ?? .pro
+        } else {
+            plan = .pro
+        }
         return Pending(attemptId: id, plan: plan)
     }
 
     public func clear() {
-        defaults.removeObject(forKey: Self.idKey)
-        defaults.removeObject(forKey: Self.planKey)
+        _ = clear(generation: 0)
+    }
+
+    @discardableResult
+    public func clear(
+        generation: UInt64
+    ) -> AccountPreferenceWriteResult {
+        _ = generation
+        return compatibility.clearLegacyCheckoutAttempt()
     }
 }
 
@@ -423,6 +463,15 @@ public final class VaultFunnelModel: ObservableObject {
     /// dismisses it, we land in "Checking payment" and let reconcile decide — the server
     /// is authoritative, so a dismissed sheet is never a failure.
     public func continueToCheckout(plan: VaultPlan) async {
+        await continueToCheckout(
+            plan: plan,
+            generation: CaptureAccountScope.identityGeneration)
+    }
+
+    public func continueToCheckout(
+        plan: VaultPlan,
+        generation: UInt64
+    ) async {
         // Storefront-gated (track T-STOREFRONT): never open external checkout where the App
         // Store storefront disallows purchasing — fail closed, the last line of defense.
         guard purchaseAllowed else { return }
@@ -436,16 +485,19 @@ public final class VaultFunnelModel: ObservableObject {
             return
         }
         // Persist BEFORE opening the browser so reconcile works even if we're killed.
-        attempts.save(attemptId: attempt.id, plan: plan)
+        _ = attempts.save(
+            attemptId: attempt.id,
+            plan: plan,
+            generation: generation)
 
         let url = attempt.checkoutURL ?? canonicalCheckoutURL(plan: plan, attemptId: attempt.id)
         let returned = (try? await browser.open(url)) ?? nil
         // Either path is durable: move to Checking payment and reconcile.
         state = .checkingPayment
         if let returned {
-            await handleReturn(url: returned)
+            await handleReturn(url: returned, generation: generation)
         } else {
-            await reconcileOnForeground()
+            await reconcileOnForeground(generation: generation)
         }
     }
 
@@ -466,30 +518,53 @@ public final class VaultFunnelModel: ObservableObject {
     /// triggers an immediate reconcile via the opaque single-use ticket. If the ticket
     /// yields nothing verified yet, fall through to the durable foreground reconcile.
     public func handleReturn(url: URL) async {
+        await handleReturn(
+            url: url,
+            generation: CaptureAccountScope.identityGeneration)
+    }
+
+    public func handleReturn(
+        url: URL,
+        generation: UInt64
+    ) async {
         guard let ticket = Self.ticket(from: url) else {
-            await reconcileOnForeground()
+            await reconcileOnForeground(generation: generation)
             return
         }
         let status = (try? await service.exchangeReturn(ticket: ticket, idToken: idToken())) ?? .pending
-        await apply(status)
-        if status == .pending { await reconcileOnForeground() }
+        await apply(status, generation: generation)
+        if status == .pending {
+            await reconcileOnForeground(generation: generation)
+        }
     }
 
     /// Called on EVERY app foreground/launch. If a checkout attempt is pending, ask the
     /// server for the authoritative status and advance the durable states. No attempt ⇒
     /// no-op (a returning free user is never dragged into the funnel).
     public func reconcileOnForeground() async {
-        guard let pending = attempts.load() else { return }
+        await reconcileOnForeground(
+            generation: CaptureAccountScope.identityGeneration)
+    }
+
+    public func reconcileOnForeground(
+        generation: UInt64
+    ) async {
+        guard let pending = attempts.load(generation: generation) else {
+            return
+        }
         // If nothing is on screen yet but an attempt is mid-flight, surface the durable
         // "checking" state so the user sees progress, never a dead free screen.
         if case .idle = state { state = .checkingPayment }
         guard let status = try? await service.reconcile(attemptId: pending.attemptId, idToken: idToken())
         else { return }        // network blip: keep the current durable state, retry next foreground
-        await apply(status)
+        await apply(status, generation: generation)
     }
 
     /// Apply a server-authoritative status to the funnel + entitlement.
-    private func apply(_ status: VaultProvisionStatus) async {
+    private func apply(
+        _ status: VaultProvisionStatus,
+        generation: UInt64
+    ) async {
         switch status {
         case .pending:
             // Not verified yet — hold "Checking payment" unless we've already advanced.
@@ -497,7 +572,10 @@ public final class VaultFunnelModel: ObservableObject {
         case .provisioning:
             state = .settingUp
         case .ready(let cellURL, let handoff):
-            connect(cellURL: cellURL, handoff: handoff)
+            connect(
+                cellURL: cellURL,
+                handoff: handoff,
+                generation: generation)
         }
     }
 
@@ -516,7 +594,11 @@ public final class VaultFunnelModel: ObservableObject {
     /// clear the completed checkout attempt. The bearer is the door handoff the cell minted
     /// (never seen in any URL). Failure to build a valid target holds the durable state so
     /// a retry can recover, rather than dead-ending.
-    private func connect(cellURL: String, handoff: String) {
+    private func connect(
+        cellURL: String,
+        handoff: String,
+        generation: UInt64
+    ) {
         let config = CellConfig(url: cellURL, auth: .bearer(handoff))
         do {
             let backend = try CellBackend(cellURL: cellURL, bearer: handoff)
@@ -525,7 +607,7 @@ public final class VaultFunnelModel: ObservableObject {
                 return
             }
             connectedVault = backend
-            attempts.clear()
+            _ = attempts.clear(generation: generation)
             state = .live(config)
         } catch {
             // A malformed cell URL/bearer from the server — stay in setting-up; reconcile
