@@ -7,7 +7,7 @@ import Darwin
 #endif
 
 final class AccountPreferencesTests: XCTestCase {
-    func testCatalogContainsExactlyTheSeventeenCanonicalInactiveEntries() throws {
+    func testCatalogContainsExactlyTheSeventeenCanonicalActiveEntries() throws {
         let entries = AccountPreferenceCatalog.entries
         XCTAssertEqual(entries.count, 17)
         XCTAssertEqual(Set(entries.map(\.canonicalKey)).count, 17)
@@ -34,7 +34,7 @@ final class AccountPreferencesTests: XCTestCase {
         XCTAssertEqual(Set(entries.map(\.canonicalKey)), Set(expectedKeys))
         XCTAssertTrue(entries.allSatisfy {
             $0.classification == .account
-                && $0.activationState == .inactiveCompatibility
+                && $0.activationState == .active
         })
 
         assertEntry(
@@ -223,6 +223,161 @@ final class AccountPreferencesTests: XCTestCase {
         XCTAssertEqual(
             result.skippedKeys,
             [AccountPreferenceCatalog.modelsCache.canonicalKey])
+    }
+
+    func testTaskSixActivatesEveryCatalogEntryAtomically() {
+        XCTAssertEqual(AccountPreferenceCatalog.entries.count, 17)
+        XCTAssertTrue(AccountPreferenceCatalog.entries.allSatisfy {
+            $0.activationState == .active
+        })
+    }
+
+    func testEstablishedOwnerAdoptionPreservesExplicitValuesAndPrivacy()
+        throws
+    {
+        let snapshot = AccountPreferenceAdoptionSnapshot(
+            scope: "acct-a11ce",
+            generation: 41,
+            legacyValues: [
+                AccountPreferenceCatalog.onboardingCompleted.canonicalKey:
+                    .bool(true),
+                AccountPreferenceCatalog.onboardingPersona.canonicalKey:
+                    .string("expert"),
+                AccountPreferenceCatalog.welcomeSeen.canonicalKey:
+                    .bool(true),
+                AccountPreferenceCatalog.welcomeLetStraightIn.canonicalKey:
+                    .bool(false),
+                AccountPreferenceCatalog.ambientEnabled.canonicalKey:
+                    .bool(true),
+                AccountPreferenceCatalog.ambientAgentName.canonicalKey:
+                    .string("Sage"),
+                AccountPreferenceCatalog.ambientOthersInline.canonicalKey:
+                    .bool(true),
+                AccountPreferenceCatalog.vaultCheckoutAttemptID.canonicalKey:
+                    .string("attempt-1"),
+                AccountPreferenceCatalog.vaultCheckoutAttemptPlan.canonicalKey:
+                    .string("starter"),
+                AccountPreferenceCatalog.brainChoice.canonicalKey:
+                    .string("computer"),
+                AccountPreferenceCatalog.waitlistJoined.canonicalKey:
+                    .bool(false),
+                AccountPreferenceCatalog.captureSilenceGapSeconds.canonicalKey:
+                    .double(75),
+                AccountPreferenceCatalog.captureOMIDesiredState.canonicalKey:
+                    .string("listening"),
+                AccountPreferenceCatalog.captureSourceEnabledOverrides.canonicalKey:
+                    .boolDictionary(["omi": true]),
+                AccountPreferenceCatalog.modelsCache.canonicalKey:
+                    .data(Data("legacy-warm".utf8)),
+            ],
+            legacySignupPosted: .value(true))
+
+        let result = AccountPreferenceAdoptionPlanner.resolve(
+            snapshot,
+            existingValues: [:],
+            establishedLegacyOwner: true)
+
+        XCTAssertEqual(
+            result.adoptedValues[
+                AccountPreferenceCatalog.onboardingCompleted.canonicalKey],
+            .bool(true))
+        XCTAssertEqual(
+            result.adoptedValues[
+                AccountPreferenceCatalog.welcomeLetStraightIn.canonicalKey],
+            .bool(false),
+            "explicit false must survive adoption")
+        XCTAssertEqual(
+            result.adoptedValues[
+                AccountPreferenceCatalog.ambientGrading.canonicalKey],
+            .bool(false),
+            "absent established grading must materialize explicit false")
+        XCTAssertEqual(
+            result.adoptedValues[
+                AccountPreferenceCatalog.signupPosted.canonicalKey],
+            .bool(true))
+        XCTAssertNil(
+            result.adoptedValues[
+                AccountPreferenceCatalog.modelsCache.canonicalKey],
+            "legacy model caches must never be adopted")
+        XCTAssertTrue(result.skippedKeys.contains(
+            AccountPreferenceCatalog.modelsCache.canonicalKey))
+    }
+
+    func testFreshAndSignedOutPlansUseSafeDefaultsWithoutLegacyAdoption() {
+        let legacy: [String: AccountPreferenceValue] = [
+            AccountPreferenceCatalog.onboardingCompleted.canonicalKey:
+                .bool(true),
+            AccountPreferenceCatalog.ambientEnabled.canonicalKey:
+                .bool(true),
+            AccountPreferenceCatalog.ambientGrading.canonicalKey:
+                .bool(true),
+            AccountPreferenceCatalog.captureOMIDesiredState.canonicalKey:
+                .string("listening"),
+            AccountPreferenceCatalog.captureSourceEnabledOverrides.canonicalKey:
+                .boolDictionary(["omi": true]),
+            AccountPreferenceCatalog.modelsCache.canonicalKey:
+                .data(Data("legacy-warm".utf8)),
+        ]
+        for scope in ["acct-b", CaptureAccountScope.signedOutScope] {
+            let result = AccountPreferenceAdoptionPlanner.resolve(
+                .init(
+                    scope: scope,
+                    generation: 7,
+                    legacyValues: legacy,
+                    legacySignupPosted: .value(true)),
+                existingValues: [:],
+                establishedLegacyOwner: false)
+
+            XCTAssertEqual(
+                result.adoptedValues[
+                    AccountPreferenceCatalog.onboardingCompleted.canonicalKey],
+                .bool(false))
+            XCTAssertEqual(
+                result.adoptedValues[
+                    AccountPreferenceCatalog.ambientEnabled.canonicalKey],
+                .bool(false))
+            XCTAssertEqual(
+                result.adoptedValues[
+                    AccountPreferenceCatalog.ambientGrading.canonicalKey],
+                .bool(false))
+            XCTAssertEqual(
+                result.adoptedValues[
+                    AccountPreferenceCatalog.captureOMIDesiredState.canonicalKey],
+                .string("paused"))
+            XCTAssertEqual(
+                result.adoptedValues[
+                    AccountPreferenceCatalog.captureSourceEnabledOverrides.canonicalKey],
+                .boolDictionary([:]))
+            XCTAssertNil(
+                result.adoptedValues[
+                    AccountPreferenceCatalog.modelsCache.canonicalKey])
+            XCTAssertNil(
+                result.adoptedValues[
+                    AccountPreferenceCatalog.signupPosted.canonicalKey])
+        }
+    }
+
+    func testAdoptionRequiresACompleteValidCheckoutPair() {
+        let id = AccountPreferenceCatalog.vaultCheckoutAttemptID.canonicalKey
+        let plan = AccountPreferenceCatalog.vaultCheckoutAttemptPlan.canonicalKey
+        for legacy in [
+            [id: AccountPreferenceValue.string("partial")],
+            [
+                id: AccountPreferenceValue.string("partial"),
+                plan: AccountPreferenceValue.string("invalid"),
+            ],
+        ] {
+            let result = AccountPreferenceAdoptionPlanner.resolve(
+                .init(
+                    scope: "acct-b",
+                    generation: 1,
+                    legacyValues: legacy,
+                    legacySignupPosted: .absent),
+                existingValues: [:],
+                establishedLegacyOwner: true)
+            XCTAssertNil(result.adoptedValues[id])
+            XCTAssertNil(result.adoptedValues[plan])
+        }
     }
 
     func testSnapshotInstallRejectsMismatchedScopeOrGenerationWithoutCachingEither()
@@ -804,8 +959,9 @@ final class AccountPreferenceCompatibilityTests: XCTestCase {
             store.read(AccountPreferenceCatalog.captureSourceEnabledOverrides),
             .value([:]))
         XCTAssertEqual(store.read(AccountPreferenceCatalog.modelsCache), .absent)
-        XCTAssertFalse(
-            store.legacySignupPosted(for: "Nick@GoForgeIt.com"))
+        XCTAssertEqual(
+            store.read(AccountPreferenceCatalog.signupPosted),
+            .absent)
     }
 
     func testLegacySpecialCasesStayByteAndValueCompatible() throws {
@@ -884,25 +1040,27 @@ final class AccountPreferenceCompatibilityTests: XCTestCase {
         XCTAssertEqual(store.read(AccountPreferenceCatalog.modelsCache), .value(models))
     }
 
-    func testLegacySignupUsesOnlyTheNarrowExactLowercasedDynamicPath() throws {
+    func testLegacySignupIsAvailableOnlyAsASealedActivationSnapshot() throws {
         let fixture = try CompatibilityFixture()
         defer { fixture.cleanup() }
         let defaults = fixture.defaults
         let store = AccountPreferenceCompatibilityStore(defaults: defaults)
-        let account = " Nick@GoForgeIt.com "
-        let historicalKey = "foundryx.account.signup-posted. nick@goforgeit.com "
+        let identity = AuthIdentity(
+            provider: "google",
+            idToken: "not-a-jwt",
+            refreshToken: nil,
+            expiresAt: .distantFuture,
+            email: "Nick@GoForgeIt.com")
+        let scope = "acct-owner"
+        let historicalKey =
+            "foundryx.account.signup-posted.nick@goforgeit.com"
         defaults.set(
-            true,
-            forKey: AccountPreferenceCatalog.signupPosted.canonicalKey)
+            true, forKey: historicalKey)
         let before = fixture.persistentDomain
 
         XCTAssertEqual(
             store.read(AccountPreferenceCatalog.signupPosted),
-            .absent,
-            "generic reads cannot expose either static or dynamic signup state")
-        XCTAssertFalse(
-            store.legacySignupPosted(for: account),
-            "the narrow legacy read ignores the canonical static marker")
+            .absent)
         XCTAssertEqual(
             store.write(false, for: AccountPreferenceCatalog.signupPosted),
             .rejected)
@@ -912,44 +1070,24 @@ final class AccountPreferenceCompatibilityTests: XCTestCase {
         XCTAssertEqual(
             fixture.persistentDomain,
             before,
-            "generic static signup mutations must leave the whole domain untouched")
-        XCTAssertEqual(store.markLegacySignupPosted(for: account), .saved)
-        XCTAssertTrue(store.legacySignupPosted(for: account))
-        XCTAssertTrue(defaults.bool(forKey: historicalKey))
-        XCTAssertTrue(
-            defaults.bool(forKey: AccountPreferenceCatalog.signupPosted.canonicalKey),
-            "the narrow helper must ignore and preserve a preexisting static marker")
-        XCTAssertFalse(
-            defaults.bool(
-                forKey: "foundryx.account.signup-posted.nick@goforgeit.com"),
-            "historical compatibility lowercases but never trims the account input")
+            "normal compatibility APIs cannot mutate dynamic signup state")
         XCTAssertEqual(
-            store.read(AccountPreferenceCatalog.signupPosted),
-            .absent,
-            "generic reads remain sealed after the narrow dynamic marker is written")
-        let afterFirstMark = fixture.persistentDomain
-        XCTAssertEqual(
-            store.markLegacySignupPosted(for: account),
-            .saved,
-            "marking an already present historical marker is idempotent")
-        XCTAssertEqual(fixture.persistentDomain, afterFirstMark)
-        let changedKeys = Set(afterFirstMark.allKeys.compactMap { $0 as? String })
-            .subtracting(before.allKeys.compactMap { $0 as? String })
-        XCTAssertEqual(changedKeys, [historicalKey])
-    }
-
-    func testLegacySignupReportsFixedPersistenceFailureWithoutMutation() throws {
-        let fixture = try CompatibilityFixture()
-        defer { fixture.cleanup() }
-        let store = AccountPreferenceCompatibilityStore(
-            defaults: fixture.defaults,
-            faultForTests: .droppedPersistence)
-        let before = fixture.persistentDomain
-
-        XCTAssertEqual(
-            store.markLegacySignupPosted(for: "Failure@Example.test"),
-            .failed)
+            LegacySignupMarkerMigration.snapshotForActivation(
+                identity: identity,
+                ownerScope: scope,
+                generation: 7,
+                durableLegacyOwnerScope: scope,
+                defaults: defaults),
+            .value(true))
         XCTAssertEqual(fixture.persistentDomain, before)
+        XCTAssertEqual(
+            LegacySignupMarkerMigration.snapshotForActivation(
+                identity: identity,
+                ownerScope: "acct-other",
+                generation: 7,
+                durableLegacyOwnerScope: scope,
+                defaults: defaults),
+            .absent)
     }
 
     func testLegacyAsyncCompletionStillWritesAfterIdentityGenerationChanges() throws {

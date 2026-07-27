@@ -216,12 +216,7 @@ public final class RemoteSession: ObservableObject {
         // retries on the next sign-in/restore. Fire-and-forget; never blocks
         // resolve. (Name flows in with Apple sign-in — Apple only surfaces it on
         // the very first authorization.)
-        let signupCompatibility = AccountPreferenceCompatibilityStore()
-        if let account = auth.signedInIdentity?.accountKeyMaterial,
-           AccountClient.shouldPostSignup(
-                account: account,
-                compatibility: signupCompatibility,
-                generation: requestedGeneration) {
+        if AccountClient.shouldPostSignup(generation: requestedGeneration) {
             let client = AccountClient(baseURL: remote.gatewayHTTPURL)
             Task {
                 let succeeded = await client.postSignup(
@@ -230,8 +225,6 @@ public final class RemoteSession: ObservableObject {
                     generation: requestedGeneration)
                 _ = AccountClient.completeSignupPost(
                     succeeded: succeeded,
-                    account: account,
-                    compatibility: signupCompatibility,
                     generation: requestedGeneration)
             }
         }

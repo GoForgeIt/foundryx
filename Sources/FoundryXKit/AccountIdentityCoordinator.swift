@@ -114,7 +114,6 @@ public final class AccountIdentityCoordinator: ObservableObject {
         activeGeneration = generation
         currentToken = nil
         onTokenAvailable(nil)
-        onCompatibilityStoreRefresh(.init(generation: generation))
         onIdentityTransition(generation)
     }
 

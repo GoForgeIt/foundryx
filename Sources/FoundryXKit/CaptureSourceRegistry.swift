@@ -202,11 +202,26 @@ public final class InMemoryCaptureSourceStore: CaptureSourceStore {
 /// UserDefaults-backed store (the app's real persistence).
 public final class UserDefaultsCaptureSourceStore: CaptureSourceStore {
     private let defaults: UserDefaults
+    private let explicitCompatibility: Bool
     private let addedKey = "foundryx.capture.sources.added"
-    public init(defaults: UserDefaults = .standard) { self.defaults = defaults }
+    public init() {
+        defaults = .standard
+        explicitCompatibility = false
+    }
+    public init(defaults: UserDefaults) {
+        self.defaults = defaults
+        explicitCompatibility = true
+    }
 
     public var enabledOverrides: [String: Bool] {
         get {
+            if !explicitCompatibility {
+                switch AccountPreferences.read(
+                    AccountPreferenceCatalog.captureSourceEnabledOverrides) {
+                case .value(let value): return value
+                case .absent: break
+                }
+            }
             switch AccountPreferenceCompatibilityStore(
                 defaults: defaults
             ).read(AccountPreferenceCatalog.captureSourceEnabledOverrides) {
@@ -215,6 +230,13 @@ public final class UserDefaultsCaptureSourceStore: CaptureSourceStore {
             }
         }
         set {
+            if !explicitCompatibility,
+               CaptureAccountScope.currentAccountPreferenceSnapshot() != nil {
+                _ = AccountPreferences.write(
+                    newValue,
+                    for: AccountPreferenceCatalog.captureSourceEnabledOverrides)
+                return
+            }
             _ = AccountPreferenceCompatibilityStore(
                 defaults: defaults
             ).write(

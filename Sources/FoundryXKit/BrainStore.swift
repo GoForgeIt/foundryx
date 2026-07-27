@@ -29,20 +29,33 @@ public enum BrainChoice: String, CaseIterable, Sendable {
 /// defaults to `.justMyPhone` (spec §3 — the free tier is the default).
 public final class BrainStore: ObservableObject, @unchecked Sendable {
     private static let key = "foundryx.brain.choice"
-    private let compatibility: AccountPreferenceCompatibilityStore
+    private let compatibility: AccountPreferenceCompatibilityStore?
 
     @Published public private(set) var choice: BrainChoice
     /// True once the user (or the pairing migration) explicitly picked a brain —
     /// lets RootView adopt `.myComputer` for pre-picker installs exactly once.
     public var hasExplicitChoice: Bool {
-        compatibility.hasLegacyStringValue(
-            for: AccountPreferenceCatalog.brainChoice)
+        if let compatibility {
+            return compatibility.hasLegacyStringValue(
+                for: AccountPreferenceCatalog.brainChoice)
+        }
+        if case .value = AccountPreferences.read(
+            AccountPreferenceCatalog.brainChoice) {
+            return true
+        }
+        return false
     }
 
-    public init(defaults: UserDefaults = .standard, hasPairedDesktop: Bool = false) {
+    public init(hasPairedDesktop: Bool = false) {
+        compatibility = nil
+        choice = Self.readActiveChoice(
+            hasPairedDesktop: hasPairedDesktop)
+    }
+
+    public init(defaults: UserDefaults, hasPairedDesktop: Bool = false) {
         compatibility = .init(defaults: defaults)
         choice = Self.readChoice(
-            compatibility: compatibility,
+            compatibility: compatibility!,
             hasPairedDesktop: hasPairedDesktop)
     }
 
@@ -58,19 +71,32 @@ public final class BrainStore: ObservableObject, @unchecked Sendable {
 
     public func select(_ c: BrainChoice) {
         choice = c
-        _ = compatibility.write(
-            c.rawValue,
-            for: AccountPreferenceCatalog.brainChoice)
+        if let compatibility {
+            _ = compatibility.write(
+                c.rawValue,
+                for: AccountPreferenceCatalog.brainChoice)
+        } else {
+            _ = AccountPreferences.write(
+                c.rawValue,
+                for: AccountPreferenceCatalog.brainChoice)
+        }
     }
 
     public func refresh(
         generation: UInt64,
         hasPairedDesktop: Bool = false
     ) {
-        _ = generation
-        choice = Self.readChoice(
-            compatibility: compatibility,
-            hasPairedDesktop: hasPairedDesktop)
+        guard generation == CaptureAccountScope.identityGeneration else {
+            return
+        }
+        if let compatibility {
+            choice = Self.readChoice(
+                compatibility: compatibility,
+                hasPairedDesktop: hasPairedDesktop)
+        } else {
+            choice = Self.readActiveChoice(
+                hasPairedDesktop: hasPairedDesktop)
+        }
     }
 
     private static func readChoice(
@@ -82,6 +108,17 @@ public final class BrainStore: ObservableObject, @unchecked Sendable {
         guard case .value(let raw) = compatibility.read(
             AccountPreferenceCatalog.brainChoice,
             context: context),
+              let choice = BrainChoice(rawValue: raw) else {
+            return hasPairedDesktop ? .myComputer : .justMyPhone
+        }
+        return choice
+    }
+
+    private static func readActiveChoice(
+        hasPairedDesktop: Bool
+    ) -> BrainChoice {
+        guard case .value(let raw) = AccountPreferences.read(
+            AccountPreferenceCatalog.brainChoice),
               let choice = BrainChoice(rawValue: raw) else {
             return hasPairedDesktop ? .myComputer : .justMyPhone
         }

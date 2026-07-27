@@ -232,9 +232,13 @@ public struct VaultCheckoutAttemptStore {
     private static let idKey = "foundryx.vault.checkoutAttempt.id"
     private static let planKey = "foundryx.vault.checkoutAttempt.plan"
 
-    private let compatibility: AccountPreferenceCompatibilityStore
+    private let compatibility: AccountPreferenceCompatibilityStore?
 
-    public init(defaults: UserDefaults = .standard) {
+    public init() {
+        compatibility = nil
+    }
+
+    public init(defaults: UserDefaults) {
         compatibility = .init(defaults: defaults)
     }
 
@@ -262,9 +266,15 @@ public struct VaultCheckoutAttemptStore {
         generation: UInt64
     ) -> AccountPreferenceWriteResult {
         _ = generation
-        return compatibility.writeLegacyCheckoutAttempt(
+        if let compatibility {
+            return compatibility.writeLegacyCheckoutAttempt(
+                id: attemptId,
+                plan: plan.rawValue)
+        }
+        return AccountPreferences.writeCheckoutAttempt(
             id: attemptId,
-            plan: plan.rawValue)
+            plan: plan.rawValue,
+            generation: generation)
     }
 
     public func load() -> Pending? {
@@ -273,15 +283,27 @@ public struct VaultCheckoutAttemptStore {
 
     public func load(generation: UInt64) -> Pending? {
         _ = generation
-        guard case .value(let id) = compatibility.read(
-            AccountPreferenceCatalog.vaultCheckoutAttemptID),
+        let idPresence = compatibility?.read(
+            AccountPreferenceCatalog.vaultCheckoutAttemptID)
+            ?? AccountPreferences.read(
+                AccountPreferenceCatalog.vaultCheckoutAttemptID)
+        guard case .value(let id) = idPresence,
               !id.isEmpty else {
             return nil
         }
         let plan: VaultPlan
-        if case .value(let raw) = compatibility.read(
-            AccountPreferenceCatalog.vaultCheckoutAttemptPlan) {
-            plan = VaultPlan(rawValue: raw) ?? .pro
+        let planPresence = compatibility?.read(
+            AccountPreferenceCatalog.vaultCheckoutAttemptPlan)
+            ?? AccountPreferences.read(
+                AccountPreferenceCatalog.vaultCheckoutAttemptPlan)
+        if case .value(let raw) = planPresence {
+            guard let storedPlan = VaultPlan(rawValue: raw) else {
+                return compatibility == nil ? nil : Pending(
+                    attemptId: id, plan: .pro)
+            }
+            plan = storedPlan
+        } else if compatibility == nil {
+            return nil
         } else {
             plan = .pro
         }
@@ -297,7 +319,10 @@ public struct VaultCheckoutAttemptStore {
         generation: UInt64
     ) -> AccountPreferenceWriteResult {
         _ = generation
-        return compatibility.clearLegacyCheckoutAttempt()
+        if let compatibility {
+            return compatibility.clearLegacyCheckoutAttempt()
+        }
+        return AccountPreferences.clearCheckoutAttempt(generation: generation)
     }
 }
 

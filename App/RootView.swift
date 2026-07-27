@@ -8,6 +8,7 @@ private final class RootAccountStores: ObservableObject {
     func resetBrainForIdentityTransition() {
         brains = BrainStore()
     }
+
 }
 
 // M5 R1b: login-gated, remote-managed. You must sign in (Google/Microsoft) and
@@ -281,9 +282,7 @@ struct RootView: View {
                 onIdentityTransition: { _ in
                     resetAccountDerivedState()
                 },
-                onRestoreCompleted: { _ in
-                    resetAccountDerivedState()
-                },
+                onRestoreCompleted: { _ in },
                 onTokenAvailable: { token in
                     VaultAuthTokenBox.shared.token = token?.value
                     if let token {
@@ -296,9 +295,9 @@ struct RootView: View {
                     }
                 },
                 onCompatibilityStoreRefresh: { refresh in
-                    // Task 2 carries the initiating generation only. Typed owners
-                    // still read the inactive legacy adapter; Task 6 installs the
-                    // account-scoped snapshot refresh.
+                    // The completed-restore callback remains the single refresh
+                    // boundary. Task 6 owners already read the installed scoped
+                    // snapshot, so no second account reset is needed here.
                     _ = refresh.generation
                 })
             identityCoordinator.start()
@@ -788,6 +787,12 @@ private struct MainTabs: View {
             if category == .omi { dm?.setEnabled(on) }
         }
         _sources = StateObject(wrappedValue: reg)
+        if let accountBinding {
+            let preferences = CaptureSettings.snapshot(
+                binding: accountBinding)
+            _ = mgr.installCapturePreferenceSnapshot(preferences)
+            _ = reg.installCapturePreferenceSnapshot(preferences)
+        }
         let exposureCoordinator =
             FoundryXAppDelegate.accountExposureCoordinator
         mgr.registerAccountExposures(with: exposureCoordinator)

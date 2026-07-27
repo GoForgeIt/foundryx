@@ -20,12 +20,12 @@ enum OnboardingPrefs {
     static let completedKey = "foundryx.onboarding.completed"
     static var completed: Bool {
         get {
-            AccountPreferenceCompatibilityStore()
-                .read(AccountPreferenceCatalog.onboardingCompleted)
-                == .value(true)
+            AccountPreferences.value(
+                AccountPreferenceCatalog.onboardingCompleted,
+                default: false)
         }
         set {
-            _ = AccountPreferenceCompatibilityStore().write(
+            _ = AccountPreferences.write(
                 newValue,
                 for: AccountPreferenceCatalog.onboardingCompleted)
         }

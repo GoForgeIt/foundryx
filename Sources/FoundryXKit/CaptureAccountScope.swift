@@ -103,7 +103,7 @@ public enum CaptureAccountScope {
     public struct ScopedPreferences: Sendable, Equatable {
         public let scope: String
 
-        fileprivate init(scope: String) {
+        init(scope: String) {
             self.scope = scope
         }
 
@@ -166,6 +166,7 @@ public enum CaptureAccountScope {
         let aliases: [String: String]
         let aliasSources: [String]
         let suppressLegacyAdoption: Bool
+        let identity: AuthIdentity
 
         init(
             scope: String,
@@ -173,7 +174,8 @@ public enum CaptureAccountScope {
             requiresActivation: Bool,
             aliases: [String: String],
             aliasSources: [String],
-            suppressLegacyAdoption: Bool = false
+            suppressLegacyAdoption: Bool = false,
+            identity: AuthIdentity
         ) {
             self.scope = scope
             self.previousScope = previousScope
@@ -181,6 +183,7 @@ public enum CaptureAccountScope {
             self.aliases = aliases
             self.aliasSources = aliasSources
             self.suppressLegacyAdoption = suppressLegacyAdoption
+            self.identity = identity
         }
     }
 
@@ -419,21 +422,25 @@ public enum CaptureAccountScope {
                 ownerScope: target)
             switch current.phase {
             case .active where current.scope == target:
-                if current.aliases != resolved.aliases {
-                    try persistActivationRecord(
-                        .active(target, aliases: resolved.aliases))
-                }
+                try persistActivationRecord(.pending(
+                    target, previous: target, aliases: resolved.aliases))
+                currentDefaults().set(
+                    false, forKey: AuthStore.signedInMirrorKey)
+                installResolution(
+                    .blocked, widgetOwner: nil, identityTransition: true)
                 return ActivationTransaction(
-                    scope: target, previousScope: target, requiresActivation: false,
+                    scope: target, previousScope: target, requiresActivation: true,
                     aliases: resolved.aliases,
                     aliasSources: resolved.aliasSources,
-                    suppressLegacyAdoption: completedDeletion)
+                    suppressLegacyAdoption: completedDeletion,
+                    identity: identity)
             case .pendingActivation where current.scope == target:
                 return ActivationTransaction(
                     scope: target, previousScope: current.previousScope,
                     requiresActivation: true, aliases: resolved.aliases,
                     aliasSources: resolved.aliasSources,
-                    suppressLegacyAdoption: completedDeletion)
+                    suppressLegacyAdoption: completedDeletion,
+                    identity: identity)
             case .pendingActivation, .pendingSignOut:
                 throw CaptureAccountScopeError.activationAlreadyPending
             case .active, .signedOut:
@@ -446,27 +453,45 @@ public enum CaptureAccountScope {
                     scope: target, previousScope: previous, requiresActivation: true,
                     aliases: resolved.aliases,
                     aliasSources: resolved.aliasSources,
-                    suppressLegacyAdoption: completedDeletion)
+                    suppressLegacyAdoption: completedDeletion,
+                    identity: identity)
             }
         }
     }
 
     /// Complete the filesystem claim before publishing ACTIVE. Errors leave PENDING
     /// intact so this owner can retry and a different identity cannot steal the claim.
-    static func completeActivation(_ transaction: ActivationTransaction) throws {
+    static func completeActivation(
+        _ transaction: ActivationTransaction,
+        activatePreferences: Bool = true
+    ) throws {
         guard transaction.requiresActivation else {
             try persistenceQueue.sync {
                 let deletionCompleted = try completedDeletionAllowsReturn(
                     ownerScope: transaction.scope)
                 let suppressLegacyAdoption =
                     transaction.suppressLegacyAdoption || deletionCompleted
-                if !suppressLegacyAdoption,
-                   try legacyPrivateDataBelongs(to: transaction.scope) {
+                let ownsLegacyPrivateData = try (
+                    !suppressLegacyAdoption
+                    && legacyPrivateDataBelongs(to: transaction.scope))
+                if ownsLegacyPrivateData {
                     try adoptLegacyPairingRecord(
                         for: transaction.scope,
                         defaults: currentDefaults())
                 }
                 let defaults = currentDefaults()
+                let preferenceValues: [String: AccountPreferenceValue]?
+                if activatePreferences {
+                    preferenceValues = try AccountPreferenceActivationStore.prepare(
+                        scope: transaction.scope,
+                        generation: identityGeneration,
+                        identity: transaction.identity,
+                        establishedLegacyOwner: ownsLegacyPrivateData,
+                        defaults: defaults
+                    ).adoptedValues
+                } else {
+                    preferenceValues = nil
+                }
                 defaults.set(true, forKey: AuthStore.signedInMirrorKey)
                 guard defaults.synchronize(),
                       defaults.bool(forKey: AuthStore.signedInMirrorKey) else {
@@ -476,7 +501,8 @@ public enum CaptureAccountScope {
                 installResolution(
                     .account(transaction.scope),
                     widgetOwner: transaction.scope,
-                    identityTransition: suppressLegacyAdoption)
+                    identityTransition: true,
+                    preferenceValues: preferenceValues)
             }
             return
         }
@@ -518,9 +544,21 @@ public enum CaptureAccountScope {
                         for: transaction.scope,
                         defaults: currentDefaults())
                 }
+                let defaults = currentDefaults()
+                let preferenceValues: [String: AccountPreferenceValue]?
+                if activatePreferences {
+                    preferenceValues = try AccountPreferenceActivationStore.prepare(
+                        scope: transaction.scope,
+                        generation: identityGeneration,
+                        identity: transaction.identity,
+                        establishedLegacyOwner: ownsLegacyPrivateData,
+                        defaults: defaults
+                    ).adoptedValues
+                } else {
+                    preferenceValues = nil
+                }
                 try persistActivationRecord(.active(
                     transaction.scope, aliases: record.aliases))
-                let defaults = currentDefaults()
                 defaults.set(true, forKey: AuthStore.signedInMirrorKey)
                 guard defaults.synchronize(),
                       defaults.bool(
@@ -532,7 +570,8 @@ public enum CaptureAccountScope {
                 installResolution(
                     .account(transaction.scope),
                     widgetOwner: transaction.scope,
-                    identityTransition: true)
+                    identityTransition: true,
+                    preferenceValues: preferenceValues)
             }
             guard admitted != nil else {
                 throw CaptureAccountScopeError.activationState(
@@ -569,47 +608,43 @@ public enum CaptureAccountScope {
                 ownerScope: target)
             switch record.phase {
             case .active where record.scope == target:
-                if record.aliases != resolved.aliases {
-                    try persistActivationRecord(
-                        .active(target, aliases: resolved.aliases))
-                }
-                if !completedDeletion {
-                    installResolution(.account(target), widgetOwner: nil,
-                                      identityTransition: false)
-                }
+                try persistActivationRecord(.pending(
+                    target, previous: target, aliases: resolved.aliases))
+                currentDefaults().set(
+                    false, forKey: AuthStore.signedInMirrorKey)
+                installResolution(
+                    .blocked, widgetOwner: nil, identityTransition: true)
                 return ActivationTransaction(
-                    scope: target, previousScope: target, requiresActivation: false,
+                    scope: target, previousScope: target, requiresActivation: true,
                     aliases: resolved.aliases,
                     aliasSources: resolved.aliasSources,
-                    suppressLegacyAdoption: completedDeletion)
+                    suppressLegacyAdoption: completedDeletion,
+                    identity: identity)
             case .pendingActivation where record.scope == target:
                 return ActivationTransaction(
                     scope: target, previousScope: record.previousScope,
                     requiresActivation: true, aliases: resolved.aliases,
                     aliasSources: resolved.aliasSources,
-                    suppressLegacyAdoption: completedDeletion)
+                    suppressLegacyAdoption: completedDeletion,
+                    identity: identity)
             case .pendingActivation where record.previousScope == target:
                 try persistActivationRecord(
                     .active(target, aliases: resolved.aliases))
-                currentDefaults().set(true, forKey: AuthStore.signedInMirrorKey)
-                installResolution(.account(target), widgetOwner: target,
-                                  identityTransition: true)
                 return ActivationTransaction(
                     scope: target, previousScope: target, requiresActivation: false,
                     aliases: resolved.aliases,
                     aliasSources: resolved.aliasSources,
-                    suppressLegacyAdoption: completedDeletion)
+                    suppressLegacyAdoption: completedDeletion,
+                    identity: identity)
             case .pendingSignOut where record.previousScope == target:
                 try persistActivationRecord(
                     .active(target, aliases: resolved.aliases))
-                currentDefaults().set(true, forKey: AuthStore.signedInMirrorKey)
-                installResolution(.account(target), widgetOwner: target,
-                                  identityTransition: true)
                 return ActivationTransaction(
                     scope: target, previousScope: target, requiresActivation: false,
                     aliases: resolved.aliases,
                     aliasSources: resolved.aliasSources,
-                    suppressLegacyAdoption: completedDeletion)
+                    suppressLegacyAdoption: completedDeletion,
+                    identity: identity)
             case .pendingActivation, .pendingSignOut:
                 throw CaptureAccountScopeError.activationAlreadyPending
             case .active:
@@ -624,7 +659,8 @@ public enum CaptureAccountScope {
                     scope: target, previousScope: nil, requiresActivation: true,
                     aliases: resolved.aliases,
                     aliasSources: resolved.aliasSources,
-                    suppressLegacyAdoption: completedDeletion)
+                    suppressLegacyAdoption: completedDeletion,
+                    identity: identity)
             }
         }
         try completeActivation(action)
@@ -660,10 +696,17 @@ public enum CaptureAccountScope {
             let defaults = currentDefaults()
             defaults.set(false, forKey: AuthStore.signedInMirrorKey)
             defaults.removeObject(forKey: oldPersistedScopeKey)
+            let preferences = try AccountPreferenceActivationStore.prepare(
+                scope: signedOutScope,
+                generation: identityGeneration,
+                identity: nil,
+                establishedLegacyOwner: false,
+                defaults: defaults)
             installResolution(
                 .signedOut,
                 widgetOwner: signedOutScope,
-                identityTransition: true)
+                identityTransition: true,
+                preferenceValues: preferences.adoptedValues)
         }
     }
 
@@ -771,6 +814,245 @@ public enum CaptureAccountScope {
         return snapshot
     }
 
+    static func writeAccountPreference<Value>(
+        _ value: Value,
+        for key: AccountPreferenceKey<Value>,
+        expectedGeneration: UInt64?
+    ) -> AccountPreferenceWriteResult {
+        guard let encoded = AccountPreferenceValue.encode(value),
+              let binding = currentScopedPreferenceBinding() else {
+            return .unresolved
+        }
+        if let expectedGeneration,
+           expectedGeneration != binding.generation {
+            return .stale
+        }
+        switch beginPreferenceStoreMutation(as: binding, barrier: nil) {
+        case .unresolved: return .unresolved
+        case .stale: return .stale
+        case .rejected: return .rejected
+        case .acquired(let scoped):
+            defer { endPreferenceStoreMutation() }
+            let defaults = currentDefaults()
+            let storageKey = scoped.key(key.canonicalKey)
+            let prior = defaults.object(forKey: storageKey)
+            defaults.set(encoded.defaultsValue, forKey: storageKey)
+            guard defaults.synchronize(),
+                  storedPreferenceValue(
+                    forKey: storageKey,
+                    matching: encoded,
+                    defaults: defaults) == encoded else {
+                restorePreferenceValue(
+                    prior, forKey: storageKey, defaults: defaults)
+                return .failed
+            }
+            cachePreferenceValue(
+                encoded,
+                forCanonicalKey: key.canonicalKey,
+                binding: binding)
+            return .saved
+        }
+    }
+
+    static func removeAccountPreference<Value>(
+        _ key: AccountPreferenceKey<Value>,
+        expectedGeneration: UInt64?
+    ) -> AccountPreferenceWriteResult {
+        guard let binding = currentScopedPreferenceBinding() else {
+            return .unresolved
+        }
+        if let expectedGeneration,
+           expectedGeneration != binding.generation {
+            return .stale
+        }
+        switch beginPreferenceStoreMutation(as: binding, barrier: nil) {
+        case .unresolved: return .unresolved
+        case .stale: return .stale
+        case .rejected: return .rejected
+        case .acquired(let scoped):
+            defer { endPreferenceStoreMutation() }
+            let defaults = currentDefaults()
+            let storageKey = scoped.key(key.canonicalKey)
+            let prior = defaults.object(forKey: storageKey)
+            defaults.removeObject(forKey: storageKey)
+            guard defaults.synchronize(),
+                  defaults.object(forKey: storageKey) == nil else {
+                restorePreferenceValue(
+                    prior, forKey: storageKey, defaults: defaults)
+                return .failed
+            }
+            cachePreferenceValue(
+                nil,
+                forCanonicalKey: key.canonicalKey,
+                binding: binding)
+            return .saved
+        }
+    }
+
+    static func writeCheckoutPreferencePair(
+        id: String,
+        plan: String,
+        expectedGeneration: UInt64?
+    ) -> AccountPreferenceWriteResult {
+        guard !id.isEmpty,
+              ["starter", "pro", "power"].contains(plan) else {
+            return .rejected
+        }
+        return mutateCheckoutPreferencePair(
+            id: id,
+            plan: plan,
+            expectedGeneration: expectedGeneration)
+    }
+
+    static func clearCheckoutPreferencePair(
+        expectedGeneration: UInt64?
+    ) -> AccountPreferenceWriteResult {
+        mutateCheckoutPreferencePair(
+            id: nil,
+            plan: nil,
+            expectedGeneration: expectedGeneration)
+    }
+
+    private static func mutateCheckoutPreferencePair(
+        id: String?,
+        plan: String?,
+        expectedGeneration: UInt64?
+    ) -> AccountPreferenceWriteResult {
+        guard let binding = currentScopedPreferenceBinding() else {
+            return .unresolved
+        }
+        if let expectedGeneration,
+           expectedGeneration != binding.generation {
+            return .stale
+        }
+        switch beginPreferenceStoreMutation(as: binding, barrier: nil) {
+        case .unresolved: return .unresolved
+        case .stale: return .stale
+        case .rejected: return .rejected
+        case .acquired(let scoped):
+            defer { endPreferenceStoreMutation() }
+            let defaults = currentDefaults()
+            let idCanonical =
+                AccountPreferenceCatalog.vaultCheckoutAttemptID.canonicalKey
+            let planCanonical =
+                AccountPreferenceCatalog.vaultCheckoutAttemptPlan.canonicalKey
+            let idKey = scoped.key(idCanonical)
+            let planKey = scoped.key(planCanonical)
+            let priorID = defaults.object(forKey: idKey)
+            let priorPlan = defaults.object(forKey: planKey)
+            if let id, let plan {
+                defaults.set(id, forKey: idKey)
+                defaults.set(plan, forKey: planKey)
+            } else {
+                defaults.removeObject(forKey: idKey)
+                defaults.removeObject(forKey: planKey)
+            }
+            let readbackMatches: Bool
+            if let id, let plan {
+                readbackMatches =
+                    defaults.string(forKey: idKey) == id
+                    && defaults.string(forKey: planKey) == plan
+            } else {
+                readbackMatches =
+                    defaults.object(forKey: idKey) == nil
+                    && defaults.object(forKey: planKey) == nil
+            }
+            guard defaults.synchronize(), readbackMatches else {
+                restorePreferenceValue(
+                    priorID,
+                    forKey: idKey,
+                    defaults: defaults,
+                    synchronize: false)
+                restorePreferenceValue(
+                    priorPlan,
+                    forKey: planKey,
+                    defaults: defaults)
+                return .failed
+            }
+            cachePreferenceValues(
+                [
+                    idCanonical: id.map(AccountPreferenceValue.string),
+                    planCanonical: plan.map(AccountPreferenceValue.string),
+                ],
+                binding: binding)
+            return .saved
+        }
+    }
+
+    private static func storedPreferenceValue(
+        forKey key: String,
+        matching expected: AccountPreferenceValue,
+        defaults: UserDefaults
+    ) -> AccountPreferenceValue? {
+        switch expected {
+        case .bool:
+            return (defaults.object(forKey: key) as? Bool).map(
+                AccountPreferenceValue.bool)
+        case .string:
+            return defaults.string(forKey: key).map(
+                AccountPreferenceValue.string)
+        case .double:
+            return (defaults.object(forKey: key) as? NSNumber).map {
+                .double($0.doubleValue)
+            }
+        case .boolDictionary:
+            return (defaults.dictionary(forKey: key) as? [String: Bool]).map(
+                AccountPreferenceValue.boolDictionary)
+        case .data:
+            return defaults.data(forKey: key).map(
+                AccountPreferenceValue.data)
+        }
+    }
+
+    private static func restorePreferenceValue(
+        _ value: Any?,
+        forKey key: String,
+        defaults: UserDefaults,
+        synchronize: Bool = true
+    ) {
+        if let value {
+            defaults.set(value, forKey: key)
+        } else {
+            defaults.removeObject(forKey: key)
+        }
+        if synchronize {
+            _ = defaults.synchronize()
+        }
+    }
+
+    static func cachePreferenceValue(
+        _ value: AccountPreferenceValue?,
+        forCanonicalKey key: String,
+        binding: ScopedPreferenceBinding
+    ) {
+        cachePreferenceValues([key: value], binding: binding)
+    }
+
+    private static func cachePreferenceValues(
+        _ changes: [String: AccountPreferenceValue?],
+        binding: ScopedPreferenceBinding
+    ) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard generation == binding.generation,
+              resolvedScope(cachedResolution) == binding.scope,
+              !deletionAdmissionBlockedLocked(binding.scope) else {
+            return
+        }
+        var values = cachedAccountPreferenceSnapshot?.values ?? [:]
+        for (key, value) in changes {
+            if let value {
+                values[key] = value
+            } else {
+                values.removeValue(forKey: key)
+            }
+        }
+        cachedAccountPreferenceSnapshot = AccountPreferenceSnapshot(
+            scope: binding.scope,
+            generation: binding.generation,
+            values: values)
+    }
+
     enum PreferenceStoreMutationAdmission {
         case acquired(ScopedPreferences)
         case stale
@@ -814,6 +1096,10 @@ public enum CaptureAccountScope {
         }
         let scoped = ScopedPreferences(scope: currentScope)
         stateLock.unlock()
+
+        guard isAccountScope(binding.scope) else {
+            return .acquired(scoped)
+        }
 
         // Durable admission follows the bounded in-process probes and must itself
         // be nonblocking: activation may hold the lifecycle store while waiting
@@ -1804,7 +2090,8 @@ public enum CaptureAccountScope {
     private static func installResolution(
         _ requestedResolution: Resolution,
         widgetOwner: String?,
-        identityTransition: Bool
+        identityTransition: Bool,
+        preferenceValues: [String: AccountPreferenceValue]? = nil
     ) {
         let publication: (resolution: Resolution, widgetOwner: String?)
         if case .account(let scope) = requestedResolution,
@@ -1818,11 +2105,19 @@ public enum CaptureAccountScope {
         cachedResolution = publication.resolution
         if identityTransition {
             generation &+= 1
-            cachedAccountPreferenceSnapshot = nil
             cachedSharedAdmissionScope = nil
             cachedSharedAdmissionCell = nil
         }
         let revision = generation
+        if let preferenceValues,
+           let scope = resolvedScope(publication.resolution) {
+            cachedAccountPreferenceSnapshot = AccountPreferenceSnapshot(
+                scope: scope,
+                generation: revision,
+                values: preferenceValues)
+        } else if identityTransition {
+            cachedAccountPreferenceSnapshot = nil
+        }
         stateLock.unlock()
         unlockPreferenceMutationGate()
 
@@ -2088,9 +2383,17 @@ public enum CaptureAccountScope {
         stateLock.unlock()
     }
 
-    static func activateForTests(_ identity: AuthIdentity) throws {
+    /// Publishes an account identity for fixtures. Preference activation is opt-in
+    /// so the accepted Task-1 snapshot/writer oracles retain their identity-only
+    /// setup; Task-6 feature worlds request the production activation path.
+    static func activateForTests(
+        _ identity: AuthIdentity,
+        activatePreferences: Bool = false
+    ) throws {
         let transaction = try beginActivation(for: identity)
-        try completeActivation(transaction)
+        try completeActivation(
+            transaction,
+            activatePreferences: activatePreferences)
     }
 
     /// Fixture-only account publication that bypasses UserDefaults durability. It

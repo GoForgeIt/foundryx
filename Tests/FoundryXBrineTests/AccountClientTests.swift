@@ -78,12 +78,27 @@ final class AccountClientTests: XCTestCase {
         XCTAssertFalse(ok, "a rejected POST must NOT be marked as done")
     }
 
-    func testOncePerAccountGateSelfHeals() {
-        let defaults = UserDefaults(suiteName: "account-client-tests-\(UUID().uuidString)")!
-        XCTAssertTrue(AccountClient.shouldPostSignup(account: "Nick@GoForgeIt.com", defaults: defaults))
-        AccountClient.markSignupPosted(account: "nick@goforgeit.com", defaults: defaults)
-        XCTAssertFalse(AccountClient.shouldPostSignup(account: "Nick@GoForgeIt.com", defaults: defaults),
-                       "gate is case-insensitive on the account")
-        XCTAssertTrue(AccountClient.shouldPostSignup(account: "other@goforgeit.com", defaults: defaults))
+    func testOncePerAccountGateUsesOnlyTheBoundScopedSnapshot() {
+        let pending = AccountPreferenceSnapshot(
+            scope: "acct-a",
+            generation: 41,
+            values: [
+                AccountPreferenceCatalog.signupPosted.canonicalKey: .bool(false),
+            ])
+        let completed = AccountPreferenceSnapshot(
+            scope: "acct-a",
+            generation: 41,
+            values: [
+                AccountPreferenceCatalog.signupPosted.canonicalKey: .bool(true),
+            ])
+
+        XCTAssertTrue(AccountClient.shouldPostSignup(
+            snapshot: pending, generation: 41))
+        XCTAssertFalse(AccountClient.shouldPostSignup(
+            snapshot: completed, generation: 41))
+        XCTAssertFalse(AccountClient.shouldPostSignup(
+            snapshot: pending, generation: 42))
+        XCTAssertFalse(AccountClient.shouldPostSignup(
+            snapshot: nil, generation: 41))
     }
 }

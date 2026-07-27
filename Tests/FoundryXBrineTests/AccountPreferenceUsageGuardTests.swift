@@ -31,7 +31,7 @@ final class AccountPreferenceUsageGuardTests: XCTestCase {
             Self.expectedAccountKeys)
         XCTAssertTrue(entries.allSatisfy {
             $0.classification == .account
-                && $0.activationState == .inactiveCompatibility
+                && $0.activationState == .active
         })
     }
 
@@ -111,10 +111,10 @@ final class AccountPreferenceUsageGuardTests: XCTestCase {
             violation.first?.keyOrUse,
             "foundryx.onboarding.completed")
         XCTAssertTrue(
-            violation.first?.reason.contains("outside") == true)
+            violation.first?.reason.contains("active") == true)
     }
 
-    func testInactiveCompatibilityAdapterIsTheOnlyRawAccountSeam() {
+    func testActiveCompatibilityAndDynamicSignupRawSeamsAreRejected() {
         let source = AccountPreferenceSourceFile(
             path: "Fixture/InactiveCompatibility.swift",
             text: """
@@ -137,9 +137,17 @@ final class AccountPreferenceUsageGuardTests: XCTestCase {
             }
             """)
 
+        let violations = AccountPreferenceUsageGuard.scan(sources: [source])
+        XCTAssertEqual(violations.count, 3)
+        XCTAssertTrue(violations.contains {
+            $0.keyOrUse == "foundryx.onboarding.completed"
+                && $0.reason.contains("active")
+        })
         XCTAssertEqual(
-            AccountPreferenceUsageGuard.scan(sources: [source]),
-            [])
+            violations.filter {
+                $0.keyOrUse == "legacySignupKey(for: account)"
+            }.count,
+            2)
     }
 
     func testActiveCatalogRejectsCompatibilityAndDynamicSignupSet() {
@@ -227,11 +235,37 @@ final class AccountPreferenceUsageGuardTests: XCTestCase {
                     defaults.object(forKey: "escaped.\\(identity)")
                 }
             }
+            enum CaptureAccountScope {
+                static let defaults: UserDefaults = .standard
+                static func storedPreferenceValue(
+                    forKey key: String,
+                    owner: String
+                ) {
+                    defaults.object(forKey: key)
+                    defaults.object(forKey: "escaped.\\(owner)")
+                }
+                static func mutateCheckoutPreferencePair(owner: String) {
+                    defaults.set(true, forKey: "escaped.\\(owner)")
+                }
+            }
+            enum AccountPreferenceActivationStore {
+                static let defaults: UserDefaults = .standard
+                static func explicitValues(
+                    entry: AccountPreferenceCatalogEntry,
+                    owner: String,
+                    key: (String) -> String
+                ) {
+                    defaults.object(forKey: key(entry.canonicalKey))
+                    defaults.object(forKey: "escaped.\\(owner)")
+                }
+            }
             """)
 
         let violations = AccountPreferenceUsageGuard.scan(sources: [source])
-        XCTAssertEqual(violations.count, 3)
-        XCTAssertEqual(Set(violations.map(\.line)), [5, 11, 17])
+        XCTAssertEqual(violations.count, 6)
+        XCTAssertEqual(
+            Set(violations.map(\.line)),
+            [5, 11, 17, 27, 30, 41])
     }
 
     func testDeletionOwnerCannotHideAnUnrelatedDynamicPreferenceRemoval() {
@@ -708,7 +742,7 @@ final class AccountPreferenceUsageGuardTests: XCTestCase {
             adoptionPolicy: first.adoptionPolicy,
             atomicGroup: first.atomicGroup,
             refreshOwner: first.refreshOwner,
-            activationState: .active)
+            activationState: .inactiveCompatibility)
         let source = AccountPreferenceSourceFile(
             path: "Fixture/Benign.swift",
             text: "import Foundation")

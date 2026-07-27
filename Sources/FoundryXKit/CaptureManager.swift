@@ -5632,7 +5632,7 @@ public enum OmiCaptureDesiredState: String, Sendable {
 }
 
 /// Immutable capture-runtime preferences resolved for one account generation.
-/// Installation remains an explicit dormant seam in Task 3.
+/// Task 6 installs this once into each capture owner after active publication.
 public struct CaptureAccountPreferenceSnapshot: Sendable, Equatable {
     public let binding: CaptureAccountScope.AccountBinding
     public let silenceGapSeconds: TimeInterval
@@ -5660,15 +5660,23 @@ public enum CaptureSettings {
 
     public static var silenceGapSeconds: TimeInterval {
         get {
-            switch AccountPreferenceCompatibilityStore().read(
+            switch AccountPreferences.read(
                 AccountPreferenceCatalog.captureSilenceGapSeconds)
             {
             case .value(let value) where value > 0: return value
-            default: return defaultGapSeconds
+            case .value: return defaultGapSeconds
+            case .absent:
+                // The only remaining compatibility read is the dormant
+                // locked/pending restoration path reserved for Task 7.
+                switch AccountPreferenceCompatibilityStore().read(
+                    AccountPreferenceCatalog.captureSilenceGapSeconds) {
+                case .value(let value) where value > 0: return value
+                default: return defaultGapSeconds
+                }
             }
         }
         set {
-            _ = AccountPreferenceCompatibilityStore().write(
+            _ = AccountPreferences.write(
                 newValue,
                 for: AccountPreferenceCatalog.captureSilenceGapSeconds)
         }
@@ -5682,25 +5690,64 @@ public enum CaptureSettings {
         set { UserDefaults.standard.set(newValue.rawValue, forKey: sourceKey) }
     }
 
-    /// The user's last ambient-capture intent. Default `.listening` on first-ever
-    /// launch (no stored value) — unchanged from today's behavior. Once the user
-    /// pauses/resumes, that choice is honored across restarts.
+    /// The account's last ambient-capture intent. Fresh and signed-out snapshots
+    /// materialize `.paused`; established owners adopt an explicit legacy choice.
     public static var omiCaptureDesiredState: OmiCaptureDesiredState {
         get {
-            switch AccountPreferenceCompatibilityStore().read(
+            switch AccountPreferences.read(
                 AccountPreferenceCatalog.captureOMIDesiredState)
             {
             case .value(let raw):
-                return OmiCaptureDesiredState(rawValue: raw) ?? .listening
+                return OmiCaptureDesiredState(rawValue: raw) ?? .paused
             case .absent:
-                return .listening
+                // Dormant locked/pending compatibility reader; normal, fresh,
+                // and signed-out activation snapshots always contain "paused".
+                switch AccountPreferenceCompatibilityStore().read(
+                    AccountPreferenceCatalog.captureOMIDesiredState) {
+                case .value(let raw):
+                    return OmiCaptureDesiredState(rawValue: raw) ?? .listening
+                case .absent:
+                    return .listening
+                }
             }
         }
         set {
-            _ = AccountPreferenceCompatibilityStore().write(
+            _ = AccountPreferences.write(
                 newValue.rawValue,
                 for: AccountPreferenceCatalog.captureOMIDesiredState)
         }
+    }
+
+    /// Normal/fresh/signed-out active snapshot. This is cache-only and performs
+    /// no identity or defaults resolution on frame delivery.
+    public static func snapshot(
+        binding: CaptureAccountScope.AccountBinding
+    ) -> CaptureAccountPreferenceSnapshot {
+        let gap: TimeInterval
+        switch AccountPreferences.read(
+            AccountPreferenceCatalog.captureSilenceGapSeconds) {
+        case .value(let value) where value > 0: gap = value
+        default: gap = defaultGapSeconds
+        }
+        let desired: OmiCaptureDesiredState
+        switch AccountPreferences.read(
+            AccountPreferenceCatalog.captureOMIDesiredState) {
+        case .value(let raw):
+            desired = OmiCaptureDesiredState(rawValue: raw) ?? .paused
+        case .absent:
+            desired = .paused
+        }
+        let overrides: [String: Bool]
+        switch AccountPreferences.read(
+            AccountPreferenceCatalog.captureSourceEnabledOverrides) {
+        case .value(let value): overrides = value
+        case .absent: overrides = [:]
+        }
+        return CaptureAccountPreferenceSnapshot(
+            binding: binding,
+            silenceGapSeconds: gap,
+            omiDesiredState: desired,
+            sourceEnabledOverrides: overrides)
     }
 
     /// Resolve the three dormant capture-runtime catalog entries through the

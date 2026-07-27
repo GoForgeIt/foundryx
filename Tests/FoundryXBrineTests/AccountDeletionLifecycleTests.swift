@@ -1315,7 +1315,9 @@ final class AccountDeletionLifecycleTests: XCTestCase {
             fixture.historicalSignupMarkerObject,
             "retirement must use sealed verified identity + owner + tombstone proofs")
 
-        try CaptureAccountScope.activateForTests(fixture.identityB)
+        try CaptureAccountScope.activateForTests(
+            fixture.identityB,
+            activatePreferences: true)
         let freshBindingB = try XCTUnwrap(
             CaptureAccountScope.currentAccountBinding())
         XCTAssertTrue(fixture.defaults.synchronize())
@@ -1347,6 +1349,8 @@ final class AccountDeletionLifecycleTests: XCTestCase {
             true)
         try fixture.seedFreshBState(as: freshBindingB)
         XCTAssertTrue(fixture.freshBStateExists(as: freshBindingB))
+        let controlsBeforeSecondDeletion =
+            fixture.snapshotPreservedControls()
 
         let later = try await fixture.lifecycle.begin(
             binding: freshBindingB)
@@ -1354,7 +1358,9 @@ final class AccountDeletionLifecycleTests: XCTestCase {
         XCTAssertEqual(later.phase, .completed)
         XCTAssertGreaterThan(later.deletionEpoch, record.deletionEpoch)
         XCTAssertTrue(fixture.allScopedBInputsAreAbsent)
-        XCTAssertEqual(fixture.snapshotPreservedControls(), controls)
+        XCTAssertEqual(
+            fixture.snapshotPreservedControls(),
+            controlsBeforeSecondDeletion)
         XCTAssertTrue(fixture.defaults.synchronize())
         XCTAssertTrue(fixture.signedInMirrorIsDurablyFalse)
         XCTAssertFalse(FoundryAuth.hasPersistedSignIn)

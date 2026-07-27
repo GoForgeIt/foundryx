@@ -310,6 +310,14 @@ public enum AccountPreferenceUsageGuard {
                 constants.removeValue(forKey: "key")
                 constants.removeValue(forKey: "activeOwnerKey")
             }
+            if context.type == "CaptureAccountScope",
+               ["storedPreferenceValue", "restorePreferenceValue"]
+                .contains(context.method) {
+                // `key` is the typed seam's method parameter. A same-named
+                // declaration elsewhere in this large owner must not be
+                // substituted for it by the file-wide constant resolver.
+                constants.removeValue(forKey: "key")
+            }
             let resolved = resolve(
                 expression,
                 constants: constants)
@@ -488,10 +496,45 @@ public enum AccountPreferenceUsageGuard {
                     return nil
                 }
             }
-            if context.type == "AccountPreferenceCompatibilityStore",
-               entries.values.allSatisfy({
-                   $0.activationState == .inactiveCompatibility
-               }) {
+            if context.type == "AccountPreferenceActivationStore",
+               let enclosingMethod = context.method {
+                let allowedMethods = [
+                    "explicitValues", "persist", "storedValue",
+                ]
+                let allowedUses = [
+                    "key(entry.canonicalKey)",
+                    "scoped.key(entry.canonicalKey)",
+                    "scoped.key($0.canonicalKey)",
+                    "storageKey",
+                    "key",
+                ]
+                if allowedMethods.contains(enclosingMethod),
+                   allowedUses.contains(compactUse) {
+                    return nil
+                }
+            }
+            if context.type == "CaptureAccountScope",
+               let enclosingMethod = context.method {
+                let allowedMethods = [
+                    "writeAccountPreference",
+                    "removeAccountPreference",
+                    "mutateCheckoutPreferencePair",
+                    "storedPreferenceValue",
+                    "restorePreferenceValue",
+                ]
+                let allowedUses = [
+                    "scoped.key(key.canonicalKey)",
+                    "scoped.key(idCanonical)",
+                    "scoped.key(planCanonical)",
+                    "storageKey",
+                    "key",
+                ]
+                if allowedMethods.contains(enclosingMethod),
+                   allowedUses.contains(compactUse) {
+                    return nil
+                }
+            }
+            if context.type == "AccountPreferenceCompatibilityStore" {
                 let genericMethods = [
                     "read", "write", "remove",
                     "clearLegacyCheckoutAttempt",
@@ -508,11 +551,17 @@ public enum AccountPreferenceUsageGuard {
                    genericUses.contains(compactUse) {
                     return nil
                 }
-                if context.method == "legacySignupPosted",
+                if entries.values.allSatisfy({
+                    $0.activationState == .inactiveCompatibility
+                }),
+                   context.method == "legacySignupPosted",
                    compactUse == "legacySignupKey(for:account)" {
                     return nil
                 }
-                if context.method == "markLegacySignupPosted",
+                if entries.values.allSatisfy({
+                    $0.activationState == .inactiveCompatibility
+                }),
+                   context.method == "markLegacySignupPosted",
                    compactUse == "legacySignupKey(for:account)" {
                     return nil
                 }

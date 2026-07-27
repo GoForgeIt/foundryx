@@ -154,3 +154,52 @@ Feature: My recordings belong to my account, not to the phone
     When a developer adds a saved choice without declaring its ownership
     Then the build fails
     And it identifies the file and saved choice that need classification
+
+  Scenario: a second account receives its own first run
+    Given the first account completed welcome and onboarding on this phone
+    When the second account signs in on the same phone
+    Then the second account receives its own welcome
+    And first run asks for its owner voice and ambient consent
+    And it starts with the individual persona and ambient intelligence off
+    And wearable capture starts paused
+
+  Scenario: the current owner's choices survive the update
+    Given onboarding, welcome, persona, and ambient choices exist from before the update
+    When that owner signs in after the update
+    Then that owner's welcome and onboarding remain complete
+    And their persona, ambient consent, grading choice, agent name, and attribution choice are unchanged
+    And the pre-update choices remain recoverable rather than being deleted
+
+  Scenario: each account's choices return after every switch
+    Given two accounts have different first-run, ambient, Vault, brain, waitlist, and capture choices
+    When I switch from the first account to the second and back again
+    Then each account sees only its own choices
+    And per-source enablement follows the account
+    But paired hardware, the active capture source, Action Button choice, and diagnostics remain with the phone
+
+  Scenario: free on-device use never claims an account's choices
+    Given an established account has saved choices on this phone
+    When FoundryX remains signed out for free on-device use
+    Then free on-device use continues with safe signed-out choices
+    And the established account's choices are neither shown, changed, nor deleted
+
+  Scenario: account transitions remain responsive and never lose a choice silently
+    Given the first account is signed in with its own choices
+    When the first account signs out and the second account signs in while the switch is still finishing
+    Then sign-out returns to the welcome without hanging
+    And the second account's first run appears without hanging
+    And a choice made during the switch is saved for its intended account or the app visibly asks me to retry
+    And that choice is never written to another account
+
+  Scenario: owner voice never implies grading consent
+    Given an established account enrolled its owner voice
+    And it has never chosen whether raw conversation context may be graded
+    When that account signs in after the update
+    Then raw conversation context is not graded or sent
+    And grading remains off until the owner explicitly turns it on
+
+  Scenario: my wearable pause choice survives a relaunch
+    Given my account has wearable capture listening
+    When I pause wearable capture and relaunch the app
+    Then wearable capture remains paused
+    And the paused choice is stored only with my account

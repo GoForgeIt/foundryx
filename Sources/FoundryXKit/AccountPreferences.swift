@@ -49,7 +49,7 @@ public enum AccountPreferenceValue: Sendable, Equatable {
         }
     }
 
-    fileprivate var defaultsValue: Any {
+    var defaultsValue: Any {
         switch self {
         case .bool(let value): return value
         case .string(let value): return value
@@ -261,7 +261,7 @@ public enum AccountPreferenceCatalog {
             adoptionPolicy: adoptionPolicy,
             atomicGroup: atomicGroup,
             refreshOwner: refreshOwner,
-            activationState: .inactiveCompatibility)
+            activationState: .active)
     }
 }
 
@@ -339,6 +339,265 @@ public struct AccountPreferenceAdoptionResult: Sendable, Equatable {
         self.adoptedValues = adoptedValues
         self.adoptedGroups = adoptedGroups
         self.skippedKeys = skippedKeys
+    }
+}
+
+/// Pure Task-6 activation planner. It resolves one complete immutable snapshot
+/// before the owner can be published active. Legacy inputs are read-only; callers
+/// persist only the returned scoped values.
+enum AccountPreferenceAdoptionPlanner {
+    static func resolve(
+        _ snapshot: AccountPreferenceAdoptionSnapshot,
+        existingValues: [String: AccountPreferenceValue],
+        establishedLegacyOwner: Bool
+    ) -> AccountPreferenceAdoptionResult {
+        var values = validValues(existingValues)
+        var adoptedGroups: Set<AccountPreferenceAtomicGroup> = []
+        var skippedKeys: Set<String> = []
+
+        let checkoutEntries = AccountPreferenceCatalog.entries(
+            in: .vaultCheckout)
+        for entry in checkoutEntries {
+            values.removeValue(forKey: entry.canonicalKey)
+        }
+        if let pair = validCheckout(in: existingValues) {
+            values.merge(pair) { current, _ in current }
+        } else if establishedLegacyOwner,
+                  let pair = validCheckout(in: snapshot.legacyValues) {
+            values.merge(pair) { current, _ in current }
+            adoptedGroups.insert(.vaultCheckout)
+        } else if checkoutEntries.contains(where: {
+            snapshot.legacyValues[$0.canonicalKey] != nil
+        }) {
+            skippedKeys.formUnion(checkoutEntries.map(\.canonicalKey))
+        }
+
+        for entry in AccountPreferenceCatalog.entries
+            where entry.atomicGroup != .vaultCheckout {
+            let key = entry.canonicalKey
+            if values[key] != nil { continue }
+
+            if establishedLegacyOwner {
+                switch entry.adoptionPolicy {
+                case .copyExplicit, .copyValid, .copyEstablishedExplicit:
+                    if let value = validValue(
+                        snapshot.legacyValues[key], for: entry) {
+                        values[key] = value
+                        adoptedGroups.insert(entry.atomicGroup)
+                    } else if snapshot.legacyValues[key] != nil {
+                        skippedKeys.insert(key)
+                    }
+                case .copyExplicitOrMaterializeFalse:
+                    values[key] = validValue(
+                        snapshot.legacyValues[key], for: entry)
+                        ?? .bool(false)
+                    adoptedGroups.insert(entry.atomicGroup)
+                case .sealedLegacySnapshot:
+                    if snapshot.legacySignupPosted == .value(true) {
+                        values[key] = .bool(true)
+                        adoptedGroups.insert(entry.atomicGroup)
+                    }
+                case .neverCopy:
+                    if snapshot.legacyValues[key] != nil {
+                        skippedKeys.insert(key)
+                    }
+                case .copyCompleteAtomicGroup:
+                    break
+                }
+            } else if snapshot.legacyValues[key] != nil
+                        || (
+                            entry.adoptionPolicy == .sealedLegacySnapshot
+                                && snapshot.legacySignupPosted != .absent
+                        ) {
+                skippedKeys.insert(key)
+            }
+
+            guard values[key] == nil,
+                  entry.adoptionPolicy != .sealedLegacySnapshot else {
+                continue
+            }
+            if establishedLegacyOwner,
+               key == AccountPreferenceCatalog.brainChoice.canonicalKey {
+                // Preserve the pre-picker paired-desktop migration signal:
+                // absence means this established owner never chose. Fresh owners
+                // still materialize the phone default below.
+                continue
+            }
+            switch entry.freshDefault {
+            case .value(let value), .explicit(let value):
+                values[key] = value
+            case .absent, .coldEmpty:
+                break
+            }
+        }
+
+        return AccountPreferenceAdoptionResult(
+            scope: snapshot.scope,
+            generation: snapshot.generation,
+            adoptedValues: values,
+            adoptedGroups: adoptedGroups,
+            skippedKeys: skippedKeys)
+    }
+
+    private static func validValues(
+        _ candidates: [String: AccountPreferenceValue]
+    ) -> [String: AccountPreferenceValue] {
+        var values: [String: AccountPreferenceValue] = [:]
+        for entry in AccountPreferenceCatalog.entries
+            where entry.atomicGroup != .vaultCheckout {
+            if let value = validValue(
+                candidates[entry.canonicalKey], for: entry) {
+                values[entry.canonicalKey] = value
+            }
+        }
+        return values
+    }
+
+    private static func validCheckout(
+        in values: [String: AccountPreferenceValue]
+    ) -> [String: AccountPreferenceValue]? {
+        let idKey =
+            AccountPreferenceCatalog.vaultCheckoutAttemptID.canonicalKey
+        let planKey =
+            AccountPreferenceCatalog.vaultCheckoutAttemptPlan.canonicalKey
+        guard case .string(let id)? = values[idKey],
+              !id.isEmpty,
+              case .string(let plan)? = values[planKey],
+              ["starter", "pro", "power"].contains(plan) else {
+            return nil
+        }
+        return [idKey: .string(id), planKey: .string(plan)]
+    }
+
+    static func validValue(
+        _ value: AccountPreferenceValue?,
+        for entry: AccountPreferenceCatalogEntry
+    ) -> AccountPreferenceValue? {
+        guard let value else { return nil }
+        switch entry.canonicalKey {
+        case AccountPreferenceCatalog.onboardingPersona.canonicalKey:
+            guard case .string(let raw) = value,
+                  ["expert", "individual", "firm"].contains(raw) else {
+                return nil
+            }
+            return value
+        case AccountPreferenceCatalog.ambientAgentName.canonicalKey:
+            guard case .string(let name) = value,
+                  !name.trimmingCharacters(
+                    in: .whitespacesAndNewlines).isEmpty else {
+                return nil
+            }
+            return value
+        case AccountPreferenceCatalog.brainChoice.canonicalKey:
+            guard case .string(let raw) = value,
+                  ["phone", "computer", "cloud"].contains(raw) else {
+                return nil
+            }
+            return value
+        case AccountPreferenceCatalog.captureSilenceGapSeconds.canonicalKey:
+            guard case .double(let seconds) = value, seconds > 0 else {
+                return nil
+            }
+            return value
+        case AccountPreferenceCatalog.captureOMIDesiredState.canonicalKey:
+            guard case .string(let raw) = value,
+                  ["listening", "paused"].contains(raw) else {
+                return nil
+            }
+            return value
+        case AccountPreferenceCatalog.vaultCheckoutAttemptID.canonicalKey,
+             AccountPreferenceCatalog.vaultCheckoutAttemptPlan.canonicalKey:
+            return nil
+        default:
+            switch (entry.valueKind, value) {
+            case (.bool, .bool),
+                 (.string, .string),
+                 (.double, .double),
+                 (.boolDictionary, .boolDictionary),
+                 (.data, .data):
+                return value
+            default:
+                return nil
+            }
+        }
+    }
+}
+
+/// Cache-only live facade used by the production owners after Task 6. Reads never
+/// touch defaults or identity persistence. Writes carry the initiating generation
+/// through the existing preference mutation gate.
+public enum AccountPreferences {
+    static func currentSnapshot() -> AccountPreferenceSnapshot? {
+        CaptureAccountScope.currentAccountPreferenceSnapshot()
+    }
+
+    public static func read<Value: Sendable & Equatable>(
+        _ key: AccountPreferenceKey<Value>
+    ) -> AccountPreferencePresence<Value> {
+        CaptureAccountScope.currentAccountPreferenceSnapshot()?
+            .presence(for: key) ?? .absent
+    }
+
+    public static func value<Value: Sendable & Equatable>(
+        _ key: AccountPreferenceKey<Value>,
+        default fallback: Value
+    ) -> Value {
+        guard case .value(let value) = read(key) else { return fallback }
+        return value
+    }
+
+    @discardableResult
+    public static func write<Value>(
+        _ value: Value,
+        for key: AccountPreferenceKey<Value>,
+        generation: UInt64? = nil
+    ) -> AccountPreferenceWriteResult {
+        guard let entry = AccountPreferenceCatalog.entries.first(where: {
+            $0.canonicalKey == key.canonicalKey
+        }),
+              entry.atomicGroup != .vaultCheckout,
+              let encoded = AccountPreferenceValue.encode(value),
+              AccountPreferenceAdoptionPlanner.validValue(
+                encoded, for: entry) != nil else {
+            return .rejected
+        }
+        return CaptureAccountScope.writeAccountPreference(
+            value,
+            for: key,
+            expectedGeneration: generation)
+    }
+
+    @discardableResult
+    public static func remove<Value>(
+        _ key: AccountPreferenceKey<Value>,
+        generation: UInt64? = nil
+    ) -> AccountPreferenceWriteResult {
+        guard !AccountPreferenceCatalog.entries(
+            in: .vaultCheckout
+        ).contains(where: { $0.canonicalKey == key.canonicalKey }) else {
+            return .rejected
+        }
+        return CaptureAccountScope.removeAccountPreference(
+            key,
+            expectedGeneration: generation)
+    }
+
+    public static func writeCheckoutAttempt(
+        id: String,
+        plan: String,
+        generation: UInt64? = nil
+    ) -> AccountPreferenceWriteResult {
+        CaptureAccountScope.writeCheckoutPreferencePair(
+            id: id,
+            plan: plan,
+            expectedGeneration: generation)
+    }
+
+    public static func clearCheckoutAttempt(
+        generation: UInt64? = nil
+    ) -> AccountPreferenceWriteResult {
+        CaptureAccountScope.clearCheckoutPreferencePair(
+            expectedGeneration: generation)
     }
 }
 
@@ -486,6 +745,11 @@ public final class AccountPreferenceWriteStore: @unchecked Sendable {
         for key: AccountPreferenceKey<Value>,
         as binding: ScopedPreferenceBinding
     ) -> AccountPreferenceWriteAcknowledgement {
+        guard !AccountPreferenceCatalog.entries(
+            in: .vaultCheckout
+        ).contains(where: { $0.canonicalKey == key.canonicalKey }) else {
+            return .init(status: .rejected)
+        }
         guard let encoded = AccountPreferenceValue.encode(value) else {
             return .init(status: .unresolved)
         }
@@ -526,6 +790,10 @@ public final class AccountPreferenceWriteStore: @unchecked Sendable {
                 restore(priorValue, forKey: scopedKey)
                 return .init(status: .failed)
             }
+            CaptureAccountScope.cachePreferenceValue(
+                encoded,
+                forCanonicalKey: key.canonicalKey,
+                binding: binding)
             return .init(
                 status: .saved,
                 scopedKey: scopedKey,
@@ -616,6 +884,143 @@ public struct AccountPreferenceCompatibilityContext: Sendable, Equatable {
     ) {
         self.ownerVoiceEnrolled = ownerVoiceEnrolled
         self.hasPairedDesktop = hasPairedDesktop
+    }
+}
+
+enum AccountPreferenceActivationStore {
+    static func prepare(
+        scope: String,
+        generation: UInt64,
+        identity: AuthIdentity?,
+        establishedLegacyOwner: Bool,
+        defaults: UserDefaults
+    ) throws -> AccountPreferenceAdoptionResult {
+        let scoped = CaptureAccountScope.ScopedPreferences(scope: scope)
+        let existing = explicitValues(
+            defaults: defaults,
+            key: { scoped.key($0) })
+        let legacy = establishedLegacyOwner
+            ? explicitValues(defaults: defaults, key: { $0 })
+            : [:]
+        let legacySignup: AccountPreferencePresence<Bool>
+        if establishedLegacyOwner, let identity {
+            legacySignup = LegacySignupMarkerMigration.snapshotForActivation(
+                identity: identity,
+                ownerScope: scope,
+                generation: generation,
+                durableLegacyOwnerScope: scope,
+                defaults: defaults)
+        } else {
+            legacySignup = .absent
+        }
+        let plan = AccountPreferenceAdoptionPlanner.resolve(
+            .init(
+                scope: scope,
+                generation: generation,
+                legacyValues: legacy,
+                legacySignupPosted: legacySignup),
+            existingValues: existing,
+            establishedLegacyOwner: establishedLegacyOwner)
+        try persist(
+            plan.adoptedValues,
+            scoped: scoped,
+            defaults: defaults)
+        return plan
+    }
+
+    private static func explicitValues(
+        defaults: UserDefaults,
+        key: (String) -> String
+    ) -> [String: AccountPreferenceValue] {
+        var values: [String: AccountPreferenceValue] = [:]
+        for entry in AccountPreferenceCatalog.entries {
+            let storageKey = key(entry.canonicalKey)
+            guard defaults.object(forKey: storageKey) != nil,
+                  let value = storedValue(
+                    defaults: defaults,
+                    key: storageKey,
+                    kind: entry.valueKind) else {
+                continue
+            }
+            if entry.atomicGroup == .vaultCheckout {
+                values[entry.canonicalKey] = value
+            } else if let valid =
+                        AccountPreferenceAdoptionPlanner.validValue(
+                            value,
+                            for: entry) {
+                values[entry.canonicalKey] = valid
+            }
+        }
+        return values
+    }
+
+    private static func persist(
+        _ values: [String: AccountPreferenceValue],
+        scoped: CaptureAccountScope.ScopedPreferences,
+        defaults: UserDefaults
+    ) throws {
+        var prior: [String: Any] = [:]
+        var absentBefore: Set<String> = []
+        for entry in AccountPreferenceCatalog.entries {
+            let storageKey = scoped.key(entry.canonicalKey)
+            if let value = defaults.object(forKey: storageKey) {
+                prior[entry.canonicalKey] = value
+            } else {
+                absentBefore.insert(entry.canonicalKey)
+            }
+            if let value = values[entry.canonicalKey] {
+                defaults.set(value.defaultsValue, forKey: storageKey)
+            } else {
+                defaults.removeObject(forKey: storageKey)
+            }
+        }
+
+        guard defaults.synchronize(),
+              explicitValues(
+                defaults: defaults,
+                key: { scoped.key($0) }) == values,
+              AccountPreferenceCatalog.entries.allSatisfy({
+                values[$0.canonicalKey] != nil
+                    || defaults.object(
+                        forKey: scoped.key($0.canonicalKey)) == nil
+              }) else {
+            for entry in AccountPreferenceCatalog.entries {
+                let storageKey = scoped.key(entry.canonicalKey)
+                if let value = prior[entry.canonicalKey] {
+                    defaults.set(value, forKey: storageKey)
+                } else if absentBefore.contains(entry.canonicalKey) {
+                    defaults.removeObject(forKey: storageKey)
+                }
+            }
+            _ = defaults.synchronize()
+            throw CaptureAccountScopeError.activationState(
+                "account preferences could not be atomically persisted and read back")
+        }
+    }
+
+    private static func storedValue(
+        defaults: UserDefaults,
+        key: String,
+        kind: AccountPreferenceValueKind
+    ) -> AccountPreferenceValue? {
+        switch kind {
+        case .bool:
+            return (defaults.object(forKey: key) as? Bool).map(
+                AccountPreferenceValue.bool)
+        case .string:
+            return defaults.string(forKey: key).map(
+                AccountPreferenceValue.string)
+        case .double:
+            return (defaults.object(forKey: key) as? NSNumber).map {
+                .double($0.doubleValue)
+            }
+        case .boolDictionary:
+            return (defaults.dictionary(forKey: key) as? [String: Bool]).map(
+                AccountPreferenceValue.boolDictionary)
+        case .data:
+            return defaults.data(forKey: key).map(
+                AccountPreferenceValue.data)
+        }
     }
 }
 
@@ -737,24 +1142,6 @@ public final class AccountPreferenceCompatibilityStore: @unchecked Sendable {
         defaults.string(forKey: key.canonicalKey) != nil
     }
 
-    public func legacySignupPosted(for account: String) -> Bool {
-        defaults.bool(forKey: legacySignupKey(for: account))
-    }
-
-    public func markLegacySignupPosted(
-        for account: String
-    ) -> AccountPreferenceWriteResult {
-        let key = legacySignupKey(for: account)
-        if defaults.object(forKey: key) != nil,
-           defaults.bool(forKey: key) {
-            return .saved
-        }
-        return persist(
-            true,
-            forKey: key,
-            exactReadback: .bool(true))
-    }
-
     private func legacyValue(
         for key: String,
         context: AccountPreferenceCompatibilityContext
@@ -836,10 +1223,6 @@ public final class AccountPreferenceCompatibilityStore: @unchecked Sendable {
         default:
             return nil
         }
-    }
-
-    private func legacySignupKey(for account: String) -> String {
-        "foundryx.account.signup-posted.\(account.lowercased())"
     }
 
     private func persist(
@@ -966,8 +1349,6 @@ struct LegacySignupMarkerMigration {
         }
     }
 
-    private static let historicalPrefix =
-        "foundryx.account.signup-posted."
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -982,16 +1363,15 @@ struct LegacySignupMarkerMigration {
         defaults: UserDefaults
     ) -> AccountPreferenceWriteResult {
         guard durableLegacyOwnerScope == ownerScope,
-              let email = identity.email?.trimmingCharacters(
-                in: .whitespacesAndNewlines).lowercased(),
-              !email.isEmpty else {
+              let historicalIdentity = historicalCanonicalIdentity(identity)
+        else {
             return .rejected
         }
-        let identity = VerifiedIdentity.verified(email)
+        let identity = VerifiedIdentity.verified(historicalIdentity)
         let ownerProof = DurableLegacyOwnerProof.proven(
             scope: ownerScope,
             generation: generation,
-            historicalCanonicalIdentity: email)
+            historicalCanonicalIdentity: historicalIdentity)
         let tombstone = DeletionTombstoneProof.proven(
             scope: ownerScope, generation: generation)
         return Self(defaults: defaults).retire(
@@ -1008,18 +1388,39 @@ struct LegacySignupMarkerMigration {
         defaults: UserDefaults
     ) -> Bool {
         guard durableLegacyOwnerScope == ownerScope,
-              let email = identity.email?.trimmingCharacters(
-                in: .whitespacesAndNewlines).lowercased(),
-              !email.isEmpty else {
+              let historicalIdentity = historicalCanonicalIdentity(identity)
+        else {
             return false
         }
-        let verified = VerifiedIdentity.verified(email)
+        let verified = VerifiedIdentity.verified(historicalIdentity)
         let proof = DurableLegacyOwnerProof.proven(
             scope: ownerScope,
             generation: generation,
-            historicalCanonicalIdentity: email)
+            historicalCanonicalIdentity: historicalIdentity)
         return Self(defaults: defaults).snapshot(
             identity: verified, ownerProof: proof) == .absent
+    }
+
+    static func snapshotForActivation(
+        identity: AuthIdentity,
+        ownerScope: String,
+        generation: UInt64,
+        durableLegacyOwnerScope: String?,
+        defaults: UserDefaults
+    ) -> AccountPreferencePresence<Bool> {
+        guard durableLegacyOwnerScope == ownerScope,
+              let historicalIdentity = historicalCanonicalIdentity(identity)
+        else {
+            return .absent
+        }
+        let verified = VerifiedIdentity.verified(historicalIdentity)
+        let proof = DurableLegacyOwnerProof.proven(
+            scope: ownerScope,
+            generation: generation,
+            historicalCanonicalIdentity: historicalIdentity)
+        return Self(defaults: defaults).snapshot(
+            identity: verified,
+            ownerProof: proof)
     }
 
     func snapshot(
@@ -1055,14 +1456,25 @@ struct LegacySignupMarkerMigration {
     }
 
     private func historicalKey(_ identity: VerifiedIdentity) -> String {
-        Self.historicalPrefix + identity.historicalCanonicalIdentity
+        "foundryx.account.signup-posted.\(identity.historicalCanonicalIdentity)"
+    }
+
+    private static func historicalCanonicalIdentity(
+        _ identity: AuthIdentity
+    ) -> String? {
+        identity.email?.lowercased()
     }
 }
 
 public enum WaitlistPrefs {
+    public static func joined() -> Bool {
+        AccountPreferences.value(
+            AccountPreferenceCatalog.waitlistJoined,
+            default: false)
+    }
+
     public static func joined(
-        compatibility: AccountPreferenceCompatibilityStore =
-            AccountPreferenceCompatibilityStore()
+        compatibility: AccountPreferenceCompatibilityStore
     ) -> Bool {
         compatibility.read(AccountPreferenceCatalog.waitlistJoined)
             == .value(true)
@@ -1070,8 +1482,17 @@ public enum WaitlistPrefs {
 
     @discardableResult
     public static func markJoined(
-        compatibility: AccountPreferenceCompatibilityStore =
-            AccountPreferenceCompatibilityStore(),
+        generation: UInt64
+    ) -> AccountPreferenceWriteResult {
+        AccountPreferences.write(
+            true,
+            for: AccountPreferenceCatalog.waitlistJoined,
+            generation: generation)
+    }
+
+    @discardableResult
+    public static func markJoined(
+        compatibility: AccountPreferenceCompatibilityStore,
         generation: UInt64
     ) -> AccountPreferenceWriteResult {
         _ = generation
@@ -1083,8 +1504,16 @@ public enum WaitlistPrefs {
     @discardableResult
     public static func completePost(
         succeeded: Bool,
-        compatibility: AccountPreferenceCompatibilityStore =
-            AccountPreferenceCompatibilityStore(),
+        generation: UInt64
+    ) -> AccountPreferenceWriteResult {
+        guard succeeded else { return .rejected }
+        return markJoined(generation: generation)
+    }
+
+    @discardableResult
+    public static func completePost(
+        succeeded: Bool,
+        compatibility: AccountPreferenceCompatibilityStore,
         generation: UInt64
     ) -> AccountPreferenceWriteResult {
         guard succeeded else { return .rejected }

@@ -285,46 +285,21 @@ final class AccountPreferenceOwnerRoutingTests: XCTestCase {
             models,
             "Task 2 keeps the shared stale completion warm")
 
-        let account = " Owner@Example.COM "
         defaults.set(
             true,
             forKey: AccountPreferenceCatalog.signupPosted.canonicalKey)
-        XCTAssertTrue(
-            AccountClient.shouldPostSignup(
-                account: account,
-                compatibility: compatibility,
-                generation: initiatingGeneration),
-            "the static future key is ignored during compatibility")
         XCTAssertEqual(
-            AccountClient.completeSignupPost(
-                succeeded: false,
-                account: account,
-                compatibility: compatibility,
-                generation: initiatingGeneration),
+            compatibility.read(AccountPreferenceCatalog.signupPosted),
+            .absent)
+        XCTAssertEqual(
+            compatibility.write(
+                true,
+                for: AccountPreferenceCatalog.signupPosted),
             .rejected)
-        XCTAssertTrue(
-            AccountClient.shouldPostSignup(
-                account: account,
-                compatibility: compatibility,
-                generation: laterGeneration),
-            "a failed delayed POST must remain retryable")
         XCTAssertEqual(
-            AccountClient.completeSignupPost(
-                succeeded: true,
-                account: account,
-                compatibility: compatibility,
-                generation: initiatingGeneration),
-            .saved)
-        XCTAssertFalse(
-            AccountClient.shouldPostSignup(
-                account: account,
-                compatibility: compatibility,
-                generation: laterGeneration))
-        XCTAssertNotNil(
-            defaults.object(
-                forKey:
-                    "foundryx.account.signup-posted. owner@example.com "),
-            "historical lowercase normalization must not trim")
+            compatibility.remove(AccountPreferenceCatalog.signupPosted),
+            .rejected,
+            "normal compatibility has no dynamic signup write after activation")
     }
 
     func testCheckoutLegacyEmptyAndPartialShapesRemainPinned() throws {
@@ -397,7 +372,7 @@ final class AccountPreferenceOwnerRoutingTests: XCTestCase {
         }
     }
 
-    func testGenerationPlumbingIsPresentButCompatibilityOwnersStayDormant()
+    func testGenerationPlumbingUsesActiveOwnerForms()
         throws
     {
         let expectedGenerationForms: [String: [String]] = [
@@ -411,13 +386,11 @@ final class AccountPreferenceOwnerRoutingTests: XCTestCase {
             "Sources/FoundryXKit/RemoteSession.swift": [
                 "postSignup(idToken:token,name:auth.signedInName,"
                     + "generation:requestedGeneration)",
-                "completeSignupPost(succeeded:succeeded,account:account,"
-                    + "compatibility:signupCompatibility,"
+                "completeSignupPost(succeeded:succeeded,"
                     + "generation:requestedGeneration)",
             ],
             "App/ChatScreen.swift": [
                 "ModelCache.save(fetched,"
-                    + "compatibility:AccountPreferenceCompatibilityStore(),"
                     + "generation:accountBinding.generation)",
             ],
             "App/LocalChatScreen.swift": [
@@ -470,7 +443,7 @@ final class AccountPreferenceOwnerRoutingTests: XCTestCase {
             XCTAssertFalse(text.contains("AccountPreferenceAdoption"), path)
         }
         XCTAssertTrue(AccountPreferenceCatalog.entries.allSatisfy {
-            $0.activationState == .inactiveCompatibility
+            $0.activationState == .active
         })
     }
 
@@ -540,7 +513,7 @@ final class AccountPreferenceOwnerRoutingTests: XCTestCase {
                 + violations.joined(separator: "\n"))
     }
 
-    func testHistoricalSignupPrefixIsConfinedToSealedMigrationAndCompatibilityHelper()
+    func testHistoricalSignupPrefixIsConfinedToSealedMigration()
         throws
     {
         let accountPreferences = try source(
@@ -582,12 +555,6 @@ final class AccountPreferenceOwnerRoutingTests: XCTestCase {
                 sourceText = sourceText.replacingOccurrences(
                     of: migration,
                     with: "")
-                let compatibilityHelper = try functionBlock(
-                    named: "legacySignupKey",
-                    in: sourceText)
-                sourceText = sourceText.replacingOccurrences(
-                    of: compatibilityHelper,
-                    with: "")
             }
             if sourceText.contains("foundryx.account.signup-posted.") {
                 disallowedPrefixFiles.append(path)
@@ -596,7 +563,7 @@ final class AccountPreferenceOwnerRoutingTests: XCTestCase {
         XCTAssertEqual(
             disallowedPrefixFiles,
             [],
-            "historical dynamic-key derivation escaped its two sealed helpers")
+            "historical dynamic-key derivation escaped the sealed migration")
     }
 
     private var repositoryRoot: URL {

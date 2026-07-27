@@ -109,52 +109,35 @@ public struct AccountClient: Sendable {
 
     // ── once-per-account gating (pure, tested) ──────────────────────────────
 
-    /// True when a signup POST should fire for this sign-in.
-    public static func shouldPostSignup(account: String, defaults: UserDefaults = .standard) -> Bool {
+    /// True only for the currently active generation when its scoped completion
+    /// marker is not true. Identity is deliberately not accepted here: activation
+    /// sealed the sole historical dynamic read into the scoped snapshot.
+    public static func shouldPostSignup(generation: UInt64) -> Bool {
         shouldPostSignup(
-            account: account,
-            compatibility: .init(defaults: defaults),
-            generation: 0)
+            snapshot: AccountPreferences.currentSnapshot(),
+            generation: generation)
     }
 
     public static func shouldPostSignup(
-        account: String,
-        compatibility: AccountPreferenceCompatibilityStore,
+        snapshot: AccountPreferenceSnapshot?,
         generation: UInt64
     ) -> Bool {
-        _ = generation
-        return !compatibility.legacySignupPosted(for: account)
-    }
-
-    public static func markSignupPosted(account: String, defaults: UserDefaults = .standard) {
-        _ = markSignupPosted(
-            account: account,
-            compatibility: .init(defaults: defaults),
-            generation: 0)
-    }
-
-    @discardableResult
-    public static func markSignupPosted(
-        account: String,
-        compatibility: AccountPreferenceCompatibilityStore,
-        generation: UInt64
-    ) -> AccountPreferenceWriteResult {
-        _ = generation
-        return compatibility.markLegacySignupPosted(for: account)
+        guard let snapshot, snapshot.generation == generation else {
+            return false
+        }
+        return snapshot.presence(
+            for: AccountPreferenceCatalog.signupPosted) != .value(true)
     }
 
     @discardableResult
     public static func completeSignupPost(
         succeeded: Bool,
-        account: String,
-        compatibility: AccountPreferenceCompatibilityStore =
-            AccountPreferenceCompatibilityStore(),
         generation: UInt64
     ) -> AccountPreferenceWriteResult {
         guard succeeded else { return .rejected }
-        return markSignupPosted(
-            account: account,
-            compatibility: compatibility,
+        return AccountPreferences.write(
+            true,
+            for: AccountPreferenceCatalog.signupPosted,
             generation: generation)
     }
 }

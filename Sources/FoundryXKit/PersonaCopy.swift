@@ -111,7 +111,13 @@ public enum WelcomePrefs {
     /// it once in Settings.
     public static let letStraightInKey = "foundryx.welcome.letStraightIn"
 
-    public static func seen(defaults: UserDefaults = .standard) -> Bool {
+    public static func seen() -> Bool {
+        AccountPreferences.value(
+            AccountPreferenceCatalog.welcomeSeen,
+            default: false)
+    }
+
+    public static func seen(defaults: UserDefaults) -> Bool {
         seen(compatibility: .init(defaults: defaults))
     }
 
@@ -122,7 +128,13 @@ public enum WelcomePrefs {
             == .value(true)
     }
 
-    public static func markSeen(defaults: UserDefaults = .standard) {
+    public static func markSeen() {
+        _ = AccountPreferences.write(
+            true,
+            for: AccountPreferenceCatalog.welcomeSeen)
+    }
+
+    public static func markSeen(defaults: UserDefaults) {
         _ = markSeen(compatibility: .init(defaults: defaults))
     }
 
@@ -133,7 +145,13 @@ public enum WelcomePrefs {
         compatibility.write(true, for: AccountPreferenceCatalog.welcomeSeen)
     }
 
-    public static func letStraightIn(defaults: UserDefaults = .standard) -> Bool {
+    public static func letStraightIn() -> Bool {
+        AccountPreferences.value(
+            AccountPreferenceCatalog.welcomeLetStraightIn,
+            default: false)
+    }
+
+    public static func letStraightIn(defaults: UserDefaults) -> Bool {
         letStraightIn(compatibility: .init(defaults: defaults))
     }
 
@@ -144,7 +162,13 @@ public enum WelcomePrefs {
             == .value(true)
     }
 
-    public static func setLetStraightIn(_ on: Bool, defaults: UserDefaults = .standard) {
+    public static func setLetStraightIn(_ on: Bool) {
+        _ = AccountPreferences.write(
+            on,
+            for: AccountPreferenceCatalog.welcomeLetStraightIn)
+    }
+
+    public static func setLetStraightIn(_ on: Bool, defaults: UserDefaults) {
         _ = setLetStraightIn(on, compatibility: .init(defaults: defaults))
     }
 
@@ -202,7 +226,16 @@ public extension PersonaCopy {
 public enum PersonaPrefs {
     public static let key = "foundryx.onboarding.persona"
 
-    public static func persona(defaults: UserDefaults = .standard) -> OnboardingPersona {
+    public static func persona() -> OnboardingPersona {
+        guard case .value(let raw) = AccountPreferences.read(
+            AccountPreferenceCatalog.onboardingPersona),
+              let persona = OnboardingPersona(rawValue: raw) else {
+            return .individual
+        }
+        return persona
+    }
+
+    public static func persona(defaults: UserDefaults) -> OnboardingPersona {
         persona(compatibility: .init(defaults: defaults))
     }
 
@@ -217,7 +250,13 @@ public enum PersonaPrefs {
         return persona
     }
 
-    public static func set(_ persona: OnboardingPersona, defaults: UserDefaults = .standard) {
+    public static func set(_ persona: OnboardingPersona) {
+        _ = AccountPreferences.write(
+            persona.rawValue,
+            for: AccountPreferenceCatalog.onboardingPersona)
+    }
+
+    public static func set(_ persona: OnboardingPersona, defaults: UserDefaults) {
         _ = set(persona, compatibility: .init(defaults: defaults))
     }
 

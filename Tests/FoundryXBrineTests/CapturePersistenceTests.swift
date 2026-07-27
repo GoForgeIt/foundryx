@@ -6,7 +6,7 @@ import Foundation
 /// (track 20260628T1657). Capture's pause flag must survive a full app restart: a
 /// user who paused the Omi and relaunched must come back paused — not silently
 /// auto-capturing on reconnect. A relaunch is simulated by constructing a FRESH
-/// CaptureManager (the same UserDefaults-backed store a real relaunch reads).
+    /// CaptureManager (the same account-scoped preference store a real relaunch reads).
 ///
 /// Mirrors `CaptureAmbientTests`: a controllable `TestSource` whose `.streaming`
 /// state stands in for an Omi (re)connect, asserting on-disk WAL segments.
@@ -22,10 +22,9 @@ final class CapturePersistenceTests: ProcessGlobalStateTestCase {
         func stop() {}
     }
 
-    // Isolation from the process-global `CaptureSettings` (UserDefaults.standard) is inherited
-    // from `ProcessGlobalStateTestCase`: it hands each test the first-launch defaults and
-    // restores the process state afterwards. This suite deliberately writes `.paused` — that is
-    // its subject — so the restore is what keeps the other 20+ CaptureManager suites honest.
+    // Isolation from the process-global capture preference cache is inherited from
+    // `ProcessGlobalStateTestCase`: it hands each test a private account owner and restores
+    // process state afterwards.
     private let desiredStateKey = "foundryx.capture.omi-desired-state"
 
     private func makeManager(_ src: TestSource, dir: URL) -> CaptureManager {
@@ -49,18 +48,16 @@ final class CapturePersistenceTests: ProcessGlobalStateTestCase {
         let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let src = TestSource()
         let mgr = makeManager(src, dir: dir)
-        src.onState?(.streaming)
-        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
-        try await waitUntil { mgr.active != nil }
 
         mgr.pause()
         XCTAssertEqual(CaptureSettings.omiCaptureDesiredState, .paused)
-        // Durable, not just in-memory: an independent raw read sees it.
-        XCTAssertEqual(UserDefaults.standard.string(forKey: desiredStateKey), "paused")
+        XCTAssertNil(
+            UserDefaults.standard.object(forKey: desiredStateKey),
+            "an account choice must not be written to the unscoped phone domain")
 
         mgr.resume()
         XCTAssertEqual(CaptureSettings.omiCaptureDesiredState, .listening)
-        XCTAssertEqual(UserDefaults.standard.string(forKey: desiredStateKey), "listening")
+        XCTAssertNil(UserDefaults.standard.object(forKey: desiredStateKey))
     }
 
     // AC2 — a persisted `paused` intent survives a relaunch: a fresh manager starts
@@ -122,17 +119,18 @@ final class CapturePersistenceTests: ProcessGlobalStateTestCase {
                              "a listening reconnect resumes capture on the next speech")
     }
 
-    // AC4 — first-ever launch (no stored value) defaults to LISTENING (not paused).
+    // An account that explicitly chose LISTENING restores that choice.
     // Speech-gated: streaming ARMS a listening window with NO conversation open; a real
     // speech onset opens the session and then ambient frames record.
-    func testFirstLaunchDefaultsToListening() async throws {
-        UserDefaults.standard.removeObject(forKey: desiredStateKey)   // never-set
+    func testExplicitListeningChoiceArmsCapture() async throws {
         XCTAssertEqual(CaptureSettings.omiCaptureDesiredState, .listening)
         let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let src = TestSource()
         let mgr = makeManager(src, dir: dir)
 
-        XCTAssertFalse(mgr.isPaused, "first launch defaults to listening (not paused)")
+        XCTAssertFalse(
+            mgr.isPaused,
+            "the account's explicit listening choice restores as not paused")
 
         // Streaming with no one speaking → LISTENING: armed, metering, NO conversation.
         src.onState?(.streaming)

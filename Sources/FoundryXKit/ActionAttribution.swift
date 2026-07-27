@@ -211,7 +211,13 @@ public enum ActionSurfacePolicy {
     /// The Settings toggle's key. Default (unset/false) = owner-only main list.
     public static let othersInlineKey = "foundryx.ambient.othersInline"
 
-    public static func othersInline(defaults: UserDefaults = .standard) -> Bool {
+    public static func othersInline() -> Bool {
+        AccountPreferences.value(
+            AccountPreferenceCatalog.ambientOthersInline,
+            default: false)
+    }
+
+    public static func othersInline(defaults: UserDefaults) -> Bool {
         othersInline(compatibility: .init(defaults: defaults))
     }
 
@@ -224,9 +230,17 @@ public enum ActionSurfacePolicy {
 
     @discardableResult
     public static func setOthersInline(
+        _ enabled: Bool
+    ) -> AccountPreferenceWriteResult {
+        AccountPreferences.write(
+            enabled,
+            for: AccountPreferenceCatalog.ambientOthersInline)
+    }
+
+    @discardableResult
+    public static func setOthersInline(
         _ enabled: Bool,
-        compatibility: AccountPreferenceCompatibilityStore =
-            AccountPreferenceCompatibilityStore()
+        compatibility: AccountPreferenceCompatibilityStore
     ) -> AccountPreferenceWriteResult {
         compatibility.write(
             enabled,

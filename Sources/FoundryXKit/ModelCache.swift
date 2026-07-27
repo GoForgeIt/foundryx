@@ -15,7 +15,15 @@ public enum ModelCache {
     static let key = "foundryx.models.cache.v1"
 
     /// The last-known model list, or `[]` on a cold cache / decode failure.
-    public static func load(_ defaults: UserDefaults = .standard) -> [ModelOption] {
+    public static func load() -> [ModelOption] {
+        guard case .value(let data) = AccountPreferences.read(
+            AccountPreferenceCatalog.modelsCache),
+              let models = try? JSONDecoder().decode([ModelOption].self, from: data)
+        else { return [] }
+        return models
+    }
+
+    public static func load(_ defaults: UserDefaults) -> [ModelOption] {
         load(
             compatibility: .init(defaults: defaults),
             generation: 0)
@@ -35,7 +43,21 @@ public enum ModelCache {
 
     /// Persist a freshly-fetched list. A no-op on encode failure (the live `models` state is
     /// still refreshed in memory regardless).
-    public static func save(_ models: [ModelOption], _ defaults: UserDefaults = .standard) {
+    @discardableResult
+    public static func save(
+        _ models: [ModelOption],
+        generation: UInt64? = nil
+    ) -> AccountPreferenceWriteResult {
+        guard let data = try? JSONEncoder().encode(models) else {
+            return .unresolved
+        }
+        return AccountPreferences.write(
+            data,
+            for: AccountPreferenceCatalog.modelsCache,
+            generation: generation)
+    }
+
+    public static func save(_ models: [ModelOption], _ defaults: UserDefaults) {
         _ = save(
             models,
             compatibility: .init(defaults: defaults),

@@ -19,17 +19,26 @@ import Foundation
 // MARK: - Preferences
 
 /// Ambient-intelligence preference keys (track 20260710T2030 v3). One place so the
-/// lane wiring, Settings, and the door client agree. The master switch defaults OFF;
-/// full-context grading defaults ON only when this device has an enrolled owner voice.
+/// lane wiring, Settings, and the door client agree. The master switch and
+/// full-context grading both require explicit account-scoped consent.
 enum AmbientPrefs {
     static let enabledKey = "foundryx.ambient.enabled"
     static let agentNameKey = "foundryx.ambient.agentName"
     static let gradingKey = "foundryx.ambient.grading"
 
-    /// Honor an explicit user choice. Until one exists, only an enrolled owner voice
-    /// opts this device into sending raw context for grading.
+    /// Honor only an explicit account-scoped choice. Voice enrollment never implies
+    /// permission to send raw context for grading.
     static func fullContextGrading(
-        defaults: UserDefaults = .standard,
+        ownerVoiceBaseDir: URL = CaptureWAL.documentsCaptures()
+    ) -> Bool {
+        _ = ownerVoiceBaseDir
+        return AccountPreferences.value(
+            AccountPreferenceCatalog.ambientGrading,
+            default: false)
+    }
+
+    static func fullContextGrading(
+        defaults: UserDefaults,
         ownerVoiceBaseDir: URL = CaptureWAL.documentsCaptures()
     ) -> Bool {
         fullContextGrading(
@@ -55,9 +64,14 @@ enum AmbientPrefs {
         return grading
     }
 
+    static func enabled() -> Bool {
+        AccountPreferences.value(
+            AccountPreferenceCatalog.ambientEnabled,
+            default: false)
+    }
+
     static func enabled(
-        compatibility: AccountPreferenceCompatibilityStore =
-            AccountPreferenceCompatibilityStore()
+        compatibility: AccountPreferenceCompatibilityStore
     ) -> Bool {
         compatibility.read(AccountPreferenceCatalog.ambientEnabled)
             == .value(true)
@@ -65,18 +79,33 @@ enum AmbientPrefs {
 
     @discardableResult
     static func setEnabled(
+        _ enabled: Bool
+    ) -> AccountPreferenceWriteResult {
+        AccountPreferences.write(
+            enabled,
+            for: AccountPreferenceCatalog.ambientEnabled)
+    }
+
+    @discardableResult
+    static func setEnabled(
         _ enabled: Bool,
-        compatibility: AccountPreferenceCompatibilityStore =
-            AccountPreferenceCompatibilityStore()
+        compatibility: AccountPreferenceCompatibilityStore
     ) -> AccountPreferenceWriteResult {
         compatibility.write(
             enabled,
             for: AccountPreferenceCatalog.ambientEnabled)
     }
 
+    static func agentName() -> String? {
+        guard case .value(let name) = AccountPreferences.read(
+            AccountPreferenceCatalog.ambientAgentName) else {
+            return nil
+        }
+        return name
+    }
+
     static func agentName(
-        compatibility: AccountPreferenceCompatibilityStore =
-            AccountPreferenceCompatibilityStore()
+        compatibility: AccountPreferenceCompatibilityStore
     ) -> String? {
         guard case .value(let name) = compatibility.read(
             AccountPreferenceCatalog.ambientAgentName) else {
@@ -87,9 +116,21 @@ enum AmbientPrefs {
 
     @discardableResult
     static func setAgentName(
+        _ name: String?
+    ) -> AccountPreferenceWriteResult {
+        if let name {
+            return AccountPreferences.write(
+                name,
+                for: AccountPreferenceCatalog.ambientAgentName)
+        }
+        return AccountPreferences.remove(
+            AccountPreferenceCatalog.ambientAgentName)
+    }
+
+    @discardableResult
+    static func setAgentName(
         _ name: String?,
-        compatibility: AccountPreferenceCompatibilityStore =
-            AccountPreferenceCompatibilityStore()
+        compatibility: AccountPreferenceCompatibilityStore
     ) -> AccountPreferenceWriteResult {
         if let name {
             return compatibility.write(
@@ -101,9 +142,17 @@ enum AmbientPrefs {
 
     @discardableResult
     static func setFullContextGrading(
+        _ enabled: Bool
+    ) -> AccountPreferenceWriteResult {
+        AccountPreferences.write(
+            enabled,
+            for: AccountPreferenceCatalog.ambientGrading)
+    }
+
+    @discardableResult
+    static func setFullContextGrading(
         _ enabled: Bool,
-        compatibility: AccountPreferenceCompatibilityStore =
-            AccountPreferenceCompatibilityStore()
+        compatibility: AccountPreferenceCompatibilityStore
     ) -> AccountPreferenceWriteResult {
         compatibility.write(
             enabled,

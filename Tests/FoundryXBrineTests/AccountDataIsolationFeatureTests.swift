@@ -610,6 +610,15 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         var adoptedOwnerScope: String?
         var preferenceGuardSources: [AccountPreferenceSourceFile] = []
         var preferenceGuardViolations: [AccountPreferenceUsageViolation] = []
+
+        var preUpdatePreferenceKeys: Set<String> = []
+        var firstPreferenceScope: String?
+        var secondPreferenceScope: String?
+        var transitionChoiceResult: AccountPreferenceWriteResult?
+        var delayedChoiceResult: AccountPreferenceWriteResult?
+        var transitionFinished = false
+        var explicitGradingEnabled = false
+        var wearablePauseOwnerScope: String?
     }
 
     private let queue = DispatchQueue(label: "foundryx.account-data-isolation-world")
@@ -852,6 +861,602 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         #endif
     }
 
+    // MARK: - Account-scoped app preferences
+
+    func firstAccountCompletedWelcomeAndOnboarding() throws {
+        try queue.sync {
+            try beginScenarioLocked()
+            seedLegacyFirstRunLocked()
+            let first = try firstPreferenceIdentityLocked()
+            state.firstIdentity = first
+            state.firstRoot = try activateLocked(first)
+            state.firstPreferenceScope = try currentPreferenceBindingLocked().scope
+        }
+    }
+
+    func secondAccountSignsInForItsOwnFirstRun() throws {
+        try queue.sync {
+            let second = try secondPreferenceIdentityLocked()
+            state.secondIdentity = second
+            state.secondRoot = try activateLocked(second)
+            state.secondPreferenceScope = try currentPreferenceBindingLocked().scope
+        }
+    }
+
+    func assertSecondAccountReceivesOwnWelcome() throws {
+        try queue.sync {
+            let snapshot = try currentPreferenceSnapshotLocked()
+            guard snapshot.presence(
+                for: AccountPreferenceCatalog.welcomeSeen) == .value(false),
+                  snapshot.presence(
+                    for: AccountPreferenceCatalog.welcomeLetStraightIn)
+                    == .value(false) else {
+                throw BrineStepError(
+                    "the replacement account inherited the phone's completed welcome")
+            }
+        }
+    }
+
+    func assertSecondAccountNeedsVoiceAndAmbientConsent() throws {
+        try queue.sync {
+            let snapshot = try currentPreferenceSnapshotLocked()
+            guard snapshot.presence(
+                for: AccountPreferenceCatalog.onboardingCompleted)
+                    == .value(false),
+                  snapshot.presence(
+                    for: AccountPreferenceCatalog.ambientGrading)
+                    == .value(false),
+                  let root = state.secondRoot,
+                  OwnerVoiceStore.state(baseDir: root) == .none else {
+                throw BrineStepError(
+                    "the replacement account skipped its owner-voice or consent first run")
+            }
+        }
+    }
+
+    func assertSecondAccountStartsIndividualAndAmbientOff() throws {
+        try queue.sync {
+            let snapshot = try currentPreferenceSnapshotLocked()
+            guard snapshot.presence(
+                for: AccountPreferenceCatalog.onboardingPersona)
+                    == .value(OnboardingPersona.individual.rawValue),
+                  snapshot.presence(
+                    for: AccountPreferenceCatalog.ambientEnabled)
+                    == .value(false) else {
+                throw BrineStepError(
+                    "the replacement account inherited persona or ambient consent")
+            }
+        }
+    }
+
+    func assertWearableCaptureStartsPaused() throws {
+        try queue.sync {
+            let snapshot = try currentPreferenceSnapshotLocked()
+            guard snapshot.presence(
+                for: AccountPreferenceCatalog.captureOMIDesiredState)
+                    == .value(OmiCaptureDesiredState.paused.rawValue),
+                  snapshot.presence(
+                    for: AccountPreferenceCatalog.captureSourceEnabledOverrides)
+                    == .value([:]) else {
+                throw BrineStepError(
+                    "fresh wearable capture inherited listening or source choices")
+            }
+        }
+    }
+
+    func preUpdateChoicesExist() throws {
+        try queue.sync {
+            try beginScenarioLocked()
+            seedLegacyEstablishedChoicesLocked()
+            state.preUpdatePreferenceKeys = Set(
+                AccountPreferenceCatalog.entries.map(\.canonicalKey))
+                .subtracting([
+                    AccountPreferenceCatalog.modelsCache.canonicalKey,
+                    AccountPreferenceCatalog.signupPosted.canonicalKey,
+                ])
+        }
+    }
+
+    func establishedOwnerSignsInAfterUpdate() throws {
+        try queue.sync {
+            let first = try firstPreferenceIdentityLocked()
+            state.firstIdentity = first
+            state.firstRoot = try activateLocked(first)
+            state.firstPreferenceScope = try currentPreferenceBindingLocked().scope
+        }
+    }
+
+    func assertEstablishedWelcomeAndOnboardingRemainComplete() throws {
+        try queue.sync {
+            let snapshot = try currentPreferenceSnapshotLocked()
+            guard snapshot.presence(
+                for: AccountPreferenceCatalog.onboardingCompleted)
+                    == .value(true),
+                  snapshot.presence(
+                    for: AccountPreferenceCatalog.welcomeSeen)
+                    == .value(true) else {
+                throw BrineStepError(
+                    "the established owner's first-run completion was reset")
+            }
+        }
+    }
+
+    func assertEstablishedChoicesAreUnchanged() throws {
+        try queue.sync {
+            let snapshot = try currentPreferenceSnapshotLocked()
+            guard snapshot.presence(
+                for: AccountPreferenceCatalog.onboardingPersona)
+                    == .value(OnboardingPersona.expert.rawValue),
+                  snapshot.presence(
+                    for: AccountPreferenceCatalog.ambientEnabled)
+                    == .value(true),
+                  snapshot.presence(
+                    for: AccountPreferenceCatalog.ambientGrading)
+                    == .value(false),
+                  snapshot.presence(
+                    for: AccountPreferenceCatalog.ambientAgentName)
+                    == .value("Sage"),
+                  snapshot.presence(
+                    for: AccountPreferenceCatalog.ambientOthersInline)
+                    == .value(true) else {
+                throw BrineStepError(
+                    "the established owner's persona or ambient choices changed")
+            }
+        }
+    }
+
+    func assertPreUpdateChoicesRemainRecoverable() throws {
+        try queue.sync {
+            let remaining = Set(
+                (scopeDefaults.persistentDomain(
+                    forName: scopeDefaultsName) ?? [:]).keys)
+            guard state.preUpdatePreferenceKeys.isSubset(of: remaining) else {
+                throw BrineStepError(
+                    "adoption deleted recoverable pre-update preference inputs")
+            }
+        }
+    }
+
+    func twoAccountsHaveDifferentChoices() throws {
+        try queue.sync {
+            try beginScenarioLocked()
+            let first = try firstPreferenceIdentityLocked()
+            state.firstIdentity = first
+            state.firstRoot = try activateLocked(first)
+            let firstBinding = try currentPreferenceBindingLocked()
+            state.firstPreferenceScope = firstBinding.scope
+            try savePreferenceSetLocked(
+                binding: firstBinding,
+                onboarding: true,
+                persona: .expert,
+                ambient: true,
+                grading: true,
+                agentName: "Atlas",
+                othersInline: true,
+                checkoutID: "attempt-first",
+                checkoutPlan: .starter,
+                brain: .myComputer,
+                waitlist: true,
+                gap: 45,
+                desiredState: .listening,
+                sourceOverrides: ["omi": true, "apple-watch": false])
+
+            let second = try secondPreferenceIdentityLocked()
+            state.secondIdentity = second
+            state.secondRoot = try activateLocked(second)
+            let secondBinding = try currentPreferenceBindingLocked()
+            state.secondPreferenceScope = secondBinding.scope
+            try savePreferenceSetLocked(
+                binding: secondBinding,
+                onboarding: false,
+                persona: .firm,
+                ambient: false,
+                grading: false,
+                agentName: "Foundry",
+                othersInline: false,
+                checkoutID: "attempt-second",
+                checkoutPlan: .power,
+                brain: .foundryCloud,
+                waitlist: false,
+                gap: 180,
+                desiredState: .paused,
+                sourceOverrides: ["omi": false, "apple-watch": true])
+
+            scopeDefaults.set(
+                "paired-\(token)", forKey: "foundryx.omi.peripheral-id")
+            scopeDefaults.set("omi", forKey: "foundryx.capture.source")
+            scopeDefaults.set("chat", forKey: "foundryx.action-button.choice")
+            scopeDefaults.set(true, forKey: "foundryx.diag.perfOverlay")
+        }
+    }
+
+    func switchFirstToSecondAndBack() throws {
+        try queue.sync {
+            guard let first = state.firstIdentity,
+                  let second = state.secondIdentity else {
+                throw BrineStepError("the two preference owners were not prepared")
+            }
+            _ = try activateLocked(first)
+            try assertPreferenceSetLocked(
+                onboarding: true,
+                persona: .expert,
+                ambient: true,
+                grading: true,
+                agentName: "Atlas",
+                othersInline: true,
+                checkoutID: "attempt-first",
+                checkoutPlan: .starter,
+                brain: .myComputer,
+                waitlist: true,
+                gap: 45,
+                desiredState: .listening,
+                sourceOverrides: ["omi": true, "apple-watch": false])
+            _ = try activateLocked(second)
+            try assertPreferenceSetLocked(
+                onboarding: false,
+                persona: .firm,
+                ambient: false,
+                grading: false,
+                agentName: "Foundry",
+                othersInline: false,
+                checkoutID: "attempt-second",
+                checkoutPlan: .power,
+                brain: .foundryCloud,
+                waitlist: false,
+                gap: 180,
+                desiredState: .paused,
+                sourceOverrides: ["omi": false, "apple-watch": true])
+            _ = try activateLocked(first)
+        }
+    }
+
+    func assertEachAccountSeesOnlyItsOwnChoices() throws {
+        try queue.sync {
+            try assertPreferenceSetLocked(
+                onboarding: true,
+                persona: .expert,
+                ambient: true,
+                grading: true,
+                agentName: "Atlas",
+                othersInline: true,
+                checkoutID: "attempt-first",
+                checkoutPlan: .starter,
+                brain: .myComputer,
+                waitlist: true,
+                gap: 45,
+                desiredState: .listening,
+                sourceOverrides: ["omi": true, "apple-watch": false])
+        }
+    }
+
+    func assertPerSourceEnablementFollowsAccount() throws {
+        try queue.sync {
+            let snapshot = try currentPreferenceSnapshotLocked()
+            guard snapshot.presence(
+                for: AccountPreferenceCatalog.captureSourceEnabledOverrides)
+                    == .value(["omi": true, "apple-watch": false]) else {
+                throw BrineStepError(
+                    "per-source enablement did not return with the first account")
+            }
+        }
+    }
+
+    func assertPhoneChoicesRemainWithPhone() throws {
+        try queue.sync {
+            guard scopeDefaults.string(
+                forKey: "foundryx.omi.peripheral-id") == "paired-\(token)",
+                  scopeDefaults.string(
+                    forKey: "foundryx.capture.source") == "omi",
+                  scopeDefaults.string(
+                    forKey: "foundryx.action-button.choice") == "chat",
+                  scopeDefaults.bool(forKey: "foundryx.diag.perfOverlay") else {
+                throw BrineStepError(
+                    "an account switch changed a phone-owned hardware choice")
+            }
+        }
+    }
+
+    func establishedAccountHasSavedChoices() throws {
+        try queue.sync {
+            try beginScenarioLocked()
+            let first = try firstPreferenceIdentityLocked()
+            state.firstIdentity = first
+            state.firstRoot = try activateLocked(first)
+            let binding = try currentPreferenceBindingLocked()
+            state.firstPreferenceScope = binding.scope
+            try savePreferenceSetLocked(
+                binding: binding,
+                onboarding: true,
+                persona: .expert,
+                ambient: true,
+                grading: false,
+                agentName: "Sage",
+                othersInline: true,
+                checkoutID: "attempt-owner",
+                checkoutPlan: .pro,
+                brain: .myComputer,
+                waitlist: true,
+                gap: 75,
+                desiredState: .listening,
+                sourceOverrides: ["omi": true])
+        }
+    }
+
+    func remainSignedOutForPreferenceUse() throws {
+        try queue.sync {
+            _ = try CaptureAccountScope.beginSignOut()
+            try CaptureAccountScope.completeSignOut()
+        }
+    }
+
+    func assertSignedOutChoicesAreSafe() throws {
+        try queue.sync {
+            let snapshot = try currentPreferenceSnapshotLocked()
+            guard snapshot.scope == CaptureAccountScope.signedOutScope,
+                  snapshot.presence(
+                    for: AccountPreferenceCatalog.onboardingCompleted)
+                    == .value(false),
+                  snapshot.presence(
+                    for: AccountPreferenceCatalog.ambientEnabled)
+                    == .value(false),
+                  snapshot.presence(
+                    for: AccountPreferenceCatalog.ambientGrading)
+                    == .value(false),
+                  snapshot.presence(
+                    for: AccountPreferenceCatalog.captureOMIDesiredState)
+                    == .value(OmiCaptureDesiredState.paused.rawValue) else {
+                throw BrineStepError(
+                    "signed-out use exposed an established account's choices")
+            }
+        }
+    }
+
+    func assertEstablishedChoicesUnchangedAfterSignedOutUse() throws {
+        try queue.sync {
+            guard let first = state.firstIdentity else {
+                throw BrineStepError("the established owner was not retained")
+            }
+            _ = try activateLocked(first)
+            try assertPreferenceSetLocked(
+                onboarding: true,
+                persona: .expert,
+                ambient: true,
+                grading: false,
+                agentName: "Sage",
+                othersInline: true,
+                checkoutID: "attempt-owner",
+                checkoutPlan: .pro,
+                brain: .myComputer,
+                waitlist: true,
+                gap: 75,
+                desiredState: .listening,
+                sourceOverrides: ["omi": true])
+        }
+    }
+
+    func firstAccountSignedInWithChoices() throws {
+        try queue.sync {
+            try beginScenarioLocked()
+            let first = try firstPreferenceIdentityLocked()
+            state.firstIdentity = first
+            state.firstRoot = try activateLocked(first)
+            let binding = try currentPreferenceBindingLocked()
+            state.firstPreferenceScope = binding.scope
+            try saveValueLocked(
+                true,
+                for: AccountPreferenceCatalog.onboardingCompleted,
+                binding: binding)
+            try saveValueLocked(
+                true,
+                for: AccountPreferenceCatalog.welcomeSeen,
+                binding: binding)
+        }
+    }
+
+    func overlapSignOutAndSecondSignIn() throws {
+        try queue.sync {
+            let initiatingGeneration = CaptureAccountScope.identityGeneration
+            _ = try CaptureAccountScope.beginSignOut()
+            state.transitionChoiceResult = WaitlistPrefs.completePost(
+                succeeded: true,
+                generation: initiatingGeneration)
+            try CaptureAccountScope.completeSignOut()
+            let second = try secondPreferenceIdentityLocked()
+            state.secondIdentity = second
+            state.secondRoot = try activateLocked(second)
+            state.secondPreferenceScope = try currentPreferenceBindingLocked().scope
+            state.delayedChoiceResult = WaitlistPrefs.completePost(
+                succeeded: true,
+                generation: initiatingGeneration)
+            state.transitionFinished = true
+        }
+    }
+
+    func assertSignOutReturnsToWelcomeWithoutHanging() throws {
+        try queue.sync {
+            guard state.transitionFinished else {
+                throw BrineStepError("the account transition did not finish")
+            }
+            let snapshot = try currentPreferenceSnapshotLocked()
+            guard snapshot.presence(
+                for: AccountPreferenceCatalog.welcomeSeen) == .value(false)
+            else {
+                throw BrineStepError(
+                    "sign-out or replacement activation retained the prior welcome")
+            }
+        }
+    }
+
+    func assertSecondFirstRunAppearsWithoutHanging() throws {
+        try queue.sync {
+            let snapshot = try currentPreferenceSnapshotLocked()
+            guard snapshot.scope == state.secondPreferenceScope,
+                  snapshot.presence(
+                    for: AccountPreferenceCatalog.onboardingCompleted)
+                    == .value(false) else {
+                throw BrineStepError(
+                    "the replacement account's first run did not appear")
+            }
+        }
+    }
+
+    func assertTransitionChoiceSavedOrRetryVisible() throws {
+        try queue.sync {
+            let visibleRetryResults: [AccountPreferenceWriteResult] = [
+                .stale, .unresolved, .rejected, .failed,
+            ]
+            guard let first = state.transitionChoiceResult,
+                  let delayed = state.delayedChoiceResult,
+                  visibleRetryResults.contains(first),
+                  visibleRetryResults.contains(delayed) else {
+                throw BrineStepError(
+                    "a choice made during unresolved identity was silently accepted")
+            }
+        }
+    }
+
+    func assertTransitionChoiceNeverWrittenElsewhere() throws {
+        try queue.sync {
+            let snapshot = try currentPreferenceSnapshotLocked()
+            guard snapshot.presence(
+                for: AccountPreferenceCatalog.waitlistJoined)
+                    == .value(false) else {
+                throw BrineStepError(
+                    "the first account's delayed choice landed in the second account")
+            }
+        }
+    }
+
+    func establishedAccountEnrolledOwnerVoice() throws {
+        try queue.sync {
+            try beginScenarioLocked()
+            let first = try firstPreferenceIdentityLocked()
+            state.firstIdentity = first
+            state.firstRoot = try activateLocked(first)
+            let frames = Array(
+                repeating: Data([0x01, 0x02, 0x03]),
+                count: OwnerVoiceStore.minimumFrames)
+            try OwnerVoiceStore.save(
+                frames: frames,
+                baseDir: try XCTUnwrap(state.firstRoot),
+                now: 7)
+        }
+    }
+
+    func ownerNeverChoseGrading() throws {
+        try queue.sync {
+            scopeDefaults.removeObject(
+                forKey: AccountPreferenceCatalog.ambientGrading.canonicalKey)
+            state.explicitGradingEnabled = false
+        }
+    }
+
+    func ownerSignsInAfterPreferenceUpdate() throws {
+        try queue.sync {
+            guard let first = state.firstIdentity else {
+                throw BrineStepError("the established owner was not retained")
+            }
+            _ = try activateLocked(first)
+        }
+    }
+
+    func assertRawContextIsNotGradedOrSent() throws {
+        try queue.sync {
+            let snapshot = try currentPreferenceSnapshotLocked()
+            guard snapshot.presence(
+                for: AccountPreferenceCatalog.ambientGrading)
+                    == .value(false),
+                  AmbientPrefs.fullContextGrading(
+                    ownerVoiceBaseDir: try XCTUnwrap(state.firstRoot)) == false else {
+                throw BrineStepError(
+                    "enrolled owner voice implicitly enabled raw grading")
+            }
+        }
+    }
+
+    func assertGradingStaysOffUntilExplicitlyEnabled() throws {
+        try queue.sync {
+            guard AmbientPrefs.fullContextGrading(
+                ownerVoiceBaseDir: try XCTUnwrap(state.firstRoot)) == false else {
+                throw BrineStepError("grading was on before explicit consent")
+            }
+            let result = AmbientPrefs.setFullContextGrading(true)
+            guard result == .saved,
+                  AmbientPrefs.fullContextGrading(
+                    ownerVoiceBaseDir: try XCTUnwrap(state.firstRoot)) else {
+                throw BrineStepError(
+                    "an explicit grading choice did not enable grading")
+            }
+            state.explicitGradingEnabled = true
+        }
+    }
+
+    func accountHasWearableCaptureListening() throws {
+        try queue.sync {
+            try beginScenarioLocked()
+            let identity = try firstPreferenceIdentityLocked()
+            state.firstIdentity = identity
+            state.firstRoot = try activateLocked(identity)
+            let binding = try currentPreferenceBindingLocked()
+            state.firstPreferenceScope = binding.scope
+            state.wearablePauseOwnerScope = binding.scope
+            try saveValueLocked(
+                OmiCaptureDesiredState.listening.rawValue,
+                for: AccountPreferenceCatalog.captureOMIDesiredState,
+                binding: binding)
+            guard CaptureSettings.omiCaptureDesiredState == .listening else {
+                throw BrineStepError(
+                    "the account did not begin with wearable capture listening")
+            }
+        }
+    }
+
+    func pauseWearableCaptureAndRelaunch() throws {
+        try queue.sync {
+            guard let identity = state.firstIdentity else {
+                throw BrineStepError("the wearable capture owner was not retained")
+            }
+            CaptureSettings.omiCaptureDesiredState = .paused
+            guard CaptureSettings.omiCaptureDesiredState == .paused else {
+                throw BrineStepError(
+                    "pausing wearable capture was not accepted for its owner")
+            }
+
+            CaptureAccountScope.resetProcessCacheForTests()
+            _ = try CaptureAccountScope.restorePersistedIdentity(identity)
+        }
+    }
+
+    func assertWearableCaptureRemainsPaused() throws {
+        try queue.sync {
+            let snapshot = try currentPreferenceSnapshotLocked()
+            guard snapshot.presence(
+                for: AccountPreferenceCatalog.captureOMIDesiredState)
+                    == .value(OmiCaptureDesiredState.paused.rawValue),
+                  CaptureSettings.omiCaptureDesiredState == .paused else {
+                throw BrineStepError(
+                    "the wearable pause choice was lost across relaunch")
+            }
+        }
+    }
+
+    func assertWearablePauseIsStoredOnlyWithItsAccount() throws {
+        try queue.sync {
+            guard let scope = state.wearablePauseOwnerScope else {
+                throw BrineStepError("the wearable pause owner scope was not retained")
+            }
+            let canonical =
+                AccountPreferenceCatalog.captureOMIDesiredState.canonicalKey
+            guard scopeDefaults.string(
+                forKey: "\(scope).\(canonical)")
+                    == OmiCaptureDesiredState.paused.rawValue,
+                  scopeDefaults.object(forKey: canonical) == nil else {
+                throw BrineStepError(
+                    "the wearable pause choice escaped its account scope")
+            }
+        }
+    }
+
     // MARK: - Saved-choice ownership classification
 
     func everySavedChoiceDeclaresItsOwner() throws {
@@ -955,6 +1560,14 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
 
     func secondAccountSignsInOnSamePhone() throws {
         try queue.sync {
+            if state.firstPreferenceScope != nil {
+                let identity = try secondPreferenceIdentityLocked()
+                state.secondIdentity = identity
+                state.secondRoot = try activateLocked(identity)
+                state.secondPreferenceScope =
+                    try currentPreferenceBindingLocked().scope
+                return
+            }
             let identity = try makeIdentity(
                 provider: .google, subject: secondSubject, email: secondEmail)
             state.secondIdentity = identity
@@ -1279,6 +1892,11 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
 
     func remainSignedOutForFreeUse() throws {
         try queue.sync {
+            if state.firstPreferenceScope != nil {
+                _ = try CaptureAccountScope.beginSignOut()
+                try CaptureAccountScope.completeSignOut()
+                return
+            }
             try CaptureAccountScope.signOutForTests()
         }
     }
@@ -2703,6 +3321,256 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
 
     // MARK: - Hermetic support
 
+    private func firstPreferenceIdentityLocked() throws -> AuthIdentity {
+        try makeIdentity(
+            provider: .google,
+            subject: "preference-first-\(scenarioNumber)-\(token)",
+            email: "preference-first-\(scenarioNumber)-\(token)@example.test")
+    }
+
+    private func secondPreferenceIdentityLocked() throws -> AuthIdentity {
+        try makeIdentity(
+            provider: .google,
+            subject: "preference-second-\(scenarioNumber)-\(token)",
+            email: "preference-second-\(scenarioNumber)-\(token)@example.test")
+    }
+
+    private func currentPreferenceBindingLocked()
+        throws -> ScopedPreferenceBinding
+    {
+        guard let binding = CaptureAccountScope.currentScopedPreferenceBinding()
+        else {
+            throw BrineStepError(
+                "the active owner did not expose a scoped preference binding")
+        }
+        return binding
+    }
+
+    private func currentPreferenceSnapshotLocked()
+        throws -> AccountPreferenceSnapshot
+    {
+        guard let snapshot =
+                CaptureAccountScope.currentAccountPreferenceSnapshot() else {
+            throw BrineStepError(
+                "the active owner did not install its account preference snapshot")
+        }
+        return snapshot
+    }
+
+    private func seedLegacyFirstRunLocked() {
+        scopeDefaults.set(
+            true,
+            forKey: AccountPreferenceCatalog.onboardingCompleted.canonicalKey)
+        scopeDefaults.set(
+            OnboardingPersona.expert.rawValue,
+            forKey: AccountPreferenceCatalog.onboardingPersona.canonicalKey)
+        scopeDefaults.set(
+            true,
+            forKey: AccountPreferenceCatalog.welcomeSeen.canonicalKey)
+        scopeDefaults.set(
+            true,
+            forKey: AccountPreferenceCatalog.welcomeLetStraightIn.canonicalKey)
+        scopeDefaults.set(
+            true,
+            forKey: AccountPreferenceCatalog.ambientEnabled.canonicalKey)
+        scopeDefaults.set(
+            "Sage",
+            forKey: AccountPreferenceCatalog.ambientAgentName.canonicalKey)
+        scopeDefaults.set(
+            true,
+            forKey: AccountPreferenceCatalog.ambientGrading.canonicalKey)
+        scopeDefaults.set(
+            OmiCaptureDesiredState.listening.rawValue,
+            forKey: AccountPreferenceCatalog.captureOMIDesiredState.canonicalKey)
+        scopeDefaults.set(
+            ["omi": true, "apple-watch": true],
+            forKey:
+                AccountPreferenceCatalog.captureSourceEnabledOverrides.canonicalKey)
+        let warmModels = try? JSONEncoder().encode([
+            ModelOption(id: "legacy-warm", label: "Legacy Warm"),
+        ])
+        scopeDefaults.set(
+            warmModels,
+            forKey: AccountPreferenceCatalog.modelsCache.canonicalKey)
+    }
+
+    private func seedLegacyEstablishedChoicesLocked() {
+        seedLegacyFirstRunLocked()
+        scopeDefaults.set(
+            false,
+            forKey: AccountPreferenceCatalog.ambientGrading.canonicalKey)
+        scopeDefaults.set(
+            true,
+            forKey: AccountPreferenceCatalog.ambientOthersInline.canonicalKey)
+        scopeDefaults.set(
+            "legacy-attempt",
+            forKey: AccountPreferenceCatalog.vaultCheckoutAttemptID.canonicalKey)
+        scopeDefaults.set(
+            VaultPlan.pro.rawValue,
+            forKey: AccountPreferenceCatalog.vaultCheckoutAttemptPlan.canonicalKey)
+        scopeDefaults.set(
+            BrainChoice.myComputer.rawValue,
+            forKey: AccountPreferenceCatalog.brainChoice.canonicalKey)
+        scopeDefaults.set(
+            true,
+            forKey: AccountPreferenceCatalog.waitlistJoined.canonicalKey)
+        scopeDefaults.set(
+            75.0,
+            forKey:
+                AccountPreferenceCatalog.captureSilenceGapSeconds.canonicalKey)
+    }
+
+    private func savePreferenceSetLocked(
+        binding: ScopedPreferenceBinding,
+        onboarding: Bool,
+        persona: OnboardingPersona,
+        ambient: Bool,
+        grading: Bool,
+        agentName: String,
+        othersInline: Bool,
+        checkoutID: String,
+        checkoutPlan: VaultPlan,
+        brain: BrainChoice,
+        waitlist: Bool,
+        gap: Double,
+        desiredState: OmiCaptureDesiredState,
+        sourceOverrides: [String: Bool]
+    ) throws {
+        try saveValueLocked(
+            onboarding,
+            for: AccountPreferenceCatalog.onboardingCompleted,
+            binding: binding)
+        try saveValueLocked(
+            onboarding,
+            for: AccountPreferenceCatalog.welcomeSeen,
+            binding: binding)
+        try saveValueLocked(
+            persona.rawValue,
+            for: AccountPreferenceCatalog.onboardingPersona,
+            binding: binding)
+        try saveValueLocked(
+            ambient,
+            for: AccountPreferenceCatalog.ambientEnabled,
+            binding: binding)
+        try saveValueLocked(
+            grading,
+            for: AccountPreferenceCatalog.ambientGrading,
+            binding: binding)
+        try saveValueLocked(
+            agentName,
+            for: AccountPreferenceCatalog.ambientAgentName,
+            binding: binding)
+        try saveValueLocked(
+            othersInline,
+            for: AccountPreferenceCatalog.ambientOthersInline,
+            binding: binding)
+        guard AccountPreferences.writeCheckoutAttempt(
+            id: checkoutID,
+            plan: checkoutPlan.rawValue,
+            generation: binding.generation) == .saved else {
+            throw BrineStepError(
+                "could not atomically seed the checkout attempt for \(binding.scope)")
+        }
+        try saveValueLocked(
+            brain.rawValue,
+            for: AccountPreferenceCatalog.brainChoice,
+            binding: binding)
+        try saveValueLocked(
+            waitlist,
+            for: AccountPreferenceCatalog.waitlistJoined,
+            binding: binding)
+        try saveValueLocked(
+            gap,
+            for: AccountPreferenceCatalog.captureSilenceGapSeconds,
+            binding: binding)
+        try saveValueLocked(
+            desiredState.rawValue,
+            for: AccountPreferenceCatalog.captureOMIDesiredState,
+            binding: binding)
+        try saveValueLocked(
+            sourceOverrides,
+            for: AccountPreferenceCatalog.captureSourceEnabledOverrides,
+            binding: binding)
+    }
+
+    private func saveValueLocked<Value>(
+        _ value: Value,
+        for key: AccountPreferenceKey<Value>,
+        binding: ScopedPreferenceBinding
+    ) throws {
+        let acknowledgement = AccountPreferenceWriteStore(
+            suiteName: scopeDefaultsName
+        ).write(value, for: key, as: binding)
+        guard acknowledgement.status == .saved else {
+            throw BrineStepError(
+                "could not seed \(key.canonicalKey) for \(binding.scope): "
+                    + "\(acknowledgement.status)")
+        }
+    }
+
+    private func assertPreferenceSetLocked(
+        onboarding: Bool,
+        persona: OnboardingPersona,
+        ambient: Bool,
+        grading: Bool,
+        agentName: String,
+        othersInline: Bool,
+        checkoutID: String,
+        checkoutPlan: VaultPlan,
+        brain: BrainChoice,
+        waitlist: Bool,
+        gap: Double,
+        desiredState: OmiCaptureDesiredState,
+        sourceOverrides: [String: Bool]
+    ) throws {
+        let snapshot = try currentPreferenceSnapshotLocked()
+        guard snapshot.presence(
+            for: AccountPreferenceCatalog.onboardingCompleted)
+                == .value(onboarding),
+              snapshot.presence(
+                for: AccountPreferenceCatalog.welcomeSeen)
+                == .value(onboarding),
+              snapshot.presence(
+                for: AccountPreferenceCatalog.onboardingPersona)
+                == .value(persona.rawValue),
+              snapshot.presence(
+                for: AccountPreferenceCatalog.ambientEnabled)
+                == .value(ambient),
+              snapshot.presence(
+                for: AccountPreferenceCatalog.ambientGrading)
+                == .value(grading),
+              snapshot.presence(
+                for: AccountPreferenceCatalog.ambientAgentName)
+                == .value(agentName),
+              snapshot.presence(
+                for: AccountPreferenceCatalog.ambientOthersInline)
+                == .value(othersInline),
+              snapshot.presence(
+                for: AccountPreferenceCatalog.vaultCheckoutAttemptID)
+                == .value(checkoutID),
+              snapshot.presence(
+                for: AccountPreferenceCatalog.vaultCheckoutAttemptPlan)
+                == .value(checkoutPlan.rawValue),
+              snapshot.presence(
+                for: AccountPreferenceCatalog.brainChoice)
+                == .value(brain.rawValue),
+              snapshot.presence(
+                for: AccountPreferenceCatalog.waitlistJoined)
+                == .value(waitlist),
+              snapshot.presence(
+                for: AccountPreferenceCatalog.captureSilenceGapSeconds)
+                == .value(gap),
+              snapshot.presence(
+                for: AccountPreferenceCatalog.captureOMIDesiredState)
+                == .value(desiredState.rawValue),
+              snapshot.presence(
+                for: AccountPreferenceCatalog.captureSourceEnabledOverrides)
+                == .value(sourceOverrides) else {
+            throw BrineStepError(
+                "the active account did not restore its complete preference set")
+        }
+    }
+
     private func beginScenarioLocked() throws {
         stopCrossProcessDeletionProbeLocked()
         pairingHarness?.cleanup()
@@ -2894,7 +3762,9 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
     }
 
     private func activateLocked(_ identity: AuthIdentity) throws -> URL {
-        try CaptureAccountScope.activateForTests(identity)
+        try CaptureAccountScope.activateForTests(
+            identity,
+            activatePreferences: true)
         guard let binding = CaptureAccountScope.currentAccountBinding() else {
             throw BrineStepError("activation completed without an account binding")
         }
@@ -3576,6 +4446,172 @@ private enum AccountDataIsolationSteps {
                 "it identifies the file and saved choice that need classification"
             ) { _, _, _ in
                 try w.assertGuardIdentifiesUndeclaredSavedChoice()
+            },
+            defineStep(
+                "the first account completed welcome and onboarding on this phone"
+            ) { ctx, _, _ in
+                try w.firstAccountCompletedWelcomeAndOnboarding()
+                return ctx
+            },
+            defineCheck("the second account receives its own welcome") {
+                _, _, _ in
+                try w.assertSecondAccountReceivesOwnWelcome()
+            },
+            defineCheck(
+                "first run asks for its owner voice and ambient consent"
+            ) { _, _, _ in
+                try w.assertSecondAccountNeedsVoiceAndAmbientConsent()
+            },
+            defineCheck(
+                "it starts with the individual persona and ambient intelligence off"
+            ) { _, _, _ in
+                try w.assertSecondAccountStartsIndividualAndAmbientOff()
+            },
+            defineCheck("wearable capture starts paused") { _, _, _ in
+                try w.assertWearableCaptureStartsPaused()
+            },
+            defineStep(
+                "onboarding, welcome, persona, and ambient choices exist from before the update"
+            ) { ctx, _, _ in
+                try w.preUpdateChoicesExist()
+                return ctx
+            },
+            defineStep("that owner signs in after the update") { ctx, _, _ in
+                try w.establishedOwnerSignsInAfterUpdate()
+                return ctx
+            },
+            defineCheck(
+                "that owner's welcome and onboarding remain complete"
+            ) { _, _, _ in
+                try w.assertEstablishedWelcomeAndOnboardingRemainComplete()
+            },
+            defineCheck(
+                "their persona, ambient consent, grading choice, agent name, and attribution choice are unchanged"
+            ) { _, _, _ in
+                try w.assertEstablishedChoicesAreUnchanged()
+            },
+            defineCheck(
+                "the pre-update choices remain recoverable rather than being deleted"
+            ) { _, _, _ in
+                try w.assertPreUpdateChoicesRemainRecoverable()
+            },
+            defineStep(
+                "two accounts have different first-run, ambient, Vault, brain, waitlist, and capture choices"
+            ) { ctx, _, _ in
+                try w.twoAccountsHaveDifferentChoices()
+                return ctx
+            },
+            defineStep(
+                "I switch from the first account to the second and back again"
+            ) { ctx, _, _ in
+                try w.switchFirstToSecondAndBack()
+                return ctx
+            },
+            defineCheck("each account sees only its own choices") {
+                _, _, _ in
+                try w.assertEachAccountSeesOnlyItsOwnChoices()
+            },
+            defineCheck("per-source enablement follows the account") {
+                _, _, _ in
+                try w.assertPerSourceEnablementFollowsAccount()
+            },
+            defineCheck(
+                "paired hardware, the active capture source, Action Button choice, and diagnostics remain with the phone"
+            ) { _, _, _ in
+                try w.assertPhoneChoicesRemainWithPhone()
+            },
+            defineStep(
+                "an established account has saved choices on this phone"
+            ) { ctx, _, _ in
+                try w.establishedAccountHasSavedChoices()
+                return ctx
+            },
+            defineCheck(
+                "free on-device use continues with safe signed-out choices"
+            ) { _, _, _ in
+                try w.assertSignedOutChoicesAreSafe()
+            },
+            defineCheck(
+                "the established account's choices are neither shown, changed, nor deleted"
+            ) { _, _, _ in
+                try w.assertEstablishedChoicesUnchangedAfterSignedOutUse()
+            },
+            defineStep(
+                "the first account is signed in with its own choices"
+            ) { ctx, _, _ in
+                try w.firstAccountSignedInWithChoices()
+                return ctx
+            },
+            defineStep(
+                "the first account signs out and the second account signs in while the switch is still finishing"
+            ) { ctx, _, _ in
+                try w.overlapSignOutAndSecondSignIn()
+                return ctx
+            },
+            defineCheck("sign-out returns to the welcome without hanging") {
+                _, _, _ in
+                try w.assertSignOutReturnsToWelcomeWithoutHanging()
+            },
+            defineCheck(
+                "the second account's first run appears without hanging"
+            ) { _, _, _ in
+                try w.assertSecondFirstRunAppearsWithoutHanging()
+            },
+            defineCheck(
+                "a choice made during the switch is saved for its intended account or the app visibly asks me to retry"
+            ) { _, _, _ in
+                try w.assertTransitionChoiceSavedOrRetryVisible()
+            },
+            defineCheck("that choice is never written to another account") {
+                _, _, _ in
+                try w.assertTransitionChoiceNeverWrittenElsewhere()
+            },
+            defineStep(
+                "an established account enrolled its owner voice"
+            ) { ctx, _, _ in
+                try w.establishedAccountEnrolledOwnerVoice()
+                return ctx
+            },
+            defineStep(
+                "it has never chosen whether raw conversation context may be graded"
+            ) { ctx, _, _ in
+                try w.ownerNeverChoseGrading()
+                return ctx
+            },
+            defineStep("that account signs in after the update") {
+                ctx, _, _ in
+                try w.ownerSignsInAfterPreferenceUpdate()
+                return ctx
+            },
+            defineCheck("raw conversation context is not graded or sent") {
+                _, _, _ in
+                try w.assertRawContextIsNotGradedOrSent()
+            },
+            defineCheck(
+                "grading remains off until the owner explicitly turns it on"
+            ) { _, _, _ in
+                try w.assertGradingStaysOffUntilExplicitlyEnabled()
+            },
+            defineStep(
+                "my account has wearable capture listening"
+            ) { ctx, _, _ in
+                try w.accountHasWearableCaptureListening()
+                return ctx
+            },
+            defineStep(
+                "I pause wearable capture and relaunch the app"
+            ) { ctx, _, _ in
+                try w.pauseWearableCaptureAndRelaunch()
+                return ctx
+            },
+            defineCheck("wearable capture remains paused") {
+                _, _, _ in
+                try w.assertWearableCaptureRemainsPaused()
+            },
+            defineCheck(
+                "the paused choice is stored only with my account"
+            ) { _, _, _ in
+                try w.assertWearablePauseIsStoredOnlyWithItsAccount()
             },
             defineStep("the first account paired a Vault with a private bearer") {
                 ctx, _, _ in
