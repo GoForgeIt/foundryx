@@ -84,7 +84,8 @@ final class VaultFunnelTests: XCTestCase {
         let parsed = parseFeatureText(text)
         XCTAssertFalse(parsed.features.isEmpty, "no features parsed")
 
-        let world = VaultWorld()
+        let world = try VaultWorld()
+        defer { world.cleanup() }
         let registry = StepRegistry(VaultSteps.make(world: world))
 
         var collected: [JSONValue] = []
@@ -112,6 +113,12 @@ final class VaultFunnelTests: XCTestCase {
 // MARK: - Brine world + steps (real VaultFunnelModel, stubbed network + browser)
 
 final class VaultWorld: @unchecked Sendable {
+    private struct ResetError: Error, CustomStringConvertible {
+        let description =
+            "the prior scenario's Vault pairing could not be cleared"
+    }
+
+    private let fixture: PairingTestFixture
     var defaults: UserDefaults!
     var attempts: VaultCheckoutAttemptStore!
     var service: StubSignupService!
@@ -123,13 +130,27 @@ final class VaultWorld: @unchecked Sendable {
     /// attempt was persisted before the browser opened.
     var attemptPersistedWhenBrowserOpened = false
 
+    init() throws {
+        fixture = try PairingTestFixture()
+        defaults = fixture.defaults
+    }
+
+    func cleanup() {
+        fixture.cleanup()
+    }
+
     /// Fresh, hermetic funnel: no Vault (entitlement off), no persisted attempt.
-    @MainActor func reset() {
-        defaults = UserDefaults(suiteName: "vault-funnel-\(UUID().uuidString)")
+    @MainActor func reset() throws {
+        if let cellStore, !cellStore.unpair() {
+            throw ResetError()
+        }
+        attempts?.clear()
         attempts = VaultCheckoutAttemptStore(defaults: defaults)
         service = StubSignupService()
         browser = StubBrowser()
-        cellStore = CellStore(defaults: defaults)
+        cellStore = CellStore(
+            defaults: defaults,
+            keychainService: fixture.cellService)
         lastRoute = nil
         attemptPersistedWhenBrowserOpened = false
         let attemptsRef = attempts!
@@ -195,13 +216,13 @@ enum VaultSteps {
         [
             // ── Givens (each re-inits the hermetic world) ────────────────────
             defineStep("a free on-device user with no Vault") { ctx, _, _ in
-                await MainActor.run { world.reset() }
+                try await MainActor.run { try world.reset() }
                 return ctx
             },
 
             defineStep("a free on-device user on the plans screen") { ctx, _, _ in
-                await MainActor.run {
-                    world.reset()
+                try await MainActor.run {
+                    try world.reset()
                     world.model.beginSetup()
                     world.model.seePlans()
                 }
@@ -210,8 +231,8 @@ enum VaultSteps {
 
             defineStep("a free on-device user who completed browser checkout") { ctx, _, _ in
                 // Browser returns a verified return-ticket; the ticket exchange is verified.
-                await MainActor.run {
-                    world.reset()
+                try await MainActor.run {
+                    try world.reset()
                     world.browser.returnURL = returnTicketURL
                     world.service.exchangeStatus = .ready(cellURL: readyCellURL, handoff: readyHandoff)
                     world.model.beginSetup(); world.model.seePlans()
@@ -220,8 +241,8 @@ enum VaultSteps {
             },
 
             defineStep("a free on-device user who dismissed the browser without paying") { ctx, _, _ in
-                await MainActor.run {
-                    world.reset()
+                try await MainActor.run {
+                    try world.reset()
                     world.browser.returnURL = nil                 // dismissed
                     world.service.reconcileStatus = .pending       // no payment yet
                     world.model.beginSetup(); world.model.seePlans()
@@ -231,8 +252,8 @@ enum VaultSteps {
             },
 
             defineStep("a free on-device user whose payment is confirmed but the cell is still provisioning") { ctx, _, _ in
-                await MainActor.run {
-                    world.reset()
+                try await MainActor.run {
+                    try world.reset()
                     world.browser.returnURL = nil
                     world.service.reconcileStatus = .pending
                     world.model.beginSetup(); world.model.seePlans()
@@ -243,8 +264,8 @@ enum VaultSteps {
             },
 
             defineStep("a user with a live Vault") { ctx, _, _ in
-                await MainActor.run {
-                    world.reset()
+                try await MainActor.run {
+                    try world.reset()
                     world.browser.returnURL = returnTicketURL
                     world.service.exchangeStatus = .ready(cellURL: readyCellURL, handoff: readyHandoff)
                     world.model.beginSetup(); world.model.seePlans()
@@ -256,7 +277,7 @@ enum VaultSteps {
             },
 
             defineStep("a returning free on-device user with no checkout attempt") { ctx, _, _ in
-                await MainActor.run { world.reset() }
+                try await MainActor.run { try world.reset() }
                 return ctx
             },
 

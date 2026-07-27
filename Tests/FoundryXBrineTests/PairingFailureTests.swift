@@ -477,6 +477,9 @@ struct PairingTestFixture {
     }
 
     func cleanup() {
+        let secretStore = SystemPairingSecretStore()
+        _ = secretStore.remove(service: cellService, account: scope)
+        _ = secretStore.remove(service: doorService, account: scope)
         CaptureAccountScope.resetTestEnvironment()
         defaults.removePersistentDomain(forName: defaultsName)
         try? FileManager.default.removeItem(at: container)
