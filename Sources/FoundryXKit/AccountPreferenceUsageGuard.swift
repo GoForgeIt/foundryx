@@ -440,6 +440,33 @@ public enum AccountPreferenceUsageGuard {
             let compactUse = resolved.use
                 .replacingOccurrences(
                     of: "\\s+", with: "", options: .regularExpression)
+            if context.type == "LiveAccountDeletionContext",
+               let enclosingMethod = context.method,
+               ["remove", "verify"].contains(enclosingMethod),
+               ["removeObject", "object"].contains(method),
+               [
+                    "\"\\(binding.scope).\\(key)\"",
+                    "\"\\(binding.scope).\\($0.canonicalKey)\"",
+                    "\"\\(binding.scope).\\($0)\"",
+                    "legacyPreferenceKey",
+               ].contains(compactUse) {
+                return nil
+            }
+            if context.type == "CellStore",
+               context.method == "erasePairing",
+               ["removeObject", "object"].contains(method),
+               [
+                    "\"\\(binding.scope).\\(Self.urlKey)\"",
+                    "\"\\(binding.scope).\\(Self.modeKey)\"",
+               ].contains(compactUse) {
+                return nil
+            }
+            if context.type == "DoorConfigStore",
+               context.method == "erasePairing",
+               ["removeObject", "object"].contains(method),
+               compactUse == "\"\\(binding.scope).\\(Self.urlKey)\"" {
+                return nil
+            }
             if compactUse == "AuthStore.signedInMirrorKey" {
                 return nil
             }

@@ -61,6 +61,24 @@ struct DoorConfigStore: @unchecked Sendable {
         return true
     }
 
+    @discardableResult
+    func erasePairing(
+        expected binding: CaptureAccountScope.AccountBinding
+    ) -> PairingSecretRemovalResult {
+        let result = secretStore.removeExplicitOwner(
+            service: keychainService,
+            account: binding.scope)
+        guard result.succeeded else { return result }
+        defaults.removeObject(
+            forKey: "\(binding.scope).\(Self.urlKey)")
+        guard defaults.synchronize(),
+              defaults.object(
+                forKey: "\(binding.scope).\(Self.urlKey)") == nil else {
+            return .failed
+        }
+        return result
+    }
+
     static func load() -> DoorConfig? {
         DoorConfigStore().load()
     }

@@ -913,6 +913,12 @@ struct LegacySignupMarkerMigration {
             self.historicalCanonicalIdentity =
                 historicalCanonicalIdentity
         }
+
+        fileprivate static func verified(
+            _ historicalCanonicalIdentity: String
+        ) -> Self {
+            Self(historicalCanonicalIdentity: historicalCanonicalIdentity)
+        }
     }
 
     struct DurableLegacyOwnerProof: Sendable, Equatable {
@@ -930,6 +936,18 @@ struct LegacySignupMarkerMigration {
             self.historicalCanonicalIdentity =
                 historicalCanonicalIdentity
         }
+
+        fileprivate static func proven(
+            scope: String,
+            generation: UInt64,
+            historicalCanonicalIdentity: String
+        ) -> Self {
+            Self(
+                scope: scope,
+                generation: generation,
+                historicalCanonicalIdentity:
+                    historicalCanonicalIdentity)
+        }
     }
 
     struct DeletionTombstoneProof: Sendable, Equatable {
@@ -940,6 +958,12 @@ struct LegacySignupMarkerMigration {
             self.scope = scope
             self.generation = generation
         }
+
+        fileprivate static func proven(
+            scope: String, generation: UInt64
+        ) -> Self {
+            Self(scope: scope, generation: generation)
+        }
     }
 
     private static let historicalPrefix =
@@ -948,6 +972,54 @@ struct LegacySignupMarkerMigration {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+    }
+
+    static func retireForDeletion(
+        identity: AuthIdentity,
+        ownerScope: String,
+        generation: UInt64,
+        durableLegacyOwnerScope: String?,
+        defaults: UserDefaults
+    ) -> AccountPreferenceWriteResult {
+        guard durableLegacyOwnerScope == ownerScope,
+              let email = identity.email?.trimmingCharacters(
+                in: .whitespacesAndNewlines).lowercased(),
+              !email.isEmpty else {
+            return .rejected
+        }
+        let identity = VerifiedIdentity.verified(email)
+        let ownerProof = DurableLegacyOwnerProof.proven(
+            scope: ownerScope,
+            generation: generation,
+            historicalCanonicalIdentity: email)
+        let tombstone = DeletionTombstoneProof.proven(
+            scope: ownerScope, generation: generation)
+        return Self(defaults: defaults).retire(
+            identity: identity,
+            ownerProof: ownerProof,
+            deletionTombstone: tombstone)
+    }
+
+    static func isAbsentForDeletion(
+        identity: AuthIdentity,
+        ownerScope: String,
+        generation: UInt64,
+        durableLegacyOwnerScope: String?,
+        defaults: UserDefaults
+    ) -> Bool {
+        guard durableLegacyOwnerScope == ownerScope,
+              let email = identity.email?.trimmingCharacters(
+                in: .whitespacesAndNewlines).lowercased(),
+              !email.isEmpty else {
+            return false
+        }
+        let verified = VerifiedIdentity.verified(email)
+        let proof = DurableLegacyOwnerProof.proven(
+            scope: ownerScope,
+            generation: generation,
+            historicalCanonicalIdentity: email)
+        return Self(defaults: defaults).snapshot(
+            identity: verified, ownerProof: proof) == .absent
     }
 
     func snapshot(

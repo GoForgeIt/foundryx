@@ -234,6 +234,59 @@ final class AccountPreferenceUsageGuardTests: XCTestCase {
         XCTAssertEqual(Set(violations.map(\.line)), [5, 11, 17])
     }
 
+    func testDeletionOwnerCannotHideAnUnrelatedDynamicPreferenceRemoval() {
+        let source = AccountPreferenceSourceFile(
+            path: "Fixture/DeletionDynamicEscape.swift",
+            text: """
+            import Foundation
+            final class LiveAccountDeletionContext {
+                let defaults: UserDefaults = .standard
+                func remove(plantedUnrelatedKey: String) {
+                    defaults.removeObject(forKey: plantedUnrelatedKey)
+                }
+            }
+            """)
+
+        let violations = AccountPreferenceUsageGuard.scan(
+            sources: [source])
+        XCTAssertEqual(violations.count, 1)
+        XCTAssertEqual(
+            violations.first?.reason,
+            "dynamic or unresolved preference key is forbidden at this persistence use")
+    }
+
+    func testDeletionAndPairingOwnersRejectPlantedGenericKeyEscapes() {
+        let source = AccountPreferenceSourceFile(
+            path: "Fixture/PlantedDeletionEscapes.swift",
+            text: """
+            import Foundation
+            final class LiveAccountDeletionContext {
+                let defaults: UserDefaults = .standard
+                func remove(unrelated: String, values: [String]) {
+                    let key = unrelated
+                    defaults.removeObject(forKey: key)
+                    values.forEach { defaults.removeObject(forKey: $0) }
+                }
+            }
+            final class CellStore {
+                let defaults: UserDefaults = .standard
+                func erasePairing(unrelated: String) {
+                    defaults.removeObject(forKey: unrelated)
+                }
+            }
+            final class DoorConfigStore {
+                let defaults: UserDefaults = .standard
+                func erasePairing(unrelated: String) {
+                    defaults.removeObject(forKey: unrelated)
+                }
+            }
+            """)
+        let violations = AccountPreferenceUsageGuard.scan(sources: [source])
+        XCTAssertGreaterThanOrEqual(
+            violations.count, 4,
+            "every planted persistence call must be rejected")
+    }
+
     func testPhoneRegistryIsFiniteAndCannotEnterAccountScope() {
         let expected: Set<String> = [
             "foundryx.omi.peripheral-id",

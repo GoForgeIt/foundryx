@@ -4,6 +4,186 @@ import BrineSwiftCore
 @testable import FoundryXKit
 
 final class PairingFailureTests: XCTestCase {
+    func testTypedSecretInspectionDistinguishesAllKeychainOutcomes() {
+        let secrets = ScriptedPairingSecretStore()
+        secrets.seed(
+            "bearer",
+            service: "cell",
+            account: "acct-owner")
+        XCTAssertEqual(
+            secrets.inspect(service: "cell", account: "acct-owner"),
+            .found("bearer"))
+        XCTAssertEqual(
+            secrets.inspect(service: "cell", account: "acct-missing"),
+            .notFound)
+
+        secrets.forceNextInspection(.unavailable)
+        XCTAssertEqual(
+            secrets.inspect(service: "cell", account: "acct-owner"),
+            .unavailable)
+        secrets.forceNextInspection(.failed)
+        XCTAssertEqual(
+            secrets.inspect(service: "cell", account: "acct-owner"),
+            .failed)
+    }
+
+    func testExplicitOwnerRemovalIsTypedAndNeverTouchesAnotherOwner() {
+        let secrets = ScriptedPairingSecretStore()
+        secrets.seed("a", service: "cell", account: "acct-a")
+        secrets.seed("b", service: "cell", account: "acct-b")
+
+        XCTAssertEqual(
+            secrets.removeExplicitOwner(
+                service: "cell", account: "acct-b"),
+            .removed)
+        XCTAssertEqual(
+            secrets.inspect(service: "cell", account: "acct-b"),
+            .notFound)
+        XCTAssertEqual(
+            secrets.inspect(service: "cell", account: "acct-a"),
+            .found("a"))
+        XCTAssertEqual(
+            secrets.removeExplicitOwner(
+                service: "cell", account: "acct-b"),
+            .notFound)
+
+        secrets.forceNextRemoval(.unavailable)
+        XCTAssertEqual(
+            secrets.removeExplicitOwner(
+                service: "cell", account: "acct-a"),
+            .unavailable)
+        XCTAssertEqual(
+            secrets.inspect(service: "cell", account: "acct-a"),
+            .found("a"))
+        secrets.forceNextRemoval(.failed)
+        XCTAssertEqual(
+            secrets.removeExplicitOwner(
+                service: "cell", account: "acct-a"),
+            .failed)
+    }
+
+    func testVaultExplicitOwnerEraseIsAtomicOnUnavailableKeychain()
+        throws
+    {
+        let fixture = try PairingTestFixture()
+        defer { fixture.cleanup() }
+        let secrets = ScriptedPairingSecretStore()
+        let store = CellStore(
+            defaults: fixture.defaults,
+            keychainService: fixture.cellService,
+            secretStore: secrets)
+        let original = CellConfig(
+            url: "https://vault.example.test",
+            auth: .bearer("owner-bearer"))
+        XCTAssertTrue(store.pair(original))
+
+        secrets.forceNextRemoval(.unavailable)
+        XCTAssertEqual(
+            store.erasePairing(expected: fixture.binding),
+            .unavailable)
+
+        XCTAssertEqual(store.config, original)
+        XCTAssertEqual(
+            CellStore(
+                defaults: fixture.defaults,
+                keychainService: fixture.cellService,
+                secretStore: secrets).config,
+            original)
+        XCTAssertEqual(
+            secrets.inspect(
+                service: fixture.cellService,
+                account: fixture.scope),
+            .found("owner-bearer"))
+    }
+
+    func testDoorExplicitOwnerEraseIsAtomicOnFailedKeychain() throws {
+        let fixture = try PairingTestFixture()
+        defer { fixture.cleanup() }
+        let secrets = ScriptedPairingSecretStore()
+        let store = DoorConfigStore(
+            defaults: fixture.defaults,
+            keychainService: fixture.doorService,
+            secretStore: secrets)
+        let original = try XCTUnwrap(DoorConfig(
+            url: "https://door.example.test",
+            bearer: "door-bearer"))
+        XCTAssertTrue(store.save(original))
+
+        secrets.forceNextRemoval(.failed)
+        XCTAssertEqual(
+            store.erasePairing(expected: fixture.binding),
+            .failed)
+
+        XCTAssertEqual(store.load(), original)
+        XCTAssertEqual(
+            secrets.inspect(
+                service: fixture.doorService,
+                account: fixture.scope),
+            .found("door-bearer"))
+    }
+
+    func testSuccessfulExplicitOwnerEraseRemovesBothServicesAndPreservesOtherOwner()
+        throws
+    {
+        let fixture = try PairingTestFixture()
+        defer { fixture.cleanup() }
+        let secrets = ScriptedPairingSecretStore()
+        let cell = CellStore(
+            defaults: fixture.defaults,
+            keychainService: fixture.cellService,
+            secretStore: secrets)
+        let door = DoorConfigStore(
+            defaults: fixture.defaults,
+            keychainService: fixture.doorService,
+            secretStore: secrets)
+        XCTAssertTrue(cell.pair(CellConfig(
+            url: "https://b-cell.example.test",
+            auth: .bearer("b-cell"))))
+        XCTAssertTrue(door.save(try XCTUnwrap(DoorConfig(
+            url: "https://b-door.example.test",
+            bearer: "b-door"))))
+        let otherScope = "acct-other-owner"
+        secrets.seed(
+            "a-cell",
+            service: fixture.cellService,
+            account: otherScope)
+        secrets.seed(
+            "a-door",
+            service: fixture.doorService,
+            account: otherScope)
+        try fixture.activateOther(subject: "owner-c")
+
+        XCTAssertEqual(
+            cell.erasePairing(expected: fixture.binding),
+            .removed)
+        XCTAssertEqual(
+            door.erasePairing(expected: fixture.binding),
+            .removed)
+
+        XCTAssertNil(fixture.defaults.object(
+            forKey: "\(fixture.scope).foundryx.cell.url"))
+        XCTAssertNil(fixture.defaults.object(
+            forKey: "\(fixture.scope).foundryx.cell.authMode"))
+        XCTAssertNil(fixture.defaults.object(
+            forKey: "\(fixture.scope).foundryx.door.url"))
+        XCTAssertEqual(
+            secrets.inspect(
+                service: fixture.cellService, account: fixture.scope),
+            .notFound)
+        XCTAssertEqual(
+            secrets.inspect(
+                service: fixture.doorService, account: fixture.scope),
+            .notFound)
+        XCTAssertEqual(
+            secrets.inspect(
+                service: fixture.cellService, account: otherScope),
+            .found("a-cell"))
+        XCTAssertEqual(
+            secrets.inspect(
+                service: fixture.doorService, account: otherScope),
+            .found("a-door"))
+    }
+
     func testColdScopedPairingReadNeverWaitsForPersistenceMaintenance() throws {
         let fixture = try PairingTestFixture()
         defer { fixture.cleanup() }
@@ -364,9 +544,25 @@ final class ScriptedPairingSecretStore:
     private var addFailures = 0
     private var removeFailures = 0
     private var updateFailures = 0
+    private var forcedInspection: PairingSecretReadResult?
+    private var forcedRemoval: PairingSecretRemovalResult?
 
     func read(service: String, account: String) -> String? {
         lock.withLock { values[Key(service: service, account: account)] }
+    }
+
+    func inspect(
+        service: String,
+        account: String
+    ) -> PairingSecretReadResult {
+        lock.withLock {
+            if let forcedInspection {
+                self.forcedInspection = nil
+                return forcedInspection
+            }
+            return values[Key(service: service, account: account)]
+                .map(PairingSecretReadResult.found) ?? .notFound
+        }
     }
 
     func update(
@@ -410,6 +606,21 @@ final class ScriptedPairingSecretStore:
         }
     }
 
+    func removeExplicitOwner(
+        service: String,
+        account: String
+    ) -> PairingSecretRemovalResult {
+        lock.withLock {
+            if let forcedRemoval {
+                self.forcedRemoval = nil
+                return forcedRemoval
+            }
+            let removed = values.removeValue(
+                forKey: Key(service: service, account: account))
+            return removed == nil ? .notFound : .removed
+        }
+    }
+
     func failNextAdd() {
         lock.withLock { addFailures += 1 }
     }
@@ -424,6 +635,20 @@ final class ScriptedPairingSecretStore:
 
     func value(service: String, account: String) -> String? {
         read(service: service, account: account)
+    }
+
+    func seed(_ value: String, service: String, account: String) {
+        lock.withLock {
+            values[Key(service: service, account: account)] = value
+        }
+    }
+
+    func forceNextInspection(_ result: PairingSecretReadResult) {
+        lock.withLock { forcedInspection = result }
+    }
+
+    func forceNextRemoval(_ result: PairingSecretRemovalResult) {
+        lock.withLock { forcedRemoval = result }
     }
 }
 
@@ -444,6 +669,7 @@ struct PairingTestFixture {
     let cellService: String
     let doorService: String
     let scope: String
+    let binding: CaptureAccountScope.AccountBinding
 
     init() throws {
         let discriminator = UUID().uuidString.lowercased()
@@ -474,6 +700,7 @@ struct PairingTestFixture {
         try CaptureAccountScope.activateForTests(identity)
         scope = try XCTUnwrap(
             CaptureAccountScope.currentScopedPreferences()?.scope)
+        binding = try XCTUnwrap(CaptureAccountScope.currentAccountBinding())
     }
 
     func cleanup() {
@@ -483,6 +710,16 @@ struct PairingTestFixture {
         CaptureAccountScope.resetTestEnvironment()
         defaults.removePersistentDomain(forName: defaultsName)
         try? FileManager.default.removeItem(at: container)
+    }
+
+    func activateOther(subject: String) throws {
+        let identity = AuthIdentity(
+            provider: AuthProvider.google.rawValue,
+            idToken: PairingTestFixture.idToken(subject: subject),
+            refreshToken: nil,
+            expiresAt: .distantFuture,
+            email: "\(subject)@example.test")
+        try CaptureAccountScope.activateForTests(identity)
     }
 
     private static func idToken(subject: String) -> String {

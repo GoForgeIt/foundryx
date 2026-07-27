@@ -65,9 +65,35 @@ public enum CaptureAccountScope {
         public let root: URL
         public let scope: String
         public let generation: UInt64
+        let admissionEpoch: UInt64?
+        let admissionCell: SharedAccountAdmissionCell?
+
+        init(
+            root: URL,
+            scope: String,
+            generation: UInt64,
+            admissionEpoch: UInt64? = nil,
+            admissionCell: SharedAccountAdmissionCell? = nil
+        ) {
+            self.root = root
+            self.scope = scope
+            self.generation = generation
+            self.admissionEpoch = admissionEpoch
+            self.admissionCell = admissionCell
+        }
 
         public var isCurrent: Bool {
             CaptureAccountScope.isCurrent(self)
+        }
+
+        public static func == (
+            lhs: AccountBinding,
+            rhs: AccountBinding
+        ) -> Bool {
+            lhs.root == rhs.root
+                && lhs.scope == rhs.scope
+                && lhs.generation == rhs.generation
+                && lhs.admissionEpoch == rhs.admissionEpoch
         }
     }
 
@@ -99,11 +125,25 @@ public enum CaptureAccountScope {
     ) rethrows -> Result? {
         stateLock.lock()
         guard generation == binding.generation,
-              resolvedScope(cachedResolution) == binding.scope else {
+              resolvedScope(cachedResolution) == binding.scope,
+              !deletionAdmissionBlockedLocked(binding.scope) else {
             stateLock.unlock()
             return nil
         }
+        let admissionLease: SharedAccountAdmissionCell.Lease?
+        if isAccountScope(binding.scope) {
+            guard let epoch = binding.admissionEpoch,
+                  let lease = binding.admissionCell?.acquire(epoch: epoch)
+            else {
+                stateLock.unlock()
+                return nil
+            }
+            admissionLease = lease
+        } else {
+            admissionLease = nil
+        }
         defer { stateLock.unlock() }
+        defer { admissionLease?.release() }
         let threadDictionary = Thread.current.threadDictionary
         let priorDepth =
             threadDictionary[preferenceMutationDepthKey] as? Int ?? 0
@@ -125,6 +165,23 @@ public enum CaptureAccountScope {
         let requiresActivation: Bool
         let aliases: [String: String]
         let aliasSources: [String]
+        let suppressLegacyAdoption: Bool
+
+        init(
+            scope: String,
+            previousScope: String?,
+            requiresActivation: Bool,
+            aliases: [String: String],
+            aliasSources: [String],
+            suppressLegacyAdoption: Bool = false
+        ) {
+            self.scope = scope
+            self.previousScope = previousScope
+            self.requiresActivation = requiresActivation
+            self.aliases = aliases
+            self.aliasSources = aliasSources
+            self.suppressLegacyAdoption = suppressLegacyAdoption
+        }
     }
 
     private enum ActivationPhase: String, Codable {
@@ -212,6 +269,12 @@ public enum CaptureAccountScope {
         let recoveryDiscriminator: String
     }
 
+    private struct AccountDeletionWorkAuthorization: Sendable {
+        let binding: AccountBinding
+        let deletionEpoch: UInt64
+        var blockedGeneration: UInt64
+    }
+
     private static let activationStateKey = "foundryx.capture-account-activation.v2"
     private static let oldPersistedScopeKey = "foundryx.capture-account-scope"
     public static let identityDidChangeNotification =
@@ -223,6 +286,7 @@ public enum CaptureAccountScope {
     private static let preferenceMutationLock = NSLock()
     private static let preferenceBarrierProbeLock = NSLock()
     private static let resolutionProbeLock = NSLock()
+    private static let exposurePublicationLock = NSLock()
     private static let persistenceQueue =
         DispatchQueue(label: "foundryx.capture-account-persistence")
     private static let migrationQueue =
@@ -233,7 +297,18 @@ public enum CaptureAccountScope {
         AccountPreferenceSnapshot?
     nonisolated(unsafe) private static var activePreferenceWriteBarrier:
         AccountPreferenceWriteBarrier?
+    nonisolated(unsafe) private static var activePreferenceAdmissionLease:
+        AccountDeletionLifecycleStore.OwnerAdmissionLease?
     nonisolated(unsafe) private static var generation: UInt64 = 0
+    nonisolated(unsafe) private static var deletionWorkAuthorizations:
+        [String: AccountDeletionWorkAuthorization] = [:]
+    nonisolated(unsafe) private static var pendingDeletionAdmissions:
+        Set<String> = []
+    nonisolated(unsafe) private static var blockedDeletionAdmissions:
+        Set<String> = []
+    nonisolated(unsafe) private static var cachedSharedAdmissionScope: String?
+    nonisolated(unsafe) private static var cachedSharedAdmissionCell:
+        SharedAccountAdmissionCell?
     nonisolated(unsafe) private static var containerOverride: URL?
     nonisolated(unsafe) private static var applicationSupportOverride: URL?
     nonisolated(unsafe) private static var defaultsOverride: UserDefaults?
@@ -244,6 +319,10 @@ public enum CaptureAccountScope {
     nonisolated(unsafe) private static var lastValidatedContainer: URL?
     nonisolated(unsafe) private static var markerSyncFailureForTests = false
     nonisolated(unsafe) private static var resolutionPersistenceEntriesForTests = 0
+    nonisolated(unsafe) private static var beforeAccountBindingPublicationHook:
+        (() -> Void)?
+    nonisolated(unsafe) private static var activationMigrationPauseHookForTests:
+        (() -> Void)?
 
     // MARK: - Stable provider-qualified key
 
@@ -336,6 +415,8 @@ public enum CaptureAccountScope {
             let current = try readActivationRecordForMutation()
             let resolved = try resolveIdentityScope(identity, against: current)
             let target = resolved.scope
+            let completedDeletion = try completedDeletionAllowsReturn(
+                ownerScope: target)
             switch current.phase {
             case .active where current.scope == target:
                 if current.aliases != resolved.aliases {
@@ -345,12 +426,14 @@ public enum CaptureAccountScope {
                 return ActivationTransaction(
                     scope: target, previousScope: target, requiresActivation: false,
                     aliases: resolved.aliases,
-                    aliasSources: resolved.aliasSources)
+                    aliasSources: resolved.aliasSources,
+                    suppressLegacyAdoption: completedDeletion)
             case .pendingActivation where current.scope == target:
                 return ActivationTransaction(
                     scope: target, previousScope: current.previousScope,
                     requiresActivation: true, aliases: resolved.aliases,
-                    aliasSources: resolved.aliasSources)
+                    aliasSources: resolved.aliasSources,
+                    suppressLegacyAdoption: completedDeletion)
             case .pendingActivation, .pendingSignOut:
                 throw CaptureAccountScopeError.activationAlreadyPending
             case .active, .signedOut:
@@ -362,7 +445,8 @@ public enum CaptureAccountScope {
                 return ActivationTransaction(
                     scope: target, previousScope: previous, requiresActivation: true,
                     aliases: resolved.aliases,
-                    aliasSources: resolved.aliasSources)
+                    aliasSources: resolved.aliasSources,
+                    suppressLegacyAdoption: completedDeletion)
             }
         }
     }
@@ -372,41 +456,88 @@ public enum CaptureAccountScope {
     static func completeActivation(_ transaction: ActivationTransaction) throws {
         guard transaction.requiresActivation else {
             try persistenceQueue.sync {
-                if try legacyPrivateDataBelongs(to: transaction.scope) {
+                let deletionCompleted = try completedDeletionAllowsReturn(
+                    ownerScope: transaction.scope)
+                let suppressLegacyAdoption =
+                    transaction.suppressLegacyAdoption || deletionCompleted
+                if !suppressLegacyAdoption,
+                   try legacyPrivateDataBelongs(to: transaction.scope) {
                     try adoptLegacyPairingRecord(
                         for: transaction.scope,
                         defaults: currentDefaults())
                 }
+                let defaults = currentDefaults()
+                defaults.set(true, forKey: AuthStore.signedInMirrorKey)
+                guard defaults.synchronize(),
+                      defaults.bool(forKey: AuthStore.signedInMirrorKey) else {
+                    throw CaptureAccountScopeError.activationState(
+                        "the signed-in mirror could not be durably restored")
+                }
                 installResolution(
-                    .account(transaction.scope), widgetOwner: nil,
-                    identityTransition: false)
+                    .account(transaction.scope),
+                    widgetOwner: transaction.scope,
+                    identityTransition: suppressLegacyAdoption)
             }
             return
         }
-        try mergeAliasedScopes(
-            transaction.aliasSources, into: transaction.scope)
-        let ownsLegacyPrivateData = try claimLegacyPrivateData(
-            for: transaction.scope)
+        let deletionCompleted = try completedDeletionAllowsReturn(
+            ownerScope: transaction.scope)
         try persistenceQueue.sync {
-            let record = try readActivationRecordForMutation()
-            guard record.phase == .pendingActivation,
-                  record.scope == transaction.scope else {
+            let container = try durableContainer()
+            let admitted = try AccountDeletionLifecycleStore(
+                container: container
+            ).withOwnerAdmission(ownerScope: transaction.scope) {
+                let record = try readActivationRecordForMutation()
+                guard record.phase == .pendingActivation,
+                      record.scope == transaction.scope else {
+                    throw CaptureAccountScopeError.activationState(
+                        "the pending owner changed before activation completed")
+                }
+                let pause = stateLock.withLock {
+                    activationMigrationPauseHookForTests
+                }
+                pause?()
+                let suppressLegacyAdoption =
+                    transaction.suppressLegacyAdoption
+                    || deletionCompleted
+                let ownsLegacyPrivateData: Bool
+                if suppressLegacyAdoption {
+                    let root = container.appendingPathComponent(
+                        transaction.scope, isDirectory: true)
+                    try FileManager.default.createDirectory(
+                        at: root, withIntermediateDirectories: true)
+                    ownsLegacyPrivateData = false
+                } else {
+                    try mergeAliasedScopes(
+                        transaction.aliasSources, into: transaction.scope)
+                    ownsLegacyPrivateData = try claimLegacyPrivateData(
+                        for: transaction.scope)
+                }
+                if ownsLegacyPrivateData {
+                    try adoptLegacyPairingRecord(
+                        for: transaction.scope,
+                        defaults: currentDefaults())
+                }
+                try persistActivationRecord(.active(
+                    transaction.scope, aliases: record.aliases))
+                let defaults = currentDefaults()
+                defaults.set(true, forKey: AuthStore.signedInMirrorKey)
+                guard defaults.synchronize(),
+                      defaults.bool(
+                        forKey: AuthStore.signedInMirrorKey) else {
+                    throw CaptureAccountScopeError.activationState(
+                        "the signed-in mirror could not be durably recorded")
+                }
+                defaults.removeObject(forKey: oldPersistedScopeKey)
+                installResolution(
+                    .account(transaction.scope),
+                    widgetOwner: transaction.scope,
+                    identityTransition: true)
+            }
+            guard admitted != nil else {
                 throw CaptureAccountScopeError.activationState(
-                    "the pending owner changed before activation completed")
+                    "account deletion admission denied activation")
             }
-            if ownsLegacyPrivateData {
-                try adoptLegacyPairingRecord(
-                    for: transaction.scope,
-                    defaults: currentDefaults())
-            }
-            try persistActivationRecord(.active(
-                transaction.scope, aliases: record.aliases))
-            let defaults = currentDefaults()
-            defaults.set(true, forKey: AuthStore.signedInMirrorKey)
-            defaults.removeObject(forKey: oldPersistedScopeKey)
-            installResolution(
-                .account(transaction.scope), widgetOwner: transaction.scope,
-                identityTransition: true)
         }
     }
 
@@ -434,23 +565,29 @@ public enum CaptureAccountScope {
             let record = try readActivationRecordForMutation()
             let resolved = try resolveIdentityScope(identity, against: record)
             let target = resolved.scope
+            let completedDeletion = try completedDeletionAllowsReturn(
+                ownerScope: target)
             switch record.phase {
             case .active where record.scope == target:
                 if record.aliases != resolved.aliases {
                     try persistActivationRecord(
                         .active(target, aliases: resolved.aliases))
                 }
-                installResolution(.account(target), widgetOwner: nil,
-                                  identityTransition: false)
+                if !completedDeletion {
+                    installResolution(.account(target), widgetOwner: nil,
+                                      identityTransition: false)
+                }
                 return ActivationTransaction(
                     scope: target, previousScope: target, requiresActivation: false,
                     aliases: resolved.aliases,
-                    aliasSources: resolved.aliasSources)
+                    aliasSources: resolved.aliasSources,
+                    suppressLegacyAdoption: completedDeletion)
             case .pendingActivation where record.scope == target:
                 return ActivationTransaction(
                     scope: target, previousScope: record.previousScope,
                     requiresActivation: true, aliases: resolved.aliases,
-                    aliasSources: resolved.aliasSources)
+                    aliasSources: resolved.aliasSources,
+                    suppressLegacyAdoption: completedDeletion)
             case .pendingActivation where record.previousScope == target:
                 try persistActivationRecord(
                     .active(target, aliases: resolved.aliases))
@@ -460,7 +597,8 @@ public enum CaptureAccountScope {
                 return ActivationTransaction(
                     scope: target, previousScope: target, requiresActivation: false,
                     aliases: resolved.aliases,
-                    aliasSources: resolved.aliasSources)
+                    aliasSources: resolved.aliasSources,
+                    suppressLegacyAdoption: completedDeletion)
             case .pendingSignOut where record.previousScope == target:
                 try persistActivationRecord(
                     .active(target, aliases: resolved.aliases))
@@ -470,7 +608,8 @@ public enum CaptureAccountScope {
                 return ActivationTransaction(
                     scope: target, previousScope: target, requiresActivation: false,
                     aliases: resolved.aliases,
-                    aliasSources: resolved.aliasSources)
+                    aliasSources: resolved.aliasSources,
+                    suppressLegacyAdoption: completedDeletion)
             case .pendingActivation, .pendingSignOut:
                 throw CaptureAccountScopeError.activationAlreadyPending
             case .active:
@@ -484,7 +623,8 @@ public enum CaptureAccountScope {
                 return ActivationTransaction(
                     scope: target, previousScope: nil, requiresActivation: true,
                     aliases: resolved.aliases,
-                    aliasSources: resolved.aliasSources)
+                    aliasSources: resolved.aliasSources,
+                    suppressLegacyAdoption: completedDeletion)
             }
         }
         try completeActivation(action)
@@ -568,9 +708,13 @@ public enum CaptureAccountScope {
     /// Lock-screen authorization is true only for a fully claimed ACTIVE scope.
     static var hasPersistedActiveScope: Bool {
         guard currentDefaults().bool(forKey: AuthStore.signedInMirrorKey),
-              case .account = currentResolution(),
-              (try? durableContainer()) != nil else { return false }
-        return true
+              case .account(let scope) = currentResolution() else {
+            return false
+        }
+        stateLock.lock()
+        let admissionBlocked = deletionAdmissionBlockedLocked(scope)
+        stateLock.unlock()
+        return !admissionBlocked
     }
 
     // MARK: - Account binding and store access
@@ -579,9 +723,15 @@ public enum CaptureAccountScope {
     /// `currentScopedPreferences`, this never resolves identity through persistence.
     public static func currentScopedPreferenceBinding() -> ScopedPreferenceBinding? {
         stateLock.lock()
-        defer { stateLock.unlock() }
-        guard let scope = resolvedScope(cachedResolution) else { return nil }
-        return ScopedPreferenceBinding(scope: scope, generation: generation)
+        guard let scope = resolvedScope(cachedResolution),
+              !deletionAdmissionBlockedLocked(scope) else {
+            stateLock.unlock()
+            return nil
+        }
+        let binding = ScopedPreferenceBinding(
+            scope: scope, generation: generation)
+        stateLock.unlock()
+        return binding
     }
 
     /// Installs a dormant immutable snapshot only for the exact current owner
@@ -597,7 +747,8 @@ public enum CaptureAccountScope {
         guard snapshot.scope == binding.scope,
               snapshot.generation == binding.generation,
               generation == binding.generation,
-              resolvedScope(cachedResolution) == binding.scope else {
+              resolvedScope(cachedResolution) == binding.scope,
+              !deletionAdmissionBlockedLocked(binding.scope) else {
             return false
         }
         cachedAccountPreferenceSnapshot = snapshot
@@ -613,7 +764,8 @@ public enum CaptureAccountScope {
         defer { stateLock.unlock() }
         guard let snapshot = cachedAccountPreferenceSnapshot,
               snapshot.generation == generation,
-              resolvedScope(cachedResolution) == snapshot.scope else {
+              resolvedScope(cachedResolution) == snapshot.scope,
+              !pendingDeletionAdmissions.contains(snapshot.scope) else {
             return nil
         }
         return snapshot
@@ -635,7 +787,6 @@ public enum CaptureAccountScope {
         let depth = Thread.current.threadDictionary[
             preferenceMutationDepthKey] as? Int ?? 0
         guard depth == 0 else { return .rejected }
-
         preferenceBarrierProbeLock.lock()
         guard preferenceMutationLock.try() else {
             preferenceBarrierProbeLock.unlock()
@@ -649,7 +800,8 @@ public enum CaptureAccountScope {
             unlockPreferenceMutationGate()
             return .rejected
         }
-        guard let currentScope = resolvedScope(cachedResolution) else {
+        guard let currentScope = resolvedScope(cachedResolution),
+              !deletionAdmissionBlockedLocked(currentScope) else {
             stateLock.unlock()
             unlockPreferenceMutationGate()
             return .unresolved
@@ -662,6 +814,20 @@ public enum CaptureAccountScope {
         }
         let scoped = ScopedPreferences(scope: currentScope)
         stateLock.unlock()
+
+        // Durable admission follows the bounded in-process probes and must itself
+        // be nonblocking: activation may hold the lifecycle store while waiting
+        // for this preference gate.
+        guard let container = try? durableContainer(),
+              let admission = AccountDeletionLifecycleStore(
+                container: container
+              ).acquireOwnerAdmission(ownerScope: binding.scope) else {
+            unlockPreferenceMutationGate()
+            return .unresolved
+        }
+        preferenceBarrierProbeLock.withLock {
+            activePreferenceAdmissionLease = admission
+        }
         return .acquired(scoped)
     }
 
@@ -677,7 +843,8 @@ public enum CaptureAccountScope {
         defer { stateLock.unlock() }
         guard generation == binding.generation,
               let currentScope = resolvedScope(cachedResolution),
-              currentScope == binding.scope else {
+              currentScope == binding.scope,
+              !deletionAdmissionBlockedLocked(currentScope) else {
             return nil
         }
         return ScopedPreferences(scope: currentScope).key(canonicalKey)
@@ -689,8 +856,12 @@ public enum CaptureAccountScope {
     /// hopping onto `persistenceQueue`.
     public static func currentScopedPreferences() -> ScopedPreferences? {
         stateLock.lock()
-        defer { stateLock.unlock() }
-        guard let scope = resolvedScope(cachedResolution) else { return nil }
+        guard let scope = resolvedScope(cachedResolution),
+              !deletionAdmissionBlockedLocked(scope) else {
+            stateLock.unlock()
+            return nil
+        }
+        stateLock.unlock()
         return ScopedPreferences(scope: scope)
     }
 
@@ -698,11 +869,44 @@ public enum CaptureAccountScope {
         guard resolvedScope(currentResolution()) != nil else { return nil }
         guard let base = try? durableContainer() else { return nil }
         stateLock.lock()
-        guard let scope = resolvedScope(cachedResolution) else {
+        guard let scope = resolvedScope(cachedResolution),
+              !deletionAdmissionBlockedLocked(scope) else {
             stateLock.unlock()
             return nil
         }
         let revision = generation
+        let hook = beforeAccountBindingPublicationHook
+        beforeAccountBindingPublicationHook = nil
+        stateLock.unlock()
+        let admissionCell: SharedAccountAdmissionCell?
+        let admissionEpoch: UInt64?
+        if isAccountScope(scope) {
+            guard let cell = try? SharedAccountAdmissionRegistry.cell(
+                container: base,
+                ownerScope: scope),
+                  let epoch = cell.openEpoch else {
+                return nil
+            }
+            admissionCell = cell
+            admissionEpoch = epoch
+        } else {
+            admissionCell = nil
+            admissionEpoch = nil
+        }
+        hook?()
+        exposurePublicationLock.lock()
+        defer { exposurePublicationLock.unlock() }
+        stateLock.lock()
+        guard generation == revision,
+              resolvedScope(cachedResolution) == scope,
+              !deletionAdmissionBlockedLocked(scope),
+              admissionCell?.isCurrent(epoch: admissionEpoch ?? 0)
+                ?? !isAccountScope(scope) else {
+            stateLock.unlock()
+            return nil
+        }
+        cachedSharedAdmissionScope = scope
+        cachedSharedAdmissionCell = admissionCell
         stateLock.unlock()
         // Published OUTSIDE `stateLock`: this takes the widget store's own lock and
         // performs a cross-process `synchronize()`. Nesting the two locks would make
@@ -711,7 +915,9 @@ public enum CaptureAccountScope {
         return AccountBinding(
             root: base.appendingPathComponent(scope, isDirectory: true),
             scope: scope,
-            generation: revision)
+            generation: revision,
+            admissionEpoch: admissionEpoch,
+            admissionCell: admissionCell)
     }
 
     /// A binding for a producer that was handed an EXPLICIT root rather than the
@@ -733,18 +939,50 @@ public enum CaptureAccountScope {
         // its own container is still never made to create the account one.
         let name = root.standardizedFileURL.lastPathComponent
         guard !(name.hasPrefix(scopePrefix) && name != scope) else { return nil }
+        exposurePublicationLock.lock()
+        defer { exposurePublicationLock.unlock() }
         stateLock.lock()
+        guard resolvedScope(cachedResolution) == scope,
+              !deletionAdmissionBlockedLocked(scope) else {
+            stateLock.unlock()
+            return nil
+        }
         let revision = generation
+        let admissionCell =
+            cachedSharedAdmissionScope == scope
+                ? cachedSharedAdmissionCell
+                : nil
+        let admissionEpoch = admissionCell?.openEpoch
+        guard !isAccountScope(scope) || admissionEpoch != nil else {
+            stateLock.unlock()
+            return nil
+        }
         stateLock.unlock()
         CaptureWidgetSnapshotStore.publishActiveOwner(scope)
-        return AccountBinding(root: root, scope: scope, generation: revision)
+        return AccountBinding(
+            root: root,
+            scope: scope,
+            generation: revision,
+            admissionEpoch: admissionEpoch,
+            admissionCell: admissionCell)
     }
 
     public static func isCurrent(_ binding: AccountBinding) -> Bool {
         stateLock.lock()
-        defer { stateLock.unlock() }
-        return generation == binding.generation
+        let current = generation == binding.generation
             && resolvedScope(cachedResolution) == binding.scope
+            && !deletionAdmissionBlockedLocked(binding.scope)
+            && (
+                !isAccountScope(binding.scope)
+                    || (
+                        binding.admissionEpoch.map {
+                            binding.admissionCell?.isCurrent(epoch: $0)
+                                == true
+                        } ?? false
+                    )
+            )
+        stateLock.unlock()
+        return current
     }
 
     public static var identityGeneration: UInt64 {
@@ -758,6 +996,13 @@ public enum CaptureAccountScope {
         guard let base = try? durableContainer() else { return failClosedRoot }
         switch resolution {
         case .account(let scope):
+            stateLock.lock()
+            let admissionBlocked =
+                deletionAdmissionBlockedLocked(scope)
+            stateLock.unlock()
+            guard !admissionBlocked else {
+                return failClosedRoot
+            }
             return base.appendingPathComponent(scope, isDirectory: true)
         case .signedOut:
             return base.appendingPathComponent(signedOutScope, isDirectory: true)
@@ -1005,7 +1250,12 @@ public enum CaptureAccountScope {
             }
 
             var moves = entries
-                .filter { !$0.hasPrefix(scopePrefix) && $0 != migrationMarker }
+                .filter {
+                    !$0.hasPrefix(scopePrefix)
+                        && $0 != migrationMarker
+                        && $0 != AccountDeletionLifecycleStore
+                            .metadataDirectoryName
+                }
                 .sorted()
                 .map {
                     LegacyMove(
@@ -1312,6 +1562,21 @@ public enum CaptureAccountScope {
                     guard let scope = record.scope, isAccountScope(scope) else {
                         return .blocked
                     }
+                    switch AccountDeletionLifecycleStore(
+                        container: try durableContainer()
+                    ).read(ownerScope: scope) {
+                    case .missing:
+                        break
+                    case .record(let deletion)
+                        where deletion.phase == .completed:
+                        guard currentDefaults().object(
+                            forKey: AuthStore.signedInMirrorKey) != nil,
+                              currentDefaults().bool(
+                                forKey: AuthStore.signedInMirrorKey)
+                        else { return .blocked }
+                    case .record, .blocked:
+                        return .blocked
+                    }
                     return .account(scope)
                 case .pendingActivation, .pendingSignOut:
                     return .blocked
@@ -1328,24 +1593,242 @@ public enum CaptureAccountScope {
         return answer
     }
 
+    private static func completedDeletionAllowsReturn(
+        ownerScope: String
+    ) throws -> Bool {
+        let store = AccountDeletionLifecycleStore(
+            container: try durableContainer())
+        switch store.read(ownerScope: ownerScope) {
+        case .missing:
+            return false
+        case .record(let record) where record.phase == .completed:
+            return true
+        case .record:
+            installResolution(
+                .blocked, widgetOwner: nil, identityTransition: true)
+            throw CaptureAccountScopeError.activationState(
+                "account deletion cleanup is still pending")
+        case .blocked(let reason):
+            installResolution(
+                .blocked, widgetOwner: nil, identityTransition: true)
+            throw CaptureAccountScopeError.activationState(
+                "account deletion state is unreadable: \(reason)")
+        }
+    }
+
+    static func blockForAccountDeletion(
+        expected binding: AccountBinding
+    ) throws -> UInt64 {
+        try persistenceQueue.sync {
+            try blockForAccountDeletionInsidePersistence(
+                expected: binding)
+        }
+    }
+
+    static func persistPendingAccountDeletion(
+        expected binding: AccountBinding,
+        persistPending:
+            @Sendable () throws -> AccountDeletionLifecycleRecord
+    ) throws -> AccountDeletionLifecycleRecord {
+        try persistenceQueue.sync {
+            exposurePublicationLock.lock()
+            defer { exposurePublicationLock.unlock() }
+            lockPreferenceMutationGateForTransition()
+            defer { unlockPreferenceMutationGate() }
+
+            stateLock.lock()
+            let isCurrentOwner = generation == binding.generation
+                && resolvedScope(cachedResolution) == binding.scope
+            if isCurrentOwner {
+                pendingDeletionAdmissions.insert(binding.scope)
+            }
+            stateLock.unlock()
+            guard isCurrentOwner else {
+                throw AccountDeletionLifecycleError.staleBinding
+            }
+
+            // The durable write intentionally runs without stateLock. Cache readers
+            // observe the process admission set while publication and preference
+            // mutation remain closed around the write.
+            let pending: AccountDeletionLifecycleRecord
+            do {
+                pending = try persistPending()
+            } catch {
+                let container = binding.root.deletingLastPathComponent()
+                let durable = AccountDeletionLifecycleStore(
+                    container: container
+                ).readWithOwnerAdmission(ownerScope: binding.scope)
+                if durable == .missing {
+                    _ = stateLock.withLock {
+                        pendingDeletionAdmissions.remove(binding.scope)
+                    }
+                }
+                throw error
+            }
+            stateLock.lock()
+            guard generation == binding.generation,
+                  resolvedScope(cachedResolution) == binding.scope else {
+                pendingDeletionAdmissions.remove(binding.scope)
+                stateLock.unlock()
+                throw AccountDeletionLifecycleError.staleBinding
+            }
+            deletionWorkAuthorizations[binding.scope] =
+                AccountDeletionWorkAuthorization(
+                    binding: binding,
+                    deletionEpoch: pending.deletionEpoch,
+                    blockedGeneration: generation)
+            stateLock.unlock()
+            return pending
+        }
+    }
+
+    private static func blockForAccountDeletionInsidePersistence(
+        expected binding: AccountBinding
+    ) throws -> UInt64 {
+        exposurePublicationLock.lock()
+        defer { exposurePublicationLock.unlock() }
+        lockPreferenceMutationGateForTransition()
+        stateLock.lock()
+        guard generation == binding.generation,
+              resolvedScope(cachedResolution) == binding.scope else {
+            stateLock.unlock()
+            unlockPreferenceMutationGate()
+            throw AccountDeletionLifecycleError.staleBinding
+        }
+        cachedResolution = .blocked
+        cachedAccountPreferenceSnapshot = nil
+        cachedSharedAdmissionScope = nil
+        cachedSharedAdmissionCell = nil
+        blockedDeletionAdmissions.insert(binding.scope)
+        pendingDeletionAdmissions.remove(binding.scope)
+        generation &+= 1
+        let revision = generation
+        if let authorization = deletionWorkAuthorizations[binding.scope] {
+            deletionWorkAuthorizations[binding.scope] =
+                AccountDeletionWorkAuthorization(
+                    binding: authorization.binding,
+                    deletionEpoch: authorization.deletionEpoch,
+                    blockedGeneration: revision)
+        }
+        stateLock.unlock()
+        unlockPreferenceMutationGate()
+        return revision
+    }
+
+    static func reassertAccountDeletionBarrier(
+        ownerScope: String
+    ) throws -> (AccountBinding, UInt64)? {
+        try persistenceQueue.sync {
+            let base = try durableContainer()
+            guard case .record(let deletion) =
+                    AccountDeletionLifecycleStore(container: base)
+                        .read(ownerScope: ownerScope),
+                  deletion.phase == .cleanupPending else {
+                return nil
+            }
+            let activation = try readActivationRecordForMutation()
+            guard activation.scope == ownerScope,
+                  activation.phase == .active
+                    || activation.phase == .pendingSignOut
+                    || activation.phase == .pendingActivation else {
+                throw AccountDeletionLifecycleError.staleBinding
+            }
+            exposurePublicationLock.lock()
+            defer { exposurePublicationLock.unlock() }
+            lockPreferenceMutationGateForTransition()
+            stateLock.lock()
+            if case .account(let current) = cachedResolution,
+               current != ownerScope {
+                stateLock.unlock()
+                unlockPreferenceMutationGate()
+                throw AccountDeletionLifecycleError.staleBinding
+            }
+            let capturedGeneration = generation
+            let canonicalRoot = base.appendingPathComponent(
+                ownerScope, isDirectory: true)
+            let authorization: AccountDeletionWorkAuthorization
+            if let existing = deletionWorkAuthorizations[ownerScope],
+               existing.deletionEpoch == deletion.deletionEpoch,
+               existing.binding.root.standardizedFileURL
+                    == canonicalRoot.standardizedFileURL {
+                authorization = existing
+            } else {
+                authorization = AccountDeletionWorkAuthorization(
+                    binding: AccountBinding(
+                        root: canonicalRoot,
+                        scope: ownerScope,
+                        generation: capturedGeneration),
+                    deletionEpoch: deletion.deletionEpoch,
+                    blockedGeneration: capturedGeneration)
+            }
+            cachedResolution = .blocked
+            cachedAccountPreferenceSnapshot = nil
+            cachedSharedAdmissionScope = nil
+            cachedSharedAdmissionCell = nil
+            blockedDeletionAdmissions.insert(ownerScope)
+            generation &+= 1
+            let blockedGeneration = generation
+            deletionWorkAuthorizations[ownerScope] =
+                AccountDeletionWorkAuthorization(
+                    binding: authorization.binding,
+                    deletionEpoch: authorization.deletionEpoch,
+                    blockedGeneration: blockedGeneration)
+            stateLock.unlock()
+            unlockPreferenceMutationGate()
+            return (
+                authorization.binding,
+                blockedGeneration
+            )
+        }
+    }
+
+    static func setSignedInMirrorFalseForAccountDeletion() throws {
+        let defaults = currentDefaults()
+        defaults.set(false, forKey: AuthStore.signedInMirrorKey)
+        guard defaults.synchronize(),
+              defaults.object(forKey: AuthStore.signedInMirrorKey) != nil,
+              defaults.bool(forKey: AuthStore.signedInMirrorKey) == false else {
+            throw AccountDeletionLifecycleError.durability
+        }
+    }
+
+    static func deliverAccountDeletionBoundary(generation: UInt64) {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: identityDidChangeNotification,
+                object: nil,
+                userInfo: ["generation": generation])
+        }
+    }
+
     private static func installResolution(
-        _ resolution: Resolution,
+        _ requestedResolution: Resolution,
         widgetOwner: String?,
         identityTransition: Bool
     ) {
+        let publication: (resolution: Resolution, widgetOwner: String?)
+        if case .account(let scope) = requestedResolution,
+           !accountPublicationAllowed(ownerScope: scope) {
+            publication = (.blocked, nil)
+        } else {
+            publication = (requestedResolution, widgetOwner)
+        }
         lockPreferenceMutationGateForTransition()
         stateLock.lock()
-        cachedResolution = resolution
+        cachedResolution = publication.resolution
         if identityTransition {
             generation &+= 1
             cachedAccountPreferenceSnapshot = nil
+            cachedSharedAdmissionScope = nil
+            cachedSharedAdmissionCell = nil
         }
         let revision = generation
         stateLock.unlock()
         unlockPreferenceMutationGate()
 
         guard identityTransition else { return }
-        CaptureWidgetSnapshotStore.transition(toOwner: widgetOwner)
+        CaptureWidgetSnapshotStore.transition(
+            toOwner: publication.widgetOwner)
         if Thread.isMainThread {
             NotificationCenter.default.post(
                 name: identityDidChangeNotification,
@@ -1359,6 +1842,115 @@ public enum CaptureAccountScope {
                     userInfo: ["generation": revision])
             }
         }
+    }
+
+    private static func accountPublicationAllowed(
+        ownerScope: String
+    ) -> Bool {
+        guard let container = try? durableContainer() else { return false }
+        guard let admission = try? SharedAccountAdmissionRegistry.cell(
+            container: container,
+            ownerScope: ownerScope) else {
+            return false
+        }
+        let allowed: Bool
+        switch AccountDeletionLifecycleStore(container: container)
+            .read(ownerScope: ownerScope) {
+        case .missing:
+            allowed = admission.openEpoch != nil
+        case .record(let record) where record.phase == .completed:
+            let signedIn = currentDefaults().object(
+                forKey: AuthStore.signedInMirrorKey) != nil
+                && currentDefaults().bool(
+                    forKey: AuthStore.signedInMirrorKey)
+            if signedIn {
+                admission.reopenAfterCompletedDeletion()
+            }
+            allowed = signedIn && admission.openEpoch != nil
+        case .record, .blocked:
+            admission.revoke()
+            allowed = false
+        }
+        stateLock.withLock {
+            if allowed {
+                blockedDeletionAdmissions.remove(ownerScope)
+                cachedSharedAdmissionScope = ownerScope
+                cachedSharedAdmissionCell = admission
+            } else {
+                blockedDeletionAdmissions.insert(ownerScope)
+                if cachedSharedAdmissionScope == ownerScope {
+                    cachedSharedAdmissionScope = nil
+                    cachedSharedAdmissionCell = nil
+                }
+            }
+        }
+        return allowed
+    }
+
+    /// Called after the durable rename and parent-directory fsync, before typed
+    /// readback. The blocked epoch becomes visible to every already-mapped process
+    /// synchronously, and readback does not complete until previously admitted
+    /// mutations have left their atomic reader leases.
+    static func publishSharedDeletionTransitionBeforeReadback(
+        _ record: AccountDeletionLifecycleRecord,
+        container: URL
+    ) throws {
+        guard record.phase == .cleanupPending else { return }
+        let admission = try SharedAccountAdmissionRegistry.cell(
+            container: container,
+            ownerScope: record.ownerScope)
+        admission.revoke()
+        admission.waitForReadersToDrain()
+    }
+
+    /// Mirrors a durable transition into this process's richer local state. The
+    /// synchronous cross-process barrier is already published through the mapped
+    /// atomic cell before typed readback; normal producers never reopen either file.
+    static func cacheDurableDeletionTransition(
+        _ record: AccountDeletionLifecycleRecord,
+        container: URL
+    ) {
+        if record.phase == .cleanupPending,
+           let admission = try? SharedAccountAdmissionRegistry.cell(
+                container: container,
+                ownerScope: record.ownerScope) {
+            admission.revoke()
+        }
+        stateLock.lock()
+        guard let knownContainer = containerOverride ?? lastValidatedContainer,
+              knownContainer.standardizedFileURL
+                == container.standardizedFileURL else {
+            stateLock.unlock()
+            return
+        }
+        var withdrawWidget = false
+        switch record.phase {
+        case .cleanupPending:
+            blockedDeletionAdmissions.insert(record.ownerScope)
+            withdrawWidget =
+                resolvedScope(cachedResolution) == record.ownerScope
+        case .completed:
+            // A proper deletion transaction has already moved the process resolution
+            // to `.blocked`. If an out-of-band writer completes without doing that,
+            // retain the cached block until activation re-resolves the owner so the
+            // old generation can never reopen.
+            if resolvedScope(cachedResolution) != record.ownerScope {
+                blockedDeletionAdmissions.remove(record.ownerScope)
+            }
+        }
+        stateLock.unlock()
+        if withdrawWidget {
+            _ = CaptureWidgetSnapshotStore.withdraw(
+                expectedOwner: record.ownerScope)
+        }
+    }
+
+    /// Caller holds `stateLock`.
+    private static func deletionAdmissionBlockedLocked(
+        _ ownerScope: String
+    ) -> Bool {
+        pendingDeletionAdmissions.contains(ownerScope)
+            || blockedDeletionAdmissions.contains(ownerScope)
     }
 
     private static func lockPreferenceMutationGateForTransition() {
@@ -1376,8 +1968,11 @@ public enum CaptureAccountScope {
     private static func unlockPreferenceMutationGate() {
         preferenceBarrierProbeLock.lock()
         activePreferenceWriteBarrier = nil
+        let admission = activePreferenceAdmissionLease
+        activePreferenceAdmissionLease = nil
         preferenceMutationLock.unlock()
         preferenceBarrierProbeLock.unlock()
+        admission?.release()
     }
 
     private static func resolvedScope(_ resolution: Resolution?) -> String? {
@@ -1439,12 +2034,18 @@ public enum CaptureAccountScope {
     // MARK: - Hermetic test support
 
     public static func setContainerForTests(_ url: URL?) {
+        SharedAccountAdmissionRegistry.resetForTests()
         preferenceMutationLock.lock()
         stateLock.lock()
         containerOverride = url
         lastValidatedContainer = nil
         cachedResolution = nil
         cachedAccountPreferenceSnapshot = nil
+        deletionWorkAuthorizations.removeAll()
+        pendingDeletionAdmissions.removeAll()
+        blockedDeletionAdmissions.removeAll()
+        cachedSharedAdmissionScope = nil
+        cachedSharedAdmissionCell = nil
         generation &+= 1
         stateLock.unlock()
         preferenceMutationLock.unlock()
@@ -1462,6 +2063,11 @@ public enum CaptureAccountScope {
         defaultsOverride = defaults
         cachedResolution = nil
         cachedAccountPreferenceSnapshot = nil
+        deletionWorkAuthorizations.removeAll()
+        pendingDeletionAdmissions.removeAll()
+        blockedDeletionAdmissions.removeAll()
+        cachedSharedAdmissionScope = nil
+        cachedSharedAdmissionCell = nil
         generation &+= 1
         stateLock.unlock()
         preferenceMutationLock.unlock()
@@ -1487,6 +2093,44 @@ public enum CaptureAccountScope {
         try completeActivation(transaction)
     }
 
+    /// Fixture-only account publication that bypasses UserDefaults durability. It
+    /// keeps process-boundary admission tests runnable on sandboxed hosts where
+    /// `UserDefaults.synchronize()` is deliberately denied.
+    static func installAccountResolutionForTests(scope: String) throws {
+        guard AccountDeletionLifecycleStore.isValidOwnerScope(scope) else {
+            throw CaptureAccountScopeError.missingStableIdentity
+        }
+        installResolution(
+            .account(scope),
+            widgetOwner: scope,
+            identityTransition: true)
+        guard currentAccountBinding()?.scope == scope else {
+            throw CaptureAccountScopeError.activationState(
+                "test account resolution was not published")
+        }
+    }
+
+    static var isInsidePreferenceMutation: Bool {
+        (Thread.current.threadDictionary[
+            preferenceMutationDepthKey] as? Int ?? 0) > 0
+    }
+
+    static func setBeforeAccountBindingPublicationHookForTests(
+        _ hook: (() -> Void)?
+    ) {
+        stateLock.withLock {
+            beforeAccountBindingPublicationHook = hook
+        }
+    }
+
+    static func setActivationMigrationPauseHookForTests(
+        _ hook: (() -> Void)?
+    ) {
+        stateLock.withLock {
+            activationMigrationPauseHookForTests = hook
+        }
+    }
+
     static func signOutForTests() throws {
         _ = try beginSignOut()
         try completeSignOut()
@@ -1497,6 +2141,8 @@ public enum CaptureAccountScope {
         stateLock.lock()
         cachedResolution = nil
         cachedAccountPreferenceSnapshot = nil
+        pendingDeletionAdmissions.removeAll()
+        blockedDeletionAdmissions.removeAll()
         generation &+= 1
         stateLock.unlock()
         preferenceMutationLock.unlock()
@@ -1538,15 +2184,20 @@ public enum CaptureAccountScope {
     }
 
     static func resetTestEnvironment() {
+        SharedAccountAdmissionRegistry.resetForTests()
         preferenceMutationLock.lock()
         stateLock.lock()
         containerOverride = nil
         applicationSupportOverride = nil
         defaultsOverride = nil
         pairingKeychainServicesOverride = nil
+        beforeAccountBindingPublicationHook = nil
+        activationMigrationPauseHookForTests = nil
         lastValidatedContainer = nil
         cachedResolution = nil
         cachedAccountPreferenceSnapshot = nil
+        cachedSharedAdmissionScope = nil
+        cachedSharedAdmissionCell = nil
         markerSyncFailureForTests = false
         generation &+= 1
         stateLock.unlock()

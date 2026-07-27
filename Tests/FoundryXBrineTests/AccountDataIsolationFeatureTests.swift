@@ -60,6 +60,48 @@ final class AccountDataIsolationFeatureTests: XCTestCase {
         #endif
     }
 
+    /// Can this host spawn a child process? An iOS unit-test bundle cannot, so the
+    /// cross-process deletion scenario skips there instead of being counted as a
+    /// failed Brine scenario. Probed for real rather than assumed from `#if os(...)`.
+    static let canSpawnChildProcess: Bool = {
+        #if os(macOS)
+        return true
+        #else
+        return false
+        #endif
+    }()
+
+    /// Deletion must revoke work already captured in ANOTHER process. That needs a
+    /// real second process, so where the host cannot spawn one this SKIPS loudly
+    /// rather than passing vacuously.
+    func testAccountDeletionCrossProcessFeature() async throws {
+        try XCTSkipUnless(
+            Self.canSpawnChildProcess,
+            "this test host cannot spawn a child process; cross-process deletion "
+                + "revocation is covered on macOS")
+        let world = try AccountDataIsolationWorld()
+        do {
+            try await BrineFeatureRunner.run(
+                "account-deletion-cross-process",
+                registry: StepRegistry(AccountDataIsolationSteps.make(world: world)))
+        } catch {
+            try? world.cleanup()
+            throw error
+        }
+        try world.cleanup()
+    }
+
+    /// The skip above must never become a silent hole on the platform where it works.
+    func testCrossProcessDeletionCoverageIsNotSilentlyLostOnMac() throws {
+        #if os(macOS)
+        XCTAssertTrue(
+            Self.canSpawnChildProcess,
+            "macOS must be able to spawn a child process — otherwise the "
+                + "cross-process deletion scenario skips everywhere and the "
+                + "coverage is gone")
+        #endif
+    }
+
     func testAccountDataIsolationFeature() async throws {
         let world = try AccountDataIsolationWorld()
         do {
@@ -72,6 +114,93 @@ final class AccountDataIsolationFeatureTests: XCTestCase {
         }
         try world.cleanup()
     }
+
+    #if os(macOS)
+    /// Child-process half of the pending-deletion scenario. The feature step starts
+    /// this exact selector, waits until it has captured a binding, then creates the
+    /// durable pending record in the parent process before releasing this work.
+    func testCrossProcessPendingDeletionProbe() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment[CrossProcessDeletionProbeEnvironment.enabled] == "1"
+        else {
+            let world = try AccountDataIsolationWorld()
+            defer { try? world.cleanup() }
+            try world.anotherProcessCapturesSignedInAccountWork()
+            try world.durablyMarkCapturedAccountPendingDeletion()
+            try world.assertOtherProcessRejectedCapturedWork()
+            try world.assertCapturedBindingIsNoLongerCurrentInOtherProcess()
+            return
+        }
+        let container = try XCTUnwrap(
+            environment[CrossProcessDeletionProbeEnvironment.container])
+        let applicationSupport = try XCTUnwrap(
+            environment[CrossProcessDeletionProbeEnvironment.applicationSupport])
+        let defaultsName = try XCTUnwrap(
+            environment[CrossProcessDeletionProbeEnvironment.defaultsName])
+        let widgetDefaultsName = try XCTUnwrap(
+            environment[CrossProcessDeletionProbeEnvironment.widgetDefaultsName])
+        let subject = try XCTUnwrap(
+            environment[CrossProcessDeletionProbeEnvironment.subject])
+        let readyPath = try XCTUnwrap(
+            environment[CrossProcessDeletionProbeEnvironment.readyPath])
+        let releasePath = try XCTUnwrap(
+            environment[CrossProcessDeletionProbeEnvironment.releasePath])
+        let resultPath = try XCTUnwrap(
+            environment[CrossProcessDeletionProbeEnvironment.resultPath])
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
+        let widgetDefaults = try XCTUnwrap(
+            UserDefaults(suiteName: widgetDefaultsName))
+        CaptureAccountScope.setContainerForTests(
+            URL(fileURLWithPath: container, isDirectory: true))
+        CaptureAccountScope.setApplicationSupportRootForTests(
+            URL(fileURLWithPath: applicationSupport, isDirectory: true))
+        CaptureAccountScope.setDefaultsForTests(defaults)
+        CaptureWidgetSnapshotStore.setDefaultsForTesting(widgetDefaults)
+        defer {
+            CaptureWidgetSnapshotStore.resetDefaultsForTesting()
+            CaptureAccountScope.resetTestEnvironment()
+        }
+
+        let scope = try CaptureAccountScope.key(
+            for: Self.crossProcessIdentity(subject: subject))
+        try CaptureAccountScope.installAccountResolutionForTests(scope: scope)
+        let binding = try XCTUnwrap(
+            CaptureAccountScope.currentAccountBinding())
+        try FileManager.default.createDirectory(
+            at: binding.root, withIntermediateDirectories: true)
+        try Data(binding.scope.utf8).write(
+            to: URL(fileURLWithPath: readyPath),
+            options: .atomic)
+
+        let deadline = Date().addingTimeInterval(5)
+        while !FileManager.default.fileExists(atPath: releasePath),
+              Date() < deadline {
+            usleep(10_000)
+        }
+        guard FileManager.default.fileExists(atPath: releasePath) else {
+            return XCTFail("parent did not release captured work before timeout")
+        }
+
+        let publication = binding.root.appendingPathComponent(
+            "cross-process-stale-publication")
+        let accepted = try CaptureAccountScope.perform(as: binding) { _ in
+            try Data("published".utf8).write(
+                to: publication, options: .atomic)
+            return true
+        } != nil
+        let result: [String: Any] = [
+            "accepted": accepted,
+            "current": binding.isCurrent,
+            "published": FileManager.default.fileExists(
+                atPath: publication.path),
+        ]
+        let encoded = try JSONSerialization.data(
+            withJSONObject: result, options: [.sortedKeys])
+        try encoded.write(
+            to: URL(fileURLWithPath: resultPath),
+            options: .atomic)
+    }
+    #endif
 
     /// Executes the new signed-out feature scenario in isolation so its RED/green
     /// signal is not obscured by unrelated activation scenarios.
@@ -332,7 +461,68 @@ final class AccountDataIsolationFeatureTests: XCTestCase {
         let path = file.standardizedFileURL.path
         return path.hasPrefix(prefix) ? String(path.dropFirst(prefix.count)) : path
     }
+
+    fileprivate static func crossProcessIdentity(subject: String) -> AuthIdentity {
+        let header = Data(#"{"alg":"none","typ":"JWT"}"#.utf8)
+        let payload = Data(#"{"sub":"\#(subject)"}"#.utf8)
+        let token = [header, payload].map {
+            $0.base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: "=", with: "")
+        }.joined(separator: ".") + ".test-signature"
+        return AuthIdentity(
+            provider: AuthProvider.google.rawValue,
+            idToken: token,
+            refreshToken: nil,
+            expiresAt: .distantFuture,
+            email: "\(subject)@example.test")
+    }
 }
+
+#if os(macOS)
+private enum CrossProcessDeletionProbeEnvironment {
+    static let enabled = "FOUNDRYX_CROSS_PROCESS_DELETION_PROBE"
+    static let container = "FOUNDRYX_CROSS_PROCESS_DELETION_CONTAINER"
+    static let applicationSupport =
+        "FOUNDRYX_CROSS_PROCESS_DELETION_APPLICATION_SUPPORT"
+    static let defaultsName = "FOUNDRYX_CROSS_PROCESS_DELETION_DEFAULTS"
+    static let widgetDefaultsName =
+        "FOUNDRYX_CROSS_PROCESS_DELETION_WIDGET_DEFAULTS"
+    static let subject = "FOUNDRYX_CROSS_PROCESS_DELETION_SUBJECT"
+    static let readyPath = "FOUNDRYX_CROSS_PROCESS_DELETION_READY"
+    static let releasePath = "FOUNDRYX_CROSS_PROCESS_DELETION_RELEASE"
+    static let resultPath = "FOUNDRYX_CROSS_PROCESS_DELETION_RESULT"
+}
+
+private final class CrossProcessDeletionProbe {
+    let process: Process
+    let logHandle: FileHandle
+    let logURL: URL
+    let readyURL: URL
+    let releaseURL: URL
+    let resultURL: URL
+    let publicationURL: URL
+
+    init(
+        process: Process,
+        logHandle: FileHandle,
+        logURL: URL,
+        readyURL: URL,
+        releaseURL: URL,
+        resultURL: URL,
+        publicationURL: URL
+    ) {
+        self.process = process
+        self.logHandle = logHandle
+        self.logURL = logURL
+        self.readyURL = readyURL
+        self.releaseURL = releaseURL
+        self.resultURL = resultURL
+        self.publicationURL = publicationURL
+    }
+}
+#endif
 
 private final class AccountDataIsolationWorld: @unchecked Sendable {
     private struct State {
@@ -438,6 +628,9 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
     private var state = State()
     private var pairingHarness: PairingScenarioHarness?
     private var accountVaultRouter: VaultFunnelModel?
+    #if os(macOS)
+    private var crossProcessDeletionProbe: CrossProcessDeletionProbe?
+    #endif
 
     private var firstEmail: String { "first-\(token)@example.com" }
     private var secondEmail: String { "second-\(token)@example.com" }
@@ -479,6 +672,7 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
 
     func cleanup() throws {
         queue.sync {
+            stopCrossProcessDeletionProbeLocked()
             pairingHarness?.cleanup()
             pairingHarness = nil
             for service in [cellKeychainService, doorKeychainService] {
@@ -500,6 +694,162 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         if fileManager.fileExists(atPath: sandbox.path) {
             try fileManager.removeItem(at: sandbox)
         }
+    }
+
+    // MARK: - Cross-process pending-deletion admission
+
+    func anotherProcessCapturesSignedInAccountWork() throws {
+        #if os(macOS)
+        try queue.sync {
+            try beginScenarioLocked()
+            let subject = "cross-process-deletion-\(token)"
+            let probeDirectory = sandbox.appendingPathComponent(
+                "cross-process-deletion", isDirectory: true)
+            try fileManager.createDirectory(
+                at: probeDirectory, withIntermediateDirectories: true)
+            let readyURL = probeDirectory.appendingPathComponent("ready")
+            let releaseURL = probeDirectory.appendingPathComponent("release")
+            let resultURL = probeDirectory.appendingPathComponent("result.json")
+            let logURL = probeDirectory.appendingPathComponent("xctest.log")
+            XCTAssertTrue(fileManager.createFile(
+                atPath: logURL.path, contents: nil))
+            let logHandle = try FileHandle(forWritingTo: logURL)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            process.arguments = [
+                "xctest",
+                "-XCTest",
+                "FoundryXBrineTests.AccountDataIsolationFeatureTests/"
+                    + "testCrossProcessPendingDeletionProbe",
+                Bundle(for: AccountDataIsolationFeatureTests.self).bundleURL.path,
+            ]
+            var environment = ProcessInfo.processInfo.environment
+            environment.removeValue(forKey: "XCTestConfigurationFilePath")
+            environment.removeValue(forKey: "XCInjectBundleInto")
+            environment[CrossProcessDeletionProbeEnvironment.enabled] = "1"
+            environment[CrossProcessDeletionProbeEnvironment.container] =
+                captureContainer.path
+            environment[
+                CrossProcessDeletionProbeEnvironment.applicationSupport] =
+                applicationSupportRoot.path
+            environment[CrossProcessDeletionProbeEnvironment.defaultsName] =
+                scopeDefaultsName
+            environment[
+                CrossProcessDeletionProbeEnvironment.widgetDefaultsName] =
+                widgetDefaultsName
+            environment[CrossProcessDeletionProbeEnvironment.subject] = subject
+            environment[CrossProcessDeletionProbeEnvironment.readyPath] =
+                readyURL.path
+            environment[CrossProcessDeletionProbeEnvironment.releasePath] =
+                releaseURL.path
+            environment[CrossProcessDeletionProbeEnvironment.resultPath] =
+                resultURL.path
+            process.environment = environment
+            process.standardOutput = logHandle
+            process.standardError = logHandle
+            try process.run()
+
+            let identity = AccountDataIsolationFeatureTests
+                .crossProcessIdentity(subject: subject)
+            let scope = try CaptureAccountScope.key(for: identity)
+            crossProcessDeletionProbe = CrossProcessDeletionProbe(
+                process: process,
+                logHandle: logHandle,
+                logURL: logURL,
+                readyURL: readyURL,
+                releaseURL: releaseURL,
+                resultURL: resultURL,
+                publicationURL: captureContainer
+                    .appendingPathComponent(scope, isDirectory: true)
+                    .appendingPathComponent(
+                        "cross-process-stale-publication"))
+            try waitForFileLocked(
+                readyURL,
+                process: process,
+                failure: "other process did not capture account work")
+            let capturedScope = try String(
+                contentsOf: readyURL, encoding: .utf8)
+            guard capturedScope == scope else {
+                throw BrineStepError(
+                    "other process captured \(capturedScope), expected \(scope)")
+            }
+        }
+        #else
+        throw XCTSkip("cross-process xctest scenario requires macOS")
+        #endif
+    }
+
+    func durablyMarkCapturedAccountPendingDeletion() throws {
+        #if os(macOS)
+        try queue.sync {
+            guard let probe = crossProcessDeletionProbe,
+                  let scope = try? String(
+                    contentsOf: probe.readyURL, encoding: .utf8) else {
+                throw BrineStepError(
+                    "cross-process captured work was not prepared")
+            }
+            let pending = try AccountDeletionLifecycleStore(
+                container: captureContainer
+            ).createPending(ownerScope: scope)
+            guard pending.phase == .cleanupPending,
+                  AccountDeletionLifecycleStore(container: captureContainer)
+                    .read(ownerScope: scope) == .record(pending) else {
+                throw BrineStepError(
+                    "pending deletion did not survive durable typed readback")
+            }
+            try Data("release".utf8).write(
+                to: probe.releaseURL, options: .atomic)
+            let deadline = Date().addingTimeInterval(5)
+            while probe.process.isRunning, Date() < deadline {
+                usleep(10_000)
+            }
+            if probe.process.isRunning {
+                probe.process.terminate()
+                throw BrineStepError(
+                    "other process did not finish captured work after deletion")
+            }
+            probe.process.waitUntilExit()
+            probe.logHandle.closeFile()
+            guard probe.process.terminationStatus == 0 else {
+                throw BrineStepError(
+                    "other process failed:\n\(probeLogLocked(probe))")
+            }
+        }
+        #else
+        throw XCTSkip("cross-process xctest scenario requires macOS")
+        #endif
+    }
+
+    func assertOtherProcessRejectedCapturedWork() throws {
+        #if os(macOS)
+        try queue.sync {
+            let result = try crossProcessDeletionResultLocked()
+            guard result["accepted"] as? Bool == false,
+                  result["published"] as? Bool == false,
+                  let probe = crossProcessDeletionProbe,
+                  !fileManager.fileExists(atPath: probe.publicationURL.path)
+            else {
+                throw BrineStepError(
+                    "other process published work after durable pending deletion")
+            }
+        }
+        #else
+        throw XCTSkip("cross-process xctest scenario requires macOS")
+        #endif
+    }
+
+    func assertCapturedBindingIsNoLongerCurrentInOtherProcess() throws {
+        #if os(macOS)
+        try queue.sync {
+            let result = try crossProcessDeletionResultLocked()
+            guard result["current"] as? Bool == false else {
+                throw BrineStepError(
+                    "other process retained a current cached account binding")
+            }
+        }
+        #else
+        throw XCTSkip("cross-process xctest scenario requires macOS")
+        #endif
     }
 
     // MARK: - Saved-choice ownership classification
@@ -2354,6 +2704,7 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
     // MARK: - Hermetic support
 
     private func beginScenarioLocked() throws {
+        stopCrossProcessDeletionProbeLocked()
         pairingHarness?.cleanup()
         pairingHarness = nil
         state.transitionProbe?.stop()
@@ -2381,6 +2732,58 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         installTestEnvironmentLocked()
         CaptureAccountScope.resetProcessCacheForTests()
     }
+
+    private func stopCrossProcessDeletionProbeLocked() {
+        #if os(macOS)
+        guard let probe = crossProcessDeletionProbe else { return }
+        if probe.process.isRunning {
+            probe.process.terminate()
+            probe.process.waitUntilExit()
+        }
+        try? probe.logHandle.close()
+        crossProcessDeletionProbe = nil
+        #endif
+    }
+
+    #if os(macOS)
+    private func waitForFileLocked(
+        _ url: URL,
+        process: Process,
+        failure: String
+    ) throws {
+        let deadline = Date().addingTimeInterval(5)
+        while ((try? Data(contentsOf: url).isEmpty) ?? true),
+              process.isRunning,
+              Date() < deadline {
+            usleep(10_000)
+        }
+        guard (try? Data(contentsOf: url).isEmpty) == false else {
+            throw BrineStepError(
+                "\(failure):\n"
+                    + (crossProcessDeletionProbe.map(probeLogLocked)
+                        ?? "<probe unavailable>"))
+        }
+    }
+
+    private func crossProcessDeletionResultLocked() throws -> [String: Any] {
+        guard let probe = crossProcessDeletionProbe,
+              fileManager.fileExists(atPath: probe.resultURL.path),
+              let result = try JSONSerialization.jsonObject(
+                with: Data(contentsOf: probe.resultURL))
+                as? [String: Any] else {
+            throw BrineStepError(
+                "other process did not report its captured-work result")
+        }
+        return result
+    }
+
+    private func probeLogLocked(
+        _ probe: CrossProcessDeletionProbe
+    ) -> String {
+        (try? String(contentsOf: probe.logURL, encoding: .utf8))
+            ?? "<non-UTF-8 xctest output>"
+    }
+    #endif
 
     private func installTestEnvironmentLocked() {
         CaptureAccountScope.setContainerForTests(captureContainer)
@@ -3376,6 +3779,28 @@ private enum AccountDataIsolationSteps {
                 "FoundryX reports that the authentication change did not complete"
             ) { _, _, _ in
                 try w.assertVaultSecureOperationFailed()
+            },
+            defineStep(
+                "another process has captured work for the signed-in account"
+            ) { ctx, _, _ in
+                try w.anotherProcessCapturesSignedInAccountWork()
+                return ctx
+            },
+            defineStep(
+                "this process durably marks that account pending deletion"
+            ) { ctx, _, _ in
+                try w.durablyMarkCapturedAccountPendingDeletion()
+                return ctx
+            },
+            defineCheck(
+                "the other process rejects the captured work before it can publish"
+            ) { _, _, _ in
+                try w.assertOtherProcessRejectedCapturedWork()
+            },
+            defineCheck(
+                "the captured account binding is no longer current in the other process"
+            ) { _, _, _ in
+                try w.assertCapturedBindingIsNoLongerCurrentInOtherProcess()
             },
         ]
     }

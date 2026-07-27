@@ -164,6 +164,12 @@ public enum CaptureWidgetSnapshotStore {
         stateLock.unlock()
     }
 
+    static var activeOwnerForTests: String? {
+        stateLock.withLock {
+            defaults?.string(forKey: activeOwnerKey)
+        }
+    }
+
     /// Withdraw the active owner's shared widget payload and verify the deletion
     /// reached the cross-process preference domain before acknowledging it.
     public static func withdraw(

@@ -124,6 +124,31 @@ public final class CellStore: ObservableObject, @unchecked Sendable {
         return true
     }
 
+    @discardableResult
+    func erasePairing(
+        expected binding: CaptureAccountScope.AccountBinding
+    ) -> PairingSecretRemovalResult {
+        let result = secretStore.removeExplicitOwner(
+            service: keychainService,
+            account: binding.scope)
+        guard result.succeeded else { return result }
+        defaults.removeObject(
+            forKey: "\(binding.scope).\(Self.urlKey)")
+        defaults.removeObject(
+            forKey: "\(binding.scope).\(Self.modeKey)")
+        guard defaults.synchronize(),
+              defaults.object(
+                forKey: "\(binding.scope).\(Self.urlKey)") == nil,
+              defaults.object(
+                forKey: "\(binding.scope).\(Self.modeKey)") == nil else {
+            return .failed
+        }
+        if CaptureAccountScope.isCurrent(binding) {
+            config = nil
+        }
+        return result
+    }
+
     /// Re-read the complete pairing after the account owner changes. A blocked
     /// transition resolves to nil immediately and never consults an unscoped key.
     public func reloadForIdentityTransition() {

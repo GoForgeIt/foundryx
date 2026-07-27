@@ -123,7 +123,9 @@ public final class OmiRestorationSpool: @unchecked Sendable {
             let rooted = CaptureAccountScope.AccountBinding(
                 root: baseDir,
                 scope: binding.scope,
-                generation: binding.generation)
+                generation: binding.generation,
+                admissionEpoch: binding.admissionEpoch,
+                admissionCell: binding.admissionCell)
             accountBinding = rooted
             return rooted
         }
