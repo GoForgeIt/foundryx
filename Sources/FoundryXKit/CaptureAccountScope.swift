@@ -104,6 +104,18 @@ public enum CaptureAccountScope {
             return nil
         }
         defer { stateLock.unlock() }
+        let threadDictionary = Thread.current.threadDictionary
+        let priorDepth =
+            threadDictionary[preferenceMutationDepthKey] as? Int ?? 0
+        threadDictionary[preferenceMutationDepthKey] = priorDepth + 1
+        defer {
+            if priorDepth == 0 {
+                threadDictionary.removeObject(
+                    forKey: preferenceMutationDepthKey)
+            } else {
+                threadDictionary[preferenceMutationDepthKey] = priorDepth
+            }
+        }
         return try mutation(binding)
     }
 
@@ -206,6 +218,10 @@ public enum CaptureAccountScope {
         Notification.Name("foundryx.capture-account-identity-did-change")
 
     private static let stateLock = NSLock()
+    // Serializes the concrete preference store with identity-generation changes.
+    // No caller-owned callback or protocol method runs while this lock is held.
+    private static let preferenceMutationLock = NSLock()
+    private static let preferenceBarrierProbeLock = NSLock()
     private static let resolutionProbeLock = NSLock()
     private static let persistenceQueue =
         DispatchQueue(label: "foundryx.capture-account-persistence")
@@ -213,12 +229,18 @@ public enum CaptureAccountScope {
         DispatchQueue(label: "foundryx.capture-account-migration")
 
     nonisolated(unsafe) private static var cachedResolution: Resolution?
+    nonisolated(unsafe) private static var cachedAccountPreferenceSnapshot:
+        AccountPreferenceSnapshot?
+    nonisolated(unsafe) private static var activePreferenceWriteBarrier:
+        AccountPreferenceWriteBarrier?
     nonisolated(unsafe) private static var generation: UInt64 = 0
     nonisolated(unsafe) private static var containerOverride: URL?
     nonisolated(unsafe) private static var applicationSupportOverride: URL?
     nonisolated(unsafe) private static var defaultsOverride: UserDefaults?
     nonisolated(unsafe) private static var pairingKeychainServicesOverride:
         (cell: String, door: String)?
+    private static let preferenceMutationDepthKey =
+        "foundryx.capture-account.preference-mutation-depth"
     nonisolated(unsafe) private static var lastValidatedContainer: URL?
     nonisolated(unsafe) private static var markerSyncFailureForTests = false
     nonisolated(unsafe) private static var resolutionPersistenceEntriesForTests = 0
@@ -552,6 +574,114 @@ public enum CaptureAccountScope {
     }
 
     // MARK: - Account binding and store access
+
+    /// The current cached preference owner and identity generation. Like
+    /// `currentScopedPreferences`, this never resolves identity through persistence.
+    public static func currentScopedPreferenceBinding() -> ScopedPreferenceBinding? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let scope = resolvedScope(cachedResolution) else { return nil }
+        return ScopedPreferenceBinding(scope: scope, generation: generation)
+    }
+
+    /// Installs a dormant immutable snapshot only for the exact current owner
+    /// generation. Task 1 exposes this seam to direct tests; no production owner calls
+    /// it or selects scoped behavior.
+    @discardableResult
+    public static func installAccountPreferenceSnapshot(
+        _ snapshot: AccountPreferenceSnapshot,
+        as binding: ScopedPreferenceBinding
+    ) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard snapshot.scope == binding.scope,
+              snapshot.generation == binding.generation,
+              generation == binding.generation,
+              resolvedScope(cachedResolution) == binding.scope else {
+            return false
+        }
+        cachedAccountPreferenceSnapshot = snapshot
+        return true
+    }
+
+    /// A cache-only read. Defaults and identity persistence are deliberately absent
+    /// from this path.
+    public static func currentAccountPreferenceSnapshot()
+        -> AccountPreferenceSnapshot?
+    {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let snapshot = cachedAccountPreferenceSnapshot,
+              snapshot.generation == generation,
+              resolvedScope(cachedResolution) == snapshot.scope else {
+            return nil
+        }
+        return snapshot
+    }
+
+    enum PreferenceStoreMutationAdmission {
+        case acquired(ScopedPreferences)
+        case stale
+        case unresolved
+        case rejected
+    }
+
+    /// Acquires the one dormant preference lifecycle gate without running caller
+    /// code. Reentry from `perform(as:)` and concurrent gate use fail promptly.
+    static func beginPreferenceStoreMutation(
+        as binding: ScopedPreferenceBinding,
+        barrier: AccountPreferenceWriteBarrier?
+    ) -> PreferenceStoreMutationAdmission {
+        let depth = Thread.current.threadDictionary[
+            preferenceMutationDepthKey] as? Int ?? 0
+        guard depth == 0 else { return .rejected }
+
+        preferenceBarrierProbeLock.lock()
+        guard preferenceMutationLock.try() else {
+            preferenceBarrierProbeLock.unlock()
+            return .rejected
+        }
+        activePreferenceWriteBarrier = barrier
+        preferenceBarrierProbeLock.unlock()
+
+        barrier?.pauseWriterIfArmed()
+        guard stateLock.try() else {
+            unlockPreferenceMutationGate()
+            return .rejected
+        }
+        guard let currentScope = resolvedScope(cachedResolution) else {
+            stateLock.unlock()
+            unlockPreferenceMutationGate()
+            return .unresolved
+        }
+        guard generation == binding.generation,
+              currentScope == binding.scope else {
+            stateLock.unlock()
+            unlockPreferenceMutationGate()
+            return .stale
+        }
+        let scoped = ScopedPreferences(scope: currentScope)
+        stateLock.unlock()
+        return .acquired(scoped)
+    }
+
+    static func endPreferenceStoreMutation() {
+        unlockPreferenceMutationGate()
+    }
+
+    static func currentPreferenceStoreKey(
+        _ canonicalKey: String,
+        as binding: ScopedPreferenceBinding
+    ) -> String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard generation == binding.generation,
+              let currentScope = resolvedScope(cachedResolution),
+              currentScope == binding.scope else {
+            return nil
+        }
+        return ScopedPreferences(scope: currentScope).key(canonicalKey)
+    }
 
     /// The current account's preference namespace, resolved only from the
     /// state-lock-protected process cache. A nil cache or blocked transition is
@@ -1203,11 +1333,16 @@ public enum CaptureAccountScope {
         widgetOwner: String?,
         identityTransition: Bool
     ) {
+        lockPreferenceMutationGateForTransition()
         stateLock.lock()
         cachedResolution = resolution
-        if identityTransition { generation &+= 1 }
+        if identityTransition {
+            generation &+= 1
+            cachedAccountPreferenceSnapshot = nil
+        }
         let revision = generation
         stateLock.unlock()
+        unlockPreferenceMutationGate()
 
         guard identityTransition else { return }
         CaptureWidgetSnapshotStore.transition(toOwner: widgetOwner)
@@ -1224,6 +1359,25 @@ public enum CaptureAccountScope {
                     userInfo: ["generation": revision])
             }
         }
+    }
+
+    private static func lockPreferenceMutationGateForTransition() {
+        preferenceBarrierProbeLock.lock()
+        if preferenceMutationLock.try() {
+            preferenceBarrierProbeLock.unlock()
+            return
+        }
+        let barrier = activePreferenceWriteBarrier
+        preferenceBarrierProbeLock.unlock()
+        barrier?.identityTransitionWillWaitAtGate()
+        preferenceMutationLock.lock()
+    }
+
+    private static func unlockPreferenceMutationGate() {
+        preferenceBarrierProbeLock.lock()
+        activePreferenceWriteBarrier = nil
+        preferenceMutationLock.unlock()
+        preferenceBarrierProbeLock.unlock()
     }
 
     private static func resolvedScope(_ resolution: Resolution?) -> String? {
@@ -1285,12 +1439,15 @@ public enum CaptureAccountScope {
     // MARK: - Hermetic test support
 
     public static func setContainerForTests(_ url: URL?) {
+        preferenceMutationLock.lock()
         stateLock.lock()
         containerOverride = url
         lastValidatedContainer = nil
         cachedResolution = nil
+        cachedAccountPreferenceSnapshot = nil
         generation &+= 1
         stateLock.unlock()
+        preferenceMutationLock.unlock()
     }
 
     static func setApplicationSupportRootForTests(_ url: URL?) {
@@ -1300,11 +1457,14 @@ public enum CaptureAccountScope {
     }
 
     static func setDefaultsForTests(_ defaults: UserDefaults?) {
+        preferenceMutationLock.lock()
         stateLock.lock()
         defaultsOverride = defaults
         cachedResolution = nil
+        cachedAccountPreferenceSnapshot = nil
         generation &+= 1
         stateLock.unlock()
+        preferenceMutationLock.unlock()
     }
 
     static func setPairingKeychainServicesForTests(
@@ -1333,10 +1493,13 @@ public enum CaptureAccountScope {
     }
 
     static func resetProcessCacheForTests() {
+        preferenceMutationLock.lock()
         stateLock.lock()
         cachedResolution = nil
+        cachedAccountPreferenceSnapshot = nil
         generation &+= 1
         stateLock.unlock()
+        preferenceMutationLock.unlock()
     }
 
     static func resetResolutionPersistenceEntriesForTests() {
@@ -1375,6 +1538,7 @@ public enum CaptureAccountScope {
     }
 
     static func resetTestEnvironment() {
+        preferenceMutationLock.lock()
         stateLock.lock()
         containerOverride = nil
         applicationSupportOverride = nil
@@ -1382,9 +1546,11 @@ public enum CaptureAccountScope {
         pairingKeychainServicesOverride = nil
         lastValidatedContainer = nil
         cachedResolution = nil
+        cachedAccountPreferenceSnapshot = nil
         markerSyncFailureForTests = false
         generation &+= 1
         stateLock.unlock()
+        preferenceMutationLock.unlock()
         resetResolutionPersistenceEntriesForTests()
     }
 }
