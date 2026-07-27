@@ -418,6 +418,8 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         var adoptedDoorURL: String?
         var adoptedDoorBearer: String?
         var adoptedOwnerScope: String?
+        var preferenceGuardSources: [AccountPreferenceSourceFile] = []
+        var preferenceGuardViolations: [AccountPreferenceUsageViolation] = []
     }
 
     private let queue = DispatchQueue(label: "foundryx.account-data-isolation-world")
@@ -497,6 +499,79 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         try validateSandbox()
         if fileManager.fileExists(atPath: sandbox.path) {
             try fileManager.removeItem(at: sandbox)
+        }
+    }
+
+    // MARK: - Saved-choice ownership classification
+
+    func everySavedChoiceDeclaresItsOwner() throws {
+        try queue.sync {
+            try beginScenarioLocked()
+            let expected: Set<String> = [
+                "foundryx.onboarding.completed",
+                "foundryx.onboarding.persona",
+                "foundryx.welcome.seen",
+                "foundryx.welcome.letStraightIn",
+                "foundryx.ambient.enabled",
+                "foundryx.ambient.agentName",
+                "foundryx.ambient.grading",
+                "foundryx.ambient.othersInline",
+                "foundryx.vault.checkoutAttempt.id",
+                "foundryx.vault.checkoutAttempt.plan",
+                "foundryx.brain.choice",
+                "foundryx.waitlist.joined",
+                "foundryx.capture.silence-gap-seconds",
+                "foundryx.capture.omi-desired-state",
+                "foundryx.capture.sources.enabled-overrides",
+                "foundryx.models.cache.v1",
+                "foundryx.account.signup-posted",
+            ]
+            let entries = AccountPreferenceCatalog.entries
+            guard entries.count == 17,
+                  Set(entries.map(\.canonicalKey)) == expected else {
+                throw BrineStepError(
+                    "saved-choice ownership truth is not the exact 17-key catalog")
+            }
+        }
+    }
+
+    func developerAddsSavedChoiceWithoutOwnership() {
+        queue.sync {
+            state.preferenceGuardSources = [
+                AccountPreferenceSourceFile(
+                    path: "Fixture/UndeclaredChoice.swift",
+                    text: """
+                    import Foundation
+                    UserDefaults.standard.set(
+                        true,
+                        forKey: "foundryx.unclassified-choice")
+                    """),
+            ]
+            state.preferenceGuardViolations = []
+        }
+    }
+
+    func assertBuildFailsForUndeclaredSavedChoice() throws {
+        try queue.sync {
+            state.preferenceGuardViolations = AccountPreferenceUsageGuard.scan(
+                sources: state.preferenceGuardSources)
+            guard !state.preferenceGuardViolations.isEmpty else {
+                throw BrineStepError(
+                    "the build accepted an unclassified saved choice")
+            }
+        }
+    }
+
+    func assertGuardIdentifiesUndeclaredSavedChoice() throws {
+        try queue.sync {
+            guard state.preferenceGuardViolations.contains(where: {
+                $0.path == "Fixture/UndeclaredChoice.swift"
+                    && $0.line == 2
+                    && $0.keyOrUse == "foundryx.unclassified-choice"
+            }) else {
+                throw BrineStepError(
+                    "the guard did not identify the saved choice's file, line, and key")
+            }
         }
     }
 
@@ -3078,6 +3153,26 @@ private enum AccountDataIsolationSteps {
                 "no first-account title or transcript is exposed to the second account"
             ) { _, _, _ in
                 try w.assertNoLiveActivityContentForSecondAccount()
+            },
+            defineStep(
+                "every saved choice declares whether it belongs to an account or the phone"
+            ) { ctx, _, _ in
+                try w.everySavedChoiceDeclaresItsOwner()
+                return ctx
+            },
+            defineStep(
+                "a developer adds a saved choice without declaring its ownership"
+            ) { ctx, _, _ in
+                w.developerAddsSavedChoiceWithoutOwnership()
+                return ctx
+            },
+            defineCheck("the build fails") { _, _, _ in
+                try w.assertBuildFailsForUndeclaredSavedChoice()
+            },
+            defineCheck(
+                "it identifies the file and saved choice that need classification"
+            ) { _, _, _ in
+                try w.assertGuardIdentifiesUndeclaredSavedChoice()
             },
             defineStep("the first account paired a Vault with a private bearer") {
                 ctx, _, _ in

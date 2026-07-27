@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+@testable import FoundryXKit
 
 /// B1(b) — the SOURCE GUARD (track 20260714T1800 ux_prototype_realignment).
 ///
@@ -81,5 +82,34 @@ final class SourceGuardTests: XCTestCase {
                 }
             }
         }
+    }
+
+    func testEveryPersistedChoiceHasDeclaredOwnership() throws {
+        let repository = appDirectory().deletingLastPathComponent()
+        let violations = try AccountPreferenceUsageGuard.scanRepository(
+            at: repository)
+        let deletionDebt = violations.filter {
+            $0.reason == "whole preference-domain removal is forbidden"
+        }
+        XCTAssertEqual(
+            deletionDebt.count,
+            1,
+            "the temporary deletion debt is an exact one-entry ratchet")
+        let debt = try XCTUnwrap(deletionDebt.first)
+        XCTAssertEqual(debt.path, "App/AccountDeletionView.swift")
+        XCTAssertEqual(
+            debt.ownership,
+            "AccountDeletionModel.live->eraseLocal")
+        XCTAssertEqual(
+            debt.operationFingerprint,
+            "UserDefaults.standard.removePersistentDomain(forName: Bundle.main.bundleIdentifier)")
+        XCTAssertGreaterThan(debt.line, 0, "line is required diagnostic context")
+        XCTAssertEqual(
+            violations.count,
+            1,
+            "every violation except the exact preexisting deletion debt fails the source guard:\n"
+                + violations.map {
+                    "\($0.path):\($0.line): \($0.keyOrUse) — \($0.reason)"
+                }.joined(separator: "\n"))
     }
 }

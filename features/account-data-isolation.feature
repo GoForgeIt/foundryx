@@ -148,3 +148,9 @@ Feature: My recordings belong to my account, not to the phone
     When the phone changes from the first account to the second account
     Then the first account's Live Activity is ended
     And no first-account title or transcript is exposed to the second account
+
+  Scenario: every saved choice declares who owns it
+    Given every saved choice declares whether it belongs to an account or the phone
+    When a developer adds a saved choice without declaring its ownership
+    Then the build fails
+    And it identifies the file and saved choice that need classification
