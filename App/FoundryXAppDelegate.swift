@@ -17,9 +17,16 @@ import UIKit
 import SwiftUI
 
 final class FoundryXAppDelegate: NSObject, UIApplicationDelegate {
+    /// One process-owned weak registry. Registration is inert; Task 5 explicitly
+    /// invokes closure at the identity boundary.
+    static let accountExposureCoordinator =
+        AccountExposureCoordinator.process
+
     /// The spool serving a background-restoration launch (nil on normal launches or
     /// after the UI takes over). Main-thread only.
     private(set) static var restorationSpool: OmiRestorationSpool?
+    private static var restorationSpoolExposure:
+        AccountExposureRegistration?
 
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
@@ -57,16 +64,34 @@ final class FoundryXAppDelegate: NSObject, UIApplicationDelegate {
 
         let dm = DeviceManager.shared(log: log)
         let spool = OmiRestorationSpool(log: log)
+        let exposure = AccountExposureRegistration(
+            participantID: "omi-restoration-spool",
+            kind: .live,
+            binding: nil,
+            owner: spool,
+            close: { spool, expected in
+                await spool.closeAccountExposure(expected: expected)
+            })
+        accountExposureCoordinator.register(exposure)
         spool.attach(to: dm)
         restorationSpool = spool
+        restorationSpoolExposure = exposure
         dm.start()   // creates the central with the SAME restore identifier → willRestoreState
     }
 
     /// UI takeover (MainTabs building the real CaptureManager): flush the spool's
     /// partial segment to disk and release it. Safe no-op on normal launches.
-    static func handOffRestorationToApp() {
+    static func handOffRestorationToApp(
+        accountBinding: CaptureAccountScope.AccountBinding?
+    ) {
         guard let spool = restorationSpool else { return }
+        if let accountBinding,
+           let rooted = spool.installAccountExposureBinding(
+                from: accountBinding) {
+            restorationSpoolExposure?.installBinding(rooted)
+        }
         spool.detach()
         restorationSpool = nil
+        restorationSpoolExposure = nil
     }
 }

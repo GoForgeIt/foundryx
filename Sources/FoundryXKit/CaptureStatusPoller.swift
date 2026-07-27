@@ -248,6 +248,10 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
     // Touched only on the main actor (start/stop + the @MainActor apply).
     @MainActor private var task: Task<Void, Never>?
     @MainActor private var lastTranscribed = false
+    @MainActor private var accountExposureClosing = false
+    @MainActor private var accountExposureClosed = false
+    @MainActor private var closingWaitersForTests:
+        [CheckedContinuation<Void, Never>] = []
 
     public init(captureId: String,
                 client: CaptureStatusFetching,
@@ -284,7 +288,9 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
         // durable card already carries a title has likewise received everything a
         // poll can deliver (title exists ⇒ transcript exists) — never re-poll it on
         // relaunch/scroll (this was the standing ~2,000 polls/hour storm).
-        guard task == nil,
+        guard !accountExposureClosing,
+              !accountExposureClosed,
+              task == nil,
               !(stage.isTerminal && title != nil),
               !(stage == .inLore && title != nil) else { return }
         // Detached so the loop (fetch + decode + sleep) runs off the main actor; only
@@ -296,6 +302,35 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
     @MainActor public func stop() {
         task?.cancel()
         task = nil
+    }
+
+    /// Terminal close, distinct from the card's restartable onDisappear `stop`.
+    /// The ACK joins a suspended fetch and rejects its continuation before publish
+    /// or card.json merge.
+    @MainActor public func close() async {
+        if accountExposureClosed { return }
+        if accountExposureClosing {
+            let running = task
+            if let running { await running.value }
+            return
+        }
+        accountExposureClosing = true
+        let waiters = closingWaitersForTests
+        closingWaitersForTests.removeAll()
+        for waiter in waiters { waiter.resume() }
+        let running = task
+        running?.cancel()
+        if let running { await running.value }
+        task = nil
+        accountExposureClosed = true
+        accountExposureClosing = false
+    }
+
+    @MainActor func waitUntilClosingForTests() async {
+        guard !accountExposureClosing else { return }
+        await withCheckedContinuation { continuation in
+            closingWaitersForTests.append(continuation)
+        }
     }
 
     /// One poll-and-apply, exposed for tests (drives the state machine without a
@@ -311,6 +346,14 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
     private func pollAndApply() async -> PollOutcome {
         do {
             let resp = try await client.captureStatus(captureId: captureId)
+            guard !Task.isCancelled,
+                  await MainActor.run(body: {
+                      !self.accountExposureClosing
+                          && !self.accountExposureClosed
+                  }) else {
+                return PollOutcome(
+                    terminal: true, titlePending: false, stored: false)
+            }
             return await apply(resp)
         } catch {
             // Transport / non-2xx (incl. 404 before the door has the manifest) — keep
@@ -321,6 +364,10 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
 
     /// Publish the polled state on the main actor and return what the loop needs.
     @MainActor private func apply(_ resp: CaptureStatusResponse) -> PollOutcome {
+        guard !accountExposureClosing, !accountExposureClosed else {
+            return PollOutcome(
+                terminal: true, titlePending: false, stored: false)
+        }
         let next = CaptureLifecycleStage(wire: resp.stage)
         stage = next
         if let id = resp.loreCaptureId { loreCaptureId = id }

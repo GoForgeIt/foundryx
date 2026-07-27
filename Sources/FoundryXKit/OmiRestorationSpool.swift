@@ -14,24 +14,55 @@
 import Foundation
 
 public final class OmiRestorationSpool: @unchecked Sendable {
-    private let io = DispatchQueue(label: "foundryx.omi-restoration-spool")
+    private let io: DispatchQueue
+    private let ioKey = DispatchSpecificKey<Bool>()
+    private var accountBinding: CaptureAccountScope.AccountBinding? // io only
     private let baseDir: URL
     private let log: DoorLog?
     private let silenceGap: TimeInterval
     private let isPaused: () -> Bool
     private var wal: CaptureWAL?          // io queue only
     private var framesSpooled = 0         // io queue only
+    private var accountExposureClosed = false // io queue only
 
     /// `paused` mirrors the user's durable capture intent — a user who paused
     /// capture must NOT be recorded by a background relaunch.
     public init(baseDir: URL = CaptureWAL.documentsCaptures(),
                 log: DoorLog? = nil,
                 silenceGap: TimeInterval = CaptureSettings.silenceGapSeconds,
-                paused: @escaping () -> Bool = { CaptureSettings.omiCaptureDesiredState == .paused }) {
+                paused: @escaping () -> Bool = { CaptureSettings.omiCaptureDesiredState == .paused },
+                binding: CaptureAccountScope.AccountBinding? = nil,
+                executor: DispatchQueue? = nil) {
+        let queue = DispatchQueue(
+            label: "foundryx.omi-restoration-spool",
+            target: executor)
+        self.io = queue
+        self.accountBinding = binding
         self.baseDir = baseDir
         self.log = log
         self.silenceGap = silenceGap
         self.isPaused = paused
+        queue.setSpecific(key: ioKey, value: true)
+    }
+
+    /// Explicit owner/root/executor initializer used by account-bound restoration.
+    public convenience init(
+        binding: CaptureAccountScope.AccountBinding,
+        root: URL,
+        executor: DispatchQueue,
+        log: DoorLog? = nil,
+        silenceGap: TimeInterval = CaptureSettings.silenceGapSeconds,
+        paused: @escaping () -> Bool = {
+            CaptureSettings.omiCaptureDesiredState == .paused
+        }
+    ) {
+        self.init(
+            baseDir: root,
+            log: log,
+            silenceGap: silenceGap,
+            paused: paused,
+            binding: binding,
+            executor: executor)
     }
 
     /// Wire this spool as the source's sink. The later CaptureManager takeover
@@ -43,15 +74,25 @@ public final class OmiRestorationSpool: @unchecked Sendable {
 
     public func handleState(_ state: AudioSourceState) {
         switch state {
-        case .streaming: io.async { self.openSessionLocked() }
-        case .stopped, .failed: io.async { self.closeSessionLocked() }
+        case .streaming:
+            io.async {
+                guard !self.accountExposureClosed else { return }
+                self.openSessionLocked()
+            }
+        case .stopped, .failed:
+            io.async {
+                guard !self.accountExposureClosed else { return }
+                self.closeSessionLocked()
+            }
         case .idle, .scanning: break
         }
     }
 
     public func append(_ frame: Data) {
         io.async {
-            guard !self.isPaused(), let wal = self.wal else { return }
+            guard !self.accountExposureClosed,
+                  !self.isPaused(),
+                  let wal = self.wal else { return }
             self.framesSpooled += 1
             wal.appendFrame(frame)
         }
@@ -61,22 +102,91 @@ public final class OmiRestorationSpool: @unchecked Sendable {
     /// buffered frames to disk and stop. The WAL's segments stay on disk, where
     /// resume-same-id finds them (its newest segment is seconds old ⇒ same id).
     public func detach() {
-        io.sync {
-            self.wal?.finish()
+        syncOnIO {
+            guard !self.accountExposureClosed else { return }
             if let id = self.wal?.captureId {
                 self.log?.info("omi-restore: spool handed off capture \(id) (\(self.framesSpooled) frames spooled)")
             }
-            self.wal = nil
+            _ = self.closeAccountExposureLocked()
+        }
+    }
+
+    /// Bind a previously-unbound locked/background spool during foreground
+    /// handoff. The owner identity is copied, but the root deliberately remains
+    /// the spool's existing legacy capture directory; no container is resolved.
+    @discardableResult
+    public func installAccountExposureBinding(
+        from binding: CaptureAccountScope.AccountBinding
+    ) -> CaptureAccountScope.AccountBinding? {
+        syncOnIO {
+            guard !accountExposureClosed else { return nil }
+            let rooted = CaptureAccountScope.AccountBinding(
+                root: baseDir,
+                scope: binding.scope,
+                generation: binding.generation)
+            accountBinding = rooted
+            return rooted
+        }
+    }
+
+    public var availableAccountExposureBinding:
+        CaptureAccountScope.AccountBinding?
+    {
+        syncOnIO { accountBinding }
+    }
+
+    /// Terminally flush and close the old owner's spool. Installed source
+    /// callbacks are deliberately retained: they are gated by the closed flag,
+    /// while a successor remains free to replace them without this close erasing it.
+    public func closeAccountExposure(
+        expected: CaptureAccountScope.AccountBinding
+    ) async -> AccountExposureCloseResult {
+        return await withCheckedContinuation { continuation in
+            executeOnIO {
+                guard let accountBinding = self.accountBinding else {
+                    continuation.resume(returning: .unavailable)
+                    return
+                }
+                guard expected == accountBinding else {
+                    continuation.resume(returning: .ownerMismatch)
+                    return
+                }
+                continuation.resume(returning: self.closeAccountExposureLocked())
+            }
+        }
+    }
+
+    func closeAccountExposureFromExecutorForTests(
+        expected: CaptureAccountScope.AccountBinding
+    ) async -> AccountExposureCloseResult {
+        await withCheckedContinuation { continuation in
+            io.async {
+                guard let accountBinding = self.accountBinding else {
+                    continuation.resume(returning: .unavailable)
+                    return
+                }
+                guard expected == accountBinding else {
+                    continuation.resume(returning: .ownerMismatch)
+                    return
+                }
+                // Already on `io`: executeOnIO must dispatch inline rather than
+                // recursively synchronizing onto this same serial executor.
+                self.executeOnIO {
+                    continuation.resume(
+                        returning: self.closeAccountExposureLocked())
+                }
+            }
         }
     }
 
     /// The capture id currently being spooled (tests + diagnostics).
-    public var activeCaptureId: String? { io.sync { wal?.captureId } }
-    public var spooledFrameCount: Int { io.sync { framesSpooled } }
+    public var activeCaptureId: String? { syncOnIO { wal?.captureId } }
+    public var spooledFrameCount: Int { syncOnIO { framesSpooled } }
 
     // MARK: io-queue internals
 
     private func openSessionLocked() {
+        guard !accountExposureClosed else { return }
         guard wal == nil else { return }
         guard !isPaused() else {
             log?.info("omi-restore: capture is user-paused — holding the link, not recording")
@@ -112,5 +222,28 @@ public final class OmiRestorationSpool: @unchecked Sendable {
         w.finish()   // flush the partial segment durably; NO finalize (disconnects never finalize)
         log?.info("omi-restore: link down — spool flushed capture \(w.captureId) (\(framesSpooled) frames)")
         wal = nil
+    }
+
+    private func closeAccountExposureLocked() -> AccountExposureCloseResult {
+        guard !accountExposureClosed else { return .alreadyClosed }
+        accountExposureClosed = true
+        wal?.finish()
+        wal = nil
+        return .closed
+    }
+
+    private func executeOnIO(_ operation: @escaping @Sendable () -> Void) {
+        if DispatchQueue.getSpecific(key: ioKey) == true {
+            operation()
+        } else {
+            io.async(execute: operation)
+        }
+    }
+
+    private func syncOnIO<Value>(_ operation: () -> Value) -> Value {
+        if DispatchQueue.getSpecific(key: ioKey) == true {
+            return operation()
+        }
+        return io.sync(execute: operation)
     }
 }

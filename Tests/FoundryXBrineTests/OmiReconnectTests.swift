@@ -72,6 +72,49 @@ final class OmiReconnectTests: XCTestCase {
             .filter { $0.hasSuffix(".opus") }
     }
 
+    func testDetachedSpoolCannotReopenThroughRetainedSourceCallbacks() {
+        let base = tempDir()
+        let source = MockSource()
+        let spool = OmiRestorationSpool(baseDir: base, silenceGap: 120, paused: { false })
+        spool.attach(to: source)
+
+        source.onState?(.streaming)
+        source.onFrame?(Data([0xA1]))
+        guard let captureId = spool.activeCaptureId else {
+            return XCTFail("spool never opened its initial capture")
+        }
+        spool.detach()
+
+        let persistedFrameCount: () -> Int = {
+            self.segFiles(base, captureId).reduce(into: 0) { count, name in
+                let url = base.appendingPathComponent(captureId).appendingPathComponent(name)
+                count += CaptureWAL.decodeSegment((try? Data(contentsOf: url)) ?? Data()).count
+            }
+        }
+        let framesBeforeRetainedCallbacks = persistedFrameCount()
+        let spooledBeforeRetainedCallbacks = spool.spooledFrameCount
+
+        // The source deliberately retains the closures installed by attach. Once detach
+        // acknowledges closure, those stale callbacks must neither reopen a WAL nor write.
+        source.onState?(.streaming)
+        source.onFrame?(Data([0xB2]))
+        let reopenedCaptureId = spool.activeCaptureId
+        let postDetachAcceptedFrames = spool.spooledFrameCount - spooledBeforeRetainedCallbacks
+        spool.detach()
+        let framesAfterRetainedCallbacks = persistedFrameCount()
+
+        XCTAssertTrue(
+            reopenedCaptureId == nil
+                && postDetachAcceptedFrames == 0
+                && framesAfterRetainedCallbacks == framesBeforeRetainedCallbacks,
+            """
+            detach returned, but retained callbacks reopened \(String(describing: reopenedCaptureId)), \
+            accepted \(postDetachAcceptedFrames) frame(s), and changed durable frames \
+            \(framesBeforeRetainedCallbacks)->\(framesAfterRetainedCallbacks)
+            """
+        )
+    }
+
     func testSpoolPersistsStreamedFramesDurably() {
         let base = tempDir()
         let source = MockSource()

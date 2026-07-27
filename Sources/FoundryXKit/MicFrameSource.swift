@@ -119,7 +119,7 @@ public final class OpusEncoder48k: @unchecked Sendable {
 /// to 48 kHz mono Int16, Opus-encodes 20 ms frames, and emits them through `onFrame`
 /// — exactly the Omi stream shape. `stop()` tears the engine down and emits `.stopped`
 /// (which finalizes the capture through the normal path).
-public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendable {
+public final class MicFrameSource: NSObject, AccountAudioSourceExposure, @unchecked Sendable {
     public var onFrame: ((Data) -> Void)?
     public var onState: ((AudioSourceState) -> Void)?
     /// Optional DIRECT decoded-PCM tap for live transcription (Feature 2): the already-
@@ -148,6 +148,8 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
     private var engineLive = false       // queue only — the AVAudioEngine is actually tapping
     private var interrupted = false      // queue only — paused by an OS audio interruption
     private var frameCount = 0           // diagnostics (queue only)
+    private let exposureLock = NSLock()
+    private var accountExposureClosed = false // exposureLock only
 
     public init(log: DoorLog? = nil) {
         self.log = log
@@ -157,15 +159,19 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
     deinit { NotificationCenter.default.removeObserver(self) }
 
     public func start() {
+        guard !isAccountExposureClosed else { return }
         // Request mic permission first; start the engine only once granted.
         requestPermission { [weak self] granted in
             guard let self else { return }
-            guard granted else {
-                self.log?.warn("phone mic: permission denied")
-                self.onState?(.failed("microphone permission denied"))
-                return
+            self.queue.async {
+                guard !self.isAccountExposureClosed else { return }
+                guard granted else {
+                    self.log?.warn("phone mic: permission denied")
+                    self.emitState(.failed("microphone permission denied"))
+                    return
+                }
+                self.startLocked()
             }
-            self.queue.async { self.startLocked() }
         }
     }
 
@@ -173,11 +179,27 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
         queue.async { [weak self] in self?.stopLocked() }
     }
 
+    public func closeAudioExposure() async -> AccountExposureCloseResult {
+        guard claimAccountExposureClose() else { return .alreadyClosed }
+        return await withCheckedContinuation {
+            (continuation:
+                CheckedContinuation<AccountExposureCloseResult, Never>) in
+            queue.async {
+                self.stopLocked(terminalNotification: true)
+                continuation.resume(returning: .closed)
+            }
+        }
+    }
+
     // MARK: engine lifecycle (serial queue)
 
     private func startLocked() {
+        guard !isAccountExposureClosed else { return }
         guard !running else { return }
-        guard encoder.isReady else { onState?(.failed("opus encoder unavailable")); return }
+        guard encoder.isReady else {
+            emitState(.failed("opus encoder unavailable"))
+            return
+        }
         running = true
         interrupted = false
         // Observe OS audio-session interruptions (phone calls, Siri, other apps),
@@ -195,7 +217,9 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
     /// engine is live; on failure emits `.failed` so the capture can finalize its partial.
     @discardableResult
     private func activateEngine() -> Bool {
-        guard running, !engineLive else { return engineLive }
+        guard !isAccountExposureClosed,
+              running,
+              !engineLive else { return engineLive }
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playAndRecord, mode: .measurement,
@@ -207,7 +231,7 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
             guard inFormat.sampleRate > 0,
                   let conv = AVAudioConverter(from: inFormat, to: target48k) else {
                 try? session.setActive(false)
-                onState?(.failed("no microphone input available"))
+                emitState(.failed("no microphone input available"))
                 return false
             }
             converter = conv
@@ -220,13 +244,14 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
             engine.prepare()
             try engine.start()
             engineLive = true
-            onState?(.streaming)
+            emitState(.streaming)
             log?.info("phone mic: engine live (input \(Int(inFormat.sampleRate))Hz → Opus 48k/960)")
             return true
         } catch {
             engine.inputNode.removeTap(onBus: 0)
             try? AVAudioSession.sharedInstance().setActive(false)
-            onState?(.failed("mic start failed: \((error as NSError).localizedDescription)"))
+            emitState(.failed(
+                "mic start failed: \((error as NSError).localizedDescription)"))
             return false
         }
     }
@@ -246,15 +271,18 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
         }
     }
 
-    private func stopLocked() {
-        guard running else { onState?(.stopped); return }
+    private func stopLocked(terminalNotification: Bool = false) {
+        guard running else {
+            emitState(.stopped, terminal: terminalNotification)
+            return
+        }
         running = false
         interrupted = false
         tearDownAudioObservers()
         deactivateEngine(releaseSession: true)
         log?.info("phone mic: capture stopped (\(frameCount) frames)")
         frameCount = 0
-        onState?(.stopped)
+        emitState(.stopped, terminal: terminalNotification)
     }
 
     // MARK: interruption / route-change / reset resilience
@@ -348,7 +376,7 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
     ///     zombie). The reason is logged either way so the next diag read names
     ///     exactly which notification is driving any storm.
     private func restartEngine(reason: String, bypassDebounce: Bool = false) {
-        guard running, !interrupted else { return }
+        guard !isAccountExposureClosed, running, !interrupted else { return }
         let now = ProcessInfo.processInfo.systemUptime
         guard engineLive else {
             // Engine already down — this is a resume/recovery, not churn.
@@ -378,7 +406,10 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
         // converter + accumulator + onFrame must be serial (the FrameRouter relies on a
         // serial source queue to preserve Opus frame order).
         queue.async { [weak self] in
-            guard let self, self.running, let conv = self.converter else { return }
+            guard let self,
+                  !self.isAccountExposureClosed,
+                  self.running,
+                  let conv = self.converter else { return }
             let ratio = self.target48k.sampleRate / input.format.sampleRate
             let cap = AVAudioFrameCount(Double(input.frameLength) * ratio) + 1024
             guard let out = AVAudioPCMBuffer(pcmFormat: self.target48k, frameCapacity: cap) else { return }
@@ -393,7 +424,7 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
             guard status != .error, out.frameLength > 0, let ch = out.int16ChannelData else { return }
             // Direct live-STT tap: hand the freshly-normalised PCM straight to the
             // recognizer (no Opus round-trip), BEFORE we encode it for the durable WAL.
-            self.onPCM?(out)
+            self.emitPCM(out)
             let n = Int(out.frameLength)
             self.pending.append(contentsOf: UnsafeBufferPointer(start: ch[0], count: n))
             let fs = OpusEncoder48k.frameSamples
@@ -402,10 +433,42 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
                 self.pending.removeFirst(fs)
                 if let pkt = self.encoder.encode(frame) {
                     self.frameCount += 1
-                    self.onFrame?(pkt)
+                    self.emitFrame(pkt)
                 }
             }
         }
+    }
+
+    private var isAccountExposureClosed: Bool {
+        exposureLock.lock()
+        defer { exposureLock.unlock() }
+        return accountExposureClosed
+    }
+
+    private func claimAccountExposureClose() -> Bool {
+        exposureLock.lock()
+        defer { exposureLock.unlock() }
+        guard !accountExposureClosed else { return false }
+        accountExposureClosed = true
+        return true
+    }
+
+    private func emitState(
+        _ state: AudioSourceState,
+        terminal: Bool = false
+    ) {
+        guard terminal || !isAccountExposureClosed else { return }
+        onState?(state)
+    }
+
+    private func emitFrame(_ frame: Data) {
+        guard !isAccountExposureClosed else { return }
+        onFrame?(frame)
+    }
+
+    private func emitPCM(_ buffer: AVAudioPCMBuffer) {
+        guard !isAccountExposureClosed else { return }
+        onPCM?(buffer)
     }
 
     // MARK: permission
@@ -423,16 +486,56 @@ public final class MicFrameSource: NSObject, AudioFrameSource, @unchecked Sendab
 
 // Non-iOS host (macOS test runner / unsupported platforms): a no-op source so the
 // type exists and the app/tests compile. The encoder above is exercised directly.
-public final class MicFrameSource: AudioFrameSource, @unchecked Sendable {
+public final class MicFrameSource: AccountAudioSourceExposure, @unchecked Sendable {
     public var onFrame: ((Data) -> Void)?
     public var onState: ((AudioSourceState) -> Void)?
+    private let exposureLock = NSLock()
+    private let exposureEmissions = DispatchGroup()
+    private var exposureClosed = false
     #if canImport(AVFoundation)
     /// Parity with the iOS source's direct-PCM tap (unused on this host platform).
     public var onPCM: ((AVAudioPCMBuffer) -> Void)?
     #endif
     public init(log: DoorLog? = nil) { _ = log }
-    public func start() { onState?(.failed("phone microphone unavailable on this platform")) }
-    public func stop() { onState?(.stopped) }
+    public func start() {
+        exposureLock.lock()
+        let closed = exposureClosed
+        exposureLock.unlock()
+        guard !closed else { return }
+        emitState(.failed("phone microphone unavailable on this platform"))
+    }
+    public func stop() { emitState(.stopped) }
+    public func closeAudioExposure() async -> AccountExposureCloseResult {
+        guard claimExposureClose() else { return .alreadyClosed }
+        await withCheckedContinuation { continuation in
+            exposureEmissions.notify(queue: .global()) {
+                continuation.resume()
+            }
+        }
+        emitState(.stopped, terminal: true)
+        return .closed
+    }
+
+    private func claimExposureClose() -> Bool {
+        exposureLock.lock()
+        defer { exposureLock.unlock() }
+        guard !exposureClosed else { return false }
+        exposureClosed = true
+        return true
+    }
+
+    private func emitState(
+        _ state: AudioSourceState,
+        terminal: Bool = false
+    ) {
+        exposureLock.lock()
+        let closed = exposureClosed
+        if terminal || !closed { exposureEmissions.enter() }
+        exposureLock.unlock()
+        guard terminal || !closed else { return }
+        defer { exposureEmissions.leave() }
+        onState?(state)
+    }
 }
 
 #endif

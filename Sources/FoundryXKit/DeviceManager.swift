@@ -116,7 +116,7 @@ public struct SavedOmi: Equatable, Sendable {
 #if canImport(CoreBluetooth)
 import CoreBluetooth
 
-public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, @unchecked Sendable {
+public final class DeviceManager: NSObject, ObservableObject, AccountAudioSourceExposure, @unchecked Sendable {
     // AudioFrameSource — the connected device's Opus stream.
     public var onFrame: ((Data) -> Void)?
     public var onState: ((AudioSourceState) -> Void)?
@@ -176,10 +176,29 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     /// (suspend/forget/disconnect).
     private let lastStateLock = NSLock()
     private var lastSourceState: AudioSourceState?
+    private let audioExposureLock = NSLock()
+    private let audioExposureEmissions = DispatchGroup()
+    private var audioExposureClosed = false
 
-    private func emitSourceState(_ s: AudioSourceState) {
+    private func emitSourceState(_ s: AudioSourceState, terminal: Bool = false) {
+        audioExposureLock.lock()
+        let closed = audioExposureClosed
+        if terminal || !closed { audioExposureEmissions.enter() }
+        audioExposureLock.unlock()
+        guard terminal || !closed else { return }
+        defer { audioExposureEmissions.leave() }
         lastStateLock.lock(); lastSourceState = s; lastStateLock.unlock()
         onState?(s)
+    }
+
+    private func emitAudioFrame(_ frame: Data) {
+        audioExposureLock.lock()
+        let closed = audioExposureClosed
+        if !closed { audioExposureEmissions.enter() }
+        audioExposureLock.unlock()
+        guard !closed else { return }
+        defer { audioExposureEmissions.leave() }
+        onFrame?(frame)
     }
 
     /// Re-emit the current source state to the (possibly just-reassigned) `onState`
@@ -192,7 +211,7 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
             self.lastStateLock.lock()
             let s = self.lastSourceState
             self.lastStateLock.unlock()
-            if let s { self.onState?(s) }
+            if let s { self.emitSourceState(s) }
         }
     }
 
@@ -281,6 +300,10 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
     /// re-enabling the Omi after a stop never reconnected (the user had to manually
     /// scan) — a primary "zero frames / stuck" cause.
     public func start() {
+        audioExposureLock.lock()
+        let closed = audioExposureClosed
+        audioExposureLock.unlock()
+        guard !closed else { return }
         autoConnect = true
         // No saved device ⇒ nothing to reconnect to. Stay FULLY DORMANT: don't create a
         // central, don't scan. A central carrying our restore identifier plus a standing
@@ -319,6 +342,38 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
 
     /// AudioFrameSource.stop() = drop the link (capture ends; we keep the saved id).
     public func stop() { disconnect() }
+
+    /// Stop the BLE producer on its owning executor and acknowledge only after
+    /// queued exposure work can no longer publish frames to the old consumer.
+    public func closeAudioExposure() async -> AccountExposureCloseResult {
+        guard claimAudioExposureClose() else { return .alreadyClosed }
+
+        return await withCheckedContinuation { continuation in
+            bleQueue.async {
+                self.autoConnect = false
+                self.gapSyncGeneration &+= 1
+                self.gapSync = nil
+                self.gapSyncHolding = false
+                self.liveHold.removeAll()
+                self.central?.stopScan()
+                if let peripheral = self.peripheral {
+                    self.central?.cancelPeripheralConnection(peripheral)
+                }
+                self.peripheral = nil
+                self.audioExposureEmissions.wait()
+                self.emitSourceState(.stopped, terminal: true)
+                continuation.resume(returning: .closed)
+            }
+        }
+    }
+
+    private func claimAudioExposureClose() -> Bool {
+        audioExposureLock.lock()
+        defer { audioExposureLock.unlock() }
+        guard !audioExposureClosed else { return false }
+        audioExposureClosed = true
+        return true
+    }
 
     /// Enable/disable the Omi as a capture source (device-page toggle). Disabling drops
     /// the link AND stops auto-reconnect, so a toggled-off Omi leaves the capture
@@ -545,7 +600,7 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
         guard flush, !liveHold.isEmpty else { liveHold.removeAll(); return }
         let held = liveHold
         liveHold.removeAll()
-        for f in held { onFrame?(f) }
+        for f in held { emitAudioFrame(f) }
     }
 
     /// Begin the ring sync once BOTH storage characteristics are known AND the data
@@ -560,7 +615,7 @@ public final class DeviceManager: NSObject, ObservableObject, AudioFrameSource, 
             guard let self, let p else { return }
             self.executeGapSyncCommand(cmd, on: p)
         }
-        engine.emitFrame = { [weak self] frame in self?.onFrame?(frame) }
+        engine.emitFrame = { [weak self] frame in self?.emitAudioFrame(frame) }
         engine.finished = { [weak self] outcome in self?.gapSyncFinished(outcome) }
         log?.info("Omi: storage service live — checking offline cache")
         engine.begin()
@@ -947,7 +1002,7 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
             }
             return
         }
-        onFrame?(frame)
+        emitAudioFrame(frame)
     }
 
     /// Decode an Omi button-trigger notification into a double-click → `onButtonDoubleClick`.
@@ -1006,7 +1061,7 @@ public enum OmiUUID {
 
 #else
 // Non-CoreBluetooth host (macOS test runner): a no-op manager so the app + tests compile.
-public final class DeviceManager: ObservableObject, AudioFrameSource, @unchecked Sendable {
+public final class DeviceManager: ObservableObject, AccountAudioSourceExposure, @unchecked Sendable {
     public static let restoreIdentifier = "foundryx.omi.central"
     private static let sharedLock = NSLock()
     private nonisolated(unsafe) static var sharedInstance: DeviceManager?   // sharedLock-guarded
@@ -1023,7 +1078,16 @@ public final class DeviceManager: ObservableObject, AudioFrameSource, @unchecked
     }
     public var onFrame: ((Data) -> Void)?
     public var onState: ((AudioSourceState) -> Void)?
-    public func replayState() {}
+    private let exposureLock = NSLock()
+    private let exposureEmissions = DispatchGroup()
+    private var exposureClosed = false
+    private var lastSourceState: AudioSourceState?
+    public func replayState() {
+        exposureLock.lock()
+        let state = lastSourceState
+        exposureLock.unlock()
+        if let state { emitState(state) }
+    }
     @Published public private(set) var connectionState: DeviceConnectionState = .poweredOff
     @Published public private(set) var discovered: [DiscoveredDevice] = []
     @Published public private(set) var saved: SavedOmi?
@@ -1031,10 +1095,16 @@ public final class DeviceManager: ObservableObject, AudioFrameSource, @unchecked
     public var isBatteryLow: Bool { (batteryLevel ?? 100) < 20 }
     public init(log: DoorLog? = nil) { _ = log }
     public static var hasSavedDevice: Bool { false }
-    public func start() { onState?(.failed("CoreBluetooth unavailable")) }
-    public func stop() { onState?(.stopped) }
+    public func start() {
+        exposureLock.lock()
+        let closed = exposureClosed
+        exposureLock.unlock()
+        guard !closed else { return }
+        emitState(.failed("CoreBluetooth unavailable"))
+    }
+    public func stop() { emitState(.stopped) }
     public func setEnabled(_ on: Bool) {}
-    public func suspend() { onState?(.stopped) }
+    public func suspend() { emitState(.stopped) }
     public func startScan() {}
     public func stopScan() {}
     public func stopScanIfScanning() {}
@@ -1042,6 +1112,40 @@ public final class DeviceManager: ObservableObject, AudioFrameSource, @unchecked
     public func connectOrPair() {}
     public func reconnect() {}
     public func forget() {}
-    public func disconnect() {}
+    public func disconnect() { emitState(.stopped) }
+    public func closeAudioExposure() async -> AccountExposureCloseResult {
+        guard claimExposureClose() else { return .alreadyClosed }
+        await withCheckedContinuation { continuation in
+            exposureEmissions.notify(queue: .global()) {
+                continuation.resume()
+            }
+        }
+        emitState(.stopped, terminal: true)
+        return .closed
+    }
+
+    private func claimExposureClose() -> Bool {
+        exposureLock.lock()
+        defer { exposureLock.unlock() }
+        guard !exposureClosed else { return false }
+        exposureClosed = true
+        return true
+    }
+
+    private func emitState(
+        _ state: AudioSourceState,
+        terminal: Bool = false
+    ) {
+        exposureLock.lock()
+        let closed = exposureClosed
+        if terminal || !closed {
+            lastSourceState = state
+            exposureEmissions.enter()
+        }
+        exposureLock.unlock()
+        guard terminal || !closed else { return }
+        defer { exposureEmissions.leave() }
+        onState?(state)
+    }
 }
 #endif

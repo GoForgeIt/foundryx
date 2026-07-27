@@ -89,6 +89,8 @@ public enum CaptureWidgetSnapshotStore {
     /// Test-only replacement for the App-Group suite. Access is serialized by
     /// `stateLock`; production leaves this nil.
     nonisolated(unsafe) static var injectedDefaults: UserDefaults?
+    nonisolated(unsafe) static var withdrawalFaultForTesting:
+        CaptureWidgetWithdrawalFault?
 
     static var defaults: UserDefaults? {
         injectedDefaults ?? UserDefaults(suiteName: appGroupID)
@@ -158,6 +160,65 @@ public enum CaptureWidgetSnapshotStore {
     static func resetDefaultsForTesting() {
         stateLock.lock()
         injectedDefaults = nil
+        withdrawalFaultForTesting = nil
+        stateLock.unlock()
+    }
+
+    /// Withdraw the active owner's shared widget payload and verify the deletion
+    /// reached the cross-process preference domain before acknowledging it.
+    public static func withdraw(
+        expectedOwner: String
+    ) -> CaptureWidgetWithdrawalResult {
+        stateLock.lock()
+        guard let defaults else {
+            stateLock.unlock()
+            return .persistenceFailed
+        }
+
+        let priorOwner = defaults.string(forKey: activeOwnerKey)
+        let priorPayload = defaults.data(forKey: key)
+        if priorOwner == nil, priorPayload == nil {
+            stateLock.unlock()
+            return .alreadyAbsent
+        }
+        guard priorOwner == expectedOwner else {
+            stateLock.unlock()
+            return .ownerMismatch
+        }
+        guard withdrawalFaultForTesting != .synchronizeFailure else {
+            stateLock.unlock()
+            return .persistenceFailed
+        }
+
+        defaults.removeObject(forKey: activeOwnerKey)
+        defaults.removeObject(forKey: key)
+        guard defaults.synchronize(),
+              defaults.object(forKey: activeOwnerKey) == nil,
+              defaults.object(forKey: key) == nil else {
+            if let priorOwner {
+                defaults.set(priorOwner, forKey: activeOwnerKey)
+            } else {
+                defaults.removeObject(forKey: activeOwnerKey)
+            }
+            if let priorPayload {
+                defaults.set(priorPayload, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+            _ = defaults.synchronize()
+            stateLock.unlock()
+            return .persistenceFailed
+        }
+        stateLock.unlock()
+        reloadWidgetTimelines()
+        return .withdrawn
+    }
+
+    static func setWithdrawalFaultForTesting(
+        _ fault: CaptureWidgetWithdrawalFault?
+    ) {
+        stateLock.lock()
+        withdrawalFaultForTesting = fault
         stateLock.unlock()
     }
 
@@ -166,4 +227,15 @@ public enum CaptureWidgetSnapshotStore {
         WidgetCenter.shared.reloadAllTimelines()
         #endif
     }
+}
+
+public enum CaptureWidgetWithdrawalResult: Sendable, Equatable {
+    case withdrawn
+    case alreadyAbsent
+    case ownerMismatch
+    case persistenceFailed
+}
+
+enum CaptureWidgetWithdrawalFault: Sendable, Equatable {
+    case synchronizeFailure
 }

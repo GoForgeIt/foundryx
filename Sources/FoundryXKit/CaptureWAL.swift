@@ -77,6 +77,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     private let uploadOverride: (@Sendable (UInt64, Data) async throws -> Void)?
 
     private let io = DispatchQueue(label: "foundryx.capture-wal")
+    private let ioKey = DispatchSpecificKey<Bool>()
     private var buffer: [Data] = []      // frames awaiting a chunk (io queue only)
     private var nextSeq: UInt64 = 0      // next segment seq (io queue only)
     private var streaming = false        // mutated on io; read in computeStatus (@unchecked)
@@ -269,6 +270,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         self.log = log
         self.chunkFrames = chunkFrames
         self.uploadOverride = upload
+        io.setSpecific(key: ioKey, value: true)
         let root = baseDir ?? CaptureWAL.documentsCaptures()
         self.dir = root.appendingPathComponent(captureId, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -304,15 +306,23 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     /// owner (CaptureManager / its drain loop) drives sync, so there's no racing
     /// background sync and tests are deterministic.
     public func finish() {
-        io.sync { self.flushLocked(); self.streaming = false }
+        syncOnIO { self.flushLocked(); self.streaming = false }
         publish()
     }
 
     /// Synchronous flush barrier (waits for queued appends — `io` is serial — then
     /// flushes the remainder). Lets tests put every frame on disk before syncing.
     public func flushAndWait() {
-        io.sync { self.flushLocked() }
+        syncOnIO { self.flushLocked() }
         publish()
+    }
+
+    private func syncOnIO(_ operation: () -> Void) {
+        if DispatchQueue.getSpecific(key: ioKey) == true {
+            operation()
+        } else {
+            io.sync(execute: operation)
+        }
     }
 
     // MARK: segment write (durable-on-phone)

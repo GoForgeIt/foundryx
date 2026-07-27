@@ -20,15 +20,136 @@ import AVFoundation
 import WidgetKit
 #endif
 
+@MainActor
+public protocol CaptureManagerTimer: AnyObject {
+    func invalidate()
+}
+
+extension Timer: CaptureManagerTimer {}
+
+public typealias CaptureManagerDrainTimerFactory =
+    @MainActor (
+        TimeInterval,
+        @escaping @MainActor () -> Void
+    ) -> any CaptureManagerTimer
+
+@MainActor
+final class ManualCaptureManagerTimer: CaptureManagerTimer {
+    private var callback: (@MainActor () -> Void)?
+    private(set) var invalidated = false
+
+    func install(_ callback: @escaping @MainActor () -> Void) {
+        self.callback = callback
+    }
+
+    func fire() {
+        guard !invalidated else { return }
+        callback?()
+    }
+
+    func fireRetainedCallbackForTests() {
+        callback?()
+    }
+
+    func invalidate() {
+        invalidated = true
+    }
+}
+
+private final class CaptureManagerTaskInstallationGate:
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private var installed = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if installed {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
+    func open() {
+        lock.lock()
+        installed = true
+        let current = waiters
+        waiters.removeAll()
+        lock.unlock()
+        for waiter in current { waiter.resume() }
+    }
+}
+
 /// Lock-guarded routing of frames → the active WAL, gated by pause. Lives off the
 /// main actor so the source's frame callback never hops actors per frame. Also the
 /// single tap point for the audio-level signal: per frame it computes the cheap
 /// level (→ the meter) and feeds the silence segmenter (→ conversation boundaries),
 /// all under the same lock so order is preserved and pause freezes everything.
+final class FrameRouterRouteBarrier: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var targetSelected = false
+    private var closeWaiting = false
+    private var selectedRouteReleased = false
+
+    func pauseAfterTargetSelection() {
+        condition.lock()
+        targetSelected = true
+        condition.broadcast()
+        while !selectedRouteReleased { condition.wait() }
+        condition.unlock()
+    }
+
+    func noteCloseWaiting() {
+        condition.lock()
+        closeWaiting = true
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func waitUntilTargetSelected(timeout: TimeInterval) -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while !targetSelected {
+            guard condition.wait(until: deadline) else { return false }
+        }
+        return true
+    }
+
+    func waitUntilCloseIsWaiting(timeout: TimeInterval) -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while !closeWaiting {
+            guard condition.wait(until: deadline) else { return false }
+        }
+        return true
+    }
+
+    func releaseSelectedRoute() {
+        condition.lock()
+        selectedRouteReleased = true
+        condition.broadcast()
+        condition.unlock()
+    }
+}
+
 final class FrameRouter: @unchecked Sendable {
     private let lock = NSLock()
     private var wal: CaptureWAL?
     private var paused = false
+    private var accountExposureClosed = false
+    private var closeAcknowledged = false
+    private var selectedRoutesInFlight = 0
+    private var closeWaiters:
+        [CheckedContinuation<AccountExposureCloseResult, Never>] = []
+    private var routeBarrierForTests: FrameRouterRouteBarrier?
     /// Frames routed while NO session WAL is wired yet (the main-actor hop between
     /// `.streaming` and beginSession/resumeSession, or a session roll). Bounded;
     /// drained into the next `setWAL`. Lock-guarded.
@@ -103,6 +224,11 @@ final class FrameRouter: @unchecked Sendable {
 
     func setWAL(_ w: CaptureWAL?) {
         lock.lock()
+        guard !accountExposureClosed else {
+            wal = nil
+            lock.unlock()
+            return
+        }
         wal = w
         if w != nil { sessionVoicedFrames = 0; lastVoicedAt = nil }   // fresh session → reset tallies
         // Drain any frames that arrived BEFORE the session's WAL was wired (the
@@ -130,6 +256,13 @@ final class FrameRouter: @unchecked Sendable {
     /// resets the onset detector + pre-roll ring so each listening window starts clean.
     func setArmed(_ b: Bool) {
         lock.lock()
+        guard !accountExposureClosed else {
+            armed = false
+            preRollRing.removeAll()
+            preSessionHold.removeAll()
+            lock.unlock()
+            return
+        }
         armed = b
         onsetSignaled = false
         onsetDetector.reset()
@@ -181,6 +314,10 @@ final class FrameRouter: @unchecked Sendable {
 
     func route(_ frame: Data) {
         lock.lock()
+        guard !accountExposureClosed else {
+            lock.unlock()
+            return
+        }
         let isPaused = paused
         // Count only frames we actually CAPTURE. When paused the BLE source still
         // delivers frames (we drop them), but the counter must FREEZE so a paused
@@ -211,6 +348,9 @@ final class FrameRouter: @unchecked Sendable {
             return
         }
         let target = isPaused ? nil : wal
+        let selectedDurableTarget = target != nil
+        if selectedDurableTarget { selectedRoutesInFlight += 1 }
+        let routeBarrier = selectedDurableTarget ? routeBarrierForTests : nil
         // No session WAL yet (pre-session window)? HOLD the frame instead of
         // dropping it — setWAL drains in order. Bounded: past the cap the newest
         // frames are dropped (the hold's contiguous head is the audio that matters).
@@ -237,6 +377,7 @@ final class FrameRouter: @unchecked Sendable {
         let emitDiag = !isPaused && (fc <= 3 || fc % 50 == 0)
         let useExternalPCM = externalPCM
         lock.unlock()
+        routeBarrier?.pauseAfterTargetSelection()
         target?.appendFrame(frame)
         if !isPaused {
             onLevel?(level)
@@ -256,6 +397,66 @@ final class FrameRouter: @unchecked Sendable {
                                fc, lb, hasWAL ? "y" : "n", level, dconv ? "y" : "n", Int(dcookie), Int(dstatus), dpcm, drms))
             }
         }
+        if selectedDurableTarget { finishSelectedRoute() }
+    }
+
+    func setRouteBarrierForTests(_ barrier: FrameRouterRouteBarrier?) {
+        lock.lock()
+        routeBarrierForTests = barrier
+        lock.unlock()
+    }
+
+    /// Terminally close this router and wait for a frame that already selected the
+    /// old WAL to enqueue its append. New routes and future WAL wiring are rejected,
+    /// and both pre-session holds are erased at the privacy boundary.
+    func closeAccountExposure() async -> AccountExposureCloseResult {
+        await withCheckedContinuation { continuation in
+            beginAccountExposureClose(continuation)
+        }
+    }
+
+    private func beginAccountExposureClose(
+        _ continuation:
+            CheckedContinuation<AccountExposureCloseResult, Never>
+    ) {
+        lock.lock()
+        if closeAcknowledged {
+            lock.unlock()
+            continuation.resume(returning: .alreadyClosed)
+            return
+        }
+        accountExposureClosed = true
+        wal = nil
+        armed = false
+        paused = true
+        preSessionHold.removeAll()
+        preRollRing.removeAll()
+        onsetSignaled = false
+        onsetDetector.reset()
+        if selectedRoutesInFlight == 0 {
+            closeAcknowledged = true
+            lock.unlock()
+            continuation.resume(returning: .closed)
+            return
+        }
+        closeWaiters.append(continuation)
+        let barrier = routeBarrierForTests
+        lock.unlock()
+        barrier?.noteCloseWaiting()
+    }
+
+    private func finishSelectedRoute() {
+        lock.lock()
+        selectedRoutesInFlight -= 1
+        guard accountExposureClosed, selectedRoutesInFlight == 0 else {
+            lock.unlock()
+            return
+        }
+        closeAcknowledged = true
+        let waiters = closeWaiters
+        closeWaiters.removeAll()
+        lock.unlock()
+        for waiter in waiters { waiter.resume(returning: .closed) }
     }
 }
 
@@ -325,6 +526,9 @@ public final class CaptureManager: ObservableObject {
     /// The captureIds last written to the warm-rows index — so a rebuild that didn't change the
     /// top-N set skips the (off-main) rewrite.
     private var lastIndexedIds: [String] = []
+    private var warmListIndexTasks: [UUID: Task<Void, Never>] = [:]
+    private var latestWarmListIndexTask: Task<Void, Never>?
+    private var sidecarWarmTasks: [UUID: Task<Void, Never>] = [:]
 
     /// Persist the top `warmSeedCount` warm rows to the durable single-file index (T3, WS-B),
     /// OFF the main actor, whenever the top-N set changes (a new/reordered conversation, or the
@@ -332,6 +536,7 @@ public final class CaptureManager: ObservableObject {
     /// detached task reads each card + writes the file. A slightly-stale title is tolerated — the
     /// real cards replace these rows the instant hydration publishes `visibleCaptures`.
     private func persistWarmListIndexIfChanged(from visible: [CaptureWAL]) {
+        guard !accountExposureClosing, !accountExposureClosed else { return }
         guard !visible.isEmpty else { return }
         let snapshot: [(id: String, started: UInt64)] = visible.prefix(Self.warmSeedCount).map {
             ($0.captureId, UInt64(max(0, startTime(of: $0))))
@@ -340,18 +545,37 @@ public final class CaptureManager: ObservableObject {
         guard ids != lastIndexedIds else { return }
         lastIndexedIds = ids
         let base = baseDir
-        Task.detached(priority: .utility) {
-            var rows: [ConversationRowLite] = []
-            rows.reserveCapacity(snapshot.count)
-            for s in snapshot {
-                let card = ConversationCardStore.load(captureId: s.id, baseDir: base)
-                let started = card?.startedAt ?? s.started
-                let title = (card?.title?.isEmpty == false) ? card!.title! : "Conversation"
-                rows.append(ConversationRowLite(captureId: s.id, title: title,
-                                                dateLabel: CaptureManager.warmDateLabel(started)))
+        let predecessor = latestWarmListIndexTask
+        let taskID = UUID()
+        let task = Task { @MainActor [weak self] in
+            if let predecessor { await predecessor.value }
+            guard !Task.isCancelled else {
+                self?.warmListIndexTasks[taskID] = nil
+                return
             }
-            WarmListIndexStore.save(rows, baseDir: base)
+            await Task.detached(priority: .utility) {
+                var rows: [ConversationRowLite] = []
+                rows.reserveCapacity(snapshot.count)
+                for s in snapshot {
+                    guard !Task.isCancelled else { return }
+                    let card = ConversationCardStore.load(
+                        captureId: s.id, baseDir: base)
+                    let started = card?.startedAt ?? s.started
+                    let title = (card?.title?.isEmpty == false)
+                        ? card!.title!
+                        : "Conversation"
+                    rows.append(ConversationRowLite(
+                        captureId: s.id,
+                        title: title,
+                        dateLabel: CaptureManager.warmDateLabel(started)))
+                }
+                guard !Task.isCancelled else { return }
+                WarmListIndexStore.save(rows, baseDir: base)
+            }.value
+            self?.warmListIndexTasks[taskID] = nil
         }
+        warmListIndexTasks[taskID] = task
+        latestWarmListIndexTask = task
     }
 
     /// Test seam: force a visible-list rebuild WITHOUT any invalidation, so a test can prove
@@ -667,7 +891,14 @@ public final class CaptureManager: ObservableObject {
     @Published public private(set) var active: CaptureWAL? {
         // `lastFinishedConversation()` EXCLUDES the active capture, so which capture is
         // active is one of its inputs — a session that begins or ends must re-derive it.
-        didSet { invalidateLastFinishedMemo() }
+        didSet {
+            invalidateLastFinishedMemo()
+            if active != nil {
+                let waiters = activeCaptureWaitersForTests
+                activeCaptureWaitersForTests.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
+        }
     }
 
     #if DEBUG
@@ -728,6 +959,9 @@ public final class CaptureManager: ObservableObject {
     /// Identity generation captured with this manager. App-Group and Live Activity
     /// producers must never publish after this generation is replaced.
     private let accountBinding: CaptureAccountScope.AccountBinding?
+    /// Dormant Task-3 preference handoff. Production continues reading the legacy
+    /// compatibility settings until a later activation task explicitly installs it.
+    private var capturePreferenceSnapshotInstalled = false
     /// Internal (not private) so organizer helpers in the module can reach the
     /// same capture tree (search text, segment sizes, category store).
     let baseDir: URL
@@ -770,8 +1004,39 @@ public final class CaptureManager: ObservableObject {
     /// phone mic stops the Omi from auto-grabbing an ambient session.
     @Published public private(set) var captureSource: CaptureSourceKind = CaptureSettings.captureSource
     private let levelBuffer = LevelBuffer()
-    private var drainTimer: Timer?
+    private var drainTimer: (any CaptureManagerTimer)?
     private var meterTimer: Timer?
+    private let drainTimerFactory: CaptureManagerDrainTimerFactory
+    private let hydrationBeforeCommit: (@Sendable () async -> Void)?
+    private let discardedPruneBeforeDelete:
+        (@Sendable (URL) async -> Void)?
+    private var drainTask: Task<Void, Never>?
+    private var eagerEndSessionTasks: [UUID: Task<Void, Never>] = [:]
+    private var recentTranscriptCacheTasks:
+        [String: Task<Void, Never>] = [:]
+    private var discardedFragmentPruneTasks:
+        [UUID: Task<Void, Never>] = [:]
+    private var mergeFinalizeTasks:
+        [UUID: Task<Void, Never>] = [:]
+    private var mergeOperationsInFlight = 0
+    private var mergeOperationWaiters:
+        [CheckedContinuation<Void, Never>] = []
+    private var accountExposureClosing = false
+    private var accountExposureClosed = false
+    private var accountExposureWorkQuiesced = false
+    private var accountExposureRegistrations:
+        [AccountExposureRegistration] = []
+    private var sourceExposureClosePending = false
+    private var micExposureClosePending = false
+    private var audioExposureCloseRetryInFlight = false
+    private var audioExposureCloseRetryWaiters:
+        [CheckedContinuation<AccountExposureCloseResult, Never>] = []
+    private var accountExposureClosingWaitersForTests:
+        [CheckedContinuation<Void, Never>] = []
+    private var accountExposureQuiescenceWaitersForTests:
+        [CheckedContinuation<Void, Never>] = []
+    private var activeCaptureWaitersForTests:
+        [CheckedContinuation<Void, Never>] = []
 
     // MARK: Live Activity + home-screen widget (Dynamic Island / WidgetKit)
 
@@ -1113,6 +1378,9 @@ public final class CaptureManager: ObservableObject {
     private var liveTranscriber: LiveTranscribing?
     /// Pump republishing the transcriber's stream into `liveTranscript` on the main actor.
     private var liveTranscriptTask: Task<Void, Never>?
+    /// Settled-transcript finishers can persist a provisional card, so account
+    /// closure owns and joins them before acknowledging the old root is quiescent.
+    private var liveTranscriptionFinishTasks: [UUID: Task<Void, Never>] = [:]
     #if canImport(AVFoundation)
     /// Thread-safe holder so the off-main frame path can feed the CURRENT transcriber
     /// without touching main-actor state (the frame tap runs on the serial source queue).
@@ -1185,8 +1453,16 @@ public final class CaptureManager: ObservableObject {
                 liveTitleCadence: LiveTitleCadence = .default,
                 liveTitleExternal: (@Sendable (String, String, Int) async throws -> String?)? = nil,
                 liveTitleBackoff: LiveTitleBackoff = .default,
-                uploadSegment: (@Sendable (String, UInt64, Data) async throws -> Void)? = nil) {
+                uploadSegment: (@Sendable (String, UInt64, Data) async throws -> Void)? = nil,
+                hydrationBeforeCommit: (@Sendable () async -> Void)? = nil,
+                drainTimerFactory: @escaping CaptureManagerDrainTimerFactory =
+                    CaptureManager.defaultDrainTimerFactory,
+                discardedPruneBeforeDelete:
+                    (@Sendable (URL) async -> Void)? = nil) {
         self.target = target
+        self.hydrationBeforeCommit = hydrationBeforeCommit
+        self.drainTimerFactory = drainTimerFactory
+        self.discardedPruneBeforeDelete = discardedPruneBeforeDelete
         self.uploadSegment = uploadSegment
         self.makeLiveTranscriber = liveTranscriber
         self.liveTitler = liveTitler
@@ -1324,6 +1600,18 @@ public final class CaptureManager: ObservableObject {
             MainActor.assumeIsolated {
                 self?.clearLiveActivityForIdentityTransition()
             }
+        }
+    }
+
+    public static func defaultDrainTimerFactory(
+        interval: TimeInterval,
+        tick: @escaping @MainActor () -> Void
+    ) -> any CaptureManagerTimer {
+        Timer.scheduledTimer(
+            withTimeInterval: interval,
+            repeats: true
+        ) { _ in
+            MainActor.assumeIsolated { tick() }
         }
     }
 
@@ -1628,20 +1916,29 @@ public final class CaptureManager: ObservableObject {
     /// result back on main. `force` (an invalidation) always starts a fresh read; a cold-miss
     /// warm coalesces onto whatever is already in flight.
     private func scheduleSidecarWarm(_ id: String, force: Bool = false) {
+        guard !accountExposureClosing, !accountExposureClosed else { return }
         guard force || warmingSidecars[id] == nil else { return }
         let generation = (sidecarGeneration[id] ?? 0) + 1
         sidecarGeneration[id] = generation
         warmingSidecars[id] = generation
         let base = baseDir
-        Task.detached(priority: .userInitiated) { [weak self] in
+        let taskID = UUID()
+        let task = Task.detached(priority: .userInitiated) { [weak self] in
             let span = PerfSpan(name: "sidecar-rewarm")
             let snap = CaptureManager.loadSidecar(captureId: id, baseDir: base)
             let meta = ConversationMetaStore.load(captureId: id, baseDir: base)
             PerfHook.span("sidecar-rewarm", ms: span.elapsedMs())
+            guard !Task.isCancelled else { return }
             await MainActor.run {
-                self?.applyWarmSidecar(id, snapshot: snap, meta: meta, generation: generation)
+                guard let self else { return }
+                defer { self.sidecarWarmTasks[taskID] = nil }
+                guard !self.accountExposureClosing,
+                      !self.accountExposureClosed else { return }
+                self.applyWarmSidecar(
+                    id, snapshot: snap, meta: meta, generation: generation)
             }
         }
+        sidecarWarmTasks[taskID] = task
     }
 
     /// Apply an off-main sidecar re-warm. Ignores a result superseded by a newer invalidation
@@ -1650,6 +1947,7 @@ public final class CaptureManager: ObservableObject {
     /// never churn the list.
     private func applyWarmSidecar(_ id: String, snapshot: SidecarSnapshot,
                                   meta: ConversationMeta?, generation: Int) {
+        guard !accountExposureClosing, !accountExposureClosed else { return }
         guard sidecarGeneration[id] == generation else { return }
         warmingSidecars[id] = nil
         let previous = sidecarCache[id]
@@ -1682,6 +1980,7 @@ public final class CaptureManager: ObservableObject {
     /// coalesced rebuild. (These are background maintenance passes — nothing is waiting on
     /// them, so `.utility` is the correct QoS.)
     private func invalidateSidecars(_ ids: [String]) {
+        guard !accountExposureClosing, !accountExposureClosed else { return }
         let unique = Array(Set(ids))
         guard !unique.isEmpty else { return }
         var generations: [String: Int] = [:]
@@ -1693,24 +1992,31 @@ public final class CaptureManager: ObservableObject {
             generations[id] = generation
         }
         let base = baseDir
-        Task.detached(priority: .utility) { [weak self] in
+        let taskID = UUID()
+        let task = Task.detached(priority: .utility) { [weak self] in
             let span = PerfSpan(name: "sidecar-rewarm-batch")
             var loaded: [(id: String, snap: SidecarSnapshot, meta: ConversationMeta?)] = []
             loaded.reserveCapacity(unique.count)
             for id in unique {
+                guard !Task.isCancelled else { return }
                 loaded.append((id,
                                CaptureManager.loadSidecar(captureId: id, baseDir: base),
                                ConversationMetaStore.load(captureId: id, baseDir: base)))
             }
             PerfHook.span("sidecar-rewarm-batch-n\(unique.count)", ms: span.elapsedMs())
+            guard !Task.isCancelled else { return }
             await MainActor.run {
                 guard let self else { return }
+                defer { self.sidecarWarmTasks[taskID] = nil }
+                guard !self.accountExposureClosing,
+                      !self.accountExposureClosed else { return }
                 for entry in loaded {
                     self.applyWarmSidecar(entry.id, snapshot: entry.snap, meta: entry.meta,
                                           generation: generations[entry.id] ?? 0)
                 }
             }
         }
+        sidecarWarmTasks[taskID] = task
     }
 
     /// Generation counter per capture, bumped on every invalidation, so a slow off-main
@@ -1782,13 +2088,19 @@ public final class CaptureManager: ObservableObject {
         // marker applied in this tick must not be clobbered by a read started before it.
         discardInFlightSidecarWarm(id)
         let wait = Self.liveSidecarRewarmInterval - (now - last)
-        Task { @MainActor [weak self] in
+        let taskID = UUID()
+        let task = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(max(0, wait) * 1_000_000_000))
             guard let self else { return }
+            defer { self.sidecarWarmTasks[taskID] = nil }
+            guard !Task.isCancelled,
+                  !self.accountExposureClosing,
+                  !self.accountExposureClosed else { return }
             self.liveSidecarWarmPending.remove(id)
             self.lastLiveSidecarWarmAt[id] = Date().timeIntervalSince1970
             self.scheduleSidecarWarm(id, force: true)
         }
+        sidecarWarmTasks[taskID] = task
     }
 
     /// How often the ACTIVE (live, still-growing) conversation's sidecar facts are re-derived
@@ -1869,11 +2181,15 @@ public final class CaptureManager: ObservableObject {
     /// once and rebuild a single time rather than N times.
     private var sidecarRebuildScheduled = false
     private func scheduleSidecarRebuild() {
+        guard !accountExposureClosing, !accountExposureClosed else { return }
         guard !sidecarRebuildScheduled else { return }
         sidecarRebuildScheduled = true
         Task { @MainActor [weak self] in
-            self?.sidecarRebuildScheduled = false
-            self?.rebuildVisibleCaptures()
+            guard let self else { return }
+            self.sidecarRebuildScheduled = false
+            guard !self.accountExposureClosing,
+                  !self.accountExposureClosed else { return }
+            self.rebuildVisibleCaptures()
         }
     }
 
@@ -1953,6 +2269,7 @@ public final class CaptureManager: ObservableObject {
     /// window (those load on demand from the detail view), or when a fetch is already
     /// in flight. Offline-safe: a failed/empty fetch simply caches nothing.
     public func ensureRecentTranscriptCached(_ captureId: String) {
+        guard !accountExposureClosing, !accountExposureClosed else { return }
         guard !isDeleted(captureId) else { return }
         // Memo-served (see `hasCachedTranscript`): this runs from every row's `onAppear`, so
         // a raw `fileExists` here is per-row disk on the main actor.
@@ -1962,10 +2279,16 @@ public final class CaptureManager: ObservableObject {
         cachingTranscripts.insert(captureId)
         let baseDir = self.baseDir
         let fetch = self.fetchContent
-        Task { [weak self] in
-            defer { self?.cachingTranscripts.remove(captureId) }
+        let task = Task { @MainActor [weak self] in
+            defer {
+                self?.cachingTranscripts.remove(captureId)
+                self?.recentTranscriptCacheTasks[captureId] = nil
+            }
             guard self?.isDeleted(captureId) == false else { return }
             guard let c = await fetch(captureId), c.found, !c.transcript.isEmpty else { return }
+            guard !Task.isCancelled,
+                  self?.accountExposureClosing != true,
+                  self?.accountExposureClosed != true else { return }
             let entry = CachedTranscript(transcript: c.transcript, title: c.title,
                                          summary: c.summary, segments: c.segments, speakers: c.speakers,
                                          paragraphs: c.paragraphs,
@@ -1983,6 +2306,7 @@ public final class CaptureManager: ObservableObject {
             self?.invalidateSidecar(captureId)
             self?.rebuildVisibleCaptures()
         }
+        recentTranscriptCacheTasks[captureId] = task
     }
 
     /// Age (seconds) of a conversation since it started, from the durable `meta.json`
@@ -2005,6 +2329,223 @@ public final class CaptureManager: ObservableObject {
         if captureSource == .omi { source.start() }
     }
     public func stopSource() { source.stop() }
+
+    /// Deterministic test join for the source-state callback that opens a capture.
+    func waitUntilActiveCaptureForTests() async {
+        guard active == nil else { return }
+        await withCheckedContinuation { continuation in
+            activeCaptureWaitersForTests.append(continuation)
+        }
+    }
+
+    /// Inert, idempotent process registration retained by this actual manager
+    /// instance, so SwiftUI StateObject reuse cannot strand a transient token.
+    public func registerAccountExposures(
+        with coordinator: AccountExposureCoordinator = .process
+    ) {
+        guard accountExposureRegistrations.isEmpty else { return }
+        let live = AccountExposureRegistration(
+            participantID: "capture-manager",
+            kind: .live,
+            binding: accountBinding,
+            owner: self,
+            close: { manager, expected in
+                await manager.closeAccountExposure(expected: expected)
+            })
+        let stale = AccountExposureRegistration(
+            participantID: "capture-manager-stale-work",
+            kind: .staleWork,
+            binding: accountBinding,
+            owner: self,
+            close: { manager, expected in
+                await manager.closeAccountExposure(expected: expected)
+            })
+        accountExposureRegistrations = [live, stale]
+        coordinator.register(live)
+        coordinator.register(stale)
+    }
+
+    /// Deterministic notification that terminal account closure has installed its
+    /// callback gate, before any injected continuation is released.
+    func waitUntilAccountExposureClosingForTests() async {
+        guard !accountExposureClosing else { return }
+        await withCheckedContinuation { continuation in
+            accountExposureClosingWaitersForTests.append(continuation)
+        }
+    }
+
+    /// Join terminal work without sleeping. Returns true only after the close ACK
+    /// has drained every manager-owned task covered by this boundary.
+    func awaitAccountExposureWorkQuiescenceForTests() async -> Bool {
+        if accountExposureWorkQuiesced { return true }
+        guard accountExposureClosing else { return false }
+        await withCheckedContinuation { continuation in
+            accountExposureQuiescenceWaitersForTests.append(continuation)
+        }
+        return accountExposureWorkQuiesced
+    }
+
+    /// Terminally seal this manager for one exact account generation. No user
+    /// preference is changed: this is a privacy/lifecycle boundary, not a pause.
+    public func closeAccountExposure(
+        expected: CaptureAccountScope.AccountBinding
+    ) async -> AccountExposureCloseResult {
+        guard let accountBinding else { return .unavailable }
+        guard expected == accountBinding else { return .ownerMismatch }
+        if accountExposureClosed { return .alreadyClosed }
+        if accountExposureClosing {
+            guard await awaitAccountExposureWorkQuiescenceForTests() else {
+                return .verificationFailed
+            }
+            if accountExposureClosed { return .alreadyClosed }
+            return await retryOutstandingAudioExposureClosure()
+        }
+
+        accountExposureClosing = true
+        accountExposureWorkQuiesced = false
+        let closingWaiters = accountExposureClosingWaitersForTests
+        accountExposureClosingWaitersForTests.removeAll()
+        for waiter in closingWaiters { waiter.resume() }
+
+        drainTimer?.invalidate()
+        drainTimer = nil
+        meterTimer?.invalidate()
+        meterTimer = nil
+        segmentTimer?.invalidate()
+        segmentTimer = nil
+
+        hydration?.cancel()
+        drainTask?.cancel()
+        let closingWarmListIndexTasks = Array(warmListIndexTasks.values)
+        for task in closingWarmListIndexTasks { task.cancel() }
+        let closingSidecarWarmTasks = Array(sidecarWarmTasks.values)
+        for task in closingSidecarWarmTasks { task.cancel() }
+        let closingRecentTranscriptTasks =
+            Array(recentTranscriptCacheTasks.values)
+        for task in closingRecentTranscriptTasks { task.cancel() }
+        let closingDiscardPruneTasks =
+            Array(discardedFragmentPruneTasks.values)
+        for task in closingDiscardPruneTasks { task.cancel() }
+        let closingMergeFinalizeTasks = Array(mergeFinalizeTasks.values)
+        for task in closingMergeFinalizeTasks { task.cancel() }
+        let eagerTasks = Array(eagerEndSessionTasks.values)
+        for task in eagerTasks { task.cancel() }
+
+        _ = await router.closeAccountExposure()
+
+        sourceExposureClosePending = true
+        micExposureClosePending = micSource.map { $0 !== source } ?? false
+        let sourceFailure = await closeOutstandingAudioExposures()
+
+        let activeAtClose = active
+        if let wal = activeAtClose {
+            wal.finish()
+            active = nil
+        }
+        if let held = suspendedSession {
+            if held.wal !== activeAtClose { held.wal.finish() }
+            suspendedSession = nil
+        }
+        isRecordingMic = false
+        recordingClock = nil
+        endLiveTranscription()
+        let closingLiveFinishTasks =
+            Array(liveTranscriptionFinishTasks.values)
+        for task in closingLiveFinishTasks { task.cancel() }
+
+        if let hydration { await hydration.value }
+        if let drainTask { await drainTask.value }
+        if mergeOperationsInFlight > 0 {
+            await withCheckedContinuation { continuation in
+                mergeOperationWaiters.append(continuation)
+            }
+        }
+        for task in closingWarmListIndexTasks { await task.value }
+        for task in closingSidecarWarmTasks { await task.value }
+        for task in closingRecentTranscriptTasks { await task.value }
+        for task in closingDiscardPruneTasks { await task.value }
+        for task in closingMergeFinalizeTasks { await task.value }
+        for task in closingLiveFinishTasks { await task.value }
+        for task in eagerTasks { await task.value }
+        eagerEndSessionTasks.removeAll()
+        self.drainTask = nil
+        warmListIndexTasks.removeAll()
+        latestWarmListIndexTask = nil
+        sidecarWarmTasks.removeAll()
+        recentTranscriptCacheTasks.removeAll()
+        discardedFragmentPruneTasks.removeAll()
+        mergeFinalizeTasks.removeAll()
+        liveTranscriptionFinishTasks.removeAll()
+
+        let currentPollers = Array(pollers.values)
+        for poller in currentPollers { await poller.close() }
+        pollers.removeAll()
+
+        if sourceFailure == nil {
+            accountExposureClosed = true
+        }
+        accountExposureWorkQuiesced = true
+        let quiescenceWaiters = accountExposureQuiescenceWaitersForTests
+        accountExposureQuiescenceWaitersForTests.removeAll()
+        for waiter in quiescenceWaiters { waiter.resume() }
+        return sourceFailure ?? .closed
+    }
+
+    /// Retry only audio-source closure verification after the manager's router,
+    /// timers, WAL, and old-root tasks have already been terminally sealed.
+    private func closeOutstandingAudioExposures()
+        async -> AccountExposureCloseResult?
+    {
+        var firstFailure: AccountExposureCloseResult?
+        if sourceExposureClosePending {
+            let result: AccountExposureCloseResult
+            if let closable = source as? any AccountAudioSourceExposure {
+                result = await closable.closeAudioExposure()
+            } else {
+                source.stop()
+                result = .closed
+            }
+            if result == .closed || result == .alreadyClosed {
+                sourceExposureClosePending = false
+            } else {
+                firstFailure = result
+            }
+        }
+        if micExposureClosePending, let micSource {
+            let result: AccountExposureCloseResult
+            if let closable = micSource as? any AccountAudioSourceExposure {
+                result = await closable.closeAudioExposure()
+            } else {
+                micSource.stop()
+                result = .closed
+            }
+            if result == .closed || result == .alreadyClosed {
+                micExposureClosePending = false
+            } else if firstFailure == nil {
+                firstFailure = result
+            }
+        }
+        return firstFailure
+    }
+
+    private func retryOutstandingAudioExposureClosure()
+        async -> AccountExposureCloseResult
+    {
+        if audioExposureCloseRetryInFlight {
+            return await withCheckedContinuation { continuation in
+                audioExposureCloseRetryWaiters.append(continuation)
+            }
+        }
+        audioExposureCloseRetryInFlight = true
+        let failed = await closeOutstandingAudioExposures()
+        let result = failed ?? .closed
+        if failed == nil { accountExposureClosed = true }
+        audioExposureCloseRetryInFlight = false
+        let waiters = audioExposureCloseRetryWaiters
+        audioExposureCloseRetryWaiters.removeAll()
+        for waiter in waiters { waiter.resume(returning: result) }
+        return result
+    }
 
     // MARK: capture-source selection (Omi vs phone mic) + phone-mic recording
 
@@ -2191,6 +2732,7 @@ public final class CaptureManager: ObservableObject {
     // MARK: ambient session lifecycle (driven by the source, not a button)
 
     private func onSourceState(_ state: AudioSourceState) {
+        guard !accountExposureClosing, !accountExposureClosed else { return }
         sourceState = state
         switch state {
         case .streaming:
@@ -2281,6 +2823,7 @@ public final class CaptureManager: ObservableObject {
     /// closed conversation (which by construction contained voice) surfaces on its own and
     /// the quiet BETWEEN conversations never mints an empty card. Capture stays live.
     private func handleSegment(_ event: SegmentEvent) {
+        guard !accountExposureClosing, !accountExposureClosed else { return }
         switch event {
         case .opened:
             log?.info("capture: segment OPENED (voice after idle)")
@@ -2313,6 +2856,7 @@ public final class CaptureManager: ObservableObject {
     /// router's pre-roll ring drains into the new session on setWAL, so the first words
     /// aren't clipped.
     private func handleSpeechOnset() {
+        guard !accountExposureClosing, !accountExposureClosed else { return }
         guard active == nil, !isRecordingMic, !isPaused else { return }   // already recording / mic / paused
         log?.info("capture: speech onset → opening conversation")
         beginSession()
@@ -2586,6 +3130,52 @@ public final class CaptureManager: ObservableObject {
         silenceGapSeconds = seconds
         CaptureSettings.silenceGapSeconds = seconds
         router.setSilenceGap(seconds)
+    }
+
+    /// Install one immutable account-bound preference snapshot without persisting
+    /// anything back to the legacy compatibility store. This seam is deliberately
+    /// dormant until the account-root owner explicitly calls it.
+    @discardableResult
+    public func installCapturePreferenceSnapshot(
+        _ snapshot: CaptureAccountPreferenceSnapshot
+    ) -> Bool {
+        guard !capturePreferenceSnapshotInstalled,
+              let accountBinding,
+              snapshot.binding == accountBinding,
+              snapshot.binding.isCurrent else {
+            return false
+        }
+        capturePreferenceSnapshotInstalled = true
+        applyCapturePreferenceSnapshot(snapshot)
+        return true
+    }
+
+    /// Explicit compatibility refresh for the already-bound manager. Identity
+    /// notifications do not invoke this in Task 3.
+    @discardableResult
+    public func refreshCapturePreferences(
+        compatibility: AccountPreferenceCompatibilityStore,
+        binding: CaptureAccountScope.AccountBinding
+    ) -> Bool {
+        guard let accountBinding,
+              binding == accountBinding,
+              binding.isCurrent else {
+            return false
+        }
+        applyCapturePreferenceSnapshot(
+            CaptureSettings.snapshot(
+                compatibility: compatibility,
+                binding: binding))
+        return true
+    }
+
+    private func applyCapturePreferenceSnapshot(
+        _ snapshot: CaptureAccountPreferenceSnapshot
+    ) {
+        silenceGapSeconds = snapshot.silenceGapSeconds
+        router.setSilenceGap(snapshot.silenceGapSeconds)
+        isPaused = snapshot.omiDesiredState == .paused
+        router.setPaused(isPaused)
     }
 
     // MARK: live audio meter (req 8)
@@ -3077,6 +3667,16 @@ public final class CaptureManager: ObservableObject {
     /// retention sweep / hydration hops); `captures` is mutated + rebuilt back on main.
     @discardableResult
     public func merge(captureIds: [String]) async -> String? {
+        guard !accountExposureClosing, !accountExposureClosed else { return nil }
+        mergeOperationsInFlight += 1
+        defer {
+            mergeOperationsInFlight -= 1
+            if mergeOperationsInFlight == 0 {
+                let waiters = mergeOperationWaiters
+                mergeOperationWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
+        }
         // Resolve to distinct, mergeable captures (real local audio; not active/deleted/…).
         var seen = Set<String>()
         let candidates = captureIds.filter { seen.insert($0).inserted && isMergeable($0) }
@@ -3096,6 +3696,9 @@ public final class CaptureManager: ObservableObject {
             let ok = await Task.detached(priority: .userInitiated) {
                 Self.appendSourceToPrimary(primaryId: primaryId, sourceId: sourceId, baseDir: base)
             }.value
+            guard !accountExposureClosing,
+                  !accountExposureClosed,
+                  !Task.isCancelled else { return nil }
             guard ok else { break }   // copy failed — stop; sources already folded stay folded
             // The source's audio is now safely on the primary → delete the source (phone +
             // door + Lore). Done BEFORE the next source so an interruption never re-copies a
@@ -3133,10 +3736,16 @@ public final class CaptureManager: ObservableObject {
         // Kick the sync→finalize now (drain timer + app-foreground retry finish it if the
         // door is down — the pending-finalize marker is durable, mirroring endSession).
         if let primaryWal = captures.first(where: { $0.captureId == primaryId }) {
-            Task { [weak self] in
+            let taskID = UUID()
+            let task = Task { @MainActor [weak self] in
+                defer { self?.mergeFinalizeTasks[taskID] = nil }
                 await primaryWal.sync()
+                guard !Task.isCancelled,
+                      self?.accountExposureClosing != true,
+                      self?.accountExposureClosed != true else { return }
                 await self?.tryFinalize(primaryWal)
             }
+            mergeFinalizeTasks[taskID] = task
         }
         log?.info("merge: folded \(sourceIds.count) source(s) into primary \(primaryId)")
         return primaryId
@@ -3407,13 +4016,22 @@ public final class CaptureManager: ObservableObject {
         // survives a transcriber teardown so an internal roll keeps its schedule.
         resetLiveTitleTransient()
         if let t {
-            Task { @MainActor [weak self] in
+            let taskID = UUID()
+            let task = Task { @MainActor [weak self] in
                 let settled = await t.finish()
-                if let captureId, !settled.isEmpty {
-                    self?.seedProvisionalCard(captureId, transcript: settled,
-                                              preferredTitle: sessionTitle)
-                }
+                guard let self else { return }
+                defer { self.liveTranscriptionFinishTasks[taskID] = nil }
+                guard !Task.isCancelled,
+                      !self.accountExposureClosing,
+                      !self.accountExposureClosed,
+                      let captureId,
+                      !settled.isEmpty else { return }
+                self.seedProvisionalCard(
+                    captureId,
+                    transcript: settled,
+                    preferredTitle: sessionTitle)
             }
+            liveTranscriptionFinishTasks[taskID] = task
         }
     }
 
@@ -3708,21 +4326,30 @@ public final class CaptureManager: ObservableObject {
         let id = finished.captureId
         let baseDir = self.baseDir
         let provider = self.locationProvider
-        Task { [weak self] in
+        let eagerTaskID = UUID()
+        let eagerTask = Task { [weak self] in
+            defer { self?.eagerEndSessionTasks[eagerTaskID] = nil }
             // Stamp the conversation END + an opportunistic location fix (F1, F5)
             // BEFORE finalize, so the metadata is durable and finalize sends it. The
             // location is best-effort: nil (denied / backgrounded / no fix) → time-only.
             let fix = await provider.currentLocation()
+            guard !Task.isCancelled,
+                  self?.accountExposureClosing != true,
+                  self?.accountExposureClosed != true else { return }
             ConversationMetaStore.recordEnd(captureId: id, baseDir: baseDir,
                                             at: nowUnixSecs(), location: fix)
             self?.invalidateMeta(id)
             await finished.sync()                 // snappy first sync
+            guard !Task.isCancelled,
+                  self?.accountExposureClosing != true,
+                  self?.accountExposureClosed != true else { return }
             // The drain timer also retries this; skip the eager close-path finalize
             // when the automatic drivers are quiesced (deterministic finalize tests).
             if self?.autoFinalizeEnabled == true {
                 await self?.tryFinalize(finished) // finalize once segments are ACK'd
             }
         }
+        eagerEndSessionTasks[eagerTaskID] = eagerTask
         // End the Live Activity into a brief idle "last conversation" state + refresh the
         // widget. The provisional card seeded above gives `lastFinishedConversation()` a
         // title immediately; a later Kiln title refresh re-pushes via the next transition.
@@ -3760,6 +4387,9 @@ public final class CaptureManager: ObservableObject {
     /// failure it stays so the next retry tick tries again. Idempotent + guarded
     /// against concurrent attempts for the same capture.
     private func tryFinalize(_ wal: CaptureWAL) async {
+        guard !accountExposureClosing,
+              !accountExposureClosed,
+              !Task.isCancelled else { return }
         let id = wal.captureId
         guard isPendingFinalize(id), !finalizing.contains(id) else { return }
         // Claim the concurrency marker BEFORE the first suspension point below. Finalize reads
@@ -3778,6 +4408,12 @@ public final class CaptureManager: ObservableObject {
         // the main actor (the single-drain guard means no concurrent `sync()`/`computeStatus`
         // races this WAL). Correctness is preserved (disk truth); the main thread does no I/O.
         let snap = await Task.detached { wal.snapshot() }.value
+        guard !accountExposureClosing,
+              !accountExposureClosed,
+              !Task.isCancelled else {
+            finalizing.remove(id)
+            return
+        }
         // Gate: audio must be durably on the desktop before finalize.
         guard snap.totalSegments > 0, snap.pendingSegments == 0 else {
             finalizing.remove(id)   // released — not a real attempt, retry next tick
@@ -3812,6 +4448,8 @@ public final class CaptureManager: ObservableObject {
             // marker is untouched and nothing is lost.
             let finalize = finalizeCapture
             try await AsyncDeadline.race(Self.finalizeCallTimeout) { try await finalize(id, meta) }
+            guard !accountExposureClosing, !accountExposureClosed,
+                  !Task.isCancelled else { return }
             clearNeedsFinalize(id)
             // The finalize backend may be the LOCAL brain (LocalBackend), which writes the
             // transcript + card sidecars directly — OUTSIDE the manager's sight. Invalidate
@@ -3863,13 +4501,17 @@ public final class CaptureManager: ObservableObject {
     // MARK: drain (retry until every segment is ACK'd)
 
     private func startDrainTimer() {
-        drainTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] timer in
-            // When the manager is gone (a torn-down test case), stop the timer so
-            // it doesn't keep firing on the main run loop — leaked repeating timers
-            // across a 400+ test suite starved the timing-sensitive drain/resync
-            // tests into flaky timeouts. Idempotent in production (self never nil).
-            guard self != nil else { timer.invalidate(); return }
-            Task { @MainActor in await self?.drainPending() }
+        drainTimer = drainTimerFactory(5) { [weak self] in
+            guard let self,
+                  !self.accountExposureClosing,
+                  !self.accountExposureClosed,
+                  self.drainTask == nil else { return }
+            let task = Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.drainPending()
+                self.drainTask = nil
+            }
+            self.drainTask = task
         }
     }
 
@@ -3880,6 +4522,8 @@ public final class CaptureManager: ObservableObject {
     private var isDraining = false
 
     public func drainPending() async {
+        guard !accountExposureClosing, !accountExposureClosed,
+              !Task.isCancelled else { return }
         guard !isDraining else { return }   // a drain is already in flight — skip this tick
         isDraining = true
         drainActive = true
@@ -3901,6 +4545,8 @@ public final class CaptureManager: ObservableObject {
             // per capture per tunnel-session); the actual uploads below still run
             // concurrently in the task group.
             for wal in batch { await resyncIfNeeded(wal) }
+            guard !accountExposureClosing, !accountExposureClosed,
+                  !Task.isCancelled else { return }
 
             var madeProgress = false
             var shouldStop = false
@@ -3939,6 +4585,8 @@ public final class CaptureManager: ObservableObject {
         // all ACK'd — this is the retry path for a finalize that didn't complete at
         // conversation-close (door/Lore was down, or segments weren't ACK'd yet).
         if autoFinalizeEnabled { await retryPendingFinalizes() }
+        guard !accountExposureClosing, !accountExposureClosed,
+              !Task.isCancelled else { return }
         await retryPendingDeletes()
         await retryPendingSpeakerConfirms()   // durable speaker-name confirms (hub-blip safe)
         shipAmbientSignalIfDue()   // redacted gate/card signal → desktop door (v3.3)
@@ -4007,6 +4655,8 @@ public final class CaptureManager: ObservableObject {
             // the upload itself will fail + back off; re-try the handshake next pass.
             return
         }
+        guard !accountExposureClosing, !accountExposureClosed,
+              !Task.isCancelled else { return }
         resyncedCaptures.insert(id)
         guard let doorSeqs, !doorSeqs.isEmpty else { return }   // old door (404) / nothing stored yet
         let skipped = wal.bulkMarkSynced(doorSeqs)
@@ -4543,6 +5193,9 @@ public final class CaptureManager: ObservableObject {
     /// `CaptureSubstanceGateTests` went from 0/10 to 2/10 failures under CPU load. The ~600
     /// cheap stats it would have saved are not worth a real race in the finalize lane.
     public func retryPendingFinalizes() async {
+        guard !accountExposureClosing,
+              !accountExposureClosed,
+              !Task.isCancelled else { return }
         for wal in captures where wal !== active && !isDeleted(wal.captureId) && isPendingFinalize(wal.captureId) {
             await tryFinalize(wal)
         }
@@ -4885,7 +5538,13 @@ public final class CaptureManager: ObservableObject {
             // Retention sweep ALSO off the main actor (was a startup main-thread hang).
             let retention = Self.retentionSweep(ids: picked, baseDir: self.baseDir)
             let warmMs = warm.elapsedMs()
+            if let hydrationBeforeCommit = self.hydrationBeforeCommit {
+                await hydrationBeforeCommit()
+            }
+            guard !Task.isCancelled else { return }
             await MainActor.run {
+                guard !self.accountExposureClosing,
+                      !self.accountExposureClosed else { return }
                 // R4 — the startup main-actor TAIL (orphan reconcile + retention apply +
                 // rebuild + widget seed) was invisible (capture-status-warm stops before this
                 // hop). Measure it under its own span so any residual main-thread cost shows.
@@ -4911,19 +5570,46 @@ public final class CaptureManager: ObservableObject {
     /// shown; keeping tens of thousands of tiny folders forever only bloats the container and
     /// slows every launch enumeration.
     private func pruneDiscardedFragments() {
+        guard !accountExposureClosing, !accountExposureClosed else { return }
         let base = baseDir
         let retention = Self.discardedRetention
-        Task.detached(priority: .background) {
+        let beforeDelete = discardedPruneBeforeDelete
+        let taskID = UUID()
+        let installed = CaptureManagerTaskInstallationGate()
+        let task = Task.detached(priority: .background) { [weak self] in
+            await installed.wait()
             let fm = FileManager.default
-            guard let entries = try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: nil) else { return }
-            let now = Date()
-            for url in entries {
-                let marker = url.appendingPathComponent(".discarded")
-                guard fm.fileExists(atPath: marker.path) else { continue }
-                let m = (try? marker.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-                if let m, now.timeIntervalSince(m) > retention { try? fm.removeItem(at: url) }
+            if let entries = try? fm.contentsOfDirectory(
+                at: base,
+                includingPropertiesForKeys: nil) {
+                let now = Date()
+                for url in entries {
+                    if Task.isCancelled { break }
+                    let marker = url.appendingPathComponent(".discarded")
+                    guard fm.fileExists(atPath: marker.path) else { continue }
+                    let values = try? marker.resourceValues(
+                        forKeys: [.contentModificationDateKey])
+                    let m = values?.contentModificationDate
+                    if Task.isCancelled { break }
+                    if let m, now.timeIntervalSince(m) > retention {
+                        if let beforeDelete { await beforeDelete(url) }
+                        guard !Task.isCancelled else { break }
+                        let exposureOpen = await MainActor.run { [weak self] in
+                            guard let self else { return false }
+                            return !self.accountExposureClosing
+                                && !self.accountExposureClosed
+                        }
+                        guard exposureOpen else { break }
+                        try? fm.removeItem(at: url)
+                    }
+                }
+            }
+            await MainActor.run {
+                self?.discardedFragmentPruneTasks[taskID] = nil
             }
         }
+        discardedFragmentPruneTasks[taskID] = task
+        installed.open()
     }
 
     // nonisolated: pure (formatter + UUID) — also minted off-main by the
@@ -4940,24 +5626,52 @@ public final class CaptureManager: ObservableObject {
 /// The user's durable AMBIENT-capture intent across launches: are we listening, or
 /// did the user pause? Persisted so a paused Omi stays paused after a full app
 /// restart instead of silently auto-capturing on reconnect.
-public enum OmiCaptureDesiredState: String {
+public enum OmiCaptureDesiredState: String, Sendable {
     case listening
     case paused
+}
+
+/// Immutable capture-runtime preferences resolved for one account generation.
+/// Installation remains an explicit dormant seam in Task 3.
+public struct CaptureAccountPreferenceSnapshot: Sendable, Equatable {
+    public let binding: CaptureAccountScope.AccountBinding
+    public let silenceGapSeconds: TimeInterval
+    public let omiDesiredState: OmiCaptureDesiredState
+    public let sourceEnabledOverrides: [String: Bool]
+
+    public init(
+        binding: CaptureAccountScope.AccountBinding,
+        silenceGapSeconds: TimeInterval,
+        omiDesiredState: OmiCaptureDesiredState,
+        sourceEnabledOverrides: [String: Bool]
+    ) {
+        self.binding = binding
+        self.silenceGapSeconds = silenceGapSeconds
+        self.omiDesiredState = omiDesiredState
+        self.sourceEnabledOverrides = sourceEnabledOverrides
+    }
 }
 
 /// Persisted capture preferences (UserDefaults). The silence-gap that drives
 /// auto-segmentation (req 9; default ~2 min, à la Omi), the chosen capture source,
 /// and the durable pause/listen intent restored on launch.
 public enum CaptureSettings {
-    private static let gapKey = "foundryx.capture.silence-gap-seconds"
     public static let defaultGapSeconds: TimeInterval = 120
 
     public static var silenceGapSeconds: TimeInterval {
         get {
-            let v = UserDefaults.standard.double(forKey: gapKey)
-            return v > 0 ? v : defaultGapSeconds
+            switch AccountPreferenceCompatibilityStore().read(
+                AccountPreferenceCatalog.captureSilenceGapSeconds)
+            {
+            case .value(let value) where value > 0: return value
+            default: return defaultGapSeconds
+            }
         }
-        set { UserDefaults.standard.set(newValue, forKey: gapKey) }
+        set {
+            _ = AccountPreferenceCompatibilityStore().write(
+                newValue,
+                for: AccountPreferenceCatalog.captureSilenceGapSeconds)
+        }
     }
 
     private static let sourceKey = "foundryx.capture.source"
@@ -4968,14 +5682,69 @@ public enum CaptureSettings {
         set { UserDefaults.standard.set(newValue.rawValue, forKey: sourceKey) }
     }
 
-    private static let desiredStateKey = "foundryx.capture.omi-desired-state"
-
     /// The user's last ambient-capture intent. Default `.listening` on first-ever
     /// launch (no stored value) — unchanged from today's behavior. Once the user
     /// pauses/resumes, that choice is honored across restarts.
     public static var omiCaptureDesiredState: OmiCaptureDesiredState {
-        get { OmiCaptureDesiredState(rawValue: UserDefaults.standard.string(forKey: desiredStateKey) ?? "") ?? .listening }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: desiredStateKey) }
+        get {
+            switch AccountPreferenceCompatibilityStore().read(
+                AccountPreferenceCatalog.captureOMIDesiredState)
+            {
+            case .value(let raw):
+                return OmiCaptureDesiredState(rawValue: raw) ?? .listening
+            case .absent:
+                return .listening
+            }
+        }
+        set {
+            _ = AccountPreferenceCompatibilityStore().write(
+                newValue.rawValue,
+                for: AccountPreferenceCatalog.captureOMIDesiredState)
+        }
+    }
+
+    /// Resolve the three dormant capture-runtime catalog entries through the
+    /// shipped compatibility adapter. Invalid legacy values retain today's
+    /// defaults; no scoped preference branch is activated here.
+    public static func snapshot(
+        compatibility: AccountPreferenceCompatibilityStore,
+        binding: CaptureAccountScope.AccountBinding
+    ) -> CaptureAccountPreferenceSnapshot {
+        let gap: TimeInterval
+        switch compatibility.read(
+            AccountPreferenceCatalog.captureSilenceGapSeconds)
+        {
+        case .value(let value) where value > 0:
+            gap = value
+        default:
+            gap = defaultGapSeconds
+        }
+
+        let desired: OmiCaptureDesiredState
+        switch compatibility.read(
+            AccountPreferenceCatalog.captureOMIDesiredState)
+        {
+        case .value(let raw):
+            desired = OmiCaptureDesiredState(rawValue: raw) ?? .listening
+        case .absent:
+            desired = .listening
+        }
+
+        let overrides: [String: Bool]
+        switch compatibility.read(
+            AccountPreferenceCatalog.captureSourceEnabledOverrides)
+        {
+        case .value(let value):
+            overrides = value
+        case .absent:
+            overrides = [:]
+        }
+
+        return CaptureAccountPreferenceSnapshot(
+            binding: binding,
+            silenceGapSeconds: gap,
+            omiDesiredState: desired,
+            sourceEnabledOverrides: overrides)
     }
 }
 

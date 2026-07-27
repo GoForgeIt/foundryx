@@ -498,7 +498,8 @@ private struct MainTabs: View {
             dm.forceConnectionStateForTests(.connected("Synthetic Omi"))
         }
         #endif
-        FoundryXAppDelegate.handOffRestorationToApp()
+        FoundryXAppDelegate.handOffRestorationToApp(
+            accountBinding: accountBinding)
         _log = StateObject(wrappedValue: log)
         _device = StateObject(wrappedValue: dm)
         _battery = StateObject(wrappedValue: BatteryMonitor())
@@ -767,7 +768,10 @@ private struct MainTabs: View {
         // toggles + add-source (BT mic / Apple Watch). Its single ACTIVE source is
         // pushed onto the existing capture lifecycle via `selectCaptureSource`, so the
         // single-stream WAL path is unchanged.
-        let reg = CaptureSourceRegistry(phoneMicAvailable: mgr.phoneMicAvailable)
+        let reg = CaptureSourceRegistry(
+            phoneMicAvailable: mgr.phoneMicAvailable,
+            accountBinding: accountBinding,
+            deviceManager: dm)
         // The registry drives the AMBIENT (Omi) capture kind only. The phone mic is a
         // MANUAL record source (the Record button) — a TRANSIENT Omi disconnect must NOT
         // auto-switch ambient capture to the phone mic NOR tear down the Omi's
@@ -784,6 +788,10 @@ private struct MainTabs: View {
             if category == .omi { dm?.setEnabled(on) }
         }
         _sources = StateObject(wrappedValue: reg)
+        let exposureCoordinator =
+            FoundryXAppDelegate.accountExposureCoordinator
+        mgr.registerAccountExposures(with: exposureCoordinator)
+        reg.registerAccountExposure(with: exposureCoordinator)
         // After a background-restoration launch the Omi may ALREADY be `.streaming`;
         // the freshly-wired CaptureManager would otherwise never see that transition
         // and never open a session. Replaying the current source state closes the

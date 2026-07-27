@@ -202,13 +202,25 @@ public final class InMemoryCaptureSourceStore: CaptureSourceStore {
 /// UserDefaults-backed store (the app's real persistence).
 public final class UserDefaultsCaptureSourceStore: CaptureSourceStore {
     private let defaults: UserDefaults
-    private let enabledKey = "foundryx.capture.sources.enabled-overrides"
     private let addedKey = "foundryx.capture.sources.added"
     public init(defaults: UserDefaults = .standard) { self.defaults = defaults }
 
     public var enabledOverrides: [String: Bool] {
-        get { (defaults.dictionary(forKey: enabledKey) as? [String: Bool]) ?? [:] }
-        set { defaults.set(newValue, forKey: enabledKey) }
+        get {
+            switch AccountPreferenceCompatibilityStore(
+                defaults: defaults
+            ).read(AccountPreferenceCatalog.captureSourceEnabledOverrides) {
+            case .value(let value): return value
+            case .absent: return [:]
+            }
+        }
+        set {
+            _ = AccountPreferenceCompatibilityStore(
+                defaults: defaults
+            ).write(
+                newValue,
+                for: AccountPreferenceCatalog.captureSourceEnabledOverrides)
+        }
     }
     public var addedSources: [CaptureSourceRecord] {
         get {
@@ -285,6 +297,12 @@ public final class CaptureSourceRegistry: ObservableObject {
 
     private let store: CaptureSourceStore
     private let discovery: AudioInputDiscovering
+    private var accountBinding: CaptureAccountScope.AccountBinding?
+    private weak var deviceManager: DeviceManager?
+    private var capturePreferenceSnapshotInstalled = false
+    private var accountExposureClosed = false
+    private var accountExposureRegistration:
+        AccountExposureRegistration?
 
     /// Fired whenever the active source changes — wired by the app to the EXISTING
     /// `CaptureManager.selectCaptureSource(_:)` so the capture lifecycle is unchanged.
@@ -300,8 +318,12 @@ public final class CaptureSourceRegistry: ObservableObject {
 
     public init(store: CaptureSourceStore = UserDefaultsCaptureSourceStore(),
                 discovery: AudioInputDiscovering? = nil,
-                phoneMicAvailable: Bool = true) {
+                phoneMicAvailable: Bool = true,
+                accountBinding: CaptureAccountScope.AccountBinding? = nil,
+                deviceManager: DeviceManager? = nil) {
         self.store = store
+        self.accountBinding = accountBinding
+        self.deviceManager = deviceManager
         #if os(iOS)
         self.discovery = discovery ?? SystemAudioInputDiscovery()
         #else
@@ -309,6 +331,92 @@ public final class CaptureSourceRegistry: ObservableObject {
         #endif
         seed(phoneMicAvailable: phoneMicAvailable)
         recomputeActive(notify: false)   // initial active without firing the callback
+    }
+
+    /// One-time dormant install. It updates only the in-memory descriptors and
+    /// never writes the compatibility store.
+    @discardableResult
+    public func installCapturePreferenceSnapshot(
+        _ snapshot: CaptureAccountPreferenceSnapshot
+    ) -> Bool {
+        guard !capturePreferenceSnapshotInstalled,
+              snapshot.binding.isCurrent,
+              accountBinding == nil || accountBinding == snapshot.binding else {
+            return false
+        }
+        accountBinding = snapshot.binding
+        capturePreferenceSnapshotInstalled = true
+        applyCapturePreferenceSnapshot(snapshot)
+        return true
+    }
+
+    /// Explicit refresh only; no identity observer selects this path in Task 3.
+    @discardableResult
+    public func refreshCapturePreferences(
+        compatibility: AccountPreferenceCompatibilityStore,
+        binding: CaptureAccountScope.AccountBinding
+    ) -> Bool {
+        guard binding.isCurrent,
+              accountBinding == nil || accountBinding == binding else {
+            return false
+        }
+        accountBinding = binding
+        applyCapturePreferenceSnapshot(
+            CaptureSettings.snapshot(
+                compatibility: compatibility,
+                binding: binding))
+        return true
+    }
+
+    private func applyCapturePreferenceSnapshot(
+        _ snapshot: CaptureAccountPreferenceSnapshot
+    ) {
+        let overrides = snapshot.sourceEnabledOverrides
+        for index in sources.indices {
+            let source = sources[index]
+            let defaultEnabled = source.isBuiltIn
+                ? true
+                : source.category != .appleWatch
+            sources[index].enabled = overrides[source.id] ?? defaultEnabled
+        }
+        recomputeActive(notify: false)
+    }
+
+    /// Terminal account exposure close. This intentionally does not route through
+    /// `setEnabled`, so user preferences and saved hardware remain untouched.
+    public func closeAccountExposure(
+        expected: CaptureAccountScope.AccountBinding
+    ) async -> AccountExposureCloseResult {
+        guard let accountBinding else { return .unavailable }
+        guard expected == accountBinding else { return .ownerMismatch }
+        guard !accountExposureClosed else { return .alreadyClosed }
+        guard let deviceManager else {
+            accountExposureClosed = true
+            return .closed
+        }
+        let result = await deviceManager.closeAudioExposure()
+        if result == .closed || result == .alreadyClosed {
+            accountExposureClosed = true
+        }
+        return result
+    }
+
+    /// Inert, idempotent registration retained by the registry StateObject
+    /// itself rather than a transient SwiftUI view initialization.
+    public func registerAccountExposure(
+        with coordinator: AccountExposureCoordinator = .process
+    ) {
+        guard accountExposureRegistration == nil else { return }
+        let registration = AccountExposureRegistration(
+            participantID: "capture-source-registry",
+            kind: .live,
+            binding: accountBinding,
+            owner: self,
+            close: { registry, expected in
+                await registry.closeAccountExposure(expected: expected)
+            })
+        accountExposureRegistration = registration
+        coordinator.register(registration)
     }
 
     // MARK: seeding + persistence
