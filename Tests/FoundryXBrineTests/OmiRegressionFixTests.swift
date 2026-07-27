@@ -1,6 +1,6 @@
 import XCTest
 import Foundation
-import FoundryXKit
+@testable import FoundryXKit
 
 /// Regression coverage for the build #76 capture-source-registry Omi breakages:
 ///   1. PRIMARY — a connected source's frames reach the WAL through the active-source
@@ -10,7 +10,7 @@ import FoundryXKit
 ///   3. Toggle-off — disabling a source removes it from the capture-visible set and
 ///      drives its lifecycle owner off (the Omi truly leaves the capture surface).
 @MainActor
-final class OmiRegressionFixTests: XCTestCase {
+final class OmiRegressionFixTests: SignedOutListeningCaptureTestCase {
 
     /// A source the test drives directly (start/stop count invocations; the test fires
     /// the onFrame/onState closures CaptureManager installs).
@@ -38,6 +38,7 @@ final class OmiRegressionFixTests: XCTestCase {
         // The Omi "connects" → ambient capture ARMS; a real speech onset opens the
         // session (no manual Record button).
         omi.onState?(.streaming)
+        try await waitUntil { mgr.isListeningForSpeechForTests }
         RealOmiFrames.openSession(omi.onFrame)
         try await waitUntil { mgr.active != nil }
         let wal = try XCTUnwrap(mgr.active)

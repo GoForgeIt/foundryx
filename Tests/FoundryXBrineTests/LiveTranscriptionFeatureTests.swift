@@ -10,7 +10,7 @@ import BrineSwiftCore
 /// `liveTranscript`, cleared on close, absent with no factory), plus the pure
 /// `LiveTranscript.renderedSegments` word-opacity ramp and the bounded recent-words
 /// window. Hermetic — the transcriber is faked (SpeechAnalyzer needs a device); no network.
-final class LiveTranscriptionFeatureTests: XCTestCase {
+final class LiveTranscriptionFeatureTests: SignedOutListeningCaptureTestCase {
     func testLiveTranscriptionFeature() async throws {
         try await BrineFeatureRunner.run("live-transcription",
                                          registry: StepRegistry(LiveTranscriptionSteps.make(world: .init())))
@@ -72,6 +72,7 @@ private final class LiveTranscriptionWorld: @unchecked Sendable {
         mgr.micPermissionOverrideForTests = true
         #endif
         src.onState?(.streaming)
+        try await Self.waitUntil { self.mgr.isListeningForSpeechForTests }
         RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await Self.waitUntil { self.mgr.active != nil }
     }

@@ -368,10 +368,7 @@ struct RootView: View {
         // over an already-presented surface (implement-review F3).
         if showingOnboarding || showingWelcome { return }
         OnboardingPrefs.migrateIfPriorUse(baseDir: CaptureWAL.documentsCaptures())
-        switch WelcomeFrontDoor.firstRunPresentation(
-            letStraightIn: WelcomePrefs.letStraightIn(),
-            onboardingCompleted: OnboardingPrefs.completed,
-            welcomeSeen: WelcomePrefs.seen()) {
+        switch WelcomeFrontDoor.firstRunPresentationForCurrentOwner() {
         case .onboarding(let skipWelcome):
             onboardingSkipsWelcome = skipWelcome
             showingOnboarding = true
@@ -417,6 +414,7 @@ final class TabRouter: ObservableObject {
 /// single BLE link + capture pipeline. All tabs talk to the resolved remote door
 /// `target` (relay tunnel + id_token bearer). Chat is independent.
 private struct MainTabs: View {
+    @Environment(\.scenePhase) private var scenePhase
     let target: DoorTarget
     let remote: RemoteSession
     let brains: BrainStore
@@ -546,6 +544,15 @@ private struct MainTabs: View {
             liveBackoff = LiveTitleBackoff(firstDelay: 4, multiplier: 2, ceiling: 20)
         }
         #endif
+        #if DEBUG || PERF_HARNESS
+        // UI-proof seam (`-SyntheticTranscript`): replace ONLY LiveTranscriber with a
+        // deterministic PCM-driven word producer. The ambient source, CaptureManager
+        // publisher, RecordingScreen binding/rendering, and foreground restoration all
+        // remain real, so the proof catches a restored blank shell instead of bypassing it.
+        if ProcessInfo.processInfo.arguments.contains("-SyntheticTranscript") {
+            liveFactory = SyntheticTranscriptLiveTranscriber.factory()
+        }
+        #endif
         // The phone's own mic as a second capture source (Record button when the Omi is
         // disconnected) — flows through the identical Opus/WAL/finalize path.
         //
@@ -596,6 +603,7 @@ private struct MainTabs: View {
             mgr = CaptureManager(
                 target: target, backend: backend, log: log, source: ambientSource,
                 micSource: mic,
+                attachToSourcesImmediately: false,
                 liveTranscriber: liveFactory,
                 liveTitler: systemTitler,
                 // Production local mode: external OFF (nil) — the on-device title stands
@@ -608,6 +616,7 @@ private struct MainTabs: View {
             mgr = CaptureManager(
                 target: target, log: log, source: ambientSource,
                 micSource: mic,
+                attachToSourcesImmediately: false,
                 liveTranscriber: liveFactory,
                 // On-device Foundation Models stays the INSTANT placeholder + offline
                 // fallback; the door refresh SHARPENS it externally on the backoff.
@@ -793,15 +802,6 @@ private struct MainTabs: View {
             _ = mgr.installCapturePreferenceSnapshot(preferences)
             _ = reg.installCapturePreferenceSnapshot(preferences)
         }
-        let exposureCoordinator =
-            FoundryXAppDelegate.accountExposureCoordinator
-        mgr.registerAccountExposures(with: exposureCoordinator)
-        reg.registerAccountExposure(with: exposureCoordinator)
-        // After a background-restoration launch the Omi may ALREADY be `.streaming`;
-        // the freshly-wired CaptureManager would otherwise never see that transition
-        // and never open a session. Replaying the current source state closes the
-        // handover (a no-op on ordinary launches — nothing has been emitted yet).
-        dm.replayState()
     }
 
     var body: some View {
@@ -937,6 +937,15 @@ private struct MainTabs: View {
         // correct — so toggling the Omi off actually hands off + drops it, and a transient
         // reconnect is reflected — regardless of which tab is visible.
         .onChange(of: device.connectionState) { _ in syncOmiConnection() }
+        // iOS may retire Speech's live-result publisher while the process is suspended
+        // even though the capture/WAL session remains open. Re-attach it from this single,
+        // always-mounted owner on foreground; the manager carries the already-rendered
+        // words into the replacement so RecordingScreen never restores as a blank shell.
+        .onChange(of: scenePhase) { phase in
+            if phase == .active {
+                manager.restoreLiveTranscriptionAfterForeground()
+            }
+        }
         // CONTENT-FREE usage: which surface the user is on. The tab's rawValue is already
         // a safe enum token (capture/activity/chat/settings) — never any content.
         .onChange(of: router.selected) { tab in UsageHook.page(tab.rawValue) }
@@ -957,6 +966,18 @@ private struct MainTabs: View {
             if id != nil { router.selected = .chat }
         }
         .onAppear {
+            // Only the StateObject SwiftUI actually accepted may claim the process-shared
+            // audio source. MainTabs.init can run speculatively on ordinary parent redraws;
+            // eager candidates used to steal these callbacks and replay `.streaming`,
+            // minting one segmentless capture id per discarded manager.
+            let exposureCoordinator =
+                FoundryXAppDelegate.accountExposureCoordinator
+            manager.registerAccountExposures(with: exposureCoordinator)
+            sources.registerAccountExposure(with: exposureCoordinator)
+            manager.activateSourceOwnership()
+            // After a background-restoration launch the Omi may ALREADY be streaming.
+            // Replay only after the accepted owner has claimed the callbacks.
+            device.replayState()
             syncOmiConnection()
             // EXT2: let action↔chat links validate against the LIVE chat store
             // (dead links are pruned at render, never routed to). Weak — the

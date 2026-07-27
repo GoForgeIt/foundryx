@@ -1,6 +1,6 @@
 import XCTest
 import Foundation
-import FoundryXKit
+@testable import FoundryXKit
 
 /// Regression tests for the capture-upload RETRY STORM that froze the phone: a
 /// multi-day backlog of failing segment uploads (expired id_token → the door rejects
@@ -16,7 +16,7 @@ import FoundryXKit
 /// All paths are driven through the manager's REAL drain via an injected per-segment
 /// upload — no live door, no network.
 @MainActor
-final class CaptureStormTests: XCTestCase {
+final class CaptureStormTests: SignedOutListeningCaptureTestCase {
 
     /// A source the test drives directly (start/stop no-ops).
     private final class TestSource: AudioFrameSource, @unchecked Sendable {
@@ -66,6 +66,7 @@ final class CaptureStormTests: XCTestCase {
     /// Drive a streaming session with ≥1 flushed (pending, un-ACK'd) segment on disk.
     private func startCaptureWithPendingSegment(_ mgr: CaptureManager, _ src: TestSource) async throws {
         src.onState?(.streaming)
+        try await waitUntil { mgr.isListeningForSpeechForTests }
         RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         for _ in 0..<60 { src.onFrame?(voiceFrame()) }

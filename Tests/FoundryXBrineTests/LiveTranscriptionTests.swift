@@ -1,7 +1,7 @@
 import XCTest
 import Foundation
 import AVFoundation
-import FoundryXKit
+@testable import FoundryXKit
 
 /// Door-free tests for the LIVE on-device transcription preview (Feature 1). The live
 /// transcriber is INJECTED via the factory seam, so we exercise the wiring — per-session
@@ -9,7 +9,7 @@ import FoundryXKit
 /// republished into `liveTranscript`, and teardown — WITHOUT needing SpeechAnalyzer or a
 /// device. This proves the preview is additive (capture is unaffected) and ephemeral.
 @MainActor
-final class LiveTranscriptionTests: XCTestCase {
+final class LiveTranscriptionTests: SignedOutListeningCaptureTestCase {
 
     final class TestSource: AudioFrameSource, @unchecked Sendable {
         var onFrame: ((Data) -> Void)?
@@ -72,11 +72,24 @@ final class LiveTranscriptionTests: XCTestCase {
     func testLivePreviewStreamsVolatileThenFinal() async throws {
         let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let src = TestSource(); let factory = FakeFactory()
-        let mgr = manager(dir, src, factory)
+        let target = DoorTarget(
+            baseURL: URL(string: "http://127.0.0.1:1")!,
+            bearer: "x")
+        let mgr = CaptureManager(
+            target: target,
+            baseDir: dir,
+            source: src,
+            micSource: src,
+            finalize: { _, _ in },
+            liveTranscriber: { factory.make() })
+        #if os(iOS)
+        mgr.micPermissionOverrideForTests = true
+        #endif
 
+        mgr.startMicRecording()
         src.onState?(.streaming)
-        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil && factory.last != nil }
+        let captureId = try XCTUnwrap(mgr.active?.captureId)
         let fake = try XCTUnwrap(factory.last)
         try await waitUntil { fake.started }
 
@@ -85,8 +98,36 @@ final class LiveTranscriptionTests: XCTestCase {
         try await waitUntil { mgr.liveTranscript.volatileTail == "kiln" }
 
         // It then snaps to a finalized, corrected line (the "guess then fix" refinement).
-        fake.emit(LiveTranscript(finalizedText: "Kiln", volatileTail: ""))
-        try await waitUntil { mgr.liveTranscript.finalizedText == "Kiln" && mgr.liveTranscript.volatileTail.isEmpty }
+        fake.emit(LiveTranscript(
+            finalizedText: "the kitchen renovation budget is ready",
+            volatileTail: "for review",
+            titleContext: "the kitchen renovation budget is ready for review"))
+        try await waitUntil { !mgr.liveTranscript.isEmpty }
+
+        // Returning from another app re-attaches the producer without painting an empty
+        // frame over the captured words. A replacement transcriber contributes only
+        // post-foreground speech, so its text must append under the same capture id.
+        let before = mgr.liveTranscript.displayText
+
+        mgr.restoreLiveTranscriptionAfterForeground()
+
+        XCTAssertEqual(mgr.liveTranscript.displayText, before,
+                       "foreground restoration must never paint a blank transcript")
+        try await waitUntil { factory.count == 2 }
+        let replacement = try XCTUnwrap(factory.last)
+        replacement.emit(LiveTranscript(
+            finalizedText: "and the contractor can start Monday",
+            volatileTail: "",
+            titleContext: "and the contractor can start Monday"))
+        try await waitUntil {
+            mgr.liveTranscript.displayText.contains("contractor can start Monday")
+        }
+
+        XCTAssertTrue(mgr.liveTranscript.displayText.hasPrefix(before),
+                      "the replacement appends to the captured words instead of restarting")
+        XCTAssertGreaterThan(mgr.liveTranscript.displayText.count, before.count)
+        XCTAssertEqual(mgr.active?.captureId, captureId,
+                       "foreground restoration keeps the same conversation")
     }
 
     /// The decoded-PCM tap actually feeds the transcriber — real Opus packets decode and
@@ -97,6 +138,7 @@ final class LiveTranscriptionTests: XCTestCase {
         let mgr = manager(dir, src, factory)
 
         src.onState?(.streaming)
+        try await waitUntil { mgr.isListeningForSpeechForTests }
         RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil && factory.last != nil }
         let fake = try XCTUnwrap(factory.last)
@@ -114,6 +156,7 @@ final class LiveTranscriptionTests: XCTestCase {
         let mgr = manager(dir, src, factory)
 
         src.onState?(.streaming)
+        try await waitUntil { mgr.isListeningForSpeechForTests }
         RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil && factory.last != nil }
         let fake = try XCTUnwrap(factory.last)
@@ -139,6 +182,7 @@ final class LiveTranscriptionTests: XCTestCase {
         let mgr = CaptureManager(target: target, baseDir: dir, source: src, finalize: { _, _ in })
 
         src.onState?(.streaming)
+        try await waitUntil { mgr.isListeningForSpeechForTests }
         RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         for _ in 0..<40 { src.onFrame?(RealOmiFrames.voiced()) }

@@ -476,9 +476,9 @@ public final class CaptureManager: ObservableObject {
     /// Scan-free warm seed for the FIRST paint of the Capture list (T1 AC5): the newest
     /// captures' captureId + title + date, read from `card.json` ONLY — NO CaptureWAL /
     /// segment scan (the per-segment stat storm is what hung launch, so it stays off-main
-    /// in `loadExisting`). Seeded synchronously in `init`; the Capture list renders these
-    /// populated rows immediately and swaps to the real WAL cards the instant off-main
-    /// hydration publishes `visibleCaptures` (which clears this).
+    /// in `loadExisting`). Seeded synchronously when source ownership activates; the
+    /// Capture list renders these populated rows immediately and swaps to the real WAL
+    /// cards the instant off-main hydration publishes `visibleCaptures` (which clears this).
     @Published public private(set) var listRows: [ConversationRowLite] = [] {
         didSet {
             // One-shot: the "load-to-zero" number nobody had — wall-time from
@@ -959,8 +959,9 @@ public final class CaptureManager: ObservableObject {
     /// Identity generation captured with this manager. App-Group and Live Activity
     /// producers must never publish after this generation is replaced.
     private let accountBinding: CaptureAccountScope.AccountBinding?
-    /// Dormant Task-3 preference handoff. Production continues reading the legacy
-    /// compatibility settings until a later activation task explicitly installs it.
+    /// One-time account-owner preference handoff. Normal app construction installs
+    /// this immediately after the account binding is published; a missing owner stays
+    /// fail-closed for locked/pending restoration.
     private var capturePreferenceSnapshotInstalled = false
     /// Internal (not private) so organizer helpers in the module can reach the
     /// same capture tree (search text, segment sizes, category store).
@@ -972,6 +973,7 @@ public final class CaptureManager: ObservableObject {
     /// frame source. Started/stopped explicitly via the Record control (not ambiently).
     private let micSource: AudioFrameSource?
     private let router: FrameRouter
+    private var ownerActivated = false
 
     /// Whether a phone-mic source is wired (drives the Record control's availability).
     public var phoneMicAvailable: Bool { micSource != nil }
@@ -1443,6 +1445,7 @@ public final class CaptureManager: ObservableObject {
                 log: DoorLog? = nil,
                 source: AudioFrameSource,
                 micSource: AudioFrameSource? = nil,
+                attachToSourcesImmediately: Bool = true,
                 finalize: (@Sendable (String, ConversationMeta?) async throws -> Void)? = nil,
                 deleteCapture: (@Sendable (String) async throws -> Void)? = nil,
                 fetchContent: (@Sendable (String) async -> CaptureContent?)? = nil,
@@ -1530,26 +1533,15 @@ public final class CaptureManager: ObservableObject {
         let gap = CaptureSettings.silenceGapSeconds
         self.silenceGapSeconds = gap
         // Restore the durable capture intent (req 2). A user who PAUSED before a full
-        // app restart must come back paused — not silently capturing. First-ever launch
-        // (no stored value) defaults to `.listening` (today's behavior). beginSession()
-        // re-applies this via router.setPaused(isPaused) on the next (re)connect, so a
-        // paused desired-state means the Omi connects but stays paused.
+        // app restart must come back paused — not silently capturing. An absent owner
+        // snapshot is reachable only while identity/restoration is unresolved and fails
+        // closed; normal fresh/signed-out/active construction installs an explicit
+        // snapshot before starting the source. beginSession() re-applies this via
+        // router.setPaused(isPaused) on the next (re)connect.
         self.isPaused = (CaptureSettings.omiCaptureDesiredState == .paused)
         self.meter = AudioMeterModel(barCount: Self.meterBarCount)
         self.live = LiveCaptureModel()
         self.router = FrameRouter(segmenter: SilenceSegmenter(silenceGap: gap))
-        // Frame path: serial source queue → router → WAL io queue. No main hop.
-        source.onFrame = { [router] frame in router.route(frame) }
-        source.onState = { [weak self] state in
-            Task { @MainActor in self?.onSourceState(state) }
-        }
-        // The phone mic feeds the SAME router + the SAME lifecycle handler — it's just
-        // another frame source. Its `.streaming`/`.stopped` begin/end a session exactly
-        // like the Omi's, so capture id / finalize / live transcription are identical.
-        micSource?.onFrame = { [router] frame in router.route(frame) }
-        micSource?.onState = { [weak self] state in
-            Task { @MainActor in self?.onSourceState(state) }
-        }
         // Level tap (off-main, cheap) + silence-gap boundaries (→ main to rotate).
         router.onLevel = { [levelBuffer] lvl in levelBuffer.record(lvl) }
         router.onSegment = { [weak self] event in
@@ -1575,17 +1567,44 @@ public final class CaptureManager: ObservableObject {
             (micSource as? MicFrameSource)?.onPCM = { [liveBox] buf in liveBox.append(buf) }
         }
         #endif
-        firstPaintSpan = PerfSpan(name: "capture-list-first-paint")  // arm time-to-first-row
+        if attachToSourcesImmediately {
+            activateSourceOwnership()
+        }
+    }
+
+    /// Activate this manager as the live capture owner. SwiftUI app construction defers
+    /// this until the accepted `StateObject` appears: ordinary parent redraws may eagerly
+    /// construct candidates that SwiftUI then discards. Those candidates must not claim
+    /// source callbacks, reconcile the active WAL as an orphan, start timers, or register
+    /// observers. Tests and non-SwiftUI callers keep immediate activation by default.
+    public func activateSourceOwnership() {
+        guard !ownerActivated,
+              !accountExposureClosing,
+              !accountExposureClosed else { return }
+        ownerActivated = true
+        // Frame path: serial source queue → router → WAL io queue. No main hop.
+        source.onFrame = { [router] frame in router.route(frame) }
+        source.onState = { [weak self] state in
+            Task { @MainActor in self?.onSourceState(state) }
+        }
+        // The phone mic feeds the SAME router + lifecycle handler.
+        micSource?.onFrame = { [router] frame in router.route(frame) }
+        micSource?.onState = { [weak self] state in
+            Task { @MainActor in self?.onSourceState(state) }
+        }
+        firstPaintSpan = PerfSpan(name: "capture-list-first-paint")
         firstPaintPending = true
-        seedWarmListRows()     // scan-free first-paint rows (T1 AC5) — before the off-main hydrate
-        loadExisting()         // OFF-MAIN hydration; finishes via finishStartupAfterHydration
+        seedWarmListRows()
+        loadExisting()
         startDrainTimer()
-        startSegmentTimer()    // wall-clock silence + runaway force-split watchdog
-        // OUT-OF-MANAGER sidecar writes (the detail view's content cache re-saves
-        // transcript.json + card.json on a fetch/speaker-confirm) invalidate the memo via a
-        // notification, so the next rebuild reflects them (track 20260717T0448).
+        startSegmentTimer()
+        // OUT-OF-MANAGER sidecar writes (detail content fetch / speaker confirm) invalidate
+        // the accepted owner's memo; discarded candidates never subscribe.
         sidecarObserver = NotificationCenter.default.addObserver(
-            forName: .foundryxSidecarChanged, object: nil, queue: .main) { [weak self] note in
+            forName: .foundryxSidecarChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
             guard let id = note.userInfo?["captureId"] as? String else { return }
             MainActor.assumeIsolated {
                 self?.invalidateSidecar(id)
@@ -2326,6 +2345,9 @@ public final class CaptureManager: ObservableObject {
     /// mic as the capture device, we do NOT auto-start the Omi BLE — so it can't grab
     /// an ambient session out from under a phone-mic recording.
     public func startSource() {
+        // The accepted SwiftUI owner may reach its child onAppear before the parent's
+        // onAppear. Claim first so a synchronous source.start() transition is never lost.
+        activateSourceOwnership()
         if captureSource == .omi { source.start() }
     }
     public func stopSource() { source.stop() }
@@ -3910,11 +3932,18 @@ public final class CaptureManager: ObservableObject {
     @discardableResult
     private func resumeSession(captureId: String) -> Bool {
         // Belt-and-suspenders with resumableCaptureId's selection: never resume something
-        // terminal / mid-merge / deliberately-ended, and only when there's local audio to
-        // append to. (The source gate is enforced at the call site — Omi `.streaming` only.)
+        // terminal / mid-merge / deliberately-ended. A recent open Omi capture may still
+        // be segmentless because its first frames have not filled one WAL chunk yet.
         guard !isDeleted(captureId), !isDiscarded(captureId), !isAbandoned(captureId),
               !Self.isEndedDeliberatelyOnDisk(captureId, baseDir: baseDir),
-              !hasPendingFoldMarker(captureId), hasLocalAudio(captureId) else { return false }
+              !hasPendingFoldMarker(captureId),
+              hasLocalAudio(captureId)
+                || Self.isRecentSegmentlessOpenOmiCapture(
+                    captureId,
+                    baseDir: baseDir,
+                    now: Date(),
+                    silenceGap: silenceGapSeconds
+                ) else { return false }
         // Stamp the session clock ONLY when there isn't one (mirrors beginSession) — a
         // relaunch has no clock, so anchor the visible timer here; the DURABLE start in
         // meta.json is preserved by recordOpen below (never re-stamped).
@@ -3961,14 +3990,25 @@ public final class CaptureManager: ObservableObject {
     /// Spin up a fresh per-conversation live transcriber (if a factory is wired) and
     /// pump its provisional transcript into `liveTranscript`. All failures are
     /// non-fatal: capture continues with no live preview.
-    private func startLiveTranscription(freshConversation: Bool) {
-        // The transient title state resets for every fresh transcriber (empty context);
-        // the external backoff schedule ONLY re-arms for a genuinely new conversation —
-        // an internal roll / resume-same-id continues the widened spacing.
-        resetLiveTitleTransient()
+    private func startLiveTranscription(
+        freshConversation: Bool,
+        carryingForward priorSnapshot: LiveTranscript? = nil
+    ) {
+        // A conversation boundary starts with empty live state. A foreground restart is
+        // different: iOS may retire the Speech publisher while the app is suspended, but
+        // the conversation and its already-rendered words are still live. Preserve that
+        // snapshot and only invalidate in-flight title requests tied to the retired
+        // transcriber; clearing the title/transcript here painted the blank shell from the
+        // foreground bug.
+        if priorSnapshot == nil {
+            resetLiveTitleTransient()
+        } else {
+            modelTitleInFlight = false
+            externalTitleInFlight = false
+        }
         if freshConversation { resetLiveTitleBackoff() }
         guard let make = makeLiveTranscriber, let t = make() else { return }
-        live.transcript = .empty
+        live.transcript = priorSnapshot ?? .empty
         liveTranscriber = t
         #if canImport(AVFoundation)
         liveBox.set(t)
@@ -3976,23 +4016,108 @@ public final class CaptureManager: ObservableObject {
         let pump = Task { @MainActor [weak self] in
             for await snap in t.transcript {
                 guard !Task.isCancelled else { break }
-                self?.live.transcript = snap
-                self?.updateLiveTitle(with: snap)
+                let published = priorSnapshot.map {
+                    Self.appendingLiveTranscript(snap, after: $0)
+                } ?? snap
+                self?.live.transcript = published
+                self?.updateLiveTitle(with: published)
             }
         }
         liveTranscriptTask = pump
         Task { @MainActor [weak self] in
             do { try await t.start() }
             catch {
-                self?.log?.warn("live transcription off: \((error as NSError).localizedDescription)")
+                guard let self, self.liveTranscriber === t else { return }
+                self.log?.warn("live transcription off: \((error as NSError).localizedDescription)")
                 #if canImport(AVFoundation)
-                self?.liveBox.set(nil)
+                self.liveBox.set(nil)
                 #endif
-                self?.liveTranscriber = nil
+                self.liveTranscriber = nil
                 pump.cancel()
-                self?.live.transcript = .empty
+                // A start failure is non-fatal and must not erase a transcript that was
+                // already visible before suspension. Re-publish the retained value so a
+                // newly-attached foreground surface reads it immediately.
+                self.live.transcript = self.live.transcript
             }
         }
+    }
+
+    /// Re-attach the ephemeral live-transcript producer after the app returns to the
+    /// foreground. Speech frameworks may terminate their result publisher while iOS
+    /// suspends the process even though the WAL session remains open. Re-publish the last
+    /// snapshot immediately (so the restored view never paints blank), retire the stale
+    /// transcriber, and start a continuation whose new words append to the retained window.
+    ///
+    /// This is lifecycle-only work: no defaults reads, durable locks, or WAL reads are
+    /// introduced on the audio/frame path.
+    public func restoreLiveTranscriptionAfterForeground() {
+        guard active != nil else { return }
+
+        let carried = Self.carriedLiveTranscript(live.transcript)
+        // @Published sends even when the value is equal. That explicit replay is the
+        // scene-phase reattachment signal the restored RecordingScreen was missing.
+        live.transcript = carried
+
+        guard !isPaused, makeLiveTranscriber != nil else { return }
+        let retired = liveTranscriber
+        #if canImport(AVFoundation)
+        liveBox.set(nil)
+        #endif
+        liveTranscriber = nil
+        liveTranscriptTask?.cancel()
+        liveTranscriptTask = nil
+
+        // Release the retired framework session best-effort. The new publisher is wired
+        // synchronously below so incoming PCM can continue flowing without waiting for an
+        // OS speech finalization that may itself have been interrupted by suspension.
+        if let retired {
+            Task { _ = await retired.finish() }
+        }
+        startLiveTranscription(
+            freshConversation: false,
+            carryingForward: carried)
+    }
+
+    /// Freeze the pre-suspension volatile tail into the carried finalized window. Those
+    /// words were already rendered to the user; a replacement recognizer starts with an
+    /// empty context and must build after them rather than replace them.
+    private static func carriedLiveTranscript(_ snapshot: LiveTranscript) -> LiveTranscript {
+        let text = LiveTranscriptBuffer.boundedTail(snapshot.displayText)
+        let context = snapshot.titleContext.isEmpty ? text : snapshot.titleContext
+        return LiveTranscript(
+            finalizedText: text,
+            volatileTail: "",
+            isComplete: false,
+            titleContext: context)
+    }
+
+    /// Merge a replacement transcriber's whole post-foreground revision after the retained
+    /// pre-foreground window. Both display and title contexts remain bounded.
+    private static func appendingLiveTranscript(
+        _ continuation: LiveTranscript,
+        after retained: LiveTranscript
+    ) -> LiveTranscript {
+        let finalized = LiveTranscriptBuffer.boundedTail(
+            joinedLiveText(retained.finalizedText, continuation.finalizedText))
+        let retainedContext = retained.titleContext.isEmpty
+            ? retained.finalizedText
+            : retained.titleContext
+        let combinedContext = joinedLiveText(
+            retainedContext,
+            continuation.titleContext)
+        var titleContext = RollingTitleContext()
+        titleContext.replaceAll(combinedContext)
+        return LiveTranscript(
+            finalizedText: finalized,
+            volatileTail: continuation.volatileTail,
+            isComplete: continuation.isComplete,
+            titleContext: titleContext.text)
+    }
+
+    private static func joinedLiveText(_ first: String, _ second: String) -> String {
+        if first.isEmpty { return second }
+        if second.isEmpty { return first }
+        return first + " " + second
     }
 
     /// Finish the active conversation's live transcriber + clear the preview. When a
@@ -5017,6 +5142,33 @@ public final class CaptureManager: ObservableObject {
         return (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
     }
 
+    /// `beginSession` durably writes open metadata and the Omi source tag before the
+    /// first WAL chunk fills. Those synchronous stamps are the continuation proof during
+    /// the segmentless buffer window after owner replacement or process relaunch.
+    private nonisolated static func isRecentSegmentlessOpenOmiCapture(
+        _ captureId: String,
+        baseDir: URL,
+        now: Date,
+        silenceGap: TimeInterval
+    ) -> Bool {
+        guard newestSegmentMTimeByName(captureId, baseDir: baseDir) == nil,
+              capturedSourceOnDisk(captureId, baseDir: baseDir)
+                == CaptureSourceKind.omi.rawValue,
+              let meta = ConversationMetaStore.load(
+                captureId: captureId,
+                baseDir: baseDir
+              ),
+              meta.endedAt == nil,
+              meta.startedAt > 0 else { return false }
+        let age = max(
+            0,
+            now.timeIntervalSince(
+                Date(timeIntervalSince1970: TimeInterval(meta.startedAt))
+            )
+        )
+        return age < silenceGap
+    }
+
     /// The newest RESUMABLE capture on disk, or nil when a fresh conversation should be
     /// minted. Omi-continuity blueprint: a reconnect or app-relaunch WITHIN the silence
     /// gap continues the SAME conversation (same capture id) rather than fragmenting it —
@@ -5034,14 +5186,16 @@ public final class CaptureManager: ObservableObject {
     /// mic-start against the resume decision — the strictly-bounded synchronous scan is the
     /// safer choice and is cheap enough.)
     ///
-    /// A capture qualifies only when: its newest segment is younger than the silence gap
-    /// (THE conversation boundary); it carries no terminal / in-flight marker (`.deleted`,
-    /// `.discarded`, `.abandoned`, `.folding-*`, or `.ended-deliberately`) and is not
-    /// confirmed-in-Lore; it is an AMBIENT/Omi capture (never a phone-mic recording — they
-    /// share the `omi-` id prefix, so an Omi reconnect must not hijack a mic recording the
-    /// user Stopped); and its end is orphan-stamped or absent, never a deliberate boundary.
-    /// New builds tag the source + deliberate-end on disk; a legacy untagged capture is
-    /// treated conservatively — resumable only if it never got any end (`endedAt == nil`).
+    /// A capture qualifies when its newest segment is younger than the silence gap (THE
+    /// conversation boundary), or—before its first segment exists—when recent open metadata
+    /// and an Omi source tag prove the segmentless session. It carries no terminal /
+    /// in-flight marker (`.deleted`, `.discarded`, `.abandoned`, `.folding-*`, or
+    /// `.ended-deliberately`) and is not confirmed-in-Lore; it is an AMBIENT/Omi capture
+    /// (never a phone-mic recording—they share the `omi-` id prefix, so an Omi reconnect
+    /// must not hijack a mic recording the user Stopped); and its end is orphan-stamped or
+    /// absent, never a deliberate boundary. New builds tag the source + deliberate-end on
+    /// disk; a legacy untagged capture is treated conservatively—resumable only if it never
+    /// got any end (`endedAt == nil`).
     public nonisolated static func resumableCaptureId(baseDir: URL,
                                                       now: Date = Date(),
                                                       silenceGap: TimeInterval) -> String? {
@@ -5062,9 +5216,18 @@ public final class CaptureManager: ObservableObject {
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { continue }
             inspected += 1   // bound the expensive work to real capture directories
-            // Newest audio younger than the silence gap? (ONE stat via the by-name shortcut)
-            guard let mtime = newestSegmentMTimeByName(id, baseDir: baseDir),
-                  now.timeIntervalSince(mtime) < silenceGap else { continue }
+            // Newest audio younger than the silence gap? (ONE stat via the by-name
+            // shortcut.) Before the first chunk exists, the synchronous open metadata +
+            // Omi source tag are the durable continuation proof.
+            let recentAudio = newestSegmentMTimeByName(id, baseDir: baseDir)
+                .map { now.timeIntervalSince($0) < silenceGap } ?? false
+            guard recentAudio
+                    || isRecentSegmentlessOpenOmiCapture(
+                        id,
+                        baseDir: baseDir,
+                        now: now,
+                        silenceGap: silenceGap
+                    ) else { continue }
             // Terminal / in-flight / deliberate-end markers are never resumed.
             if isDeletedOnDisk(id, baseDir: baseDir) { continue }
             if isDiscardedOnDisk(id, baseDir: baseDir) { continue }
@@ -5665,14 +5828,7 @@ public enum CaptureSettings {
             {
             case .value(let value) where value > 0: return value
             case .value: return defaultGapSeconds
-            case .absent:
-                // The only remaining compatibility read is the dormant
-                // locked/pending restoration path reserved for Task 7.
-                switch AccountPreferenceCompatibilityStore().read(
-                    AccountPreferenceCatalog.captureSilenceGapSeconds) {
-                case .value(let value) where value > 0: return value
-                default: return defaultGapSeconds
-                }
+            case .absent: return defaultGapSeconds
             }
         }
         set {
@@ -5699,16 +5855,7 @@ public enum CaptureSettings {
             {
             case .value(let raw):
                 return OmiCaptureDesiredState(rawValue: raw) ?? .paused
-            case .absent:
-                // Dormant locked/pending compatibility reader; normal, fresh,
-                // and signed-out activation snapshots always contain "paused".
-                switch AccountPreferenceCompatibilityStore().read(
-                    AccountPreferenceCatalog.captureOMIDesiredState) {
-                case .value(let raw):
-                    return OmiCaptureDesiredState(rawValue: raw) ?? .listening
-                case .absent:
-                    return .listening
-                }
+            case .absent: return .paused
             }
         }
         set {

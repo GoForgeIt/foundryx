@@ -19,7 +19,7 @@ import AVFoundation
 /// Isolation is NON-NEGOTIABLE: every test uses a FRESH tempDir — the real `~/.foundry` /
 /// `~/.lore` are never touched.
 @MainActor
-final class LiveCaptureModelIsolationTests: XCTestCase {
+final class LiveCaptureModelIsolationTests: SignedOutListeningCaptureTestCase {
 
     /// How many live ticks a test drives — comfortably more than a minute of real recording
     /// at the transcriber's several-per-second cadence.
@@ -127,6 +127,7 @@ final class LiveCaptureModelIsolationTests: XCTestCase {
         let mgr = await makeManager(dir: dir, source: src, factory: factory)
 
         src.onState?(.streaming)
+        try await waitUntil { mgr.isListeningForSpeechForTests }
         RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil && factory.last != nil }
         let fake = try XCTUnwrap(factory.last)
@@ -152,6 +153,7 @@ final class LiveCaptureModelIsolationTests: XCTestCase {
         let mgr = await makeManager(dir: dir, source: src)
 
         src.onState?(.streaming)
+        try await waitUntil { mgr.isListeningForSpeechForTests }
         RealOmiFrames.openSession(src.onFrame)
         try await waitUntil { mgr.active != nil }
         let activeId = try XCTUnwrap(mgr.active?.captureId)

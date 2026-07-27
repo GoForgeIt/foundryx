@@ -41,6 +41,17 @@ Feature: Omi always reconnects and syncs its offline cache
     When the Omi reconnects and the gap audio arrives
     Then the same conversation continues under its original capture id
 
+  Scenario: rapid listening restarts keep one buffered conversation
+    Given my Omi has opened a conversation and its first audio is still buffered
+    When the app restarts listening several times while I keep speaking
+    Then I still have one conversation
+    And all recorded audio belongs to the original conversation
+
+  Scenario: relaunch before the first saved segment keeps the conversation
+    Given my Omi has opened a conversation and its first audio is still buffered
+    When the app relaunches within the conversation silence boundary
+    Then the same conversation continues under its original capture id
+
   Scenario: a long gap starts a new conversation
     Given the Omi was away longer than the conversation silence boundary
     When the Omi reconnects

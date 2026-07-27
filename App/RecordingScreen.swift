@@ -251,6 +251,12 @@ struct RecordingScreen: View {
             .frame(maxWidth: .infinity, minHeight: 82, alignment: .topLeading)
             .frame(height: 82, alignment: .topLeading)
             .clipped()
+            // Assertable as ONE element carrying the rendered words. Without this the live
+            // transcript could not be tested at all, which is why "no transcript on the
+            // recording page" shipped unnoticed (Nick 2026-07-27). The element must expose
+            // the text as its value so a proof can tell "rendering" from "blank shell".
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("live-transcript")
     }
 
     // MARK: 5 — suggestion stack (only rows that exist)

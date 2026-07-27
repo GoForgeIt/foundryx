@@ -508,6 +508,79 @@ final class CaptureResumeTests: ProcessGlobalStateTestCase {
         XCTAssertEqual(CaptureManager.resumableCaptureId(baseDir: d5, now: now, silenceGap: 120),
                        legacyOrphan, "a legacy untagged true orphan (endedAt == nil) is resumed")
     }
+
+    func testSegmentlessOpenOmiIsResumableOnlyInsideBoundary() throws {
+        let now = Date()
+        let gap: TimeInterval = 120
+
+        func seedOpen(
+            _ dir: URL,
+            id: String,
+            source: CaptureSourceKind,
+            age: TimeInterval
+        ) throws {
+            try FileManager.default.createDirectory(
+                at: dir.appendingPathComponent(id, isDirectory: true),
+                withIntermediateDirectories: true
+            )
+            try tagSource(dir: dir, captureId: id, source)
+            ConversationMetaStore.save(
+                ConversationMeta(
+                    startedAt: UInt64(now.timeIntervalSince1970 - age)
+                ),
+                captureId: id,
+                baseDir: dir
+            )
+        }
+
+        let freshDir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: freshDir) }
+        let fresh = "omi-20260727-160000-buffered"
+        try seedOpen(freshDir, id: fresh, source: .omi, age: 30)
+        XCTAssertEqual(
+            CaptureManager.resumableCaptureId(
+                baseDir: freshDir,
+                now: now,
+                silenceGap: gap
+            ),
+            fresh,
+            "a recent open Omi capture remains discoverable before its first segment"
+        )
+
+        let staleDir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: staleDir) }
+        try seedOpen(
+            staleDir,
+            id: "omi-20260727-150000-stale",
+            source: .omi,
+            age: 600
+        )
+        XCTAssertNil(
+            CaptureManager.resumableCaptureId(
+                baseDir: staleDir,
+                now: now,
+                silenceGap: gap
+            ),
+            "a segmentless open marker does not cross the conversation boundary"
+        )
+
+        let micDir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: micDir) }
+        try seedOpen(
+            micDir,
+            id: "omi-20260727-160000-mic",
+            source: .phoneMic,
+            age: 30
+        )
+        XCTAssertNil(
+            CaptureManager.resumableCaptureId(
+                baseDir: micDir,
+                now: now,
+                silenceGap: gap
+            ),
+            "an Omi reconnect never adopts a segmentless phone-mic recording"
+        )
+    }
 }
 
 @MainActor

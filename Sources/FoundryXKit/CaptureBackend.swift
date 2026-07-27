@@ -41,6 +41,7 @@ extension CaptureManager {
                             log: DoorLog? = nil,
                             source: AudioFrameSource,
                             micSource: AudioFrameSource? = nil,
+                            attachToSourcesImmediately: Bool = true,
                             locationProvider: ConversationLocationProviding? = nil,
                             liveTranscriber: LiveTranscriberFactory? = nil,
                             liveTitler: LocalTitleSummary? = nil,
@@ -52,6 +53,7 @@ extension CaptureManager {
                   log: log,
                   source: source,
                   micSource: micSource,
+                  attachToSourcesImmediately: attachToSourcesImmediately,
                   finalize: { captureId, meta in
                       try await backend.finalize(captureId: captureId, meta: meta)
                   },

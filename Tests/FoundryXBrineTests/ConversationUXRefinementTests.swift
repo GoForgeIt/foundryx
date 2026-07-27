@@ -10,7 +10,7 @@ import FoundryXKit
 ///   • Feature 5 — the pure time-bucketing of the conversation list.
 ///   • Feature 3 — the mic toggle drives the record/stop state.
 @MainActor
-final class ConversationUXRefinementTests: XCTestCase {
+final class ConversationUXRefinementTests: SignedOutListeningCaptureTestCase {
 
     // MARK: fakes (mirror the patterns in PhoneMicCaptureTests / LiveTranscriptionTests)
 

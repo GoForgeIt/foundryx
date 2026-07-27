@@ -219,7 +219,7 @@ public final class UserDefaultsCaptureSourceStore: CaptureSourceStore {
                 switch AccountPreferences.read(
                     AccountPreferenceCatalog.captureSourceEnabledOverrides) {
                 case .value(let value): return value
-                case .absent: break
+                case .absent: return [:]
                 }
             }
             switch AccountPreferenceCompatibilityStore(
@@ -230,8 +230,7 @@ public final class UserDefaultsCaptureSourceStore: CaptureSourceStore {
             }
         }
         set {
-            if !explicitCompatibility,
-               CaptureAccountScope.currentAccountPreferenceSnapshot() != nil {
+            if !explicitCompatibility {
                 _ = AccountPreferences.write(
                     newValue,
                     for: AccountPreferenceCatalog.captureSourceEnabledOverrides)

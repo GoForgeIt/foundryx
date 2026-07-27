@@ -30,7 +30,7 @@ public final class OmiRestorationSpool: @unchecked Sendable {
     public init(baseDir: URL = CaptureWAL.documentsCaptures(),
                 log: DoorLog? = nil,
                 silenceGap: TimeInterval = CaptureSettings.silenceGapSeconds,
-                paused: @escaping () -> Bool = { CaptureSettings.omiCaptureDesiredState == .paused },
+                paused: @escaping () -> Bool = { true },
                 binding: CaptureAccountScope.AccountBinding? = nil,
                 executor: DispatchQueue? = nil) {
         let queue = DispatchQueue(
@@ -52,9 +52,7 @@ public final class OmiRestorationSpool: @unchecked Sendable {
         executor: DispatchQueue,
         log: DoorLog? = nil,
         silenceGap: TimeInterval = CaptureSettings.silenceGapSeconds,
-        paused: @escaping () -> Bool = {
-            CaptureSettings.omiCaptureDesiredState == .paused
-        }
+        paused: @escaping () -> Bool = { true }
     ) {
         self.init(
             baseDir: root,

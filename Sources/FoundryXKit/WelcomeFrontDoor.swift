@@ -124,4 +124,18 @@ public enum WelcomeFrontDoor {
         }
         return .none
     }
+
+    /// The exact current-owner decision rendered by RootView. Keeping the account
+    /// readers inside this tested presentation seam prevents the App target from
+    /// accidentally substituting phone-global compatibility values.
+    public static func firstRunPresentationForCurrentOwner()
+        -> FirstRunPresentation
+    {
+        firstRunPresentation(
+            letStraightIn: WelcomePrefs.letStraightIn(),
+            onboardingCompleted: AccountPreferences.value(
+                AccountPreferenceCatalog.onboardingCompleted,
+                default: false),
+            welcomeSeen: WelcomePrefs.seen())
+    }
 }

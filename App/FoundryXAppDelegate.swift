@@ -1,17 +1,9 @@
-// FoundryXAppDelegate — the CoreBluetooth STATE-RESTORATION bootstrap.
+// FoundryXAppDelegate — process-level account exposure coordination.
 //
-// When the Omi walks out of range, DeviceManager leaves a standing PENDING connect
-// (no timeout). If iOS then terminates the app, the pending connect survives inside
-// bluetoothd, and when the Omi returns to range iOS RELAUNCHES the app in the
-// background, passing our central's restore identifier in the launch options. That
-// launch has NO UI: SwiftUI scene/`RootView` construction isn't guaranteed, and the
-// full CaptureManager pipeline (sign-in, door target) isn't built. So the delegate —
-// the earliest, guaranteed hook — re-creates the shared DeviceManager (same restore
-// identifier ⇒ `willRestoreState` hands the peripheral back) and attaches the
-// headless OmiRestorationSpool so the reconnected stream is saved durably to the
-// standard capture WAL. When the user later opens the app, MainTabs adopts the SAME
-// shared DeviceManager, detaches the spool, and the existing resume-same-id logic
-// continues the conversation from the spool's segments.
+// Task 6 deliberately leaves CoreBluetooth background restoration dormant. A locked
+// relaunch has no verified account preference snapshot, so it must not construct a
+// source store, a capture spool, or a central. Task 7 owns the later verified-owner
+// restoration design. The handoff remains an inert compatibility seam until then.
 
 import UIKit
 import SwiftUI
@@ -30,53 +22,9 @@ final class FoundryXAppDelegate: NSObject, UIApplicationDelegate {
 
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
-        let centrals = (launchOptions?[.bluetoothCentrals] as? [String]) ?? []
-        if centrals.contains(DeviceManager.restoreIdentifier) {
-            Self.beginBackgroundRestoration()
-        }
+        _ = application
+        _ = launchOptions
         return true
-    }
-
-    /// Recreate the central (same restore identifier — `willRestoreState` fires) and
-    /// spool frames durably. Honors the user's persisted intents: an Omi the user
-    /// toggled OFF is never resurrected; a paused capture holds the link but records
-    /// nothing (the spool checks pause per-frame).
-    private static func beginBackgroundRestoration() {
-        // A signed-out phone must never record in the background. The check must
-        // work with the device LOCKED (phone in pocket — the normal case), so it
-        // reads the lock-screen-safe persisted sign-in signal, not the keychain.
-        guard FoundryAuth.hasPersistedSignIn else { return }
-        // No paired Omi ⇒ nothing to restore. A bluetooth-central relaunch with no saved
-        // device would otherwise re-run the WHOLE DeviceManager/spool setup on the main
-        // thread (the ~1s didFinishLaunching block the field telemetry symbolicated to
-        // OmiRestorationSpool.attach) and re-create a central that can only ever scan for
-        // a device that isn't there. With no saved device the connect flow is dormant, so
-        // bail here BEFORE any of that work. (An owner with no Omi never armed a pending
-        // connect, so this relaunch should not happen — but guard it decisively.)
-        guard DeviceManager.hasSavedDevice else { return }
-        let store = UserDefaultsCaptureSourceStore()
-        let omiEnabled = store.enabledOverrides[CaptureSourceDescriptor.omiId] ?? true
-        guard omiEnabled else { return }
-
-        let log = DoorLog()
-        log.setRemoteSink(RemoteConfig.fromBundle()?.gatewayHTTPURL.appendingPathComponent("diag/log"))
-        log.info("omi-restore: background relaunch for bluetooth-central restoration")
-
-        let dm = DeviceManager.shared(log: log)
-        let spool = OmiRestorationSpool(log: log)
-        let exposure = AccountExposureRegistration(
-            participantID: "omi-restoration-spool",
-            kind: .live,
-            binding: nil,
-            owner: spool,
-            close: { spool, expected in
-                await spool.closeAccountExposure(expected: expected)
-            })
-        accountExposureCoordinator.register(exposure)
-        spool.attach(to: dm)
-        restorationSpool = spool
-        restorationSpoolExposure = exposure
-        dm.start()   // creates the central with the SAME restore identifier → willRestoreState
     }
 
     /// UI takeover (MainTabs building the real CaptureManager): flush the spool's

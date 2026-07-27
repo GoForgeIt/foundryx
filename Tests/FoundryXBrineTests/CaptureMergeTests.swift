@@ -9,7 +9,7 @@ import Foundation
 /// door + Lore). Door-free: the upload/finalize/delete seams are injected; disk is real, so
 /// the WAL concat, idempotence, and guard behavior are exercised against real files.
 @MainActor
-final class CaptureMergeTests: XCTestCase {
+final class CaptureMergeTests: SignedOutListeningCaptureTestCase {
 
     private let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
 
@@ -266,6 +266,7 @@ final class CaptureMergeTests: XCTestCase {
         // Open a LIVE recording — a fresh active capture with an id we don't control
         // (speech-gated: a real speech onset opens the conversation).
         src.onState?(.streaming)
+        try await waitUntil { mgr.isListeningForSpeechForTests }
         RealOmiFrames.openSession(src.onFrame)
         try await waitUntil { mgr.active != nil }
         let activeId = try XCTUnwrap(mgr.active?.captureId)

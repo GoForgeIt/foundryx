@@ -119,6 +119,40 @@ class ProcessGlobalStateTestCase: XCTestCase {
     }
 }
 
+/// Capture-mechanics fixtures with no authenticated account still have a real owner:
+/// `acct-none`. Materialize that signed-out activation snapshot first and prove its
+/// fresh intent is fail-closed, then explicitly select listening because subclasses
+/// exercise an already-authorized ambient recording. This keeps `.absent` reserved for
+/// unresolved restoration instead of letting ordinary test construction fall into it.
+class SignedOutListeningCaptureTestCase: ProcessGlobalStateTestCase {
+
+    override func setUp() {
+        super.setUp()
+        do {
+            try CaptureAccountScope.signOutForTests()
+            let signedOut = try XCTUnwrap(
+                CaptureAccountScope.currentAccountPreferenceSnapshot())
+            XCTAssertEqual(signedOut.scope, "acct-none")
+            XCTAssertEqual(
+                signedOut.presence(
+                    for: AccountPreferenceCatalog.captureOMIDesiredState),
+                .value(OmiCaptureDesiredState.paused.rawValue),
+                "a fresh signed-out activation snapshot must explicitly fail closed")
+
+            CaptureSettings.omiCaptureDesiredState = .listening
+            XCTAssertEqual(
+                CaptureAccountScope.currentAccountPreferenceSnapshot()?
+                    .presence(
+                        for: AccountPreferenceCatalog.captureOMIDesiredState),
+                .value(OmiCaptureDesiredState.listening.rawValue),
+                "an active-capture fixture must explicitly select listening")
+        } catch {
+            XCTFail(
+                "could not install the signed-out capture activation snapshot: \(error)")
+        }
+    }
+}
+
 /// Unit suites need deterministic preference durability without sharing CFPreferences
 /// domains. The account-data-isolation feature and deletion integration tests retain
 /// real suite-backed UserDefaults coverage; this store isolates capture mechanics.

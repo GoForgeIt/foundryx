@@ -1,7 +1,7 @@
 import XCTest
 import Foundation
 import BrineSwiftCore
-import FoundryXKit
+@testable import FoundryXKit
 
 /// Local-first onboarding (track 20260705T1100), Phase 1: the append-only capture
 /// event log + the CaptureBackend brain seam. Two layers:
@@ -10,7 +10,7 @@ import FoundryXKit
 ///  - A HERMETIC Brine run of the `@phase1` scenarios in
 ///    `features/local-first-onboarding.feature`, driving a REAL CaptureManager on a
 ///    temp dir (stubbed door I/O) — the same wiring the app runs.
-final class LocalFirstOnboardingTests: XCTestCase {
+final class LocalFirstOnboardingTests: ProcessGlobalStateTestCase {
 
     private func tempDir(_ label: String) throws -> URL {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -258,7 +258,20 @@ enum OnboardingSteps {
                     world.manager = mgr
                     world.source = src
                     src.onState?(.streaming)                      // ambient: arm for speech
-                    RealOmiFrames.openSession(src.onFrame)        // a real speech onset opens the conversation
+                }
+                let armDeadline = Date().addingTimeInterval(3)
+                while await MainActor.run(
+                    body: {
+                        world.manager?.isListeningForSpeechForTests != true
+                    })
+                {
+                    if Date() > armDeadline {
+                        throw StepError("capture source never reached streaming")
+                    }
+                    try await Task.sleep(nanoseconds: 10_000_000)
+                }
+                _ = await MainActor.run {
+                    RealOmiFrames.openSession(world.source?.onFrame)
                 }
                 // The speech onset → beginSession hop is async — wait for the session
                 // like the ambient lifecycle test does.

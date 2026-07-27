@@ -7,7 +7,7 @@ import BrineSwiftCore
 /// OmiOfflineSyncEngine with a mocked link, the OmiRestorationSpool with a real WAL
 /// on a temp dir). The BLE wire itself is exercised on the `@ble-hardware` lane and
 /// the real-device plan in the track (the sim cannot BLE).
-final class OmiAlwaysReconnectFeatureTests: XCTestCase {
+final class OmiAlwaysReconnectFeatureTests: ProcessGlobalStateTestCase {
     func testOmiAlwaysReconnectScenarios() async throws {
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0..<3 { url.deleteLastPathComponent() }
@@ -60,6 +60,7 @@ private final class OmiReconnectWorld: @unchecked Sendable {
     var source: MockAudioSource?
     var firstCaptureId: String?
     var secondCaptureId: String?
+    var captureManagers: [CaptureManager] = []
 
     final class MockAudioSource: AudioFrameSource, @unchecked Sendable {
         var onFrame: ((Data) -> Void)?
@@ -72,6 +73,7 @@ private final class OmiReconnectWorld: @unchecked Sendable {
         autoConnect = true
         disconnectAction = nil; failAction = nil; restoreAction = nil
         engine = nil; commands = []; delivered = []; liveHold = []; outcome = nil
+        captureManagers.removeAll()
         if let d = baseDir { try? FileManager.default.removeItem(at: d) }
         baseDir = nil; spool = nil; source = nil; firstCaptureId = nil; secondCaptureId = nil
     }
@@ -102,6 +104,138 @@ private final class OmiReconnectWorld: @unchecked Sendable {
 
     func liveFrame(_ f: Data) {
         if let e = engine, e.isActive { liveHold.append(f) } else { delivered.append(f) }
+    }
+
+    @MainActor
+    func openBufferedConversation() async throws {
+        let base = makeBaseDir()
+        let src = MockAudioSource()
+        source = src
+        // Open deterministically through the real paused-restoration path, then resume
+        // listening and buffer fewer than one WAL chunk. This avoids making the owner
+        // continuity proof depend on host AudioToolbox's Opus decoder.
+        CaptureSettings.omiCaptureDesiredState = .paused
+        let manager = makeCaptureManager(baseDir: base, source: src)
+        captureManagers = [manager]
+        if let hydration = manager.hydration { await hydration.value }
+
+        src.onState?(.streaming)
+        try await waitUntil("initial buffered conversation to open") {
+            manager.active != nil
+        }
+        manager.resume()
+        for _ in 0..<10 { src.onFrame?(Data([0xA1])) }
+        firstCaptureId = manager.active?.captureId
+
+        guard let id = firstCaptureId,
+              CaptureManager.newestSegmentMTimeOnDisk(id, baseDir: base) == nil else {
+            throw BrineStepError("premise failed: the first audio must still be buffered")
+        }
+    }
+
+    @MainActor
+    func recreateListeningOwnerSeveralTimes() async throws {
+        guard let base = baseDir, let src = source else {
+            throw BrineStepError("no buffered conversation to restart")
+        }
+        for _ in 0..<3 {
+            // MainTabs can be initialized speculatively several times while SwiftUI
+            // preserves the existing StateObject. These candidates are real managers, but
+            // they must remain inert unless SwiftUI accepts and presents their owner.
+            let discardedCandidate = makeCaptureManager(
+                baseDir: base,
+                source: src,
+                attachToSourcesImmediately: false
+            )
+            captureManagers.append(discardedCandidate)
+            if let hydration = discardedCandidate.hydration { await hydration.value }
+            // MainTabs used to replay DeviceManager's current `.streaming` state from
+            // init. If the candidate stole the callback, this makes it a live owner; with
+            // deferred ownership the replay still reaches the original accepted manager.
+            src.onState?(.streaming)
+            for _ in 0..<10 { src.onFrame?(Data([0xA2])) }
+        }
+
+        // Make the ownership error observable on disk: after the restart burst, speech
+        // must still append to the original capture rather than one of its siblings.
+        for _ in 0..<60 { src.onFrame?(Data([0xA3])) }
+        captureManagers.first?.active?.flushAndWait()
+        secondCaptureId = captureManagers.first?.active?.captureId
+    }
+
+    @MainActor
+    func relaunchWithinSilenceBoundary() async throws {
+        guard let base = baseDir else {
+            throw BrineStepError("no buffered conversation to relaunch")
+        }
+        let relaunchedSource = MockAudioSource()
+        source = relaunchedSource
+        CaptureSettings.omiCaptureDesiredState = .paused
+        let relaunched = makeCaptureManager(baseDir: base, source: relaunchedSource)
+        captureManagers.append(relaunched)
+        if let hydration = relaunched.hydration { await hydration.value }
+        relaunchedSource.onState?(.streaming)
+        try await waitUntil("relaunched manager to open a conversation") {
+            relaunched.active != nil
+        }
+        relaunched.resume()
+        secondCaptureId = relaunched.active?.captureId
+    }
+
+    func captureDirectoryIds() -> [String] {
+        guard let base = baseDir else { return [] }
+        let fm = FileManager.default
+        return ((try? fm.contentsOfDirectory(atPath: base.path)) ?? []).filter { name in
+            guard !name.hasPrefix(".") else { return false }
+            var isDirectory: ObjCBool = false
+            return fm.fileExists(
+                atPath: base.appendingPathComponent(name, isDirectory: true).path,
+                isDirectory: &isDirectory
+            ) && isDirectory.boolValue
+        }
+    }
+
+    func captureIdsContainingAudio() -> [String] {
+        guard let base = baseDir else { return [] }
+        let fm = FileManager.default
+        return captureDirectoryIds().filter { id in
+            let dir = base.appendingPathComponent(id, isDirectory: true)
+            return ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? [])
+                .contains { $0.hasSuffix(".opus") }
+        }
+    }
+
+    @MainActor
+    private func makeCaptureManager(
+        baseDir: URL,
+        source: MockAudioSource,
+        attachToSourcesImmediately: Bool = true
+    ) -> CaptureManager {
+        CaptureManager(
+            target: DoorTarget(
+                baseURL: URL(string: "http://127.0.0.1:1")!,
+                bearer: "feature-test"
+            ),
+            baseDir: baseDir,
+            source: source,
+            attachToSourcesImmediately: attachToSourcesImmediately,
+            finalize: { _, _ in }
+        )
+    }
+
+    @MainActor
+    private func waitUntil(
+        _ description: String,
+        timeout: TimeInterval = 3,
+        _ condition: @MainActor () -> Bool
+    ) async throws {
+        let started = Date()
+        while !condition() {
+            if Date().timeIntervalSince(started) > timeout {
+                throw BrineStepError("timed out waiting for \(description)")
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
     }
 }
 
@@ -274,6 +408,47 @@ private enum OmiReconnectSteps {
                 return ctx
             },
 
+            // Scenarios: a segmentless capture survives owner churn and relaunch.
+            defineStep("my Omi has opened a conversation and its first audio is still buffered") { ctx, _, _ in
+                world.reset()
+                try await world.openBufferedConversation()
+                return ctx
+            },
+            defineStep("the app restarts listening several times while I keep speaking") { ctx, _, _ in
+                try await world.recreateListeningOwnerSeveralTimes()
+                return ctx
+            },
+            defineStep("I still have one conversation") { ctx, _, _ in
+                let ids = world.captureDirectoryIds()
+                guard ids.count == 1, ids.first == world.firstCaptureId else {
+                    throw BrineStepError(
+                        "expected only the original conversation, got \(ids.sorted())"
+                    )
+                }
+                let candidatesStayedInactive = await MainActor.run {
+                    world.captureManagers.dropFirst().allSatisfy { $0.active == nil }
+                }
+                guard candidatesStayedInactive else {
+                    throw BrineStepError(
+                        "a discarded listening-owner candidate became a live capture owner"
+                    )
+                }
+                return ctx
+            },
+            defineStep("all recorded audio belongs to the original conversation") { ctx, _, _ in
+                let ids = world.captureIdsContainingAudio()
+                guard ids == [world.firstCaptureId].compactMap({ $0 }) else {
+                    throw BrineStepError(
+                        "expected audio only under \(world.firstCaptureId ?? "?"), got \(ids.sorted())"
+                    )
+                }
+                return ctx
+            },
+            defineStep("the app relaunches within the conversation silence boundary") { ctx, _, _ in
+                try await world.relaunchWithinSilenceBoundary()
+                return ctx
+            },
+
             // Scenario: long gap → new conversation
             defineStep("the Omi was away longer than the conversation silence boundary") { ctx, _, _ in
                 world.reset()
@@ -347,4 +522,3 @@ private enum OmiReconnectSteps {
         ]
     }
 }
-

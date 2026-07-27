@@ -10,7 +10,12 @@ import BrineSwiftCore
 /// `FileManager.default.temporaryDirectory`: capture Documents, legacy Application
 /// Support, account activation defaults, and App-Group widget defaults. No scenario
 /// resolves or removes a production container.
-final class AccountDataIsolationFeatureTests: XCTestCase {
+/// Inherits `ProcessGlobalStateTestCase` because the capture-preference scenarios
+/// WRITE process-global `CaptureSettings` (e.g. `omiCaptureDesiredState`). Without the
+/// restoring tearDown those writes leak into whatever suite runs next, which is an
+/// order-dependent failure that only shows up in the full run — the exact class the
+/// `lint` gate exists to catch.
+final class AccountDataIsolationFeatureTests: ProcessGlobalStateTestCase {
     /// Can this test host actually use the Keychain? The iOS unit-test bundle has no
     /// host app and therefore no keychain entitlement, so every `SecItem` call there
     /// returns `errSecMissingEntitlement` (-34018). Probed once, for real, rather than
@@ -172,13 +177,21 @@ final class AccountDataIsolationFeatureTests: XCTestCase {
             to: URL(fileURLWithPath: readyPath),
             options: .atomic)
 
-        let deadline = Date().addingTimeInterval(5)
+        // Generous deadline ON PURPOSE. This is a real cross-PROCESS handshake, and the
+        // `flake` gate deliberately runs the suite under heavy CPU load, where a child
+        // process can be starved for seconds. A tight bound here does not test the
+        // deletion barrier — it tests the scheduler, and it would add a fourth
+        // load-sensitive test to a gate that is already too noisy to trust
+        // (track 20260726T0030). The barrier itself is asserted below; this wait only
+        // needs to not give up early.
+        let deadline = Date().addingTimeInterval(60)
         while !FileManager.default.fileExists(atPath: releasePath),
               Date() < deadline {
             usleep(10_000)
         }
         guard FileManager.default.fileExists(atPath: releasePath) else {
-            return XCTFail("parent did not release captured work before timeout")
+            return XCTFail("parent did not release captured work within 60s — under load this "
+                           + "means the handshake never happened, not that it was slow")
         }
 
         let publication = binding.root.appendingPathComponent(
@@ -619,6 +632,12 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         var transitionFinished = false
         var explicitGradingEnabled = false
         var wearablePauseOwnerScope: String?
+        var restorationDefaultsBefore: [String: Any]?
+        var restorationRoot: URL?
+        var restorationSpooledFrames = 0
+        var restorationCaptureIDs: [String] = []
+        var restorationDesiredState: OmiCaptureDesiredState?
+        var restorationSourceOverrides: [String: Bool]?
     }
 
     private let queue = DispatchQueue(label: "foundryx.account-data-isolation-world")
@@ -681,6 +700,7 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
 
     func cleanup() throws {
         queue.sync {
+            restoreRestorationDefaultsLocked()
             stopCrossProcessDeletionProbeLocked()
             pairingHarness?.cleanup()
             pairingHarness = nil
@@ -897,6 +917,30 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         }
     }
 
+    func assertRenderedFirstRunBelongsToSecondAccount() throws {
+        try queue.sync {
+            let snapshot = try currentPreferenceSnapshotLocked()
+            let rootView = try String(
+                contentsOf: repositoryRoot.appendingPathComponent(
+                    "App/RootView.swift"),
+                encoding: .utf8)
+            guard snapshot.scope == state.secondPreferenceScope,
+                  rootView.contains(
+                    "switch WelcomeFrontDoor."
+                        + "firstRunPresentationForCurrentOwner()"),
+                  WelcomeFrontDoor.surface(
+                    signedIn: true,
+                    letStraightIn: WelcomePrefs.letStraightIn(),
+                    entered: false) == .welcomeConnectGate,
+                  WelcomeFrontDoor.firstRunPresentationForCurrentOwner()
+                    == .onboarding(skipWelcome: false) else {
+                throw BrineStepError(
+                    "the rendered welcome/first-run decision did not come from "
+                        + "the replacement account")
+            }
+        }
+    }
+
     func assertSecondAccountNeedsVoiceAndAmbientConsent() throws {
         try queue.sync {
             let snapshot = try currentPreferenceSnapshotLocked()
@@ -940,6 +984,123 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
                     == .value([:]) else {
                 throw BrineStepError(
                     "fresh wearable capture inherited listening or source choices")
+            }
+        }
+    }
+
+    func firstAccountLegacyWearableChoiceIsListening() throws {
+        try queue.sync {
+            try beginScenarioLocked()
+            let keys = [
+                AccountPreferenceCatalog.captureOMIDesiredState.canonicalKey,
+                AccountPreferenceCatalog.captureSourceEnabledOverrides
+                    .canonicalKey,
+            ]
+            state.restorationDefaultsBefore = Dictionary(
+                uniqueKeysWithValues: keys.compactMap { key in
+                    UserDefaults.standard.object(forKey: key).map {
+                        (key, $0)
+                    }
+                })
+            seedLegacyFirstRunLocked()
+            UserDefaults.standard.set(
+                OmiCaptureDesiredState.listening.rawValue,
+                forKey:
+                    AccountPreferenceCatalog.captureOMIDesiredState.canonicalKey)
+            UserDefaults.standard.set(
+                [CaptureSourceDescriptor.omiId: true],
+                forKey: AccountPreferenceCatalog.captureSourceEnabledOverrides
+                    .canonicalKey)
+            _ = UserDefaults.standard.synchronize()
+
+            let first = try firstPreferenceIdentityLocked()
+            state.firstIdentity = first
+            state.firstRoot = try activateLocked(first)
+            state.firstPreferenceScope =
+                try currentPreferenceBindingLocked().scope
+        }
+    }
+
+    func secondAccountExplicitlyPausedWearableCapture() throws {
+        try queue.sync {
+            let second = try secondPreferenceIdentityLocked()
+            state.secondIdentity = second
+            state.secondRoot = try activateLocked(second)
+            let binding = try currentPreferenceBindingLocked()
+            state.secondPreferenceScope = binding.scope
+            guard AccountPreferences.write(
+                OmiCaptureDesiredState.paused.rawValue,
+                for: AccountPreferenceCatalog.captureOMIDesiredState,
+                generation: binding.generation) == .saved else {
+                throw BrineStepError(
+                    "the replacement account's explicit pause was not saved")
+            }
+        }
+    }
+
+    func removeCachedSecondAccountPreferenceSnapshot() throws {
+        try queue.sync {
+            guard CaptureSettings.omiCaptureDesiredState == .paused else {
+                throw BrineStepError(
+                    "the replacement account was not paused before restoration")
+            }
+            CaptureAccountScope.resetProcessCacheForTests()
+            guard CaptureAccountScope.currentAccountPreferenceSnapshot() == nil
+            else {
+                throw BrineStepError(
+                    "the replacement account snapshot remained cached")
+            }
+        }
+    }
+
+    func bluetoothRestorationDeliversAudioFrame() throws {
+        try queue.sync {
+            let root = sandbox.appendingPathComponent(
+                "paused-background-restoration", isDirectory: true)
+            try fileManager.createDirectory(
+                at: root, withIntermediateDirectories: true)
+            state.restorationRoot = root
+
+            let store = UserDefaultsCaptureSourceStore()
+            state.restorationSourceOverrides = store.enabledOverrides
+            state.restorationDesiredState =
+                CaptureSettings.omiCaptureDesiredState
+            guard store.enabledOverrides[
+                CaptureSourceDescriptor.omiId] ?? true else {
+                return
+            }
+
+            let spool = OmiRestorationSpool(
+                baseDir: root, silenceGap: 0)
+            spool.handleState(.streaming)
+            spool.append(Data([0x11, 0x22, 0x33]))
+            state.restorationSpooledFrames = spool.spooledFrameCount
+            spool.detach()
+            state.restorationCaptureIDs =
+                (try? fileManager.contentsOfDirectory(atPath: root.path))
+                    ?? []
+        }
+    }
+
+    func assertRestorationFrameWasNotRecorded() throws {
+        try queue.sync {
+            guard state.restorationSpooledFrames == 0,
+                  state.restorationCaptureIDs.isEmpty else {
+                throw BrineStepError(
+                    "background restoration recorded the replacement account "
+                        + "after its explicit pause")
+            }
+        }
+    }
+
+    func assertRestorationDidNotInheritLegacyChoices() throws {
+        try queue.sync {
+            defer { restoreRestorationDefaultsLocked() }
+            guard state.restorationDesiredState == .paused,
+                  state.restorationSourceOverrides == [:] else {
+                throw BrineStepError(
+                    "background restoration inherited the first account's "
+                        + "legacy listening/source choices")
             }
         }
     }
@@ -3572,6 +3733,7 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
     }
 
     private func beginScenarioLocked() throws {
+        restoreRestorationDefaultsLocked()
         stopCrossProcessDeletionProbeLocked()
         pairingHarness?.cleanup()
         pairingHarness = nil
@@ -3599,6 +3761,22 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         state = State()
         installTestEnvironmentLocked()
         CaptureAccountScope.resetProcessCacheForTests()
+    }
+
+    private func restoreRestorationDefaultsLocked() {
+        guard let saved = state.restorationDefaultsBefore else { return }
+        for key in [
+            AccountPreferenceCatalog.captureOMIDesiredState.canonicalKey,
+            AccountPreferenceCatalog.captureSourceEnabledOverrides.canonicalKey,
+        ] {
+            if let value = saved[key] {
+                UserDefaults.standard.set(value, forKey: key)
+            } else {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+        }
+        _ = UserDefaults.standard.synchronize()
+        state.restorationDefaultsBefore = nil
     }
 
     private func stopCrossProcessDeletionProbeLocked() {
@@ -4458,6 +4636,11 @@ private enum AccountDataIsolationSteps {
                 try w.assertSecondAccountReceivesOwnWelcome()
             },
             defineCheck(
+                "the rendered first-run flow belongs to the second account"
+            ) { _, _, _ in
+                try w.assertRenderedFirstRunBelongsToSecondAccount()
+            },
+            defineCheck(
                 "first run asks for its owner voice and ambient consent"
             ) { _, _, _ in
                 try w.assertSecondAccountNeedsVoiceAndAmbientConsent()
@@ -4469,6 +4652,37 @@ private enum AccountDataIsolationSteps {
             },
             defineCheck("wearable capture starts paused") { _, _, _ in
                 try w.assertWearableCaptureStartsPaused()
+            },
+            defineStep(
+                "the first account's pre-update wearable choice is listening"
+            ) { ctx, _, _ in
+                try w.firstAccountLegacyWearableChoiceIsListening()
+                return ctx
+            },
+            defineStep(
+                "the second account explicitly paused wearable capture"
+            ) { ctx, _, _ in
+                try w.secondAccountExplicitlyPausedWearableCapture()
+                return ctx
+            },
+            defineStep(
+                "no cached second-account preference snapshot is installed"
+            ) { ctx, _, _ in
+                try w.removeCachedSecondAccountPreferenceSnapshot()
+                return ctx
+            },
+            defineStep("Bluetooth restoration delivers an audio frame") {
+                ctx, _, _ in
+                try w.bluetoothRestorationDeliversAudioFrame()
+                return ctx
+            },
+            defineCheck("the frame is not recorded") { _, _, _ in
+                try w.assertRestorationFrameWasNotRecorded()
+            },
+            defineCheck(
+                "restoration does not inherit the first account's legacy choices"
+            ) { _, _, _ in
+                try w.assertRestorationDidNotInheritLegacyChoices()
             },
             defineStep(
                 "onboarding, welcome, persona, and ambient choices exist from before the update"

@@ -16,7 +16,7 @@ import Foundation
 /// capture lifecycle, door-free, on the same controllable-source seams the session-clock
 /// tests use.
 @MainActor
-final class MeterLifecycleTests: XCTestCase {
+final class MeterLifecycleTests: SignedOutListeningCaptureTestCase {
 
     /// A source the test drives directly (start/stop no-ops; the test fires the
     /// onFrame/onState closures CaptureManager installs).
@@ -62,6 +62,7 @@ final class MeterLifecycleTests: XCTestCase {
         let mgr = await makeManager(dir, source: src)
 
         src.onState?(.streaming)
+        try await waitUntil { mgr.isListeningForSpeechForTests }
         RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         XCTAssertTrue(mgr.meterIsRunningForTests,
@@ -75,6 +76,7 @@ final class MeterLifecycleTests: XCTestCase {
         let src = TestSource()
         let mgr = await makeManager(dir, source: src)
         src.onState?(.streaming)
+        try await waitUntil { mgr.isListeningForSpeechForTests }
         RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         XCTAssertTrue(mgr.meterIsRunningForTests)
@@ -158,6 +160,7 @@ final class MeterLifecycleTests: XCTestCase {
         let src = TestSource()
         let mgr = await makeManager(dir, source: src)
         src.onState?(.streaming)
+        try await waitUntil { mgr.isListeningForSpeechForTests }
         RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         mgr.captureSurfaceDidDisappear()   // off the capture surface, session live

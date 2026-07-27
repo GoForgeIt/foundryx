@@ -120,6 +120,100 @@ final class CaptureAccountPreferenceTests: ProcessGlobalStateTestCase {
         return result
     }
 
+    func testBackgroundRestorationDoesNotRecordPausedReplacementAccount()
+        throws
+    {
+        let sourceOverridesKey =
+            AccountPreferenceCatalog.captureSourceEnabledOverrides.canonicalKey
+        let savedSourceOverrides =
+            UserDefaults.standard.object(forKey: sourceOverridesKey)
+        defer {
+            if let savedSourceOverrides {
+                UserDefaults.standard.set(
+                    savedSourceOverrides, forKey: sourceOverridesKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: sourceOverridesKey)
+            }
+        }
+
+        CaptureSettings.omiCaptureDesiredState = .paused
+        XCTAssertEqual(
+            CaptureSettings.omiCaptureDesiredState,
+            .paused,
+            "the replacement account must explicitly pause before restoration")
+
+        UserDefaults.standard.set(
+            OmiCaptureDesiredState.listening.rawValue,
+            forKey:
+                AccountPreferenceCatalog.captureOMIDesiredState.canonicalKey)
+        UserDefaults.standard.set(
+            [CaptureSourceDescriptor.omiId: true],
+            forKey: sourceOverridesKey)
+        CaptureAccountScope.resetProcessCacheForTests()
+        XCTAssertNil(CaptureAccountScope.currentAccountPreferenceSnapshot())
+
+        let store = UserDefaultsCaptureSourceStore()
+        XCTAssertEqual(
+            store.enabledOverrides,
+            [:],
+            "an absent owner snapshot must not inherit legacy source choices")
+        XCTAssertEqual(
+            CaptureSettings.omiCaptureDesiredState,
+            .paused,
+            "an absent owner snapshot must fail closed despite legacy listening")
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "paused-restoration-\(UUID().uuidString)",
+                isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let spool = OmiRestorationSpool(baseDir: root, silenceGap: 0)
+        spool.handleState(.streaming)
+        spool.append(Data([0x11, 0x22, 0x33]))
+        XCTAssertEqual(
+            spool.spooledFrameCount,
+            0,
+            "background restoration recorded B after B explicitly paused")
+        XCTAssertNil(spool.activeCaptureId)
+        spool.detach()
+    }
+
+    func testTask6RestorationBootstrapIsDormantAndSpoolHasNoLiveDefaultsReader()
+        throws
+    {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let appDelegate = try String(
+            contentsOf: repository
+                .appendingPathComponent("App/FoundryXAppDelegate.swift"),
+            encoding: .utf8)
+        XCTAssertFalse(
+            appDelegate.contains("UserDefaultsCaptureSourceStore()"),
+            "Task 6 must not activate the Task 7 restoration preference reader")
+        XCTAssertFalse(
+            appDelegate.contains("OmiRestorationSpool(log:"),
+            "Task 6 must not create a live background restoration spool")
+        XCTAssertFalse(
+            appDelegate.contains("dm.start()"),
+            "Task 6 must not activate CoreBluetooth restoration")
+
+        let spool = try String(
+            contentsOf: repository.appendingPathComponent(
+                "Sources/FoundryXKit/OmiRestorationSpool.swift"),
+            encoding: .utf8)
+        XCTAssertFalse(
+            spool.contains("CaptureSettings.omiCaptureDesiredState"),
+            "the per-frame spool gate must not read live compatibility defaults")
+        XCTAssertFalse(
+            spool.contains("UserDefaults"),
+            "the restoration spool must not query defaults per frame")
+    }
+
     func testDormantSnapshotInstallAndExplicitRefreshPreserveCompatibility()
         async throws
     {

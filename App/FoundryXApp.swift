@@ -30,6 +30,18 @@ struct FoundryXApp: App {
         // once sign-in resolves the target — see RootView's setUsageTarget call. It is
         // delivered THROUGH Foundry (the door appends it to the local telemetry rollup).
         #if DEBUG || PERF_HARNESS
+        let proofArguments = ProcessInfo.processInfo.arguments
+        if proofArguments.contains("-MainPreview") {
+            // MainPreview bypasses authentication, but it is still an ordinary signed-out
+            // capture owner. Publish acct-none before any demo seeding or capture object is
+            // constructed so neither storage nor capture intent falls through to `.absent`.
+            CaptureAccountScope.setAccountForTests(email: nil)
+            if proofArguments.contains("-SyntheticOmi") {
+                // Synthetic ambient capture has an explicit listening premise. Persist it
+                // only in acct-none; no authenticated account inherits the proof's intent.
+                CaptureSettings.omiCaptureDesiredState = .listening
+            }
+        }
         DemoSeed.installPerfLogIfRequested()  // `-PerfLog`: mirror perf spans to the unified log
         DemoSeed.installStallDemoIfRequested() // `-StallDemo`: prove the live stall-stack path
         DemoSeed.seedStressIfRequested()      // `-StressSeed <N>`: large-library perf harness

@@ -12,7 +12,7 @@ import FoundryXKit
 /// was said ~80 words ago, sliding forward. These tests pin the replacement: a
 /// bounded whole-conversation `titleContext` (head + rolling tail), a whole-text
 /// salience heuristic, the anti-flicker arbiter, and the manager-owned `liveTitle`.
-final class RollingTitleTests: XCTestCase {
+final class RollingTitleTests: ProcessGlobalStateTestCase {
 
     // MARK: RollingTitleContext — the bounded whole-conversation accumulator
 
@@ -265,12 +265,24 @@ final class RollingTitleTests: XCTestCase {
     }
 
     @MainActor
-    private func waitUntil(timeout: TimeInterval = 5, _ cond: @MainActor () -> Bool) async throws {
+    private func waitUntil(
+        timeout: TimeInterval = 5,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ cond: @MainActor () -> Bool
+    ) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while !cond() {
-            if Date() > deadline { XCTFail("timed out waiting"); return }
+            if Date() > deadline {
+                XCTFail("timed out waiting", file: file, line: line)
+                throw WaitFailure.timedOut
+            }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
+    }
+
+    private enum WaitFailure: Error {
+        case timedOut
     }
 
     private func tempDir() throws -> URL {
@@ -278,6 +290,17 @@ final class RollingTitleTests: XCTestCase {
             .appendingPathComponent("foundryx-rolling-title-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
+    }
+
+    /// These manager-level title tests exercise an explicit phone-mic session with an
+    /// injected source; they are not microphone-permission integration tests. Hostless
+    /// iOS XCTest cannot construct a TCC identity, so install the same permission seam
+    /// every other injected-mic suite uses before asking the manager to record.
+    @MainActor
+    private func grantInjectedMicPermission(_ manager: CaptureManager) {
+        #if os(iOS)
+        manager.micPermissionOverrideForTests = true
+        #endif
     }
 
     /// A finalized snapshot carrying the whole-conversation context (what the real
@@ -295,16 +318,17 @@ final class RollingTitleTests: XCTestCase {
         let titler = Fixtures.FakeTitler(title: "Kitchen renovation planning")
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
         // Cadence collapsed for the test: every final may refresh, model gate open.
-        let mgr = CaptureManager(target: target, baseDir: dir, source: src,
+        let mgr = CaptureManager(target: target, baseDir: dir, source: src, micSource: src,
                                  finalize: { _, _ in },
                                  liveTranscriber: { fake },
                                  liveTitler: titler,
                                  liveTitleCadence: LiveTitleCadence(
                                      heuristicMinNewWords: 1, modelMinWords: 4,
                                      modelMinNewWords: 1, modelRefreshSeconds: 0))
+        grantInjectedMicPermission(mgr)
 
+        mgr.startMicRecording()
         src.onState?(.streaming)
-        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         XCTAssertNil(mgr.liveTitle, "nothing said yet → no name")
 
@@ -333,15 +357,16 @@ final class RollingTitleTests: XCTestCase {
         let src = Fixtures.TestSource()
         let fake = Fixtures.FakeLiveTranscriber()
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
-        let mgr = CaptureManager(target: target, baseDir: dir, source: src,
+        let mgr = CaptureManager(target: target, baseDir: dir, source: src, micSource: src,
                                  finalize: { _, _ in },
                                  liveTranscriber: { fake },
                                  liveTitleCadence: LiveTitleCadence(
                                      heuristicMinNewWords: 1, modelMinWords: 999,
                                      modelMinNewWords: 999, modelRefreshSeconds: 3600))
+        grantInjectedMicPermission(mgr)
 
+        mgr.startMicRecording()
         src.onState?(.streaming)
-        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
         fake.emit(finalSnap("planning the quarterly platform budget with the whole team today"))
         try await waitUntil { mgr.liveTitle != nil }
@@ -363,15 +388,16 @@ final class RollingTitleTests: XCTestCase {
         let fake = Fixtures.FakeLiveTranscriber()
         let recorder = Fixtures.ExternalRecorder(reply: "Fireworks Sharpened Title")
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
-        let mgr = CaptureManager(target: target, baseDir: dir, source: src,
+        let mgr = CaptureManager(target: target, baseDir: dir, source: src, micSource: src,
                                  finalize: { _, _ in },
                                  liveTranscriber: { fake },
                                  liveTitler: nil,   // heuristic-only placeholder (isolate external)
                                  liveTitleExternal: recorder.closure(),
                                  liveTitleBackoff: LiveTitleBackoff(firstDelay: 0, multiplier: 2, ceiling: 1))
+        grantInjectedMicPermission(mgr)
 
+        mgr.startMicRecording()
         src.onState?(.streaming)
-        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
 
         let context = "okay so the kitchen renovation budget is our topic today for planning cabinets and counters"
@@ -397,15 +423,16 @@ final class RollingTitleTests: XCTestCase {
         let fake = Fixtures.FakeLiveTranscriber()
         let recorder = Fixtures.ExternalRecorder(reply: nil, fails: true)
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
-        let mgr = CaptureManager(target: target, baseDir: dir, source: src,
+        let mgr = CaptureManager(target: target, baseDir: dir, source: src, micSource: src,
                                  finalize: { _, _ in },
                                  liveTranscriber: { fake },
                                  liveTitler: nil,
                                  liveTitleExternal: recorder.closure(),
                                  liveTitleBackoff: LiveTitleBackoff(firstDelay: 0, multiplier: 2, ceiling: 1))
+        grantInjectedMicPermission(mgr)
 
+        mgr.startMicRecording()
         src.onState?(.streaming)
-        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
 
         // Emit a growing conversation so each new snapshot is an eligible tick.
@@ -438,15 +465,16 @@ final class RollingTitleTests: XCTestCase {
         let fake = Fixtures.FakeLiveTranscriber()
         let recorder = Fixtures.ExternalRecorder(reply: "Sharpened One")
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
-        let mgr = CaptureManager(target: target, baseDir: dir, source: src,
+        let mgr = CaptureManager(target: target, baseDir: dir, source: src, micSource: src,
                                  finalize: { _, _ in },
                                  liveTranscriber: { fake },
                                  liveTitler: nil,
                                  liveTitleExternal: recorder.closure(),
                                  liveTitleBackoff: LiveTitleBackoff(firstDelay: 0, multiplier: 2, ceiling: 1))
+        grantInjectedMicPermission(mgr)
 
+        mgr.startMicRecording()
         src.onState?(.streaming)
-        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil }
 
         let context = "planning the quarterly platform budget with the whole team today for the offsite agenda"
@@ -471,31 +499,48 @@ final class RollingTitleTests: XCTestCase {
         let factory = Fixtures.FakeFactory()
         let recorder = Fixtures.ExternalRecorder(reply: "Sharpened Title")
         let target = DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x")
-        let mgr = CaptureManager(target: target, baseDir: dir, source: src,
+        let mgr = CaptureManager(target: target, baseDir: dir, source: src, micSource: src,
                                  finalize: { _, _ in },
                                  liveTranscriber: { factory.make() },
                                  liveTitler: nil,
                                  liveTitleExternal: recorder.closure(),
                                  liveTitleBackoff: LiveTitleBackoff(firstDelay: 0, multiplier: 2, ceiling: 1))
+        grantInjectedMicPermission(mgr)
+        XCTAssertFalse(
+            mgr.isPaused,
+            "the normal test owner installs an explicit listening snapshot")
 
+        mgr.startMicRecording()
         src.onState?(.streaming)
-        RealOmiFrames.openSession(src.onFrame)   // speech onset opens the conversation
         try await waitUntil { mgr.active != nil && factory.last != nil }
         let convo1 = try XCTUnwrap(mgr.active?.captureId)
         let sentence = "planning the quarterly platform budget with the whole team today for the offsite agenda"
-        factory.last!.emit(finalSnap(sentence))
+        let firstTranscriber = try XCTUnwrap(
+            factory.last,
+            "a listening capture must install its live transcriber")
+        firstTranscriber.emit(finalSnap(sentence))
         try await waitUntil { recorder.count == 1 }
-        XCTAssertEqual(recorder.calls[0].seq, 0)
-        XCTAssertEqual(recorder.calls[0].captureId, convo1)
+        let firstCall = try XCTUnwrap(
+            recorder.calls.first,
+            "the first conversation must reach the external title path")
+        XCTAssertEqual(firstCall.seq, 0)
+        XCTAssertEqual(firstCall.captureId, convo1)
 
         // Manual split → a brand-new conversation (new transcriber + capture id).
         mgr.splitConversation()
         try await waitUntil { mgr.active?.captureId != nil && mgr.active?.captureId != convo1 }
         let convo2 = try XCTUnwrap(mgr.active?.captureId)
-        factory.last!.emit(finalSnap("a totally separate discussion about the vacation flights to Lisbon in June"))
+        let secondTranscriber = try XCTUnwrap(
+            factory.last,
+            "a manual split must install a fresh live transcriber")
+        secondTranscriber.emit(finalSnap(
+            "a totally separate discussion about the vacation flights to Lisbon in June"))
         // External is NOT stuck in-flight across the swap: it fires again, re-armed.
         try await waitUntil { recorder.count == 2 }
-        XCTAssertEqual(recorder.calls[1].captureId, convo2, "the external refresh re-targets the new conversation")
-        XCTAssertEqual(recorder.calls[1].seq, 0, "a fresh conversation resets the request sequence")
+        let secondCall = try XCTUnwrap(
+            recorder.calls.dropFirst().first,
+            "the new conversation must reach the external title path")
+        XCTAssertEqual(secondCall.captureId, convo2, "the external refresh re-targets the new conversation")
+        XCTAssertEqual(secondCall.seq, 0, "a fresh conversation resets the request sequence")
     }
 }

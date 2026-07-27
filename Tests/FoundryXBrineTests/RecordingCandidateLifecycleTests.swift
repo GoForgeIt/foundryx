@@ -8,7 +8,7 @@ import FoundryXKit
 /// can return AFTER the user ended the recording, or after the session rolled to a new
 /// conversation — it must be dropped, never bled onto the wrong/next conversation.
 @MainActor
-final class RecordingCandidateLifecycleTests: XCTestCase {
+final class RecordingCandidateLifecycleTests: SignedOutListeningCaptureTestCase {
 
     final class TestSource: AudioFrameSource, @unchecked Sendable {
         var onFrame: ((Data) -> Void)?

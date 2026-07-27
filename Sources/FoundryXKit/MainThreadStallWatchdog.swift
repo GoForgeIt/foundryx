@@ -117,6 +117,13 @@ public final class MainThreadStallWatchdog: @unchecked Sendable {
         control.async { [self] in paused = false }
     }
 
+    /// Deterministic unit-test heartbeat. Production remains timer-driven; tests that
+    /// exercise exact threshold boundaries can run one control-queue tick directly so
+    /// simulator timer starvation cannot turn an unscheduled sensor into a product failure.
+    func tickSynchronouslyForTests() {
+        control.sync { tick() }
+    }
+
     /// One heartbeat. If the previous ping is STILL stuck in the target queue, the target
     /// thread is blocked right now: sample its backtrace once (when the stall has already
     /// lasted ≥ captureThresholdMs) — this is the only moment we can see WHERE it is blocked,

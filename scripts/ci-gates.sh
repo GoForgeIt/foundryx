@@ -201,12 +201,12 @@ phase_compile() {
 # THE REPLACEMENT — three independent detections, each with a control that can fail:
 #
 #   1. SYMBOLS (`nm -a`), with a NEGATIVE CONTROL. Harness-only TYPES (DemoSeed, StressChurn,
-#      SyntheticMicFrameSource, BenchModel) leave dozens of symbols in a binary that compiles
+#      SyntheticMicFrameSource, SyntheticTranscriptLiveTranscriber, BenchModel) leave symbols
+#      in a binary that compiles
 #      them. The identical detection is run first against the PerfRelease binary — which is
 #      KNOWN to contain every seam — and every seam MUST be found there. If the control comes
 #      up empty the gate declares ITSELF broken and fails; it never prints "clean" on a
-#      detection it has not just proven works. (Measured: PerfRelease 36/61/80/23 symbol hits
-#      for the four seams; Release 0/0/0/0.)
+#      detection it has not just proven works.
 #
 #   2. SOURCE GATING. `nm` cannot see a harness REGION inside a production type (the
 #      `-MainPreview` branch in RootView is not its own symbol). So every read of a banned
@@ -220,12 +220,12 @@ phase_compile() {
 #
 # S10: `leak` run ALONE used to validate whatever stale `.app` happened to be on disk. It now
 # builds what it inspects.
-LEAK_SEAM_TYPES=(DemoSeed StressChurn SyntheticMicFrameSource BenchModel)
+LEAK_SEAM_TYPES=(DemoSeed StressChurn SyntheticMicFrameSource SyntheticTranscriptLiveTranscriber BenchModel)
 # NB: `-PerfLog` is deliberately NOT on this list — PerfMetricsSubscriber reads it in
 # PRODUCTION code (it suppresses the launch-cost window when the harness owns the sensor),
 # so its presence in Release is correct, not a leak.
 LEAK_SEAM_ARGS=(-SyntheticMic -BrainSetupFailed -StressSeed -StressSegs -StressChurn -StallDemo -MainPreview
-                -WelcomePreview -Screen -RemoteChat -SyntheticOmi)
+                -WelcomePreview -Screen -RemoteChat -SyntheticOmi -SyntheticTranscript)
 # -WelcomePreview / -Screen / -RemoteChat were found SHIPPING IN RELEASE alongside -MainPreview.
 # They are listed here, not merely fixed at the call site, because fixing an instance without
 # policing the class is how the first one survived: a seam nobody is checking for is a seam that
@@ -472,12 +472,15 @@ phase_lint() {
 # capture surface, driven through the REAL pipeline. RecordingProof exercises the phone-mic
 # Record button; AmbientRecordingProof exercises the OMI AMBIENT path — a speech onset opens
 # a conversation with no button tap, the "Listening" hero tile carries it, and TAPPING that
-# tile opens the recording page. That ambient flow shipped BROKEN and green on 2026-07-23
-# because nothing rendered it; this phase is the guard so it can't recur. -SyntheticMic /
-# -SyntheticOmi feed real Opus packets through the whole pipeline, so only the radio is
-# stood in for. A missing simulator is a LOUD failure, never a silent skip.
+# tile opens the recording page. ForegroundRestoreProof then switches apps mid-conversation
+# and proves the same controls, elapsed clock, and transcript remain live on return. Those
+# ambient flows shipped BROKEN and green because nothing rendered their lifecycle; this phase
+# is the guard so they cannot recur. -SyntheticMic / -SyntheticOmi feed real Opus packets
+# through the whole pipeline; -SyntheticTranscript substitutes only LiveTranscriber with a
+# PCM-driven deterministic word source, leaving the real view/binding/restore path intact.
+# A missing simulator is a LOUD failure, never a silent skip.
 phase_uiproof() {
-  echo "==> [uiproof] recording-surface UI E2E on a simulator (phone-mic + Omi ambient)"
+  echo "==> [uiproof] recording-surface UI E2E on a simulator (phone-mic + Omi ambient + foreground restore)"
   local udid
   udid=$(xcrun simctl list devices available 2>/dev/null | grep -E "iPhone" | grep -Eo "[0-9A-F-]{36}" | head -1)
   if [ -z "$udid" ]; then
@@ -493,8 +496,10 @@ phase_uiproof() {
        -derivedDataPath "$DD" \
        -only-testing:FoundryXUITests/RecordingProofUITests/testPhoneMicRecordingTimerAndSurface \
        -only-testing:FoundryXUITests/AmbientRecordingProofUITests/testAmbientSpeechOpensATappableRecordingConversation \
+       -only-testing:FoundryXUITests/ForegroundRestoreProofUITests/testListeningSurfaceSurvivesBackgroundingAndStaysUsable \
+       -only-testing:FoundryXUITests/ForegroundRestoreProofUITests/testLiveTranscriptRendersAndSurvivesBackgrounding \
        >"$out" 2>&1; then
-    echo "  uiproof: recording surface (phone-mic + Omi ambient tap-through) PASSED"
+    echo "  uiproof: recording surface (phone-mic + Omi ambient + foreground restore) PASSED"
   else
     tail -50 "$out"
     fail "uiproof-recording-surface"

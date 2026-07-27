@@ -159,9 +159,18 @@ Feature: My recordings belong to my account, not to the phone
     Given the first account completed welcome and onboarding on this phone
     When the second account signs in on the same phone
     Then the second account receives its own welcome
+    And the rendered first-run flow belongs to the second account
     And first run asks for its owner voice and ambient consent
     And it starts with the individual persona and ambient intelligence off
     And wearable capture starts paused
+
+  Scenario: background restoration never records a paused replacement account
+    Given the first account's pre-update wearable choice is listening
+    And the second account explicitly paused wearable capture
+    And no cached second-account preference snapshot is installed
+    When Bluetooth restoration delivers an audio frame
+    Then the frame is not recorded
+    And restoration does not inherit the first account's legacy choices
 
   Scenario: the current owner's choices survive the update
     Given onboarding, welcome, persona, and ambient choices exist from before the update
