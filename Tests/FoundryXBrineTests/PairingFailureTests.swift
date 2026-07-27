@@ -188,11 +188,14 @@ final class PairingFailureTests: XCTestCase {
     }
 
     @MainActor
-    func testCoordinatorObservesRealNotificationAndReloadsAfterRestore() {
+    func testCoordinatorObservesRealNotificationAndReloadsAfterRestore() throws {
+        let fixture = try PairingTestFixture()
+        defer { fixture.cleanup() }
+        let generation = CaptureAccountScope.identityGeneration
         let center = NotificationCenter()
         let coordinator = AccountIdentityCoordinator(
             notificationCenter: center,
-            activeGeneration: 4)
+            activeGeneration: generation)
         var transitions: [UInt64] = []
         var restores: [UInt64] = []
         coordinator.bind(
@@ -203,17 +206,23 @@ final class PairingFailureTests: XCTestCase {
         center.post(
             name: CaptureAccountScope.identityDidChangeNotification,
             object: nil,
-            userInfo: ["generation": NSNumber(value: 5)])
-        coordinator.restoreCompleted(generation: 5)
+            userInfo: ["generation": NSNumber(value: generation)])
+        coordinator.restoreCompleted(generation: generation)
 
-        XCTAssertEqual(transitions, [5])
-        XCTAssertEqual(restores, [5])
+        XCTAssertEqual(transitions, [generation])
+        XCTAssertEqual(restores, [generation])
         coordinator.stop()
     }
 
     @MainActor
-    func testCoordinatorRejectsTokenFromPriorAccountGeneration() {
-        let coordinator = AccountIdentityCoordinator(activeGeneration: 12)
+    func testCoordinatorRejectsTokenFromPriorAccountGeneration() throws {
+        let fixture = try PairingTestFixture()
+        defer { fixture.cleanup() }
+        let currentGeneration = CaptureAccountScope.identityGeneration
+        XCTAssertGreaterThan(currentGeneration, 0)
+        let staleGeneration = currentGeneration - 1
+        let coordinator = AccountIdentityCoordinator(
+            activeGeneration: currentGeneration)
         var accepted: [AccountBoundToken] = []
         coordinator.bind(
             onIdentityTransition: { _ in },
@@ -225,17 +234,66 @@ final class PairingFailureTests: XCTestCase {
         coordinator.tokenDidChange(
             AccountBoundToken(
                 value: "stale-a-token",
-                generation: 11),
-            generation: 11)
+                generation: staleGeneration),
+            generation: staleGeneration)
         coordinator.tokenDidChange(
             AccountBoundToken(
                 value: "current-b-token",
-                generation: 12),
-            generation: 12)
+                generation: currentGeneration),
+            generation: currentGeneration)
 
         XCTAssertEqual(
             accepted,
-            [AccountBoundToken(value: "current-b-token", generation: 12)])
+            [AccountBoundToken(
+                value: "current-b-token",
+                generation: currentGeneration)])
+    }
+
+    @MainActor
+    func testStaleRestoreCannotRewindCurrentIdentityGeneration() throws {
+        let fixture = try PairingTestFixture()
+        defer { fixture.cleanup() }
+        let currentGeneration = CaptureAccountScope.identityGeneration
+        XCTAssertGreaterThan(currentGeneration, 0)
+        let staleGeneration = currentGeneration - 1
+        let center = NotificationCenter()
+        let coordinator = AccountIdentityCoordinator(
+            notificationCenter: center,
+            activeGeneration: staleGeneration)
+        var transitions: [UInt64] = []
+        var restores: [UInt64] = []
+        var accepted: [AccountBoundToken] = []
+        coordinator.bind(
+            onIdentityTransition: { transitions.append($0) },
+            onRestoreCompleted: { restores.append($0) },
+            onTokenAvailable: {
+                if let token = $0 { accepted.append(token) }
+            })
+        coordinator.start()
+
+        center.post(
+            name: CaptureAccountScope.identityDidChangeNotification,
+            object: nil,
+            userInfo: ["generation": NSNumber(value: currentGeneration)])
+        coordinator.restoreCompleted(generation: staleGeneration)
+        coordinator.tokenDidChange(
+            AccountBoundToken(
+                value: "stale-a-token",
+                generation: staleGeneration),
+            generation: staleGeneration)
+        coordinator.restoreCompleted(generation: currentGeneration)
+        let currentToken = AccountBoundToken(
+            value: "current-b-token",
+            generation: currentGeneration)
+        coordinator.tokenDidChange(
+            currentToken,
+            generation: currentGeneration)
+
+        XCTAssertEqual(transitions, [currentGeneration])
+        XCTAssertEqual(restores, [currentGeneration])
+        XCTAssertEqual(accepted, [currentToken])
+        XCTAssertEqual(coordinator.currentToken, currentToken)
+        coordinator.stop()
     }
 
     @MainActor
@@ -660,23 +718,51 @@ final class PairingScenarioHarness: @unchecked Sendable {
             storefrontCountryCode: { "USA" })
         model.resetForIdentityTransition()
         let generation = CaptureAccountScope.identityGeneration
+        guard generation > 0 else {
+            throw BrineStepError("the delayed-token generation could not advance")
+        }
+        let staleGeneration = generation - 1
+        let center = NotificationCenter()
+        delayedTokenTransitions = []
+        delayedTokenRestores = []
         let coordinator = AccountIdentityCoordinator(
-            activeGeneration: generation)
+            notificationCenter: center,
+            activeGeneration: staleGeneration)
         coordinator.bind(
-            onIdentityTransition: { _ in },
-            onRestoreCompleted: { _ in },
+            onIdentityTransition: {
+                self.delayedTokenTransitions.append($0)
+                model.resetForIdentityTransition()
+            },
+            onRestoreCompleted: {
+                self.delayedTokenRestores.append($0)
+                model.resetForIdentityTransition()
+            },
             onTokenAvailable: { available in
-                guard let available else { return }
-                token.value = available.value
-                model.refreshForAvailableToken(
-                    expectedGeneration: available.generation)
+                if let available {
+                    token.value = available.value
+                    model.refreshForAvailableToken(
+                        expectedGeneration: available.generation)
+                } else {
+                    token.value = nil
+                    model.clearUnavailableIdentityToken(
+                        expectedGeneration: generation)
+                }
             })
+        coordinator.start()
+        center.post(
+            name: CaptureAccountScope.identityDidChangeNotification,
+            object: nil,
+            userInfo: ["generation": NSNumber(value: generation)])
+        coordinator.restoreCompleted(generation: staleGeneration)
         coordinator.tokenDidChange(
             AccountBoundToken(
                 value: "first-account-stale-token",
-                generation: generation &- 1),
-            generation: generation &- 1)
-        staleTokenWasIgnored = model.entitlement == .off
+                generation: staleGeneration),
+            generation: staleGeneration)
+        staleTokenWasIgnored =
+            model.entitlement == .off
+            && delayedTokenTransitions == [generation]
+            && delayedTokenRestores.isEmpty
         self.vaultModel = model
         self.delayedTokenCoordinator = coordinator
         self.delayedTokenGeneration = generation
@@ -688,6 +774,7 @@ final class PairingScenarioHarness: @unchecked Sendable {
               let generation = delayedTokenGeneration else {
             throw BrineStepError("the delayed token scenario was not prepared")
         }
+        coordinator.restoreCompleted(generation: generation)
         coordinator.tokenDidChange(
             AccountBoundToken(
                 value: "second-account-token",
@@ -714,9 +801,12 @@ final class PairingScenarioHarness: @unchecked Sendable {
     }
 
     func assertStaleVaultNeverReconnected() throws {
-        guard staleTokenWasIgnored else {
+        guard staleTokenWasIgnored,
+              let generation = delayedTokenGeneration,
+              delayedTokenTransitions == [generation],
+              delayedTokenRestores == [generation] else {
             throw BrineStepError(
-                "the prior account's delayed token reconnected its Vault")
+                "the prior account's delayed restore or token reconnected its Vault")
         }
     }
 
@@ -765,6 +855,8 @@ final class PairingScenarioHarness: @unchecked Sendable {
 
     private var delayedTokenCoordinator: AccountIdentityCoordinator?
     private var delayedTokenGeneration: UInt64?
+    private var delayedTokenTransitions: [UInt64] = []
+    private var delayedTokenRestores: [UInt64] = []
 
     private func seedBearerVault() throws -> CellStore {
         let store = CellStore(

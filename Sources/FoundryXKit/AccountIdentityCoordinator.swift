@@ -69,11 +69,10 @@ public final class AccountIdentityCoordinator: ObservableObject {
     }
 
     public func restoreCompleted(generation: UInt64) {
-        if activeGeneration != generation {
-            currentToken = nil
-            onTokenAvailable(nil)
+        guard generation == activeGeneration,
+              generation == CaptureAccountScope.identityGeneration else {
+            return
         }
-        activeGeneration = generation
         onRestoreCompleted(generation)
     }
 
@@ -82,6 +81,7 @@ public final class AccountIdentityCoordinator: ObservableObject {
         generation: UInt64
     ) {
         guard generation == activeGeneration,
+              generation == CaptureAccountScope.identityGeneration,
               token?.generation == nil || token?.generation == generation else {
             return
         }
@@ -90,6 +90,9 @@ public final class AccountIdentityCoordinator: ObservableObject {
     }
 
     private func receiveIdentityChange(generation: UInt64) {
+        guard generation == CaptureAccountScope.identityGeneration else {
+            return
+        }
         activeGeneration = generation
         currentToken = nil
         onTokenAvailable(nil)
