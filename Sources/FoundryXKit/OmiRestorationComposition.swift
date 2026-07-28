@@ -49,7 +49,10 @@ public enum OmiRestorationComposition {
     ///
     /// `deviceContext` is NOT defaulted. A default would let the boundary this factory
     /// exists to hold be crossed by omission — the mutation "omit the context at the factory
-    /// boundary" would then be a change nobody has to make deliberately.
+    /// boundary" would then be a change nobody has to make deliberately. Dropping it here
+    /// still compiles (the spool's own parameter is optional, so a directly-constructed
+    /// spool keeps its shipped behaviour) and the restoration then records conversations
+    /// with no device record — which is what the feature catches.
     public static func makeRestorationSpool(
         binding: CaptureAccountScope.AccountBinding?,
         root: URL,

@@ -204,8 +204,14 @@ final class CaptureAccountPreferenceTests: ProcessGlobalStateTestCase {
             1,
             "the restoration launch must resolve exactly one capture snapshot")
         XCTAssertTrue(
-            appDelegate.contains("OmiRestorationSpool("),
-            "Task 7 must create the headless restoration spool")
+            appDelegate.contains("OmiRestorationComposition.makeRestorationSpool("),
+            "Task 7 must create the headless restoration spool — through the Kit-level "
+                + "composition factory, which is the only place a test can execute the "
+                + "boundary where a device identity enters the archive")
+        XCTAssertTrue(
+            appDelegate.contains("OmiRestorationComposition.resolveDeviceContext("),
+            "the restoration launch must resolve WHICH device it is about to record from, "
+                + "rather than letting the spool discover an identity it does not possess")
         XCTAssertTrue(
             appDelegate.contains("dm.start()"),
             "Task 7 must activate CoreBluetooth restoration after owner proof")
