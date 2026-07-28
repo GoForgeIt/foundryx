@@ -1,8 +1,31 @@
-// GapRecoveryWindow — the gap-recovery window, modelled as data.
+// GapRecoveryWindow — the gap-recovery window, modelled as data
+// (track 20260725T2306_device_agnostic_recording_source, task T3).
 //
-// T3 RED STUB (track 20260725T2306_device_agnostic_recording_source). The type surface is
-// declared so `features/device-gap-recovery.feature` can be wired and RUN; every body is
-// unimplemented so the scenarios fail on real assertions, not on a missing symbol.
+// THE DISTINCTION THIS FILE EXISTS TO KEEP. When the link returns, the device may still be
+// holding audio recorded while it was away. Three situations look alike from the transport
+// and are completely different to the person who was talking:
+//
+//   * we pulled it back                            -> `.recovered`
+//   * we did NOT pull it back this time, and the
+//     device still has it for the next reconnect   -> `.nothingToRecover`   (NOT a loss)
+//   * it is gone                                   -> `.unrecoverable`      (a loss)
+//
+// The shipped sync engine already distinguishes them internally — `failed` deliberately
+// issues no ring advance so "the device keeps its unread cache for next reconnect" — but
+// nothing published that distinction, so any surface would have had to guess. Guessing
+// wrong in the safe-looking direction ("couldn't recover your audio") tells a person their
+// conversation is lost when it is sitting on the device.
+//
+// EVERY CLOSE IS DATA. The window is a value type whose `Close` enum enumerates the ways it
+// can end, so "how many call sites close the window" is not a number anyone maintains, and
+// no call site can invent an outcome of its own. Two rules the plan fixes:
+//
+//   * at most ONE outcome per opened window;
+//   * exactly one only for a window tagged AT OPEN as following an interrupted capture —
+//     a window that interrupted nothing has nothing to say and says nothing.
+//
+// Whether a drop interrupted an active capture is a fact `CaptureManager` owns.
+// `DeviceManager` reports transport facts and must never infer it.
 
 import Foundation
 
@@ -18,8 +41,12 @@ public enum GapRecoveryOutcome: Equatable, Sendable {
     /// The audio for the gap is gone.
     case unrecoverable(reason: String)
 
-    /// True only when audio was actually lost.
-    public var isLoss: Bool { false }   // T3 RED STUB
+    /// True only when audio was actually lost. `.nothingToRecover` is deliberately NOT a
+    /// loss: the span is still on the device.
+    public var isLoss: Bool {
+        if case .unrecoverable = self { return true }
+        return false
+    }
 }
 
 /// How a conversation interrupted by the drop continues once the link returns.
@@ -42,6 +69,10 @@ public struct GapRecoveryWindow: Equatable, Sendable {
         case linkDroppedBeforeEngine
         /// The storage service never materialised within the decision deadline.
         case decisionDeadlinePassed
+        /// The device exposes no offline storage at all, so it never recorded the gap.
+        case deviceHasNoStorage
+        /// The device HAS storage but we could not talk to it this time.
+        case storageUnavailable(reason: String)
         /// Any other close before an engine ran (superseded, torn down, budget released).
         case closedWithoutEngine(reason: String)
     }
@@ -63,20 +94,77 @@ public struct GapRecoveryWindow: Equatable, Sendable {
     /// Close the window. Returns the outcome to publish, or `nil` when there is nothing
     /// honest to say: a window that interrupted no conversation, or one already closed.
     public mutating func close(_ cause: Close) -> GapRecoveryOutcome? {
-        _ = cause
-        return nil   // T3 RED STUB
+        guard isOpen else { return nil }          // at most one outcome per opened window
+        isOpen = false
+        guard followsInterruptedCapture else { return nil }   // nothing interrupted, nothing to say
+        let outcome: GapRecoveryOutcome
+        switch cause {
+        case .engineFinished(let ending):
+            outcome = Self.outcome(for: ending)
+        case .linkDroppedBeforeEngine:
+            outcome = .nothingToRecover(
+                reason: "the link went away before this audio could be requested, so the "
+                    + "device still has it for the next reconnect")
+        case .decisionDeadlinePassed:
+            outcome = .nothingToRecover(
+                reason: "this device did not offer its stored audio in time, so it still "
+                    + "has it for the next reconnect")
+        case .deviceHasNoStorage:
+            // Not a failure to COLLECT — a failure to have recorded. This device keeps no
+            // audio while it is disconnected, so the gap was never captured and is gone.
+            // Calling that "still on the device" would be the opposite lie.
+            outcome = .unrecoverable(
+                reason: "this device does not keep audio while it is disconnected, so "
+                    + "nothing was recorded during the gap")
+        case .storageUnavailable(let reason):
+            outcome = .nothingToRecover(
+                reason: "this device's stored audio could not be reached (\(reason)), so it "
+                    + "still has it for the next reconnect")
+        case .closedWithoutEngine(let reason):
+            outcome = .nothingToRecover(
+                reason: "this audio was never requested (\(reason)), so the device still "
+                    + "has it for the next reconnect")
+        }
+        published = outcome
+        return outcome
     }
 
     /// The engine's ending, translated into what the user is told.
     public static func outcome(for ending: OmiOfflineSyncEngine.Outcome) -> GapRecoveryOutcome {
-        _ = ending
-        return .nothingBuffered   // T3 RED STUB
+        switch ending {
+        case .nothingToSync:
+            return .nothingBuffered
+        case .synced(let records, let frames):
+            // A transfer that carried no frames recovered nothing, and saying "recovered"
+            // about zero audio is the same lie in the other direction.
+            return frames > 0 ? .recovered(records: records, frames: frames) : .nothingBuffered
+        case .aborted(let records, let frames, let reason):
+            // The engine advanced ONLY over what it consumed, so the remainder is still on
+            // the device — partial recovery, not loss.
+            return .partiallyRecovered(records: records, frames: frames, reason: reason)
+        case .failed(let why):
+            // Nothing was consumed and NO advance was issued: the device keeps its unread
+            // cache for the next reconnect. This is the case that must never read as loss.
+            return .nothingToRecover(
+                reason: "this audio could not be collected (\(why)), so the device still "
+                    + "has it for the next reconnect")
+        case .unsupportedProtocol(let why):
+            // The device cannot replay what it recorded while away. That audio is gone.
+            return .unrecoverable(
+                reason: "this device cannot send back audio it recorded while disconnected "
+                    + "(\(why))")
+        }
     }
 
     /// Whether the conversation carried through the gap is resumed, or a proposed
     /// replacement is refused.
     public func continuation(forProposedCaptureId proposed: String?) -> GapCaptureContinuation {
-        _ = proposed
-        return .openFresh   // T3 RED STUB
+        guard let carried = interruptedCaptureId else { return .openFresh }
+        guard let proposed else { return .resumeSame(captureId: carried) }
+        // A gap must not split one conversation into two: while an interrupted identity is
+        // carried, a DIFFERENT proposed conversation is refused rather than opened.
+        return proposed == carried
+            ? .resumeSame(captureId: carried)
+            : .refuseReplacement(carrying: carried, proposed: proposed)
     }
 }

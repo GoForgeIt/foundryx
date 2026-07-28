@@ -16,8 +16,8 @@ final class DeviceGapRecoveryFeatureTests: XCTestCase {
         let result = try await BrineFeatureRunner.run(
             "device-gap-recovery",
             registry: StepRegistry(DeviceGapRecoverySteps.make(world: world)))
-        XCTAssertEqual(result.passed, 13,
-                       "device-gap-recovery must run all 13 scenarios (6 plain + 7 outline rows)")
+        XCTAssertEqual(result.passed, 15,
+                       "device-gap-recovery must run all 15 scenarios (8 plain + 7 outline rows)")
     }
 
     /// Every engine ending must map to exactly one outcome, and the mapping must be TOTAL:
@@ -53,6 +53,8 @@ final class DeviceGapRecoveryFeatureTests: XCTestCase {
             .linkDroppedBeforeEngine,
             .decisionDeadlinePassed,
             .closedWithoutEngine(reason: "superseded"),
+            .deviceHasNoStorage,
+            .storageUnavailable(reason: "subscribe failed"),
             .engineFinished(.nothingToSync),
         ] {
             var tagged = GapRecoveryWindow(interruptedCaptureId: "cap-1")
@@ -148,6 +150,14 @@ enum DeviceGapRecoverySteps {
             },
             defineStep("the storage service never appears and the decision deadline passes") { ctx, _, _ in
                 world.close(.decisionDeadlinePassed)
+                return ctx
+            },
+            defineStep("the device turns out to have no offline storage at all") { ctx, _, _ in
+                world.close(.deviceHasNoStorage)
+                return ctx
+            },
+            defineStep("the device's stored audio cannot be reached this time") { ctx, _, _ in
+                world.close(.storageUnavailable(reason: "subscribe failed"))
                 return ctx
             },
             defineStep("the sync engine ends with {string}") { ctx, p, _ in

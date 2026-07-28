@@ -120,6 +120,14 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     // AudioFrameSource — the connected device's Opus stream.
     public var onFrame: ((Data) -> Void)?
     public var onState: ((AudioSourceState) -> Void)?
+    /// Which conversation a drop interrupted, supplied by the owner of capture state
+    /// (`CaptureManager`). `DeviceManager` reports transport facts and must NOT infer this —
+    /// it cannot see paused state or session boundaries (track 20260725T2306, T3).
+    public var interruptedCaptureId: (() -> String?)?
+    /// Published once per gap-recovery window that followed an interrupted conversation.
+    /// T5 renders it; nothing else may invent one.
+    public var onGapRecoveryOutcome: ((GapRecoveryOutcome) -> Void)?
+
     /// Fired when the Omi hardware button is DOUBLE-clicked (wired to pause/resume the
     /// current recording). Detected from the Omi button-trigger characteristic — see
     /// `OmiUUID.buttonService`. Only fires if the paired firmware exposes that service.
@@ -245,6 +253,8 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     private var storageDataChar: CBCharacteristic?
     private var storageControlChar: CBCharacteristic?
     private var gapSync: OmiOfflineSyncEngine?
+    /// The current gap-recovery window, tagged at open (track 20260725T2306, T3). bleQueue only.
+    private var gapWindow: GapRecoveryWindow?
     /// True from connect until the storage-sync decision resolves (service absent,
     /// unsupported, finished, failed). While true, LIVE audio frames are held so
     /// recovered gap audio lands in the WAL first — recorded order.
@@ -647,18 +657,38 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     private func beginGapSyncWindow() {
         gapSyncHolding = true
         liveHold.removeAll()
+        // Tag AT OPEN. Asking later would ask after the reconnect has already changed the
+        // capture state the question is about.
+        gapWindow = GapRecoveryWindow(interruptedCaptureId: interruptedCaptureId?())
         let generationAtStart = gapSyncGeneration
         bleQueue.asyncAfter(deadline: .now() + gapSyncDecisionTimeout) { [weak self] in
             guard let self, self.gapSyncGeneration == generationAtStart, self.gapSyncHolding,
                   self.gapSync == nil else { return }
             self.log?.warn("Omi: storage sync never started within \(Int(self.gapSyncDecisionTimeout))s — releasing live audio")
+            self.closeGapWindow(.decisionDeadlinePassed)
             self.endGapSyncWindow(flush: true)
         }
+    }
+
+    /// The ONE place a gap-recovery outcome reaches anybody. Every close path calls this
+    /// with its cause; the window itself decides whether there is anything to say, so no
+    /// call site can invent an outcome and a second close is a no-op by construction.
+    private func closeGapWindow(_ cause: GapRecoveryWindow.Close) {
+        guard var window = gapWindow else { return }
+        let outcome = window.close(cause)
+        gapWindow = window
+        guard let outcome else { return }
+        onGapRecoveryOutcome?(outcome)
     }
 
     /// Close the hold: optionally flush the held live frames (in arrival order)
     /// into the normal frame path, and drop the engine.
     private func endGapSyncWindow(flush: Bool) {
+        // A teardown that reached no engine still owes the user an answer when it
+        // interrupted a conversation. If an engine already finished, its outcome was
+        // published first and this is a no-op.
+        closeGapWindow(.closedWithoutEngine(reason: "the window closed before it was collected"))
+        gapWindow = nil
         gapSyncGeneration &+= 1
         gapSync = nil
         gapSyncHolding = false
@@ -729,6 +759,7 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
         case .failed(let why):
             log?.warn("Omi: offline sync failed (\(why)) — device keeps its unread cache for next reconnect")
         }
+        closeGapWindow(.engineFinished(outcome))
         endGapSyncWindow(flush: true)
     }
 
@@ -938,7 +969,14 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
         setBatteryLevel(nil)          // the level is stale once the link drops
         // Settle any in-flight gap sync FIRST so held live audio is released (in
         // order) into the session before `.stopped` ends it.
-        gapSync?.linkDropped()
+        if gapSync == nil {
+            // The reachable sequence the plan names: didConnect -> window opens -> the link
+            // goes before service discovery ever produced an engine. The unread span was
+            // never requested, so it is still on the device — never a loss.
+            closeGapWindow(.linkDroppedBeforeEngine)
+        } else {
+            gapSync?.linkDropped()   // settles through gapSyncFinished, which publishes
+        }
         endGapSyncWindow(flush: true)
         audioChar = nil; storageDataChar = nil; storageControlChar = nil
         emitSourceState(.stopped)            // ends the ambient capture session
@@ -976,6 +1014,9 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
         }
         if !hasStorage {
             log?.info("Omi: no storage service — offline cache sync unavailable, live only")
+            // A device with NO storage service never buffered the gap. That is a different
+            // fact from "we could not collect it", and the user is owed the honest one.
+            closeGapWindow(.deviceHasNoStorage)
             endGapSyncWindow(flush: true)
         }
     }
@@ -1015,6 +1056,8 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
         if ch.uuid == OmiUUID.storageDataChar {
             if let error {
                 log?.warn("Omi: storage subscribe failed (\(error.localizedDescription)) — skipping offline sync")
+                // The device HAS storage; we could not reach it this time, so it keeps the span.
+                closeGapWindow(.storageUnavailable(reason: error.localizedDescription))
                 endGapSyncWindow(flush: true)
                 return
             }

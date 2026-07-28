@@ -30,6 +30,20 @@ Feature: Audio missed during a link gap is reported truthfully
     Then the outcome says the audio is still on the device
     And the outcome is not a loss
 
+  Scenario: a device that keeps no audio while disconnected is reported honestly as a loss
+    Given a conversation was interrupted when the link dropped
+    And the device reconnects and the gap window opens
+    When the device turns out to have no offline storage at all
+    Then the outcome reads "unrecoverable"
+    And the outcome is a loss only when the audio is really gone
+
+  Scenario: stored audio that cannot be reached this time is not a loss
+    Given a conversation was interrupted when the link dropped
+    And the device reconnects and the gap window opens
+    When the device's stored audio cannot be reached this time
+    Then the outcome says the audio is still on the device
+    And the outcome is not a loss
+
   Scenario: a window that interrupted no conversation closes silently
     Given no conversation was interrupted when the link dropped
     And the device reconnects and the gap window opens
