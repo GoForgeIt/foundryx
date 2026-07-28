@@ -15,9 +15,13 @@ final class DeviceAccountScopeFeatureTests: XCTestCase {
     func testDeviceAccountScopeFeature() async throws {
         let world = try DeviceAccountScopeWorld()
         do {
-            try await BrineFeatureRunner.run(
+            // L3: pin the POPULATION. BrineFeatureRunner asserts only that nothing failed;
+            // deleting a scenario would otherwise leave this suite green.
+            let result = try await BrineFeatureRunner.run(
                 "device-account-scope",
                 registry: StepRegistry(DeviceAccountScopeSteps.make(world: world)))
+            XCTAssertEqual(result.passed, 9,
+                           "device-account-scope must run all 9 scenarios (8 + the transport round trip)")
         } catch {
             world.cleanup()
             throw error
@@ -116,6 +120,15 @@ final class DeviceAccountScopeFeatureTests: XCTestCase {
                                                         ready: [identity])?.identity,
                        identity)
 
+        // M2: a reconnect for a device this account does not remember is a NO-OP, and must
+        // say so. Reporting it as `.recorded` is the mechanism by which H1 — a detach that
+        // nothing ever cleared — stayed invisible.
+        let unknown = RecordingDeviceIdentity(shape: .audioRoute, hardwareToken: "never-seen")
+        XCTAssertEqual(RecordingDeviceStore.recordUserReconnect(identity: unknown),
+                       .noMatchingRecord(scope: store.scope))
+        XCTAssertFalse(try store.records().contains { $0.identity == unknown },
+                       "a no-op reconnect invented a remembered device")
+
         // With no resolvable scope the outcome is LOUD and typed, never a silent no-op.
         CaptureAccountScope.setContainerForTests(
             URL(fileURLWithPath: "/dev/null/not-a-container", isDirectory: true))
@@ -123,6 +136,36 @@ final class DeviceAccountScopeFeatureTests: XCTestCase {
                                                                   displayName: "Trail Mic") {
             XCTFail("an unresolvable scope reported a successful detach")
         }
+    }
+
+    /// M1 — a user detach that CANNOT be persisted must not vanish. `DeviceManager` holds a
+    /// `DoorLog`; the fail-closed store paths (`currentAccountBinding()` returning nil) are
+    /// real, so the outcome is logged at error level. Both arms are asserted so "no error
+    /// was logged" cannot pass by the logger simply never logging.
+    func testAnUnpersistableDetachIsLoggedLoudlyRatherThanSwallowed() throws {
+        let world = try DeviceAccountScopeWorld()
+        defer { world.cleanup() }
+        try world.freshEnvironment()
+        try world.signIn("log-owner")
+        _ = try world.stagePairedTransportDevice(named: "Trail Mic")
+
+        // POSITIVE CONTROL: with a resolvable scope the detach is recorded, at info, with
+        // no error line — so the failing arm below is distinguishing something.
+        let healthy = DoorLog()
+        DeviceManager(log: healthy).forget()
+        XCTAssertTrue(healthy.entries.contains { $0.level == .info && $0.text.contains("device forget: recorded in acct-") },
+                      "a successful detach was not logged at all: \(healthy.entries.map(\.text))")
+        XCTAssertFalse(healthy.entries.contains { $0.level == .error },
+                       "a successful detach logged an error")
+
+        // Now break the scope resolution and repeat.
+        _ = try world.stagePairedTransportDevice(named: "Trail Mic")
+        CaptureAccountScope.setContainerForTests(
+            URL(fileURLWithPath: "/dev/null/not-a-container", isDirectory: true))
+        let broken = DoorLog()
+        DeviceManager(log: broken).forget()
+        XCTAssertTrue(broken.entries.contains { $0.level == .error && $0.text.contains("NOT PERSISTED") },
+                      "an unpersistable user detach was swallowed: \(broken.entries.map(\.text))")
     }
 
     /// The migration reader declares its own key literals so they resolve statically for
@@ -182,6 +225,14 @@ final class DeviceAccountScopeWorld: @unchecked Sendable {
     var readyIdentities: Set<RecordingDeviceIdentity> = []
     var lastActive: RecordingDeviceRecord?
     var legacyIdentity: RecordingDeviceIdentity?
+    /// The REAL transport object. `forget()` / `connect(_:)` are the two production call
+    /// sites this suite must exercise as a round trip; driving the statics beneath them
+    /// proved nothing about either (finding H1).
+    var deviceManager: DeviceManager?
+    var pairedDevice: DiscoveredDevice?
+    /// `DeviceManager` reads `UserDefaults.standard` directly, so the three device-global
+    /// keys are snapshotted and restored around every scenario that stages a pairing.
+    private var standardDefaultsBefore: [String: Any]?
     var holdOutcome: RecordingDeviceHoldOutcome?
     var migrationOutcome: RecordingDeviceMigrationOutcome?
 
@@ -215,6 +266,9 @@ final class DeviceAccountScopeWorld: @unchecked Sendable {
     /// from a defect. Each Given re-creates the container, the scope state, and the legacy
     /// defaults from scratch.
     func freshEnvironment() throws {
+        restoreStandardDefaults()
+        deviceManager = nil
+        pairedDevice = nil
         try? CaptureAccountScope.signOutForTests()
         CaptureAccountScope.resetTestEnvironment()
         try? FileManager.default.removeItem(at: container)
@@ -239,6 +293,7 @@ final class DeviceAccountScopeWorld: @unchecked Sendable {
     }
 
     func cleanup() {
+        restoreStandardDefaults()
         try? CaptureAccountScope.signOutForTests()
         CaptureAccountScope.resetTestEnvironment()
         defaults.removePersistentDomain(forName: defaultsName)
@@ -276,6 +331,50 @@ final class DeviceAccountScopeWorld: @unchecked Sendable {
         defaults.set(Date().timeIntervalSinceReferenceDate, forKey: DeviceManager.savedDateKey)
         legacyIdentity = RecordingDeviceIdentity(shape: .bleStream,
                                                  hardwareToken: Self.legacyPeripheralID)
+    }
+
+    private static var transportKeys: [String] {
+        [DeviceManager.savedKey, DeviceManager.savedNameKey, DeviceManager.savedDateKey]
+    }
+
+    /// Stage a pairing exactly as `DeviceManager.setSaved` / `markConnected` write it, in
+    /// the PROCESS-GLOBAL defaults the transport actually reads, and remember the device in
+    /// the account store as a connected device would be.
+    func stagePairedTransportDevice(named name: String) throws -> DiscoveredDevice {
+        if standardDefaultsBefore == nil {
+            // Only PRESENT keys are recorded; a key absent here must be REMOVED on restore,
+            // not written back as a null (which UserDefaults rejects outright).
+            var snapshot: [String: Any] = [:]
+            for key in Self.transportKeys {
+                if let value = UserDefaults.standard.object(forKey: key) { snapshot[key] = value }
+            }
+            standardDefaultsBefore = snapshot
+        }
+        let id = UUID()
+        UserDefaults.standard.set(id.uuidString, forKey: DeviceManager.savedKey)
+        UserDefaults.standard.set(name, forKey: DeviceManager.savedNameKey)
+        UserDefaults.standard.set(Date().timeIntervalSinceReferenceDate,
+                                  forKey: DeviceManager.savedDateKey)
+        let device = DiscoveredDevice(id: id, name: name, rssi: -50)
+        pairedDevice = device
+        deviceManager = DeviceManager()
+        _ = try store().upsert(RecordingDeviceRecord(
+            identity: RecordingDeviceIdentity(shape: .bleStream, hardwareToken: id.uuidString),
+            displayName: name,
+            lastConnected: Date(timeIntervalSinceReferenceDate: 2000)))
+        return device
+    }
+
+    func restoreStandardDefaults() {
+        guard let saved = standardDefaultsBefore else { return }
+        for key in Self.transportKeys {
+            if let value = saved[key] {
+                UserDefaults.standard.set(value, forKey: key)
+            } else {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+        }
+        standardDefaultsBefore = nil
     }
 
     var legacyPairingStillPresent: Bool {
@@ -513,11 +612,58 @@ enum DeviceAccountScopeSteps {
                 return ctx
             },
 
+            // ── the transport round trip (finding H1) ────────────────────────
+            defineStep("the transport remembers a paired device {string}") { ctx, p, _ in
+                _ = try world.stagePairedTransportDevice(named: try p.requireString(0))
+                return ctx
+            },
+            defineStep("I forget the device on the device page") { ctx, _, _ in
+                guard let manager = world.deviceManager else {
+                    throw BrineStepError("no transport was staged")
+                }
+                manager.forget()
+                try world.recomputeActive()
+                return ctx
+            },
+            defineCheck("the detach is recorded against my account") { _, _, _ in
+                guard let device = world.pairedDevice else {
+                    throw BrineStepError("no transport was staged")
+                }
+                let identity = RecordingDeviceIdentity(shape: .bleStream,
+                                                       hardwareToken: device.id.uuidString)
+                guard let record = try world.store().records()
+                    .first(where: { $0.identity == identity }) else {
+                    throw BrineStepError("the account remembers no record for the forgotten device")
+                }
+                guard record.userDetached else {
+                    throw BrineStepError("forget() did not persist the detach")
+                }
+            },
+            defineStep("I pair the same device again on the device page") { ctx, _, _ in
+                guard let manager = world.deviceManager, let device = world.pairedDevice else {
+                    throw BrineStepError("no transport was staged")
+                }
+                // The natural re-pair path. It must clear the detach `forget()` wrote —
+                // `reconnect()` cannot, because `forget()` erased the saved identity it
+                // reads (finding H1).
+                manager.connect(device)
+                world.readyIdentities = Set(try world.store().records().map(\.identity))
+                try world.recomputeActive()
+                return ctx
+            },
+
             // ── preference and readiness, never vendor ───────────────────────
             defineStep("two remembered devices {string} and {string} are both ready") { ctx, p, _ in
                 _ = try world.remember(try p.requireString(0), shape: .audioRoute)
                 _ = try world.remember(try p.requireString(1), shape: .bleStream)
                 world.readyIdentities = Set(try world.store().records().map(\.identity))
+                return ctx
+            },
+            defineStep("I have chosen {string} instead") { ctx, p, _ in
+                // Changing your mind. Two `prefer` calls is what makes "at most one device
+                // is marked as the user's choice" reachable at all.
+                try world.store().prefer(try world.record(named: try p.requireString(0)).identity)
+                try world.recomputeActive()
                 return ctx
             },
             defineStep("I have chosen {string}") { ctx, p, _ in
@@ -567,16 +713,41 @@ enum DeviceAccountScopeSteps {
                 }
             },
             defineCheck("at most one device is active") { _, _, _ in
+                // THE FIRST VERSION OF THIS CHECK WAS A TAUTOLOGY. It counted records equal
+                // to `active(...)`, which returns a single Optional, so `count <= 1` was
+                // guaranteed by the return type. Both arms below can fail, and each has an
+                // executed mutation.
                 let records = try world.store().records()
-                let actives = records.filter {
-                    RecordingDeviceActivation.active(among: records, ready: world.readyIdentities)?
-                        .identity == $0.identity
-                }
-                guard actives.count <= 1 else {
-                    throw BrineStepError("\(actives.count) devices are active")
-                }
                 guard records.count >= 2 else {
                     throw BrineStepError("only \(records.count) device(s) remembered — the claim is vacuous")
+                }
+                // (a) the DURABLE state may not mark two devices as the user's choice —
+                // fails if `prefer` ever stops clearing the others.
+                let preferred = records.filter(\.userPreferred).map(\.displayName)
+                guard preferred.count <= 1 else {
+                    throw BrineStepError("\(preferred.count) devices are marked as the user's choice: \(preferred)")
+                }
+                // (b) and even against a store that IS ambiguous, selection must be
+                // single-valued and STABLE — the same device whatever order the records
+                // arrive in. Fails if the identity tiebreak is dropped, because `max(by:)`
+                // over indistinguishable elements then returns whichever came first.
+                let ambiguous = records.map {
+                    RecordingDeviceRecord(identity: $0.identity, displayName: $0.displayName,
+                                          lastConnected: $0.lastConnected,
+                                          userDetached: false, userPreferred: true)
+                }
+                let ready = Set(ambiguous.map(\.identity))
+                var chosen: Set<RecordingDeviceIdentity> = []
+                for permutation in [ambiguous, ambiguous.reversed()] {
+                    guard let active = RecordingDeviceActivation.active(among: Array(permutation),
+                                                                        ready: ready) else {
+                        throw BrineStepError("no device was selected from a ready, undetached set")
+                    }
+                    chosen.insert(active.identity)
+                }
+                guard chosen.count == 1 else {
+                    throw BrineStepError(
+                        "selection is not single-valued under an ambiguous store: \(chosen.count) different devices chosen")
                 }
             },
 

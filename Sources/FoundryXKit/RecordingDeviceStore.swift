@@ -177,7 +177,11 @@ public final class RecordingDeviceStore {
 
 public enum RecordingDeviceDetachOutcome: Equatable, Sendable {
     case recorded(scope: String)
-    /// Loud, typed, never silent: the detach could not be persisted.
+    /// The gesture referred to a device this account does not remember, so nothing changed.
+    /// A distinct fact from `recorded`: reporting a no-op as success is how a detach that
+    /// was never cleared stayed invisible.
+    case noMatchingRecord(scope: String)
+    /// Loud, typed, never silent: the outcome could not be persisted at all.
     case unavailable(String)
 }
 
@@ -206,6 +210,11 @@ extension RecordingDeviceStore {
         }
     }
 
+    /// ASYMMETRIC WITH `recordUserDetach`, ON PURPOSE. A detach for a device the store has
+    /// never seen is upserted, because the detach is itself the fact worth remembering. A
+    /// reconnect for an unknown device is NOT upserted: doing so would invent a remembered
+    /// device the account never paired, putting it in the set `RecordingDeviceActivation`
+    /// chooses from. So the no-op is reported as a no-op.
     @discardableResult
     public static func recordUserReconnect(
         identity: RecordingDeviceIdentity
@@ -215,6 +224,9 @@ extension RecordingDeviceStore {
                 .errorDescription ?? "no account scope")
         }
         do {
+            guard try store.records().contains(where: { $0.identity == identity }) else {
+                return .noMatchingRecord(scope: store.scope)
+            }
             try store.reconnect(identity)
             return .recorded(scope: store.scope)
         } catch {

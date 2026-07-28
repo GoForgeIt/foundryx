@@ -56,6 +56,19 @@ Feature: Recording devices are remembered per account, and detaches stick
     When I reconnect "Trail Mic" myself
     Then it is the active device
 
+  Scenario: forgetting a device on the device page and pairing it again makes it active once more
+    Given account "first" is signed in
+    And the transport remembers a paired device "Trail Mic"
+    And the device is ready
+    Then it is the active device
+    When I forget the device on the device page
+    Then the detach is recorded against my account
+    And no device is active
+    When the app relaunches and the device is ready again
+    Then no device is active
+    When I pair the same device again on the device page
+    Then it is the active device
+
   Scenario: the active device follows preference and readiness, never vendor identity
     Given account "first" is signed in
     And two remembered devices "Alpha Recorder" and "Omi" are both ready
@@ -63,6 +76,8 @@ Feature: Recording devices are remembered per account, and detaches stick
     Then it is the active device
     And swapping which device is the BLE one does not change the active device
     When "Alpha Recorder" stops being ready
+    Then "Omi" is the active device
+    When I have chosen "Omi" instead
     Then "Omi" is the active device
     And at most one device is active
 

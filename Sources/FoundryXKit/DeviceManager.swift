@@ -453,6 +453,21 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
 
     public func connect(_ device: DiscoveredDevice) {
         autoConnect = true
+        // H1: THE RE-PAIR PATH IS THE ONE THAT MATTERS. `forget()` erases the three
+        // device-global keys, so by the time the user pairs again `reconnect()` has no saved
+        // identity to clear and `Self.loadSaved()` is nil — a re-paired device would stay
+        // permanently excluded by `RecordingDeviceActivation`. Pairing THIS device is the
+        // user gesture that revokes the earlier detach, so it is recorded here.
+        //
+        // Deliberately BEFORE the transport guard: the flag records USER INTENT, not radio
+        // state. A pairing tap while the central is not yet ready is still the intent, and
+        // leaving the store detached until the radio happens to be ready is exactly the
+        // silent staleness this fixes.
+        logDetachOutcome(
+            RecordingDeviceStore.recordUserReconnect(
+                identity: RecordingDeviceIdentity(shape: .bleStream,
+                                                  hardwareToken: device.id.uuidString)),
+            gesture: "pair")
         guard let c = central,
               let p = c.retrievePeripherals(withIdentifiers: [device.id]).first
                   ?? discoveredPeripherals[device.id] else { return }
@@ -467,12 +482,16 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     /// fall back to a scan when there's nothing saved / it's out of range.
     public func reconnect() {
         autoConnect = true
-        // A manual reconnect is the ONLY thing that clears an explicit detach
-        // (track 20260725T2306, T2). The automatic paths never reach this method.
+        // One of the two USER gestures that clear an explicit detach; the other is
+        // `connect(_:)`, the re-pair path (track 20260725T2306, T2). No automatic path
+        // reaches either. This arm covers a device that is still SAVED — after `forget()`
+        // there is nothing saved here, which is why the re-pair arm exists.
         if let saved = Self.loadSaved() {
-            RecordingDeviceStore.recordUserReconnect(
-                identity: RecordingDeviceIdentity(shape: .bleStream,
-                                                  hardwareToken: saved.id.uuidString))
+            logDetachOutcome(
+                RecordingDeviceStore.recordUserReconnect(
+                    identity: RecordingDeviceIdentity(shape: .bleStream,
+                                                      hardwareToken: saved.id.uuidString)),
+                gesture: "reconnect")
         }
         guard let c = central, c.state == .poweredOn else { start(); return }
         autoReconnect(userInitiated: true)
@@ -483,13 +502,17 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
         autoConnect = false
         // Persist the EXPLICIT detach into the account-scoped store BEFORE the
         // device-global keys go, so a relaunch cannot re-arm a device the user detached
-        // (track 20260725T2306, T2). The outcome is typed and returned by the store, never
-        // swallowed.
+        // (track 20260725T2306, T2). The store returns a typed outcome and it is LOGGED —
+        // `RecordingDeviceStore.current()` genuinely returns nil on the fail-closed paths
+        // (blocked deletion admission, unresolvable durable container), and an explicit
+        // user detach that could not be persisted must not vanish without a trace.
         if let saved = Self.loadSaved() {
-            RecordingDeviceStore.recordUserDetach(
-                identity: RecordingDeviceIdentity(shape: .bleStream,
-                                                  hardwareToken: saved.id.uuidString),
-                displayName: saved.name)
+            logDetachOutcome(
+                RecordingDeviceStore.recordUserDetach(
+                    identity: RecordingDeviceIdentity(shape: .bleStream,
+                                                      hardwareToken: saved.id.uuidString),
+                    displayName: saved.name),
+                gesture: "forget")
         }
         central?.stopScan()
         if let p = peripheral { central?.cancelPeripheralConnection(p) }
@@ -500,6 +523,20 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
         DispatchQueue.main.async { self.saved = nil }
         setState(.idle)
         emitSourceState(.stopped)
+    }
+
+    /// Report what the account-scoped device store actually did with a user gesture.
+    /// A failure here is a LOST USER DECISION, so it logs at error level; a no-op reconnect
+    /// (nothing remembered under this account) is ordinary and logs at info.
+    private func logDetachOutcome(_ outcome: RecordingDeviceDetachOutcome, gesture: String) {
+        switch outcome {
+        case .recorded(let scope):
+            log?.info("device \(gesture): recorded in \(scope)")
+        case .noMatchingRecord(let scope):
+            log?.info("device \(gesture): no remembered device to update in \(scope)")
+        case .unavailable(let reason):
+            log?.error("device \(gesture): NOT PERSISTED — \(reason)")
+        }
     }
 
     /// Drop the current link but keep the saved device (so we auto-reconnect).
