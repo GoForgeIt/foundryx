@@ -528,14 +528,22 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     /// Report what the account-scoped device store actually did with a user gesture.
     /// A failure here is a LOST USER DECISION, so it logs at error level; a no-op reconnect
     /// (nothing remembered under this account) is ordinary and logs at info.
+    ///
+    /// THE SCOPE NEVER APPEARS HERE. `DoorLog` ships to a remote diagnostic sink in cleartext
+    /// (see `RecordingDeviceLogRedaction`), and `acct-<hash>` is a stable per-account
+    /// correlation token. M1's requirement is that a lost user decision be LOUD, which the
+    /// error level provides on its own; naming the account buys nothing and costs the
+    /// property `DeviceRefDerivation` was built to protect. The error arm is redacted rather
+    /// than trusted, because a Cocoa failure names the containing folder by itself.
     private func logDetachOutcome(_ outcome: RecordingDeviceDetachOutcome, gesture: String) {
         switch outcome {
-        case .recorded(let scope):
-            log?.info("device \(gesture): recorded in \(scope)")
-        case .noMatchingRecord(let scope):
-            log?.info("device \(gesture): no remembered device to update in \(scope)")
+        case .recorded:
+            log?.info("device \(gesture): recorded")
+        case .noMatchingRecord:
+            log?.info("device \(gesture): no remembered device to update")
         case .unavailable(let reason):
-            log?.error("device \(gesture): NOT PERSISTED — \(reason)")
+            log?.error("device \(gesture): NOT PERSISTED — "
+                + RecordingDeviceLogRedaction.redactingAccountScopes(reason))
         }
     }
 

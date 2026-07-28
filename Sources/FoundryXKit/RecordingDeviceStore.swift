@@ -237,6 +237,40 @@ extension RecordingDeviceStore {
 
 // MARK: - Legacy pairing migration
 
+/// Keeps the account scope off any channel that leaves the handset.
+///
+/// WHY THIS EXISTS. `DoorLog` is not a local logger: `setRemoteSink` is wired in production
+/// (`App/FoundryXAppDelegate.swift`, `App/RootView.swift`) from a gateway URL baked into
+/// `Info.plist`, and `flush()` POSTs the entries as plain text, unauthenticated, over
+/// cleartext HTTP. The scope is `acct-<hash of the account key material>` — a stable
+/// per-account correlation token, and one this repo deliberately refuses to derive
+/// `DeviceRef` from because the scope name is computable from an email address. Emitting it
+/// in a log line would hand out exactly the identifier `DeviceRefDerivation` exists to avoid.
+///
+/// A Cocoa write failure carries it WITHOUT ANYONE INTERPOLATING IT — measured, not assumed:
+/// `You don't have permission to save the file "recording-devices.json" in the folder
+/// "acct-1a2b3c4d5e".` So stripping the interpolations is not sufficient; anything derived
+/// from an error goes through here.
+enum RecordingDeviceLogRedaction {
+    static let replacement = "<account-scope>"
+
+    static func redactingAccountScopes(_ text: String) -> String {
+        var out = ""
+        var rest = Substring(text)
+        while let marker = rest.range(of: CaptureAccountScope.scopePrefix) {
+            out += rest[..<marker.lowerBound]
+            out += replacement
+            let tail = rest[marker.upperBound...]
+            // The token is the scope digest (hex) or the literal `none`; it ends at the
+            // first character that cannot be part of either.
+            let end = tail.firstIndex { !$0.isLetter && !$0.isNumber } ?? tail.endIndex
+            rest = tail[end...]
+        }
+        out += rest
+        return out
+    }
+}
+
 public enum RecordingDeviceMigrationOutcome: Equatable, Sendable {
     case adopted(RecordingDeviceIdentity)
     case alreadyAdopted

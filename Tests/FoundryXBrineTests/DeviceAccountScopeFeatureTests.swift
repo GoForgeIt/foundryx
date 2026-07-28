@@ -153,7 +153,7 @@ final class DeviceAccountScopeFeatureTests: XCTestCase {
         // no error line — so the failing arm below is distinguishing something.
         let healthy = DoorLog()
         DeviceManager(log: healthy).forget()
-        XCTAssertTrue(healthy.entries.contains { $0.level == .info && $0.text.contains("device forget: recorded in acct-") },
+        XCTAssertTrue(healthy.entries.contains { $0.level == .info && $0.text.contains("device forget: recorded") },
                       "a successful detach was not logged at all: \(healthy.entries.map(\.text))")
         XCTAssertFalse(healthy.entries.contains { $0.level == .error },
                        "a successful detach logged an error")
@@ -166,6 +166,70 @@ final class DeviceAccountScopeFeatureTests: XCTestCase {
         DeviceManager(log: broken).forget()
         XCTAssertTrue(broken.entries.contains { $0.level == .error && $0.text.contains("NOT PERSISTED") },
                       "an unpersistable user detach was swallowed: \(broken.entries.map(\.text))")
+
+        // H2 — AND NEITHER LOG NAMES THE ACCOUNT. `DoorLog` ships to a remote sink in
+        // cleartext, so `acct-<hash>` — a stable per-account correlation token — must never
+        // reach it. Durable, so the leak cannot be reintroduced by a later "helpful" detail.
+        for (label, log) in [("healthy", healthy), ("broken", broken)] {
+            for entry in log.entries {
+                XCTAssertFalse(entry.text.contains(CaptureAccountScope.scopePrefix),
+                               "the \(label) log carries an account scope off the device: \(entry.text)")
+            }
+        }
+    }
+
+    /// H2, the arm that does not depend on anyone remembering not to interpolate: a Cocoa
+    /// write failure names the containing folder — which IS the account scope — all by
+    /// itself. The redaction is proved load-bearing by asserting the RAW message carries it.
+    func testAFailureMessageCannotCarryTheAccountScopeOffTheDevice() throws {
+        let world = try DeviceAccountScopeWorld()
+        defer { world.cleanup() }
+        try world.freshEnvironment()
+        try world.signIn("redaction-owner")
+        _ = try world.stagePairedTransportDevice(named: "Trail Mic")
+
+        let root = try world.store().root
+        XCTAssertTrue(root.lastPathComponent.hasPrefix(CaptureAccountScope.scopePrefix),
+                      "this test only means something if the store root IS the account scope: \(root.path)")
+
+        // POSITIVE CONTROL: the unredacted failure really does name the account.
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: root.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path) }
+        var rawNamedTheScope = false
+        do {
+            try Data("probe".utf8).write(to: root.appendingPathComponent("recording-devices.json"),
+                                         options: .atomic)
+        } catch {
+            rawNamedTheScope = error.localizedDescription.contains(CaptureAccountScope.scopePrefix)
+        }
+        XCTAssertTrue(rawNamedTheScope,
+                      "the raw failure no longer names the account folder, so the redaction "
+                          + "below is no longer proving anything on this platform")
+
+        let log = DoorLog()
+        DeviceManager(log: log).forget()
+
+        XCTAssertTrue(log.entries.contains { $0.level == .error && $0.text.contains("NOT PERSISTED") },
+                      "the unwritable store did not fail loudly: \(log.entries.map(\.text))")
+        for entry in log.entries {
+            XCTAssertFalse(entry.text.contains(CaptureAccountScope.scopePrefix),
+                           "a failure message carried the account scope off the device: \(entry.text)")
+        }
+    }
+
+    /// The redaction itself, as a function: every scope form, and text that must survive.
+    func testAccountScopeRedaction() {
+        let redact = RecordingDeviceLogRedaction.redactingAccountScopes
+        XCTAssertEqual(
+            redact("You don't have permission to save the file \"recording-devices.json\" in the folder \"acct-1a2b3c4d5e\"."),
+            "You don't have permission to save the file \"recording-devices.json\" in the folder \"<account-scope>\".")
+        XCTAssertEqual(redact("held in acct-none for now"), "held in <account-scope> for now")
+        XCTAssertEqual(redact("/root/acct-deadbeef/recording-devices.json"),
+                       "/root/<account-scope>/recording-devices.json")
+        XCTAssertEqual(redact("two acct-aaa and acct-bbb"), "two <account-scope> and <account-scope>")
+        // Nothing else is touched.
+        XCTAssertEqual(redact("no scope here at all"), "no scope here at all")
+        XCTAssertEqual(redact(""), "")
     }
 
     /// The migration reader declares its own key literals so they resolve statically for
