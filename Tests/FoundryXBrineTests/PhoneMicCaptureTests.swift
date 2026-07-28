@@ -145,6 +145,15 @@ final class PhoneMicCaptureTests: ProcessGlobalStateTestCase {
         // ACK the segments (door-free) then finalize fires once, exactly like Omi.
         ackAllSegments(dir, capture)
         await mgr.retryPendingFinalizes()
+        // retryPendingFinalizes() only awaits the finalizes IT starts. One the drain loop
+        // already began is no longer "pending", so it is skipped and this returns while
+        // that call is still in flight — under CPU load the assertion then reads an empty
+        // recorder. Same race as ConversationCardTests' helper.
+        //
+        // The "once" claim below is what actually matters and is UNAFFECTED: this waits
+        // only for the FIRST call to land, so a duplicate finalize still fails the
+        // equality (the other known load defect, track 20260726T0030).
+        try await waitUntil { rec.calls.contains(capture) }
         XCTAssertEqual(rec.calls, [capture],
                        "a phone-mic capture finalizes through the normal path, once")
     }
