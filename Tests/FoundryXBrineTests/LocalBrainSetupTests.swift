@@ -40,6 +40,26 @@ final class LocalBrainSetupTests: XCTestCase {
 
     private let fastPolicy = BrainSetupPolicy(stallTimeout: 60, buildTimeout: 180, pollInterval: 2)
 
+    /// Hand the cooperative pool enough suspension points for the stall WATCHDOG to
+    /// actually run between progress reports.
+    ///
+    /// These tests race two tasks — a download loop and the watchdog polling it — and both
+    /// suspend with `Task.yield()`. A single yield does not guarantee the watchdog is
+    /// scheduled, so on the iOS runtime the download would sometimes finish first and the
+    /// stall go undetected: `LocalBrainSetupTests` passed 20/20 on macOS and failed 20/3 on
+    /// iOS, which broke CI (2026-07-28). Yielding several times makes the interleaving
+    /// reliable WITHOUT weakening any assertion — the stall must still be detected.
+    // Free function, not a method: these call sites are inside `@Sendable` closures, and
+    // capturing `self` (a non-Sendable XCTestCase) is a hard error under SwiftPM's strict
+    // concurrency checking even though Xcode's build accepted it.
+}
+
+private func yieldToWatchdog() async {
+    for _ in 0..<8 { await Task.yield() }
+}
+
+extension LocalBrainSetupTests {
+
     /// THE BUG: a download that stops advancing used to spin forever. It must now fail
     /// in bounded time into the honest failure state — not the setup state.
     func testStalledDownloadFailsHonestlyInsteadOfSpinningForever() async throws {
@@ -87,7 +107,7 @@ final class LocalBrainSetupTests: XCTestCase {
                     for i in 1...100 {
                         clock.advance(3)                 // 3s per chunk ⇒ 300s total
                         onProgress(Double(i) / 100)
-                        await Task.yield()
+                        await yieldToWatchdog()
                     }
                 },
                 build: {}),
@@ -314,7 +334,7 @@ final class LocalBrainSetupTests: XCTestCase {
                     for i in 1...10 {
                         clock.advance(59)                // just inside the 60s limit
                         onProgress(Double(i) * 0.001)    // 0.1% each time
-                        await Task.yield()
+                        await yieldToWatchdog()
                     }
                 },
                 build: {}),
@@ -342,7 +362,7 @@ final class LocalBrainSetupTests: XCTestCase {
                         clock.advance(3)
                         onProgress(0.2)                  // backwards: not progress
                         onProgress(0.5)                  // same place: not progress
-                        await Task.yield()
+                        await yieldToWatchdog()
                     }
                     // The watchdog fires long before this loop ends; the cancelled-but-
                     // never-awaited download simply finishes in the background.
@@ -377,7 +397,7 @@ final class LocalBrainSetupTests: XCTestCase {
                     onProgress(1.0)                       // every byte has landed
                     for _ in 0..<60 {                     // 180s of moving + verifying
                         clock.advance(3)
-                        await Task.yield()
+                        await yieldToWatchdog()
                     }
                 },
                 build: {}),
