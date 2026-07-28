@@ -268,32 +268,55 @@ enum DeviceAgnosticSourceSteps {
                 }
             },
             defineCheck("no entry is ranked ahead of another because of its vendor name") { _, _, _ in
-                // Rename the vendor-named device to something neutral; the position of
-                // every OTHER device in the list must not move. If a vendor ladder existed,
-                // renaming the vendor would reshuffle the list.
+                // FIRST VERSION OF THIS CHECK COULD NOT FAIL. It renamed the vendor device
+                // and then compared the relative order of the OTHERS — which a vendor ladder
+                // leaves untouched, since sorting one device to the front does not reorder
+                // the rest. It passed against a deliberately reintroduced
+                // `if name.contains("omi") { sort first }`. What follows can fail, and does.
+                //
+                // (1) A device's position is a function of its own NAME, computed here
+                // independently of the catalog. A ladder keyed on any name substring, any
+                // shape, or any discovery position breaks this immediately.
+                let expected = world.merged
+                    .sorted {
+                        let left = $0.displayName.lowercased(), right = $1.displayName.lowercased()
+                        if left != right { return left < right }
+                        return $0.identity.storageKey < $1.identity.storageKey
+                    }
+                    .map(\.identity)
+                guard world.merged.map(\.identity) == expected else {
+                    throw BrineStepError(
+                        "list order is not determined by the device's own name: "
+                            + "\(world.merged.map(\.displayName)) is not the name order")
+                }
+                // (2) Renaming the vendor device must move it exactly as any other rename
+                // would — the new sequence is again the plain name order of the new names.
                 let renamed = world.observations.map { observation -> RecordingDeviceObservation in
                     guard vendorWords.contains(observation.reportedName.lowercased()) else { return observation }
                     return RecordingDeviceObservation(
                         identity: observation.identity,
-                        reportedName: "Neutral Recorder",
+                        reportedName: "Zebra Recorder",
                         audioProfile: observation.audioProfile,
                         declaredCapabilities: observation.declaredCapabilities)
                 }
-                let before = world.merged.map(\.identity)
-                let after = RecordingSourceCatalog.merge(renamed).map(\.identity)
-                guard Set(before) == Set(after), before.count == after.count else {
+                guard renamed.contains(where: { $0.reportedName == "Zebra Recorder" }) else {
+                    throw BrineStepError("the rename experiment renamed nothing — it proves nothing")
+                }
+                let after = RecordingSourceCatalog.merge(renamed)
+                guard Set(after.map(\.identity)) == Set(world.merged.map(\.identity)) else {
                     throw BrineStepError("renaming the vendor changed the device SET")
                 }
-                // Position may legitimately change for the RENAMED device (the order is by
-                // name); it may not change for any other device relative to the rest.
-                let beforeOthers = before.filter { identity in
-                    !(world.merged.first { $0.identity == identity }
-                        .map { vendorWords.contains($0.displayName.lowercased()) } ?? false)
-                }
-                let afterOthers = after.filter { beforeOthers.contains($0) }
-                guard beforeOthers == afterOthers else {
+                let afterExpected = after
+                    .sorted {
+                        let left = $0.displayName.lowercased(), right = $1.displayName.lowercased()
+                        if left != right { return left < right }
+                        return $0.identity.storageKey < $1.identity.storageKey
+                    }
+                    .map(\.identity)
+                guard after.map(\.identity) == afterExpected else {
                     throw BrineStepError(
-                        "renaming the vendor reordered the other devices: \(beforeOthers) → \(afterOthers)")
+                        "after renaming the vendor the list is no longer in name order: "
+                            + "\(after.map(\.displayName))")
                 }
             },
             defineCheck("{string} is refused with an actionable reason") { _, p, _ in
