@@ -31,6 +31,10 @@ Feature: Recording devices are remembered per account, and detaches stick
     Then the device is restored without a physical re-pair
     When account "second" signs in on the same handset
     Then the second account remembers no devices
+    When a crash leaves the signed-out hold's records in place
+    And account "third" signs in and tries to adopt the hold
+    Then the hold reports that it was already consumed
+    And the second account remembers no devices
 
   Scenario: adopting the legacy pairing twice changes nothing
     Given account "first" is signed in

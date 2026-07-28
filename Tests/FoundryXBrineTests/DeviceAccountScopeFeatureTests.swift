@@ -39,10 +39,21 @@ final class DeviceAccountScopeFeatureTests: XCTestCase {
         XCTAssertEqual(first, DeviceRefDerivation.ref(for: identity, accountKeyMaterial: "google|sub|alice"),
                        "the reference is not stable for one account")
 
-        // A fixed or scope-derived key would make this equal.
-        let scopeName = CaptureAccountScope.key(forAccountKeyMaterial: "google|sub|alice")
-        XCTAssertNotEqual(first, DeviceRefDerivation.ref(for: identity, accountKeyMaterial: scopeName),
-                          "the reference is reproducible from the enumerable scope name")
+        // NOT DERIVED FROM THE SCOPE NAME. The first version of this check compared the
+        // reference against one derived from the scope-name STRING, which a scope-keyed
+        // implementation also passes — it hashed the scope name of the scope name. The
+        // falsifier that works uses the fact that `key(forAccountKeyMaterial:)` CASE-FOLDS:
+        // two different secrets collapse onto ONE scope name, so a scope-keyed reference is
+        // forced to be equal for both while a secret-keyed one is not.
+        let upper = "google|sub|Alice", lower = "google|sub|alice"
+        XCTAssertEqual(CaptureAccountScope.key(forAccountKeyMaterial: upper),
+                       CaptureAccountScope.key(forAccountKeyMaterial: lower),
+                       "the fixture no longer maps two distinct secrets onto one scope name, "
+                           + "so it can no longer detect a scope-derived key")
+        XCTAssertNotEqual(DeviceRefDerivation.ref(for: identity, accountKeyMaterial: upper),
+                          DeviceRefDerivation.ref(for: identity, accountKeyMaterial: lower),
+                          "the reference is derived from the enumerable scope name rather than "
+                              + "from the account secret")
 
         // Different devices under one account must differ, or the ref would identify only
         // the account and nothing about which device is speaking.
@@ -77,6 +88,43 @@ final class DeviceAccountScopeFeatureTests: XCTestCase {
         XCTAssertEqual(seen, ["b"], "active selection moved with the device shape: \(seen)")
     }
 
+    /// `DeviceManager.forget()` / `reconnect()` call these two statics; they are the seam
+    /// where a user detach becomes durable, account-scoped state. Driven directly here so
+    /// the behaviour is proved without a radio; T4 drives the full CoreBluetooth chain.
+    func testTransportDetachAndReconnectPersistIntoTheCurrentAccount() throws {
+        let world = try DeviceAccountScopeWorld()
+        defer { world.cleanup() }
+        try world.freshEnvironment()
+        try world.signIn("detach-owner")
+        let store = try world.store()
+        let identity = RecordingDeviceIdentity(shape: .bleStream, hardwareToken: "peripheral-42")
+
+        // A detach for a device the store has never seen must still be remembered.
+        let detached = RecordingDeviceStore.recordUserDetach(identity: identity,
+                                                             displayName: "Trail Mic")
+        XCTAssertEqual(detached, .recorded(scope: store.scope))
+        XCTAssertEqual(try store.records().first?.userDetached, true)
+        XCTAssertNil(RecordingDeviceActivation.active(among: try store.records(),
+                                                      ready: [identity]),
+                     "a detached device became active")
+
+        // Only a user reconnect clears it.
+        let reconnected = RecordingDeviceStore.recordUserReconnect(identity: identity)
+        XCTAssertEqual(reconnected, .recorded(scope: store.scope))
+        XCTAssertEqual(try store.records().first?.userDetached, false)
+        XCTAssertEqual(RecordingDeviceActivation.active(among: try store.records(),
+                                                        ready: [identity])?.identity,
+                       identity)
+
+        // With no resolvable scope the outcome is LOUD and typed, never a silent no-op.
+        CaptureAccountScope.setContainerForTests(
+            URL(fileURLWithPath: "/dev/null/not-a-container", isDirectory: true))
+        if case .recorded = RecordingDeviceStore.recordUserDetach(identity: identity,
+                                                                  displayName: "Trail Mic") {
+            XCTFail("an unresolvable scope reported a successful detach")
+        }
+    }
+
     private func permutations<T>(of items: [T]) -> [[T]] {
         guard items.count > 1 else { return [items] }
         var out: [[T]] = []
@@ -98,7 +146,7 @@ final class DeviceAccountScopeWorld: @unchecked Sendable {
     let defaults: UserDefaults
     let scopeDefaults: UserDefaults
     private let defaultsName: String
-    private let scopeDefaultsName: String
+    let scopeDefaultsName: String
 
     /// Injected account secret per email — the keychain is unreadable in a hostless iOS
     /// test bundle, so the SECRET (and only the secret) is supplied here.
@@ -144,6 +192,36 @@ final class DeviceAccountScopeWorld: @unchecked Sendable {
         CaptureAccountScope.setApplicationSupportRootForTests(
             sandbox.appendingPathComponent("application-support", isDirectory: true))
         CaptureAccountScope.setDefaultsForTests(scopeDefaults)
+    }
+
+    /// A clean handset for each scenario. Brine runs every scenario of a feature against
+    /// ONE world, and these scenarios each assert over the WHOLE remembered set ("remembers
+    /// exactly one device", "remembers no devices", "no device is active"), so a device or
+    /// a consumed signed-out hold left behind by an earlier scenario is indistinguishable
+    /// from a defect. Each Given re-creates the container, the scope state, and the legacy
+    /// defaults from scratch.
+    func freshEnvironment() throws {
+        try? CaptureAccountScope.signOutForTests()
+        CaptureAccountScope.resetTestEnvironment()
+        try? FileManager.default.removeItem(at: container)
+        for key in [DeviceManager.savedKey, DeviceManager.savedNameKey, DeviceManager.savedDateKey] {
+            defaults.removeObject(forKey: key)
+        }
+        scopeDefaults.removePersistentDomain(forName: scopeDefaultsName)
+        try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
+        CaptureAccountScope.setContainerForTests(container)
+        CaptureAccountScope.setApplicationSupportRootForTests(
+            sandbox.appendingPathComponent("application-support", isDirectory: true))
+        CaptureAccountScope.setDefaultsForTests(scopeDefaults)
+        keyMaterial.material = nil
+        emissions = [:]
+        lastEmission = nil
+        refsAcrossRelaunch = [:]
+        readyIdentities = []
+        lastActive = nil
+        legacyIdentity = nil
+        holdOutcome = nil
+        migrationOutcome = nil
     }
 
     func cleanup() {
@@ -218,6 +296,7 @@ enum DeviceAccountScopeSteps {
         [
             // ── signed-out hold + legacy migration ───────────────────────────
             defineStep("a legacy device is paired and no account is signed in during upgrade") { ctx, _, _ in
+                try world.freshEnvironment()
                 try world.signOut()
                 world.stageLegacyPairing()
                 let store = try world.store()
@@ -282,17 +361,46 @@ enum DeviceAccountScopeSteps {
 
             // ── account isolation ────────────────────────────────────────────
             defineStep("account {string} is signed in and has remembered a device named {string}") { ctx, p, _ in
+                try world.freshEnvironment()
                 try world.signIn(try p.requireString(0))
                 _ = try world.remember(try p.requireString(1))
                 return ctx
             },
             defineStep("account {string} is signed in") { ctx, p, _ in
+                try world.freshEnvironment()
                 try world.signIn(try p.requireString(0))
                 return ctx
             },
             defineStep("account {string} signs in on the same handset") { ctx, p, _ in
                 try world.signIn(try p.requireString(0))
                 return ctx
+            },
+            defineStep("a crash leaves the signed-out hold's records in place") { ctx, _, _ in
+                // Adoption marks the hold consumed and THEN clears it. A crash between the
+                // two leaves the records visible but already claimed — the only situation
+                // in which the marker, rather than the emptiness, is what protects the
+                // second account.
+                guard let identity = world.legacyIdentity else {
+                    throw BrineStepError("no legacy identity was staged")
+                }
+                let hold = RecordingDeviceHold.signedOutStore(container: world.container)
+                try hold.replaceAll([RecordingDeviceRecord(
+                    identity: identity,
+                    displayName: DeviceAccountScopeWorld.legacyDeviceName)])
+                return ctx
+            },
+            defineStep("account {string} signs in and tries to adopt the hold") { ctx, p, _ in
+                try world.signIn(try p.requireString(0))
+                world.holdOutcome = try RecordingDeviceHold.adopt(
+                    into: try world.store(), container: world.container)
+                return ctx
+            },
+            defineCheck("the hold reports that it was already consumed") { _, _, _ in
+                guard world.holdOutcome == .alreadyConsumed else {
+                    throw BrineStepError(
+                        "hold adoption reported \(String(describing: world.holdOutcome)), "
+                            + "expected alreadyConsumed")
+                }
             },
             defineStep("account {string} signs back in") { ctx, p, _ in
                 try world.signIn(try p.requireString(0))
@@ -460,6 +568,7 @@ enum DeviceAccountScopeSteps {
 
             // ── privacy reference ────────────────────────────────────────────
             defineStep("no account secret is available") { ctx, _, _ in
+                try world.freshEnvironment()
                 world.keyMaterial.material = nil
                 return ctx
             },
@@ -497,6 +606,7 @@ enum DeviceAccountScopeSteps {
                 }
             },
             defineStep("the same physical device is remembered by two different accounts") { ctx, _, _ in
+                try world.freshEnvironment()
                 world.emissions = [:]
                 world.refsAcrossRelaunch = [:]
                 for label in ["alpha", "beta"] {

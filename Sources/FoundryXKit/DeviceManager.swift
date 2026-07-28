@@ -467,6 +467,13 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     /// fall back to a scan when there's nothing saved / it's out of range.
     public func reconnect() {
         autoConnect = true
+        // A manual reconnect is the ONLY thing that clears an explicit detach
+        // (track 20260725T2306, T2). The automatic paths never reach this method.
+        if let saved = Self.loadSaved() {
+            RecordingDeviceStore.recordUserReconnect(
+                identity: RecordingDeviceIdentity(shape: .bleStream,
+                                                  hardwareToken: saved.id.uuidString))
+        }
         guard let c = central, c.state == .poweredOn else { start(); return }
         autoReconnect(userInitiated: true)
     }
@@ -474,6 +481,16 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     /// Drop the current link AND forget the saved device (user-initiated).
     public func forget() {
         autoConnect = false
+        // Persist the EXPLICIT detach into the account-scoped store BEFORE the
+        // device-global keys go, so a relaunch cannot re-arm a device the user detached
+        // (track 20260725T2306, T2). The outcome is typed and returned by the store, never
+        // swallowed.
+        if let saved = Self.loadSaved() {
+            RecordingDeviceStore.recordUserDetach(
+                identity: RecordingDeviceIdentity(shape: .bleStream,
+                                                  hardwareToken: saved.id.uuidString),
+                displayName: saved.name)
+        }
         central?.stopScan()
         if let p = peripheral { central?.cancelPeripheralConnection(p) }
         peripheral = nil
