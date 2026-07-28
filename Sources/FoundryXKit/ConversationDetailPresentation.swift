@@ -110,7 +110,7 @@ public enum ConversationAnswerLog {
 /// and the user's own added actions — in the prototype's outcome vocabulary.
 public struct ConversationActionsPresentation: Equatable, Sendable {
     /// The empty state, per the prototype realignment.
-    public static let emptyStateText = "Nothing surfaced from this conversation yet."
+    public static let emptyStateText = "Nothing surfaced from this voice note yet."
     /// The add affordance's label.
     public static let addActionLabel = "Add an action"
     /// The collapsed group holding actions OTHER people said (features/
@@ -267,12 +267,12 @@ public struct ConversationActionsPresentation: Equatable, Sendable {
     /// face reads identically to accepting the nudge live.
     public static func chatSeed(utterance: String, summary: String) -> String {
         let ask = summary.isEmpty ? "help with that" : summary
-        return "While I was recording, this came up: \u{201C}\(utterance)\u{201D}\n\nPlease \(ask)."
+        return "While I was taking a note, this came up: \u{201C}\(utterance)\u{201D}\n\nPlease \(ask)."
     }
 
     /// The act-in-chat prefill for an action the user added by hand.
     public static func userActionSeed(title: String) -> String {
-        "From one of my conversations, I noted an action: \u{201C}\(title)\u{201D}\n\nPlease help me get it done."
+        "From one of my voice notes, I noted an action: \u{201C}\(title)\u{201D}\n\nPlease help me get it done."
     }
 
     /// The prototype's outcome vocabulary over the logged card outcomes.

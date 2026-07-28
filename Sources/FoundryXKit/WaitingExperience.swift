@@ -82,10 +82,10 @@ public struct WaitCopy: Equatable, Sendable {
         case .recap:
             return WaitCopy(
                 headline: "Summarizing on your iPhone",
-                privacyLine: "The recap is written by a model running entirely on your device — no conversation text is sent anywhere to summarize it.")
+                privacyLine: "The recap is written by a model running entirely on your device — no voice note text is sent anywhere to summarize it.")
         case .title:
             return WaitCopy(
-                headline: "Naming this conversation",
+                headline: "Naming this voice note",
                 privacyLine: onDevice
                     ? "A model on your iPhone is reading the transcript to write its title and summary."
                     : "A model on your Mac is reading the transcript to write its title and summary.")
@@ -131,7 +131,7 @@ public enum WaitPhaseText {
             ]
         case .transcription:
             return [
-                (20, "Still transcribing — longer recordings take longer."),
+                (20, "Still transcribing — longer voice notes take longer."),
                 (45, "Nearly there — this was a long one."),
             ]
         case .doorFetch:
@@ -235,7 +235,7 @@ public struct WaitingTipDeck: Equatable, Sendable {
     static let evergreen: [String] = [
         "Every segment is written to your phone's disk before it's sent — a dropped connection never loses a word.",
         "Your transcripts are stored as plain text on your phone, ready to search in an instant.",
-        "Your phone keeps its own copy of every recording, even after it's backed up to your Mac.",
+        "Your phone keeps its own copy of every voice note, even after it's backed up to your Mac.",
         "The link to your Mac is end-to-end encrypted — even the relay that carries it can't read a thing.",
         "Titles, summaries, and recaps are written by a model on your device, not in anyone's cloud.",
     ]
@@ -243,15 +243,15 @@ public struct WaitingTipDeck: Equatable, Sendable {
     static func kindFacts(_ kind: WaitKind, onDevice: Bool) -> [String] {
         switch kind {
         case .recap:
-            return ["This recap is drawn only from your own conversations — the model is told never to invent details."]
+            return ["This recap is drawn only from your own voice notes — the model is told never to invent details."]
         case .title:
-            return ["The title comes from the transcript itself — no conversation content is uploaded to name it."]
+            return ["The title comes from the transcript itself — no voice note content is uploaded to name it."]
         case .transcription:
             return onDevice
                 ? ["On-device transcription turns even a private conversation into text without it ever leaving your phone."]
                 : ["Transcription happens on your own Mac — your audio is never sent to our servers to be read."]
         case .doorFetch:
-            return ["Your conversations live on your Mac, not our servers — this is your own computer answering."]
+            return ["Your voice notes live on your Mac, not our servers — this is your own computer answering."]
         case .sync:
             return onDevice
                 ? ["Backing up locally keeps everything on devices you own — nothing is uploaded to us."]
@@ -262,7 +262,7 @@ public struct WaitingTipDeck: Equatable, Sendable {
     static func statFacts(_ stats: WaitingLibraryStats, onDevice: Bool) -> [String] {
         var out: [String] = []
         if let c = stats.conversationCount, c > 0 {
-            let unit = c == 1 ? "conversation" : "conversations"
+            let unit = c == 1 ? "voice note" : "voice notes"
             out.append("You've captured \(WaitProgressLabel.grouped(c)) \(unit) so far — kept on your own devices.")
         }
         if let s = stats.segmentsOnComputer, s > 0 {

@@ -38,7 +38,7 @@ public enum AudioPlaybackPresentation {
     /// The honest reason playback is off while a recording is active — `nil` when it
     /// isn't (playback is allowed). Matches the app's plain, non-technical voice.
     public static func playbackDisabledReason(isRecording: Bool) -> String? {
-        isRecording ? "Playback is off while you're recording" : nil
+        isRecording ? "Playback is off while you're taking a note" : nil
     }
 
     /// Map a fetch/playback error to an honest outcome. The audio-fetch path returns
@@ -99,10 +99,10 @@ public enum AudioPlaybackPresentation {
         switch outcome {
         case .unavailable:
             return Copy(title: "Audio no longer available",
-                        subtitle: "Recordings live on your computer and aren't kept there forever.")
+                        subtitle: "Voice note audio lives on your computer and isn't kept there forever.")
         case .unreachable:
             return Copy(title: "Can't reach your computer",
-                        subtitle: "Your recordings live there.")
+                        subtitle: "Your voice note audio lives there.")
         case .failed:
             return Copy(title: "Couldn't play this audio")
         }

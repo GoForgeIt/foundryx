@@ -104,7 +104,7 @@ public struct CaptureCardPresentation: Equatable, Sendable {
             let head = words.prefix(fallbackTitleWords).joined(separator: " ")
             return words.count > fallbackTitleWords ? head + "…" : head
         }
-        return "Untitled conversation"
+        return "Untitled voice note"
     }
 
     // MARK: summary — what it was about
@@ -131,7 +131,7 @@ public struct CaptureCardPresentation: Equatable, Sendable {
                            local: Bool) -> String {
         switch progress {
         case .recording:
-            return "Recording"
+            return "Taking a note"
         case .savedOnPhone:
             // Durable on the phone, not yet with the computer — whether the last
             // sync attempt errored is a log line, not card copy.
@@ -197,7 +197,7 @@ public struct CaptureCardPresentation: Equatable, Sendable {
 /// "08 Capture home"). Pure constants so the scenarios assert the exact words.
 public enum CaptureHomeCopy {
     /// The record CTA card's headline.
-    public static let recordTitle = "Record a conversation"
+    public static let recordTitle = "Make a voice note"
 
     /// The record CTA's reassurance line. Phone-only tier keeps the prototype's
     /// exact copy; the computer tier says where the full history already lives.
@@ -210,7 +210,7 @@ public enum CaptureHomeCopy {
     /// "Recent on this phone" headline + its "N conversations" row-meta.
     public static let recentHeadline = "Recent on this phone"
     public static func conversationCount(_ n: Int) -> String {
-        "\(n) conversation\(n == 1 ? "" : "s")"
+        "\(n) voice note\(n == 1 ? "" : "s")"
     }
 
     /// The trailing text-action that opens the full-history search.
@@ -244,6 +244,6 @@ public final class CaptureFindState: ObservableObject {
 public enum MeterCaptionText {
     public static func caption(paused: Bool, isRecordingMic: Bool) -> String {
         if paused { return "Paused, not listening" }
-        return isRecordingMic ? "Recording" : "Listening…"
+        return isRecordingMic ? "Taking a note" : "Listening…"
     }
 }

@@ -120,7 +120,7 @@ final class SyncBarPresenterTests: XCTestCase {
     }
 
     func testSettledCopyIsTierAware() {
-        XCTAssertEqual(SyncStripCopy.allSaved(local: true), "All conversations saved")
-        XCTAssertEqual(SyncStripCopy.allSaved(local: false), "All captures saved to computer")
+        XCTAssertEqual(SyncStripCopy.allSaved(local: true), "All voice notes saved")
+        XCTAssertEqual(SyncStripCopy.allSaved(local: false), "All voice notes saved to computer")
     }
 }

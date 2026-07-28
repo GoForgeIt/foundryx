@@ -74,7 +74,7 @@ struct DeviceScreen: View {
             wearablePortrait
 
             VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-                Text("RECORDING DEVICE")
+                Text("VOICE NOTE DEVICE")
                     .grainTextStyle(.caption)
                     .fontWeight(.semibold)
                     .foregroundStyle(GrainColor.forgeBlue)

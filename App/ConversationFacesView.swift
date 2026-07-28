@@ -261,7 +261,7 @@ struct ConversationFacesView: View {
                 }
             }
         }
-        .confirmationDialog("Delete conversation?", isPresented: $confirmDelete,
+        .confirmationDialog("Delete voice note?", isPresented: $confirmDelete,
                             titleVisibility: .visible) {
             Button("Delete", role: .destructive) {
                 manager.deleteConversation(captureId)
@@ -504,10 +504,10 @@ struct ConversationFacesView: View {
             // On-device titling + summary synth in flight (WS-C).
             WaitingExperienceView(model: WaitingExperienceModel(kind: .title, onDevice: true), compact: true)
         } else if transcriptText != nil {
-            Text("No summary yet. The transcript face has the full conversation.")
+            Text("No summary yet. The transcript face has the full voice note.")
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
         } else if !loading {
-            Text("Nothing to summarize yet. The summary appears once the conversation is processed.")
+            Text("Nothing to summarize yet. The summary appears once the voice note is processed.")
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
         }
     }
@@ -832,8 +832,8 @@ struct ConversationFacesView: View {
             Text("Transcript not loaded")
                 .grainTextStyle(.title).foregroundStyle(GrainColor.ink)
             Text(isOlder
-                 ? "This is an older conversation, so its transcript isn't stored on your phone. Load it from your computer."
-                 : "Load this conversation's transcript from your computer.")
+                 ? "This is an older voice note, so its transcript isn't stored on your phone. Load it from your computer."
+                 : "Load this voice note's transcript from your computer.")
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             GrainButton("Load transcript", variant: .filled, size: .sm) { Task { await fetchFromDoor() } }
             if let loadError {
@@ -1078,7 +1078,7 @@ struct ConversationFacesView: View {
     private var receiptSection: some View {
         DisclosureGroup(isExpanded: $receiptExpanded) {
             VStack(alignment: .leading, spacing: GrainSpacing.x2) {
-                receiptRow("Recording", receiptDuration)
+                receiptRow("Voice note", receiptDuration)
                 receiptRow("Transcription", "Transcribed in the cloud (Deepgram)")
                 receiptRow("Speakers", "Speakers found on-device (WeSpeaker)")
                 receiptRow("Device cost", "$0 on your device")
@@ -1116,7 +1116,7 @@ struct ConversationFacesView: View {
 
     private var receiptDuration: String {
         guard let seconds = manager.conversationMeta(for: captureId)?.durationSeconds else {
-            return "Recording duration unavailable"
+            return "Voice note duration unavailable"
         }
         let minutes = Int(seconds) / 60
         let remainder = Int(seconds) % 60
@@ -1134,9 +1134,9 @@ struct ConversationFacesView: View {
         if let t = content?.title, !t.isEmpty { return t }
         if let t = cached?.title, !t.isEmpty { return t }
         if let t = provisional?.title, !t.isEmpty { return t }
-        guard let t = transcriptText, !t.isEmpty else { return "Conversation" }
+        guard let t = transcriptText, !t.isEmpty else { return "Voice note" }
         let words = t.split(whereSeparator: { $0 == " " || $0 == "\n" }).prefix(6).joined(separator: " ")
-        return words.isEmpty ? "Conversation" : words
+        return words.isEmpty ? "Voice note" : words
     }
 
     private func copyTranscript() {

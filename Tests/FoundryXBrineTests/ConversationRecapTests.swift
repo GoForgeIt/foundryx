@@ -44,11 +44,11 @@ final class ConversationRecapTests: XCTestCase {
         let recap = await ConversationRecapEngine.build(span: .day(start), from: pool, calendar: cal)
         let r = try! XCTUnwrap(recap)
         XCTAssertEqual(r.conversationCount, 3, "only today's three")
-        XCTAssertTrue(r.narrative.contains("3 conversations today"))
+        XCTAssertTrue(r.narrative.contains("3 voice notes today"))
         XCTAssertFalse(r.insights.isEmpty)
-        XCTAssertTrue(r.freshnessLine().contains("3 conversations"))
+        XCTAssertTrue(r.freshnessLine().contains("3 voice notes"))
         // Daily freshness advertises that the recap grows through the day.
-        XCTAssertTrue(r.freshnessLine().hasPrefix("Grows after each processed conversation"))
+        XCTAssertTrue(r.freshnessLine().hasPrefix("Grows after each processed voice note"))
     }
 
     // Scenario: the daily recap is rebuilt after each new conversation (freshness reflects newest)
@@ -226,7 +226,7 @@ final class ConversationRecapTests: XCTestCase {
         await fulfillment(of: [exp], timeout: 3.0)
         cancellable.cancel()
         XCTAssertEqual(model.daily?.conversationCount, 3, "rebuilt without leaving the screen")
-        XCTAssertTrue(model.daily?.freshnessLine.hasPrefix("Grows after each processed conversation") ?? false)
+        XCTAssertTrue(model.daily?.freshnessLine.hasPrefix("Grows after each processed voice note") ?? false)
     }
 
     // WS-C: `isComposing` is the honest wait signal the WaitingExperience binds to —
@@ -364,4 +364,3 @@ private final class CountingComposer: RecapComposer, @unchecked Sendable {
         return ("A model narrative.", ["model insight"])
     }
 }
-

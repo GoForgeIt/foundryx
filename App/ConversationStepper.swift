@@ -112,6 +112,6 @@ struct ConversationStepper: View {
             let mark = s == .done ? "done" : s == .active ? "in progress" : s == .failed ? "failed" : "pending"
             return "\(step.label(local: local)): \(mark)"
         }
-        return "Conversation progress. " + names.joined(separator: ", ")
+        return "Voice note progress. " + names.joined(separator: ", ")
     }
 }

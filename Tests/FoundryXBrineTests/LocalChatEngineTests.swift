@@ -87,6 +87,6 @@ final class LocalChatEngineTests: XCTestCase {
         XCTAssertTrue(LocalChatPresentation.honestyNotice.contains("entirely on your phone"))
         XCTAssertTrue(LocalChatPresentation.honestyNotice.contains("upgrade to Foundry"))
         XCTAssertEqual(LocalChatPresentation.waitlistButtonTitle, "Join the waitlist")
-        XCTAssertTrue(LocalChatPresentation.noAppleIntelligencePrompt.contains("record + transcribe"))
+        XCTAssertTrue(LocalChatPresentation.noAppleIntelligencePrompt.contains("make voice notes"))
     }
 }

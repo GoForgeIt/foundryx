@@ -338,7 +338,7 @@ private struct ChatListSheet: View {
     var onDismiss: () -> Void
 
     /// EXT3 — provenance + category pills (the capture list's chip idiom) and,
-    /// under "From conversations", grouping by source conversation. All the
+    /// under "From voice notes", grouping by source note. All the
     /// filter/group logic is ChatListOrganizer (kit, tested); this renders it.
     @State private var provenance: ChatListOrganizer.Provenance = .all
     @State private var categoryFilter: String?
@@ -398,7 +398,7 @@ private struct ChatListSheet: View {
                         .lineLimit(1)
                     HStack(spacing: GrainSpacing.x1) {
                         if convo.isFromConversation {
-                            Text("From a conversation" +
+                            Text("From a voice note" +
                                  (convo.origin?.category.map { " · \($0)" } ?? ""))
                                 .grainTextStyle(.caption)
                                 .foregroundStyle(GrainColor.forgeBlue)
@@ -475,10 +475,10 @@ private struct ChatListSheet: View {
     /// card store still has it; chats whose source is unknown (accepted cards
     /// mid-recording) share one honest header.
     private static func sourceHeader(_ captureId: String?) -> String {
-        guard let captureId else { return "From a conversation" }
+        guard let captureId else { return "From a voice note" }
         let title = ConversationCardStore.load(
             captureId: captureId, baseDir: CaptureWAL.documentsCaptures())?.title
-        return title?.isEmpty == false ? title! : "A conversation"
+        return title?.isEmpty == false ? title! : "A voice note"
     }
 
     private static func subtitle(_ convo: ChatConversationStore.Conversation) -> String {

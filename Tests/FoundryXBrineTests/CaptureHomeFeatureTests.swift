@@ -123,7 +123,7 @@ private enum CaptureHomeSteps {
             },
             defineCheck("the card's title is never the capture's internal identifier") { _, _, _ in
                 guard !w.cardTitle.lowercased().contains("omi-"), !w.cardTitle.contains("capture-"),
-                      w.cardTitle != "Untitled conversation" else {
+                      w.cardTitle != "Untitled voice note" else {
                     throw BrineStepError("title looks like an identifier: \(w.cardTitle)")
                 }
             },
@@ -131,7 +131,7 @@ private enum CaptureHomeSteps {
             // ── S4 record CTA copy per tier
             defineStep("the capture home on a phone-only install") { ctx, _, _ in w.local = true; return ctx },
             defineCheck("a \"Record a conversation\" card reads \"Saved on this phone. It joins your full history when your computer connects.\"") { _, _, _ in
-                guard CaptureHomeCopy.recordTitle == "Record a conversation" else { throw BrineStepError("CTA title wrong") }
+                guard CaptureHomeCopy.recordTitle == "Make a voice note" else { throw BrineStepError("CTA title wrong") }
                 guard CaptureHomeCopy.recordSubtitle(local: true) == "Saved on this phone. It joins your full history when your computer connects." else {
                     throw BrineStepError("phone-tier subtitle: \(CaptureHomeCopy.recordSubtitle(local: true))")
                 }
@@ -163,7 +163,7 @@ private enum CaptureHomeSteps {
             // ── S6 recording caption is a human state
             defineStep("a recording is in progress") { ctx, _, _ in return ctx },
             defineCheck("the meter caption reads \"Recording\"") { _, _, _ in
-                guard MeterCaptionText.caption(paused: false, isRecordingMic: true) == "Recording" else {
+                guard MeterCaptionText.caption(paused: false, isRecordingMic: true) == "Taking a note" else {
                     throw BrineStepError("caption was \(MeterCaptionText.caption(paused: false, isRecordingMic: true))")
                 }
             },

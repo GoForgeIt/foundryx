@@ -144,6 +144,6 @@ public enum SyncStripLayout {
 public enum SyncStripCopy {
     /// The all-saved line. `local` (phone-only tier) has no "computer" to copy to.
     public static func allSaved(local: Bool) -> String {
-        local ? "All conversations saved" : "All captures saved to computer"
+        local ? "All voice notes saved" : "All voice notes saved to computer"
     }
 }

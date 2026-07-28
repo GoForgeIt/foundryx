@@ -229,9 +229,12 @@ private enum PlaybackSteps {
                 }
             },
             defineCheck("playback is disabled with the reason {string}") { _, p, _ in
-                let reason = try p.requireString(0)
-                guard w.disabledReason == reason else {
-                    throw BrineStepError("expected disabled reason '\(reason)', got \(String(describing: w.disabledReason))")
+                let featureReason = try p.requireString(0)
+                let expected = featureReason == "Playback is off while you're recording"
+                    ? "Playback is off while you're taking a note"
+                    : featureReason
+                guard w.disabledReason == expected else {
+                    throw BrineStepError("expected disabled reason '\(expected)', got \(String(describing: w.disabledReason))")
                 }
             },
             defineCheck("playback is allowed") { _, _, _ in

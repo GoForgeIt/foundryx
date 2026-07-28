@@ -115,12 +115,12 @@ public struct LocalChatEngine: Sendable {
 public enum LocalChatPresentation {
     public static let honestyNotice =
         "Answers run entirely on your phone and may be inaccurate or hallucinate. " +
-        "For accurate, cited answers across all your conversations, upgrade to Foundry " +
+        "For accurate, cited answers across all your voice notes, upgrade to Foundry " +
         "(Cloud or your computer)."
     public static let waitlistButtonTitle = "Join the waitlist"
     /// The upgrade prompt shown instead of chat on phones without Apple Intelligence
     /// (locked decision #2 — transcribe-only tier, no MLX fallback).
     public static let noAppleIntelligencePrompt =
-        "Your phone can record + transcribe; smarter summaries and chat need a brain — " +
+        "Your phone can make voice notes; smarter summaries and chat need a brain — " +
         "join the Cloud waitlist or connect your computer."
 }

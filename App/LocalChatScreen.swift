@@ -49,7 +49,7 @@ struct LocalChatScreen: View {
                     }
                     .padding(GrainSpacing.x4)
                 }
-                GrainComposer("Ask across your conversations…", text: $input,
+                GrainComposer("Ask across your voice notes…", text: $input,
                               isSending: thinking, onSend: send)
             }
         }

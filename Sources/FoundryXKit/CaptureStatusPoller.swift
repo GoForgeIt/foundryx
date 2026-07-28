@@ -34,7 +34,7 @@ public enum CaptureLifecycleStage: String, Sendable, Equatable {
     /// The chip label shown on the card. Phase A is stage-only (no title yet).
     public var chipLabel: String {
         switch self {
-        case .recording: return "🔴 Recording"
+        case .recording: return "🔴 Note in progress"
         case .stored: return "💾 Saved"
         case .transcribing: return "📝 Transcribing…"
         case .transcribed: return "📝 Transcribed"
@@ -69,7 +69,7 @@ public enum ConversationProgress: String, Sendable, Equatable {
     /// "transcribing" vocabulary would be a lie; the labels stay on-device instead.
     public func label(local: Bool) -> String {
         switch self {
-        case .recording: return "Recording"
+        case .recording: return "Taking a note"
         case .savedOnPhone: return "Saved on phone"
         case .savedToComputer: return local ? "Saved on phone" : "Saved to computer"
         case .transcribing: return local ? "Transcribing on this phone…" : "Transcribing…"
@@ -101,7 +101,7 @@ public enum ConversationProgress: String, Sendable, Equatable {
         /// "saved" step stays on-device and transcription is "on this phone".
         public func label(local: Bool) -> String {
             switch self {
-            case .recorded: return "Recorded"
+            case .recorded: return "Captured"
             case .saved: return local ? "Saved on phone" : "Saved to computer"
             case .transcribing: return local ? "Transcribing on phone" : "Transcribing"
             case .ready: return "Ready"

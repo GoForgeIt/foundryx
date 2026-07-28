@@ -152,7 +152,7 @@ private enum WaitingExperienceSteps {
             },
             defineCheck("it tells me longer recordings take longer") { _, _, _ in
                 let line = world.model.statusLine(elapsed: world.elapsed)
-                try expect(line.contains("longer recordings take longer"),
+                try expect(line.contains("longer voice notes take longer"),
                            "status line at \(world.elapsed)s was \(line)")
             },
             defineCheck("it says it is fetching from my Mac") { _, _, _ in
@@ -164,7 +164,7 @@ private enum WaitingExperienceSteps {
                            "privacy line was \(world.model.copy.privacyLine)")
             },
             defineCheck("it says it is naming this conversation") { _, _, _ in
-                try expect(world.model.copy.headline == "Naming this conversation",
+                try expect(world.model.copy.headline == "Naming this voice note",
                            "headline was \(world.model.copy.headline)")
             },
             defineCheck("the two facts are different") { _, _, _ in
@@ -241,7 +241,7 @@ private enum WaitingExperienceSteps {
             defineCheck("it says all my conversations are saved") { _, _, _ in
                 try expect(world.presentation == .settled,
                            "expected the settled strip, got \(world.presentation)")
-                try expect(SyncStripCopy.allSaved(local: world.local) == "All conversations saved",
+                try expect(SyncStripCopy.allSaved(local: world.local) == "All voice notes saved",
                            "settled copy was \(SyncStripCopy.allSaved(local: world.local))")
             },
         ]

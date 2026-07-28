@@ -106,7 +106,7 @@ private enum ConversationRecapsSteps {
                 guard w.recap?.conversationCount == 3 else { throw BrineStepError("count was \(String(describing: w.recap?.conversationCount))") }
             },
             defineCheck("its freshness line grows after each processed conversation") { _, _, _ in
-                guard let line = w.recap?.freshnessLine(), line.contains("3 conversations") else {
+                guard let line = w.recap?.freshnessLine(), line.contains("3 voice notes") else {
                     throw BrineStepError("freshness line did not grow to 3: \(String(describing: w.recap?.freshnessLine()))")
                 }
             },
