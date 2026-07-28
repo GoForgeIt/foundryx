@@ -680,6 +680,9 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     /// recovered gap audio. A one-shot decision deadline releases the hold if the
     /// storage service / subscription never materializes.
     func beginGapSyncWindow() {
+        // The window state is bleQueue-confined. Asserting it here is what makes the test
+        // seam's queue hop load-bearing instead of decorative.
+        dispatchPrecondition(condition: .onQueue(bleQueue))
         gapSyncHolding = true
         liveHold.removeAll()
         // Tag AT OPEN. Asking later would ask after the reconnect has already changed the
@@ -999,9 +1002,8 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
         setBatteryLevel(nil)          // the level is stale once the link drops
         // Settle any in-flight gap sync FIRST so held live audio is released (in
         // order) into the session before `.stopped` ends it.
-        let engineWasRunning = gapSync != nil
-        if engineWasRunning { gapSync?.linkDropped() }   // settles through gapSyncFinished
-        applyLinkDrop(engineWasRunning: engineWasRunning)
+        gapSync?.linkDropped()   // settles synchronously through gapSyncFinished
+        applyLinkDrop()
         audioChar = nil; storageDataChar = nil; storageControlChar = nil
         emitSourceState(.stopped)            // ends the ambient capture session
         // A USER-suspended link (Omi toggled off) must stay down — don't fight the
@@ -1055,13 +1057,14 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
         endGapSyncWindow(flush: true)
     }
 
-    /// The gap-window consequences of a link drop, CB-free for the same reason. The caller
-    /// settles the engine; with an engine running the engine publishes and this closes
-    /// nothing.
-    func applyLinkDrop(engineWasRunning: Bool) {
-        if let cause = GapWindowTrigger.closeCause(engineWasRunning: engineWasRunning) {
-            closeGapWindow(cause)
-        }
+    /// The gap-window consequences of a link drop, CB-free for the same reason.
+    ///
+    /// The caller settles the engine FIRST. `linkDropped()` publishes synchronously, so if
+    /// an engine was running the window is already closed and this close is a no-op by the
+    /// at-most-one rule; if there was no engine, the span was never requested and is still
+    /// on the device.
+    func applyLinkDrop() {
+        closeGapWindow(.linkDroppedBeforeEngine)
         endGapSyncWindow(flush: true)
     }
 

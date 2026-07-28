@@ -1347,11 +1347,6 @@ public final class CaptureManager: ObservableObject {
     /// "reconnecting…" state; a reconnect within the window resumes the same conversation.
     public var isAwaitingReconnect: Bool { suspendedSession != nil }
 
-    /// The conversation a device drop interrupted and is still holding open, if any.
-    /// This is the fact `DeviceManager` asks for when it tags a gap-recovery window —
-    /// capture/paused state lives here, so the answer must come from here
-    /// (track 20260725T2306, T3).
-    public var interruptedCaptureId: String? { suspendedSession?.wal.captureId }
 
     /// Resolve a pending Omi reconnect-grace hold: end the held conversation only when a REAL
     /// conversation boundary has been reached — `SilenceSegmenter.defaultSilenceGap` of voiced

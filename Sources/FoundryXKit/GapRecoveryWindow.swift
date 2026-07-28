@@ -74,17 +74,33 @@ enum GapWindowTrigger {
     /// task exists to prevent, so a failed discovery is `.storageUnavailable` (retriable,
     /// not a loss) and `.deviceHasNoStorage` is reserved for a discovery that SUCCEEDED and
     /// genuinely returned no storage service.
+    /// The four cells of `{error nil, non-nil} x {storage seen, not seen}`:
+    ///
+    ///   nil      x seen      -> nil, the characteristic path continues
+    ///   non-nil  x seen      -> nil, ALSO continues (see below)
+    ///   nil      x not seen  -> `.deviceHasNoStorage`, an honest loss
+    ///   non-nil  x not seen  -> `.storageUnavailable`, retriable, not a loss
+    ///
+    /// SEEING THE SERVICE WINS OVER THE ERROR. `didDiscoverServices` has already issued
+    /// `discoverCharacteristics` for a storage service it found, and `maybeBeginGapSync`
+    /// needs the hold still open to use them. Closing here because a *different* service
+    /// failed would tear that down and forfeit a recovery that was about to happen — the
+    /// code would be starting characteristic discovery for the storage service and
+    /// declaring the storage unreachable in the same breath. If the characteristics never
+    /// arrive, the decision deadline already releases the hold with its own honest cause.
     static func closeCause(discoveryError: String?,
                            sawStorageService: Bool) -> GapRecoveryWindow.Close? {
+        if sawStorageService { return nil }
         if let discoveryError { return .storageUnavailable(reason: discoveryError) }
-        return sawStorageService ? nil : .deviceHasNoStorage
+        return .deviceHasNoStorage
     }
 
-    /// A link drop. With an engine running the engine settles and publishes; without one
-    /// the span was never requested and is still on the device.
-    static func closeCause(engineWasRunning: Bool) -> GapRecoveryWindow.Close? {
-        engineWasRunning ? nil : .linkDroppedBeforeEngine
-    }
+    // A link drop needs no parameter. `OmiOfflineSyncEngine.linkDropped()` publishes
+    // SYNCHRONOUSLY through `gapSyncFinished` before the drop handler runs, so by then the
+    // window is already closed and the window's own at-most-one rule makes this close a
+    // no-op. An `engineWasRunning` argument therefore selected between two branches that
+    // are indistinguishable in every reachable state — a discrimination that could not be
+    // tested because it does not exist. Removed rather than left as a decorative claim.
 }
 
 /// One opened gap-recovery window.
