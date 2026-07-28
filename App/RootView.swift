@@ -257,7 +257,7 @@ struct RootView: View {
         .fullScreenCover(isPresented: Binding(
             get: { vaultFunnel.state != .idle },
             set: { if !$0 { vaultFunnel.dismiss() } })) {
-            VaultFunnelView(model: vaultFunnel)
+            VaultFunnelView(model: vaultFunnel, onSignInAgain: { showingAccount = true })
         }
         // Server reconciliation is the mechanism (design law): reconcile entitlement on every
         // foreground so a checkout finished/abandoned in the browser still resolves. Keep the

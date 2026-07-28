@@ -56,7 +56,11 @@ public struct VaultSignupClient: VaultSignupService {
         }
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, resp) = try await session.data(for: req)
-        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+        guard let http = resp as? HTTPURLResponse else { throw VaultSignupError.server }
+        if http.statusCode == 401 || http.statusCode == 403 {
+            throw VaultSignupError.unauthorized
+        }
+        guard (200..<300).contains(http.statusCode) else {
             throw VaultSignupError.server
         }
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -78,8 +82,21 @@ public struct VaultSignupClient: VaultSignupService {
             return .ready(cellURL: cellURL, handoff: handoff)
         case "provisioning", "building", "setting_up":
             return .provisioning
-        default:
+        case "pending":
             return .pending
+        case "failed":
+            return .failed(.provisioningFailed)
+        case "suspended":
+            return .failed(.suspended)
+        case "unentitled":
+            return .failed(.notEntitled)
+        default:
+            // An unrecognised status is TERMINAL, not progress. The old `default:
+            // return .pending` meant any status this build had not heard of — including
+            // every one above — rendered as an eternal "Checking your payment…". A
+            // paying user sat in that spinner for five hours. Surfacing an unknown state
+            // is recoverable; spinning on it is not.
+            return .failed(.unknown(raw))
         }
     }
 }
@@ -87,4 +104,11 @@ public struct VaultSignupClient: VaultSignupService {
 public enum VaultSignupError: Error, Equatable, Sendable {
     case server
     case malformedResponse
+    /// The server REJECTED our bearer (401/403). Distinct from `.server` because the
+    /// remedy is different and the old code could not tell them apart: `reconcileOnForeground`
+    /// treated every thrown error as a passing network blip and silently kept waiting, so
+    /// a phone signing with an hour-old (expired) id_token retried forever, invisibly.
+    /// Every reconcile from the owner's phone on 2026-07-28 returned 401 and none of them
+    /// surfaced anything.
+    case unauthorized
 }

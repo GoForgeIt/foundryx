@@ -23,6 +23,9 @@ import StoreKit
 // the prototype's language (micro-label, screen title, tier rows, privacy line).
 struct VaultFunnelView: View {
     @ObservedObject var model: VaultFunnelModel
+    /// Present the sign-in sheet — the remedy when the server rejected our bearer. nil
+    /// leaves the button out rather than showing one that does nothing.
+    var onSignInAgain: (() -> Void)? = nil
 
     var body: some View {
         ZStack {
@@ -60,15 +63,27 @@ struct VaultFunnelView: View {
                        body: "Sign-in and payment open in your browser. Your card never touches the app.",
                        spinning: true)
         case .checkingPayment:
-            waitScreen(label: "Back in FoundryX", title: "Checking your payment…",
-                       body: "Welcome back. We finish on our servers and reconcile the moment you return — closing the app is safe.",
-                       spinning: true)
+            VStack(spacing: GrainSpacing.x4) {
+                waitScreen(label: "Back in FoundryX", title: "Checking your payment…",
+                           body: "Welcome back. We finish on our servers and reconcile the moment you return — closing the app is safe.",
+                           spinning: true)
+                // An exit from the WAITING state too, not just from a failure. Waiting is
+                // fine; waiting with no way out is what trapped a paying owner on this
+                // exact screen for five hours.
+                GrainButton("Stop waiting", variant: .text, size: .regular) {
+                    model.abandonCheckout()
+                }
+                .padding(.bottom, GrainSpacing.x4)
+                .accessibilityIdentifier("stop-waiting")
+            }
         case .settingUp:
             waitScreen(label: "Payment confirmed", title: "Setting up your Vault",
                        body: "Your private Vault, your memory, and your agent. Yours alone — isolated from every other Vault.",
                        spinning: true)
         case .live:
             liveScreen
+        case .failed(let reason):
+            failedScreen(reason)
         }
     }
 
@@ -198,6 +213,51 @@ struct VaultFunnelView: View {
             Spacer()
         }
         .padding(.vertical, GrainSpacing.x6)
+    }
+
+    // MARK: failed — a terminal stop that always offers a way out
+    //
+    // This screen exists because its absence trapped a paying owner on
+    // "Checking your payment…" for five hours (2026-07-28). Every terminal condition —
+    // a failed provision, a suspended Vault, an expired sign-in, a status this build has
+    // never seen — used to render as that same spinner, with nothing to press.
+    //
+    // Two rules: say what happened in the user's terms, and NEVER leave without an exit.
+
+    @ViewBuilder
+    private func failedScreen(_ reason: VaultProvisionFailure) -> some View {
+        VStack(spacing: GrainSpacing.x4) {
+            Spacer()
+            Image(systemName: reason.needsSignIn ? "person.crop.circle.badge.exclamationmark"
+                                                 : "exclamationmark.triangle")
+                .font(.system(size: 56)).foregroundStyle(GrainColor.amber)
+            microLabel(reason.needsSignIn ? "Sign-in" : "Setup")
+            Text(reason.headline).grainTextStyle(.title).multilineTextAlignment(.center)
+            Text(reason.needsSignIn
+                 ? "Your payment is safe. Sign in again and we'll pick up exactly where this left off."
+                 : "Your payment is safe — nothing was charged twice, and no half-built Vault was left behind. You can try again now.")
+                .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
+                .multilineTextAlignment(.center)
+
+            if reason.needsSignIn {
+                GrainButton("Sign in again", variant: .filled, size: .regular) {
+                    // The attempt is deliberately KEPT for this case, so signing in
+                    // resumes the same checkout rather than losing a paid-for Vault.
+                    onSignInAgain?()
+                }
+            } else if reason.isRetryable {
+                GrainButton("Try again", variant: .filled, size: .regular) {
+                    model.beginSetup()
+                }
+            }
+            // ALWAYS present, whatever the reason — this is the door that did not exist.
+            GrainButton("Back to my notes", variant: .outlined, size: .regular) {
+                model.abandonCheckout()
+            }
+            Spacer()
+        }
+        .padding(.vertical, GrainSpacing.x6)
+        .accessibilityIdentifier("vault-setup-failed")
     }
 
     // MARK: live — "Your Vault is live"
@@ -333,6 +393,17 @@ extension VaultFunnelModel {
             browser: ASWebAuthenticationVaultBrowser(),
             cellStore: CellStore(),
             idToken: { VaultAuthTokenBox.shared.token },
+            // THE fix for the five-hour trap: sign reconciles with a token that is still
+            // alive. The box above is a cached snapshot nobody refreshes, and Google
+            // id_tokens die after an hour — so every Vault reconcile made more than an
+            // hour after sign-in was rejected 401, invisibly, forever.
+            // `FoundryAuth.currentIdToken()` already knew how to refresh; the funnel
+            // simply never asked it.
+            refreshingIdToken: {
+                let fresh = try? await FoundryAuth().currentIdToken()
+                if let fresh { VaultAuthTokenBox.shared.token = fresh }
+                return fresh
+            },
             storefrontCountryCode: { VaultStorefrontBox.shared.countryCode })
     }
 }
