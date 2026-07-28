@@ -170,6 +170,19 @@ public enum CaptureWidgetSnapshotStore {
         }
     }
 
+    /// The durable cross-process owner tag used to corroborate a cold locked
+    /// restoration. Reading the tag never publishes, repairs, or clears it: a
+    /// missing/mismatched App-Group handoff must remain distinguishable from proof.
+    static var persistedActiveOwner: String? {
+        stateLock.withLock {
+            guard let owner = defaults?.string(forKey: activeOwnerKey),
+                  !owner.isEmpty else {
+                return nil
+            }
+            return owner
+        }
+    }
+
     /// Withdraw the active owner's shared widget payload and verify the deletion
     /// reached the cross-process preference domain before acknowledging it.
     public static func withdraw(

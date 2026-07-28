@@ -888,6 +888,37 @@ public struct AccountPreferenceCompatibilityContext: Sendable, Equatable {
 }
 
 enum AccountPreferenceActivationStore {
+    /// Read one already-activated owner's scoped values without adopting,
+    /// materializing, or writing anything. This is the cold/locked restoration
+    /// path: invalid values are omitted, and an incomplete checkout pair is
+    /// omitted atomically. Callers bind the returned values to the generation
+    /// they are about to publish in the process cache.
+    static func restoreExisting(
+        scope: String,
+        defaults: UserDefaults
+    ) -> [String: AccountPreferenceValue] {
+        let scoped = CaptureAccountScope.ScopedPreferences(scope: scope)
+        var values = explicitValues(
+            defaults: defaults,
+            key: { scoped.key($0) })
+        let checkoutEntries = AccountPreferenceCatalog.entries(
+            in: .vaultCheckout)
+        let idKey =
+            AccountPreferenceCatalog.vaultCheckoutAttemptID.canonicalKey
+        let planKey =
+            AccountPreferenceCatalog.vaultCheckoutAttemptPlan.canonicalKey
+        guard case .string(let id)? = values[idKey],
+              !id.isEmpty,
+              case .string(let plan)? = values[planKey],
+              ["starter", "pro", "power"].contains(plan) else {
+            for entry in checkoutEntries {
+                values.removeValue(forKey: entry.canonicalKey)
+            }
+            return values
+        }
+        return values
+    }
+
     static func prepare(
         scope: String,
         generation: UInt64,

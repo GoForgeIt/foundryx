@@ -1804,7 +1804,10 @@ public enum CaptureAccountScope {
         resolutionProbeLock.withLock {
             resolutionPersistenceEntriesForTests += 1
         }
-        let resolved: Resolution = persistenceQueue.sync {
+        let restored: (
+            resolution: Resolution,
+            preferenceValues: [String: AccountPreferenceValue]?
+        ) = persistenceQueue.sync {
             do {
                 guard let record = try decodeActivationRecord() else {
                     // This may be a genuinely signed-out fresh install, or a
@@ -1820,33 +1823,46 @@ public enum CaptureAccountScope {
                     // UserDefaults boolean, so it is readable even while the device is
                     // locked, and it is stamped on every successful save/load.
                     if currentDefaults().bool(forKey: AuthStore.signedInMirrorKey) {
-                        return .blocked
+                        return (.blocked, nil)
                     }
                     switch AuthStore.identityPresence() {
                     case .absent:
                         // Genuinely never signed in — the free on-device tier.
-                        return .signedOut
+                        return (
+                            .signedOut,
+                            AccountPreferenceActivationStore.restoreExisting(
+                                scope: signedOutScope,
+                                defaults: currentDefaults()))
                     case .present:
                         // An identity exists but was never activated (a pre-scope
                         // install): claim ownership first, do not expose a root.
-                        return .blocked
+                        return (.blocked, nil)
                     case .unreadableLocked:
                         // Locked device: an identity may exist. Fail closed rather
                         // than strand authenticated audio in `acct-none`.
-                        return .blocked
+                        return (.blocked, nil)
                     case .unreadable:
                         // The keychain cannot answer for a non-lock reason, e.g.
                         // errSecMissingEntitlement in a test host. The mirror has
                         // already said nobody is signed in, and blocking here made the
                         // free tier fail closed on the whole iOS runtime.
-                        return .signedOut
+                        return (
+                            .signedOut,
+                            AccountPreferenceActivationStore.restoreExisting(
+                                scope: signedOutScope,
+                                defaults: currentDefaults()))
                     }
                 }
                 switch record.phase {
-                case .signedOut: return .signedOut
+                case .signedOut:
+                    return (
+                        .signedOut,
+                        AccountPreferenceActivationStore.restoreExisting(
+                            scope: signedOutScope,
+                            defaults: currentDefaults()))
                 case .active:
                     guard let scope = record.scope, isAccountScope(scope) else {
-                        return .blocked
+                        return (.blocked, nil)
                     }
                     switch AccountDeletionLifecycleStore(
                         container: try durableContainer()
@@ -1859,22 +1875,47 @@ public enum CaptureAccountScope {
                             forKey: AuthStore.signedInMirrorKey) != nil,
                               currentDefaults().bool(
                                 forKey: AuthStore.signedInMirrorKey)
-                        else { return .blocked }
+                        else { return (.blocked, nil) }
                     case .record, .blocked:
-                        return .blocked
+                        return (.blocked, nil)
                     }
-                    return .account(scope)
+                    // The activation record and the App-Group handoff are two
+                    // independent durable witnesses. A stale/missing owner tag
+                    // cannot be repaired by currentAccountBinding() before this
+                    // check and therefore never authorizes locked recording.
+                    guard currentDefaults().bool(
+                            forKey: AuthStore.signedInMirrorKey),
+                          CaptureWidgetSnapshotStore.persistedActiveOwner
+                            == scope else {
+                        return (.blocked, nil)
+                    }
+                    return (
+                        .account(scope),
+                        AccountPreferenceActivationStore.restoreExisting(
+                            scope: scope,
+                            defaults: currentDefaults()))
                 case .pendingActivation, .pendingSignOut:
-                    return .blocked
+                    return (.blocked, nil)
                 }
             } catch {
-                return .blocked
+                return (.blocked, nil)
             }
         }
 
         stateLock.lock()
-        if cachedResolution == nil { cachedResolution = resolved }
-        let answer = cachedResolution ?? resolved
+        if cachedResolution == nil {
+            cachedResolution = restored.resolution
+            if let preferenceValues = restored.preferenceValues,
+               let scope = resolvedScope(restored.resolution) {
+                cachedAccountPreferenceSnapshot = AccountPreferenceSnapshot(
+                    scope: scope,
+                    generation: generation,
+                    values: preferenceValues)
+            } else {
+                cachedAccountPreferenceSnapshot = nil
+            }
+        }
+        let answer = cachedResolution ?? restored.resolution
         stateLock.unlock()
         return answer
     }

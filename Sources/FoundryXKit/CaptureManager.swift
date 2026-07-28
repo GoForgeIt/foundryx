@@ -3254,6 +3254,13 @@ public final class CaptureManager: ObservableObject {
     /// from a live recording (`active != nil`) and from idle.
     var isListeningForSpeechForTests: Bool { active == nil && router.isArmedForTests() }
 
+    #if canImport(AVFoundation)
+    /// Test seam: deliver a buffer at the downstream edge of the live PCM tap. The
+    /// decoded-Opus test separately proves FrameRouter reaches this holder; foreground
+    /// tests use this seam to prove the holder now targets the replacement transcriber.
+    func appendLivePCMForTests(_ pcm: AVAudioPCMBuffer) { liveBox.append(pcm) }
+    #endif
+
     /// Test seam: drive ONE 12 Hz meter tick through the EXACT path the timer uses, with no
     /// timer running — so a test can prove that N ticks during a recording do ZERO main-actor
     /// disk reads and drive at most the throttled number of widget pushes. Internal
@@ -4066,6 +4073,14 @@ public final class CaptureManager: ObservableObject {
         liveTranscriber = nil
         liveTranscriptTask?.cancel()
         liveTranscriptTask = nil
+
+        #if canImport(AVFoundation)
+        // Suspension can leave the stateful Opus decoder straddling a discontinuity in
+        // the source stream. Re-baseline it at the same boundary where the PCM consumer
+        // is replaced. startLiveTranscription installs the replacement into liveBox
+        // synchronously before the next routed frame is handed to it.
+        router.resetPCMDecoder()
+        #endif
 
         // Release the retired framework session best-effort. The new publisher is wired
         // synchronously below so incoming PCM can continue flowing without waiting for an

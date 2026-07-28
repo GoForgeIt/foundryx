@@ -1,9 +1,9 @@
 // FoundryXAppDelegate — process-level account exposure coordination.
 //
-// Task 6 deliberately leaves CoreBluetooth background restoration dormant. A locked
-// relaunch has no verified account preference snapshot, so it must not construct a
-// source store, a capture spool, or a central. Task 7 owns the later verified-owner
-// restoration design. The handoff remains an inert compatibility seam until then.
+// A Bluetooth-restoration relaunch may happen before protected Keychain data is
+// readable. The headless path therefore starts only from the independently persisted
+// ACTIVE owner plus its matching App-Group owner tag, and it snapshots that owner's
+// capture choices once before wiring any per-frame callback.
 
 import UIKit
 import SwiftUI
@@ -23,7 +23,48 @@ final class FoundryXAppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         _ = application
-        _ = launchOptions
+        guard launchOptions?[.bluetoothCentrals] != nil,
+              FoundryAuth.hasPersistedSignIn,
+              let binding = CaptureAccountScope.currentAccountBinding()
+        else {
+            return true
+        }
+
+        let preferences = CaptureSettings.snapshot(
+            binding: binding)
+        let omiEnabled = preferences.sourceEnabledOverrides[
+            CaptureSourceDescriptor.omiId] ?? true
+        guard omiEnabled else {
+            return true
+        }
+
+        let log = DoorLog()
+        log.setRemoteSink(
+            RemoteConfig.fromBundle()?.gatewayHTTPURL
+                .appendingPathComponent("diag/log"))
+        let dm = DeviceManager.shared(log: log)
+        let paused = preferences.omiDesiredState != .listening
+        let spool = OmiRestorationSpool(
+            binding: binding,
+            root: binding.root,
+            executor: DispatchQueue(
+                label: "foundryx.omi-restoration-owner"),
+            log: log,
+            silenceGap: preferences.silenceGapSeconds,
+            paused: { paused })
+        let exposure = AccountExposureRegistration(
+            participantID: "omi-restoration-spool",
+            kind: .live,
+            binding: binding,
+            owner: spool,
+            close: { spool, expected in
+                await spool.closeAccountExposure(expected: expected)
+            })
+        Self.restorationSpool = spool
+        Self.restorationSpoolExposure = exposure
+        Self.accountExposureCoordinator.register(exposure)
+        spool.attach(to: dm)
+        dm.start()
         return true
     }
 

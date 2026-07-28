@@ -638,6 +638,31 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         var restorationCaptureIDs: [String] = []
         var restorationDesiredState: OmiCaptureDesiredState?
         var restorationSourceOverrides: [String: Bool]?
+        var lockedRestorationBinding: CaptureAccountScope.AccountBinding?
+        var lockedListeningSnapshot: CaptureAccountPreferenceSnapshot?
+        var lockedPausedSnapshot: CaptureAccountPreferenceSnapshot?
+        var lockedDisabledSourceSnapshot: CaptureAccountPreferenceSnapshot?
+        var lockedAbsentListeningSnapshot: CaptureAccountPreferenceSnapshot?
+        var lockedListeningFrames = 0
+        var lockedPausedFrames = 0
+        var lockedDisabledSourceFrames = 0
+        var lockedAbsentListeningFrames = 0
+        var lockedRestorationLookupCount = 0
+        var pendingActivation:
+            CaptureAccountScope.ActivationTransaction?
+        var pendingDesiredState: OmiCaptureDesiredState?
+        var pendingSourceOverrides: [String: Bool]?
+        var pendingSpooledFrames = 0
+        var pendingCaptureIDs: [String] = []
+        var pendingStaleWriteResult: AccountPreferenceWriteResult?
+        var pendingResolutionElapsed: TimeInterval = 0
+        var pendingCompletionElapsed: TimeInterval = 0
+        var pendingLookupCount = 0
+        var pendingFirstAccountGeneration: UInt64?
+        var pendingBlockedGeneration: UInt64?
+        var pendingActivatedGeneration: UInt64?
+        var pendingSecondSnapshot: CaptureAccountPreferenceSnapshot?
+        var pendingSecondBinding: CaptureAccountScope.AccountBinding?
     }
 
     private let queue = DispatchQueue(label: "foundryx.account-data-isolation-world")
@@ -1101,6 +1126,376 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
                 throw BrineStepError(
                     "background restoration inherited the first account's "
                         + "legacy listening/source choices")
+            }
+        }
+    }
+
+    func accountUsedWearableCaptureBeforePhoneLocked() throws {
+        try queue.sync {
+            try beginScenarioLocked()
+            let owner = try firstPreferenceIdentityLocked()
+            state.firstIdentity = owner
+            state.lockedOwnerRoot = try activateLocked(owner)
+            let binding = try currentPreferenceBindingLocked()
+            state.firstPreferenceScope = binding.scope
+            try saveValueLocked(
+                37.0,
+                for: AccountPreferenceCatalog.captureSilenceGapSeconds,
+                binding: binding)
+            try saveValueLocked(
+                OmiCaptureDesiredState.listening.rawValue,
+                for: AccountPreferenceCatalog.captureOMIDesiredState,
+                binding: binding)
+            try saveValueLocked(
+                [
+                    CaptureSourceDescriptor.omiId: true,
+                    CaptureSourceDescriptor.appleWatchId: false,
+                ],
+                for: AccountPreferenceCatalog.captureSourceEnabledOverrides,
+                binding: binding)
+
+            let otherScope = try CaptureAccountScope.key(
+                for: secondPreferenceIdentityLocked())
+            seedPersistedCaptureChoicesLocked(
+                scope: otherScope,
+                gap: 91,
+                desiredState: .paused,
+                sourceOverrides: [
+                    CaptureSourceDescriptor.omiId: false,
+                    CaptureSourceDescriptor.appleWatchId: true,
+                ])
+            seedPersistedCaptureChoicesLocked(
+                scope: CaptureAccountScope.signedOutScope,
+                gap: 17,
+                desiredState: .listening,
+                sourceOverrides: [
+                    CaptureSourceDescriptor.omiId: false,
+                    CaptureSourceDescriptor.appleWatchId: true,
+                ])
+
+            guard CaptureWidgetSnapshotStore.activeOwnerForTests
+                    == binding.scope else {
+                throw BrineStepError(
+                    "the persisted owner was not tagged in the shared handoff")
+            }
+            CaptureAccountScope.resetProcessCacheForTests()
+        }
+    }
+
+    func iOSRestoresWearableBeforeUnlock() throws {
+        try queue.sync {
+            let lookupsBefore =
+                CaptureAccountScope.resolutionPersistenceEntryCountForTests
+            let listening = try restoreLockedCaptureCaseLocked()
+            state.lockedRestorationBinding = listening.binding
+            state.lockedListeningSnapshot = listening.snapshot
+            state.lockedListeningFrames = listening.frames
+
+            try updatePersistedCaptureChoicesLocked(
+                scope: listening.binding.scope,
+                desiredState: .paused,
+                sourceOverrides: [
+                    CaptureSourceDescriptor.omiId: true,
+                    CaptureSourceDescriptor.appleWatchId: true,
+                ])
+            let paused = try restoreLockedCaptureCaseLocked()
+            state.lockedPausedSnapshot = paused.snapshot
+            state.lockedPausedFrames = paused.frames
+
+            try updatePersistedCaptureChoicesLocked(
+                scope: listening.binding.scope,
+                desiredState: .listening,
+                sourceOverrides: [
+                    CaptureSourceDescriptor.omiId: false,
+                    CaptureSourceDescriptor.appleWatchId: true,
+                ])
+            let disabled = try restoreLockedCaptureCaseLocked()
+            state.lockedDisabledSourceSnapshot = disabled.snapshot
+            state.lockedDisabledSourceFrames = disabled.frames
+
+            try updatePersistedCaptureChoicesLocked(
+                scope: listening.binding.scope,
+                desiredState: nil,
+                sourceOverrides: [CaptureSourceDescriptor.omiId: true])
+            let absent = try restoreLockedCaptureCaseLocked()
+            state.lockedAbsentListeningSnapshot = absent.snapshot
+            state.lockedAbsentListeningFrames = absent.frames
+            state.lockedRestorationLookupCount =
+                CaptureAccountScope.resolutionPersistenceEntryCountForTests
+                    - lookupsBefore
+        }
+    }
+
+    func assertOnlyLockedOwnersCaptureChoicesRestored() throws {
+        try queue.sync {
+            guard let binding = state.lockedRestorationBinding,
+                  let ownerRoot = state.lockedOwnerRoot,
+                  let snapshot = state.lockedListeningSnapshot,
+                  binding.root == ownerRoot,
+                  binding.scope == state.firstPreferenceScope,
+                  snapshot.binding == binding,
+                  snapshot.silenceGapSeconds == 37,
+                  snapshot.omiDesiredState == .listening,
+                  snapshot.sourceEnabledOverrides == [
+                    CaptureSourceDescriptor.omiId: true,
+                    CaptureSourceDescriptor.appleWatchId: false,
+                  ] else {
+                throw BrineStepError(
+                    "locked restoration did not recover the persisted owner's capture snapshot")
+            }
+        }
+    }
+
+    func assertLockedExplicitCaptureChoicesHonored() throws {
+        try queue.sync {
+            guard state.lockedListeningFrames == 64,
+                  state.lockedPausedSnapshot?.omiDesiredState == .paused,
+                  state.lockedPausedSnapshot?.sourceEnabledOverrides == [
+                    CaptureSourceDescriptor.omiId: true,
+                    CaptureSourceDescriptor.appleWatchId: true,
+                  ],
+                  state.lockedPausedFrames == 0,
+                  state.lockedDisabledSourceSnapshot?.omiDesiredState
+                    == .listening,
+                  state.lockedDisabledSourceSnapshot?
+                    .sourceEnabledOverrides[
+                        CaptureSourceDescriptor.omiId] == false,
+                  state.lockedDisabledSourceFrames == 0 else {
+                throw BrineStepError(
+                    "locked restoration did not honor explicit listening, pause, and source choices")
+            }
+        }
+    }
+
+    func assertLockedAbsentListeningStaysPaused() throws {
+        try queue.sync {
+            guard state.lockedAbsentListeningSnapshot?.omiDesiredState
+                    == .paused,
+                  state.lockedAbsentListeningFrames == 0 else {
+                throw BrineStepError(
+                    "absence of a prior listening choice authorized locked recording")
+            }
+        }
+    }
+
+    func assertLockedRestoreAppliedNoOtherAccountChoices() throws {
+        try queue.sync {
+            let snapshots = [
+                state.lockedListeningSnapshot,
+                state.lockedPausedSnapshot,
+                state.lockedDisabledSourceSnapshot,
+                state.lockedAbsentListeningSnapshot,
+            ]
+            guard snapshots.allSatisfy({
+                $0?.binding.scope == state.firstPreferenceScope
+            }),
+                  state.lockedListeningSnapshot?.silenceGapSeconds != 91,
+                  state.lockedListeningSnapshot?.silenceGapSeconds != 17,
+                  state.lockedRestorationLookupCount == 4 else {
+                throw BrineStepError(
+                    "locked restoration used another owner or resolved preferences on a frame")
+            }
+        }
+    }
+
+    func wearableCaptureBelongedToFirstAccount() throws {
+        try queue.sync {
+            try beginScenarioLocked()
+            let second = try secondPreferenceIdentityLocked()
+            state.secondIdentity = second
+            state.secondRoot = try activateLocked(second)
+            let secondBinding = try currentPreferenceBindingLocked()
+            state.secondPreferenceScope = secondBinding.scope
+            try saveValueLocked(
+                61.0,
+                for: AccountPreferenceCatalog.captureSilenceGapSeconds,
+                binding: secondBinding)
+            try saveValueLocked(
+                OmiCaptureDesiredState.listening.rawValue,
+                for: AccountPreferenceCatalog.captureOMIDesiredState,
+                binding: secondBinding)
+            try saveValueLocked(
+                [
+                    CaptureSourceDescriptor.omiId: false,
+                    CaptureSourceDescriptor.appleWatchId: true,
+                ],
+                for: AccountPreferenceCatalog.captureSourceEnabledOverrides,
+                binding: secondBinding)
+
+            let first = try firstPreferenceIdentityLocked()
+            state.firstIdentity = first
+            state.firstRoot = try activateLocked(first)
+            let firstBinding = try currentPreferenceBindingLocked()
+            let firstAccountBinding = try XCTUnwrap(
+                CaptureAccountScope.currentAccountBinding())
+            state.firstPreferenceScope = firstBinding.scope
+            state.pendingFirstAccountGeneration = firstBinding.generation
+            try saveValueLocked(
+                29.0,
+                for: AccountPreferenceCatalog.captureSilenceGapSeconds,
+                binding: firstBinding)
+            try saveValueLocked(
+                OmiCaptureDesiredState.listening.rawValue,
+                for: AccountPreferenceCatalog.captureOMIDesiredState,
+                binding: firstBinding)
+            try saveValueLocked(
+                [
+                    CaptureSourceDescriptor.omiId: true,
+                    CaptureSourceDescriptor.appleWatchId: false,
+                ],
+                for: AccountPreferenceCatalog.captureSourceEnabledOverrides,
+                binding: firstBinding)
+            seedPersistedCaptureChoicesLocked(
+                scope: CaptureAccountScope.signedOutScope,
+                gap: 13,
+                desiredState: .listening,
+                sourceOverrides: [
+                    CaptureSourceDescriptor.omiId: true,
+                    CaptureSourceDescriptor.appleWatchId: true,
+                ])
+
+            let spool = OmiRestorationSpool(
+                binding: firstAccountBinding,
+                root: firstAccountBinding.root,
+                executor: DispatchQueue(
+                    label: "foundryx.pending-switch-first-owner-spool"),
+                silenceGap: 0,
+                paused: { false })
+            spool.handleState(.streaming)
+            spool.append(Data([0x31, 0x32]))
+            guard spool.spooledFrameCount == 1,
+                  spool.activeCaptureId != nil else {
+                throw BrineStepError(
+                    "wearable capture did not open under the first account")
+            }
+            spool.detach()
+        }
+    }
+
+    func secondAccountSignInHasNotFinished() throws {
+        try queue.sync {
+            guard let second = state.secondIdentity,
+                  let firstGeneration =
+                    state.pendingFirstAccountGeneration else {
+                throw BrineStepError(
+                    "the account-switch capture premises were not prepared")
+            }
+            let started = Date()
+            state.pendingActivation =
+                try CaptureAccountScope.beginActivation(for: second)
+            state.pendingBlockedGeneration =
+                CaptureAccountScope.identityGeneration
+            state.pendingDesiredState =
+                CaptureSettings.omiCaptureDesiredState
+            state.pendingSourceOverrides =
+                UserDefaultsCaptureSourceStore().enabledOverrides
+            state.pendingStaleWriteResult = AccountPreferences.write(
+                OmiCaptureDesiredState.paused.rawValue,
+                for: AccountPreferenceCatalog.captureOMIDesiredState,
+                generation: firstGeneration)
+
+            let root = sandbox.appendingPathComponent(
+                "pending-account-restoration", isDirectory: true)
+            try fileManager.createDirectory(
+                at: root, withIntermediateDirectories: true)
+            let lookupsBefore =
+                CaptureAccountScope.resolutionPersistenceEntryCountForTests
+            let spool = OmiRestorationSpool(
+                baseDir: root,
+                silenceGap: 0,
+                paused: { true })
+            spool.handleState(.streaming)
+            for _ in 0..<64 {
+                spool.append(Data([0x41, 0x42]))
+            }
+            state.pendingSpooledFrames = spool.spooledFrameCount
+            spool.detach()
+            state.pendingLookupCount =
+                CaptureAccountScope.resolutionPersistenceEntryCountForTests
+                    - lookupsBefore
+            state.pendingCaptureIDs =
+                (try? fileManager.contentsOfDirectory(atPath: root.path))
+                    ?? []
+            state.pendingResolutionElapsed =
+                Date().timeIntervalSince(started)
+        }
+    }
+
+    func assertPendingCaptureDoesNotRecord() throws {
+        try queue.sync {
+            guard state.pendingSpooledFrames == 0,
+                  state.pendingCaptureIDs.isEmpty,
+                  state.pendingLookupCount == 0 else {
+                throw BrineStepError(
+                    "unfinished sign-in recorded or resolved owner state per frame")
+            }
+        }
+    }
+
+    func assertPendingCaptureReusesNoPriorChoices() throws {
+        try queue.sync {
+            guard state.pendingDesiredState == .paused,
+                  state.pendingSourceOverrides == [:],
+                  state.pendingStaleWriteResult != .saved else {
+                throw BrineStepError(
+                    "unfinished sign-in reused or rewrote the first/signed-out capture choices")
+            }
+        }
+    }
+
+    func assertPendingSecondAccountStartsSafe() throws {
+        try queue.sync {
+            guard state.pendingDesiredState == .paused,
+                  state.pendingSourceOverrides == [:],
+                  CaptureAccountScope.currentAccountPreferenceSnapshot() == nil,
+                  CaptureAccountScope.currentAccountBinding() == nil else {
+                throw BrineStepError(
+                    "the unfinished replacement account exposed non-default capture choices")
+            }
+        }
+    }
+
+    func assertAppResponsiveUntilSignInFinishes() throws {
+        try queue.sync {
+            guard state.pendingResolutionElapsed < 1,
+                  let transaction = state.pendingActivation else {
+                throw BrineStepError(
+                    "the unfinished sign-in blocked the app or lost its transaction")
+            }
+            let started = Date()
+            try CaptureAccountScope.completeActivation(transaction)
+            state.pendingActivatedGeneration =
+                CaptureAccountScope.identityGeneration
+            state.pendingCompletionElapsed =
+                Date().timeIntervalSince(started)
+            state.pendingActivation = nil
+            guard state.pendingCompletionElapsed < 1 else {
+                throw BrineStepError(
+                    "completing sign-in blocked the app")
+            }
+        }
+    }
+
+    func assertSecondCaptureChoicesAppearAfterSignIn() throws {
+        try queue.sync {
+            let binding = try currentPreferenceBindingLocked()
+            let accountBinding = try XCTUnwrap(
+                CaptureAccountScope.currentAccountBinding())
+            let snapshot = CaptureSettings.snapshot(binding: accountBinding)
+            state.pendingSecondBinding = accountBinding
+            state.pendingSecondSnapshot = snapshot
+            guard binding.scope == state.secondPreferenceScope,
+                  snapshot.binding == accountBinding,
+                  snapshot.silenceGapSeconds == 61,
+                  snapshot.omiDesiredState == .listening,
+                  snapshot.sourceEnabledOverrides == [
+                    CaptureSourceDescriptor.omiId: false,
+                    CaptureSourceDescriptor.appleWatchId: true,
+                  ],
+                  let blocked = state.pendingBlockedGeneration,
+                  state.pendingActivatedGeneration == blocked &+ 1 else {
+                throw BrineStepError(
+                    "the replacement account did not publish exactly one fresh capture generation")
             }
         }
     }
@@ -3669,6 +4064,86 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         }
     }
 
+    private func seedPersistedCaptureChoicesLocked(
+        scope: String,
+        gap: Double,
+        desiredState: OmiCaptureDesiredState,
+        sourceOverrides: [String: Bool]
+    ) {
+        let scoped = CaptureAccountScope.ScopedPreferences(scope: scope)
+        scopeDefaults.set(
+            gap,
+            forKey: scoped.key(
+                AccountPreferenceCatalog.captureSilenceGapSeconds.canonicalKey))
+        scopeDefaults.set(
+            desiredState.rawValue,
+            forKey: scoped.key(
+                AccountPreferenceCatalog.captureOMIDesiredState.canonicalKey))
+        scopeDefaults.set(
+            sourceOverrides,
+            forKey: scoped.key(
+                AccountPreferenceCatalog.captureSourceEnabledOverrides
+                    .canonicalKey))
+        _ = scopeDefaults.synchronize()
+    }
+
+    private func updatePersistedCaptureChoicesLocked(
+        scope: String,
+        desiredState: OmiCaptureDesiredState?,
+        sourceOverrides: [String: Bool]
+    ) throws {
+        let scoped = CaptureAccountScope.ScopedPreferences(scope: scope)
+        let desiredKey = scoped.key(
+            AccountPreferenceCatalog.captureOMIDesiredState.canonicalKey)
+        if let desiredState {
+            scopeDefaults.set(desiredState.rawValue, forKey: desiredKey)
+        } else {
+            scopeDefaults.removeObject(forKey: desiredKey)
+        }
+        scopeDefaults.set(
+            sourceOverrides,
+            forKey: scoped.key(
+                AccountPreferenceCatalog.captureSourceEnabledOverrides
+                    .canonicalKey))
+        guard scopeDefaults.synchronize() else {
+            throw BrineStepError(
+                "could not persist the locked capture-choice variant")
+        }
+        CaptureAccountScope.resetProcessCacheForTests()
+    }
+
+    private func restoreLockedCaptureCaseLocked() throws -> (
+        binding: CaptureAccountScope.AccountBinding,
+        snapshot: CaptureAccountPreferenceSnapshot,
+        frames: Int
+    ) {
+        guard let binding = CaptureAccountScope.currentAccountBinding(),
+              binding.scope == state.firstPreferenceScope else {
+            throw BrineStepError(
+                "locked restoration could not prove the persisted owner")
+        }
+        let snapshot = CaptureSettings.snapshot(binding: binding)
+        guard snapshot.sourceEnabledOverrides[
+            CaptureSourceDescriptor.omiId] ?? true else {
+            return (binding, snapshot, 0)
+        }
+        let paused = snapshot.omiDesiredState != .listening
+        let spool = OmiRestorationSpool(
+            binding: binding,
+            root: binding.root,
+            executor: DispatchQueue(
+                label: "foundryx.locked-owner-restoration-spool"),
+            silenceGap: snapshot.silenceGapSeconds,
+            paused: { paused })
+        spool.handleState(.streaming)
+        for _ in 0..<64 {
+            spool.append(Data([0x51, 0x52]))
+        }
+        let frames = spool.spooledFrameCount
+        spool.detach()
+        return (binding, snapshot, frames)
+    }
+
     private func assertPreferenceSetLocked(
         onboarding: Bool,
         persona: OnboardingPersona,
@@ -4683,6 +5158,70 @@ private enum AccountDataIsolationSteps {
                 "restoration does not inherit the first account's legacy choices"
             ) { _, _, _ in
                 try w.assertRestorationDidNotInheritLegacyChoices()
+            },
+            defineStep(
+                "an account used wearable capture before the phone locked"
+            ) { ctx, _, _ in
+                try w.accountUsedWearableCaptureBeforePhoneLocked()
+                return ctx
+            },
+            defineStep(
+                "iOS restores wearable capture before the owner unlocks the phone"
+            ) { ctx, _, _ in
+                try w.iOSRestoresWearableBeforeUnlock()
+                return ctx
+            },
+            defineCheck(
+                "only that account's prior capture choices are restored"
+            ) { _, _, _ in
+                try w.assertOnlyLockedOwnersCaptureChoicesRestored()
+            },
+            defineCheck(
+                "its explicit listening, pause, and source choices are honored"
+            ) { _, _, _ in
+                try w.assertLockedExplicitCaptureChoicesHonored()
+            },
+            defineCheck(
+                "capture stays paused when no prior listening choice exists"
+            ) { _, _, _ in
+                try w.assertLockedAbsentListeningStaysPaused()
+            },
+            defineCheck("no other account's choices are applied") {
+                _, _, _ in
+                try w.assertLockedRestoreAppliedNoOtherAccountChoices()
+            },
+            defineStep("wearable capture belonged to the first account") {
+                ctx, _, _ in
+                try w.wearableCaptureBelongedToFirstAccount()
+                return ctx
+            },
+            defineStep("the second account's sign-in has not finished") {
+                ctx, _, _ in
+                try w.secondAccountSignInHasNotFinished()
+                return ctx
+            },
+            defineCheck("capture does not record") { _, _, _ in
+                try w.assertPendingCaptureDoesNotRecord()
+            },
+            defineCheck(
+                "it does not reuse the first account's or signed-out capture choices"
+            ) { _, _, _ in
+                try w.assertPendingCaptureReusesNoPriorChoices()
+            },
+            defineCheck(
+                "the second account starts paused with its default source choices"
+            ) { _, _, _ in
+                try w.assertPendingSecondAccountStartsSafe()
+            },
+            defineCheck(
+                "the app remains responsive until sign-in finishes"
+            ) { _, _, _ in
+                try w.assertAppResponsiveUntilSignInFinishes()
+            },
+            defineCheck(
+                "the second account's own capture choices appear after sign-in"
+            ) { _, _, _ in
+                try w.assertSecondCaptureChoicesAppearAfterSignIn()
             },
             defineStep(
                 "onboarding, welcome, persona, and ambient choices exist from before the update"

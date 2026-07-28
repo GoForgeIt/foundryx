@@ -181,7 +181,7 @@ final class CaptureAccountPreferenceTests: ProcessGlobalStateTestCase {
         spool.detach()
     }
 
-    func testTask6RestorationBootstrapIsDormantAndSpoolHasNoLiveDefaultsReader()
+    func testTask7RestorationBootstrapUsesOneOwnerSnapshotAndNoLiveDefaultsReader()
         throws
     {
         let repository = URL(fileURLWithPath: #filePath)
@@ -192,15 +192,26 @@ final class CaptureAccountPreferenceTests: ProcessGlobalStateTestCase {
             contentsOf: repository
                 .appendingPathComponent("App/FoundryXAppDelegate.swift"),
             encoding: .utf8)
+        XCTAssertTrue(
+            appDelegate.contains("launchOptions?[.bluetoothCentrals]"),
+            "only an iOS Bluetooth-restoration launch may activate the headless path")
+        XCTAssertTrue(
+            appDelegate.contains("CaptureSettings.snapshot("),
+            "the bootstrap must resolve one immutable proved-owner capture snapshot")
+        XCTAssertEqual(
+            appDelegate.components(
+                separatedBy: "CaptureSettings.snapshot(").count - 1,
+            1,
+            "the restoration launch must resolve exactly one capture snapshot")
+        XCTAssertTrue(
+            appDelegate.contains("OmiRestorationSpool("),
+            "Task 7 must create the headless restoration spool")
+        XCTAssertTrue(
+            appDelegate.contains("dm.start()"),
+            "Task 7 must activate CoreBluetooth restoration after owner proof")
         XCTAssertFalse(
             appDelegate.contains("UserDefaultsCaptureSourceStore()"),
-            "Task 6 must not activate the Task 7 restoration preference reader")
-        XCTAssertFalse(
-            appDelegate.contains("OmiRestorationSpool(log:"),
-            "Task 6 must not create a live background restoration spool")
-        XCTAssertFalse(
-            appDelegate.contains("dm.start()"),
-            "Task 6 must not activate CoreBluetooth restoration")
+            "restoration must not fall through to another owner's compatibility store")
 
         let spool = try String(
             contentsOf: repository.appendingPathComponent(
@@ -212,6 +223,17 @@ final class CaptureAccountPreferenceTests: ProcessGlobalStateTestCase {
         XCTAssertFalse(
             spool.contains("UserDefaults"),
             "the restoration spool must not query defaults per frame")
+
+        let rootView = try String(
+            contentsOf: repository
+                .appendingPathComponent("App/RootView.swift"),
+            encoding: .utf8)
+        XCTAssertEqual(
+            rootView.components(
+                separatedBy: "identityCoordinator.restoreCompleted(").count
+                - 1,
+            1,
+            "activation completion must keep exactly one refresh boundary")
     }
 
     func testDormantSnapshotInstallAndExplicitRefreshPreserveCompatibility()
