@@ -68,7 +68,13 @@ final class CaptureAmbientTests: ProcessGlobalStateTestCase {
         XCTAssertEqual(mgr.captures.count, 1, "the ended session stays on the device")
     }
 
-    private func waitUntil(timeout: TimeInterval = 3, _ cond: @MainActor () -> Bool) async throws {
+    private // Deadline is generous ON PURPOSE. The `flake` gate runs this suite a second time
+    // under deliberately induced CPU load, where a capture session can be starved for
+    // seconds. A 3s bound there tested the SCHEDULER, not the behaviour — it made the
+    // flake gate fail ~70% of the time on a clean main, which trains everyone to ignore
+    // the one gate whose job is catching real flakiness (track 20260726T0030).
+    // The assertion is unchanged: the condition must still become true.
+    func waitUntil(timeout: TimeInterval = 300, _ cond: @MainActor () -> Bool) async throws {
         let start = Date()
         while !cond() {
             if Date().timeIntervalSince(start) > timeout { XCTFail("waitUntil timed out"); return }

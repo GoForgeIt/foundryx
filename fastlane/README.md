@@ -15,6 +15,22 @@ For _fastlane_ installation instructions, see [Installing _fastlane_](https://do
 
 ## iOS
 
+### ios gates
+
+```sh
+[bundle exec] fastlane ios gates
+```
+
+Run the permanent CI gates (package tests, CQRS invariants, iOS compiles, Release leak, flake, lint).
+
+### ios perf
+
+```sh
+[bundle exec] fastlane ios perf
+```
+
+Large-library perf budgets on a simulated iPhone (nav + churn-interleaved CQRS phase).
+
 ### ios register
 
 ```sh
