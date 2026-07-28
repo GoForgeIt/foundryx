@@ -337,15 +337,21 @@ final class DeviceSystemReconnectWorld: @unchecked Sendable {
         device.start()
     }
 
-    /// A relaunched process has FINISHED LAUNCHING when its library has hydrated: that is
-    /// what gates `finishStartupAfterHydration` (orphan reconcile, retention sweep), and it
-    /// is the work a returning device must not race.
+    /// A relaunched process has FINISHED LAUNCHING when its hydration task has completed —
+    /// BOTH phases.
     ///
-    /// Not a bare sleep, and not a weakened assertion — it waits for an observable the
-    /// production code publishes, then asserts exactly what it asserted before.
+    /// MY FIRST VERSION WAITED ON THE WRONG PHASE (review finding M1). It waited for
+    /// `!captures.isEmpty`, which is satisfied at the end of hydration PHASE 1. The cause I
+    /// had correctly diagnosed — `finishStartupAfterHydration` → `reconcileOrphanedCaptures`,
+    /// which can bind or discard the very capture the scenario is about — runs in the
+    /// PHASE-2 main-actor hop, after the off-main warm pass and the retention sweep. So the
+    /// wait narrowed the race instead of closing it, and 8/8 clean was consistent with both
+    /// readings. `hydration` is the repository's own two-phase join (`public private(set)`,
+    /// used the same way in `CaptureAccountPreferenceTests`); awaiting it closes the race
+    /// rather than shrinking it. No assertion changes.
     @MainActor
     func waitForRelaunchToHydrate() async throws {
-        try await Self.waitUntil { !self.capture.captures.isEmpty }
+        await capture.hydration?.value
     }
 
     /// Drop the process's objects the way a watchdog kill does: nothing is ended, nothing is

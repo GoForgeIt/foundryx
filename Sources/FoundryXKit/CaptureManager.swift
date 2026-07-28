@@ -1340,6 +1340,18 @@ public final class CaptureManager: ObservableObject {
         .blocked(reason: "no device context was supplied to this capture manager")
     }
 
+    /// WHAT IS ACTUALLY RECORDING right now, for the composition root to attribute by.
+    ///
+    /// This is the question the archive needs answered. `isRecordingMic` is the manager's own
+    /// authority on it — it is what the phone-mic arm of `onSourceState` keys off, what the
+    /// live surface's "Phone" label keys off, and what `endSession`'s usage token keys off —
+    /// so reading it here keeps the durable record agreeing with all three instead of with
+    /// the handset's address book.
+    public var recordingSourceForAttribution: CaptureRecordingSource {
+        if isRecordingMic || captureSource == .phoneMic { return .handsetMicrophone }
+        return .externalStream
+    }
+
     /// The identity to narrow a resume by, or nil when the composition root could not
     /// resolve one (in which case the shipped, un-narrowed rule applies).
     private var resumingDeviceIdentity: RecordingDeviceIdentity? {

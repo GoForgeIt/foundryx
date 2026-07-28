@@ -24,25 +24,52 @@ public enum OmiRestorationComposition {
     /// there may be no remembered device at all — and neither absence may be papered over.
     /// A placeholder identity written into a capture directory is indistinguishable from a
     /// real one forever after, so the answer is `blocked` and the caller defers.
+    /// A stable token for the handset's own input. It names a role, not a serial: there is
+    /// exactly one built-in microphone per handset, the account scope already says whose
+    /// handset it is, and putting anything device-identifying here would hand the archive a
+    /// correlator the privacy work exists to withhold.
+    public static let handsetToken = "handset"
+    public static let handsetDisplayName = "Phone"
+
     public static func resolveDeviceContext(
         binding: CaptureAccountScope.AccountBinding?,
-        savedDevice: SavedOmi?
+        savedDevice: SavedOmi?,
+        recording: CaptureRecordingSource
     ) -> CaptureDeviceContextResolution {
         guard let binding else {
             return .blocked(reason:
                 "no account scope is resolvable during this background restoration, so any "
                     + "audio recorded now could not be attributed to an owner")
         }
-        guard let savedDevice else {
-            return .blocked(reason:
-                "no remembered device is available, so audio recorded now could not be "
-                    + "attributed to a device")
+        switch recording {
+        case .handsetMicrophone:
+            // THE RECORDER IS KNOWN. A handset recording is attributable whether or not an
+            // external device is remembered, and it is never attributable TO one — the
+            // remembered pairing is not what is making this audio.
+            return .resolved(CaptureDeviceContext(
+                identity: RecordingDeviceIdentity(shape: .builtInMic,
+                                                  hardwareToken: handsetToken),
+                displayName: handsetDisplayName,
+                accountScope: binding.scope))
+        case .handsetAudioRoute(let token, let displayName):
+            return .resolved(CaptureDeviceContext(
+                identity: RecordingDeviceIdentity(shape: .audioRoute, hardwareToken: token),
+                displayName: displayName,
+                accountScope: binding.scope))
+        case .externalStream:
+            // Only HERE does the remembered pairing answer the question, because only here is
+            // the remembered pairing the thing that is recording.
+            guard let savedDevice else {
+                return .blocked(reason:
+                    "an external stream is recording but no device is remembered, so this "
+                        + "audio could not be attributed to a device")
+            }
+            return .resolved(CaptureDeviceContext(
+                identity: RecordingDeviceIdentity(shape: .bleStream,
+                                                  hardwareToken: savedDevice.id.uuidString),
+                displayName: savedDevice.name,
+                accountScope: binding.scope))
         }
-        return .resolved(CaptureDeviceContext(
-            identity: RecordingDeviceIdentity(shape: .bleStream,
-                                              hardwareToken: savedDevice.id.uuidString),
-            displayName: savedDevice.name,
-            accountScope: binding.scope))
     }
 
     /// Build the spool the restoration bootstrap installs, carrying the resolved context in.

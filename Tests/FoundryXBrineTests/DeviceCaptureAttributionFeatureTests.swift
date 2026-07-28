@@ -26,8 +26,8 @@ final class DeviceCaptureAttributionFeatureTests: ProcessGlobalStateTestCase {
             let result = try await BrineFeatureRunner.run(
                 "device-capture-attribution",
                 registry: StepRegistry(DeviceCaptureAttributionSteps.make(world: world)))
-            XCTAssertEqual(result.passed, 5,
-                           "device-capture-attribution must run all 5 scenarios")
+            XCTAssertEqual(result.passed, 7,
+                           "device-capture-attribution must run all 7 scenarios")
         } catch {
             await world.teardown()
             throw error
@@ -141,8 +141,18 @@ final class DeviceCaptureAttributionWorld: @unchecked Sendable {
     var resolution: CaptureDeviceContextResolution?
     var continuation: String?
     var provenance: CaptureDeviceProvenance?
+    /// The conversation the HANDSET opened, and the record it left.
+    var handsetConversation: String?
+    var handsetConversationNoDevice: String?
+    /// Device B's world: its own manager, its own spool, and what each opened.
+    var deviceBIdentity: RecordingDeviceIdentity?
+    var deviceBManagerConversation: String?
+    var deviceBSpoolConversation: String?
+    var deviceAReopened: String?
 
     private var directories: [URL] = []
+    /// Extra managers built by the two-device scenario; held so nothing deallocates mid-run.
+    var managers: [CaptureManager] = []
 
     var identity: RecordingDeviceIdentity {
         RecordingDeviceIdentity(shape: .bleStream, hardwareToken: deviceId.uuidString)
@@ -175,12 +185,26 @@ final class DeviceCaptureAttributionWorld: @unchecked Sendable {
         resolution = nil
         continuation = nil
         provenance = nil
+        handsetConversation = nil
+        handsetConversationNoDevice = nil
+        deviceBIdentity = nil
+        deviceBManagerConversation = nil
+        deviceBSpoolConversation = nil
+        deviceAReopened = nil
         deviceId = UUID()
         pairing.stage(id: deviceId, name: "Omi")
+        // `selectCaptureSource` PERSISTS to process-global `CaptureSettings`. Brine runs every
+        // scenario of a feature in one process, so the handset scenario would otherwise leave
+        // `.phoneMic` behind and the next scenario's cold-resume arm — which is gated on
+        // `captureSource == .omi` — would silently never run. Reset it with the rest of the
+        // handset state. (This suite inherits `ProcessGlobalStateTestCase`, which owns the
+        // restore at tearDown; the lint gate requires exactly that.)
+        CaptureSettings.captureSource = .omi
     }
 
     @MainActor
     func teardown() {
+        managers = []
         capture = nil
         device = nil
         stack = nil
@@ -214,6 +238,88 @@ final class DeviceCaptureAttributionWorld: @unchecked Sendable {
         }
         try Data([1, 2, 3, 4]).write(to: dir.appendingPathComponent("seg-000000000000.opus"))
         seededConversation = id
+    }
+
+    /// Record a conversation from the HANDSET'S OWN MICROPHONE, through the real
+    /// `CaptureManager`, with the production context resolver `RootView` installs.
+    ///
+    /// `rememberADevice` is the whole point of the first arm: an Omi IS remembered and IS the
+    /// remembered pairing, and the recording still must not be attributed to it.
+    @MainActor
+    func recordOnHandset(rememberADevice: Bool) async throws -> String {
+        try freshHandset()
+        if !rememberADevice { pairing.clear() }
+        // BORN on the phone mic rather than switched to it. `selectCaptureSource(.phoneMic)`
+        // calls `source.stop()`, whose `.stopped` reaches `onSourceState` on a LATER main-actor
+        // turn — by which time `startMicRecording()` has set `isRecordingMic`, so the Omi's
+        // stop is read as the MIC stopping and clears it again. That race is real in
+        // production too (it is not T4's to fix), but driving it here would test the race
+        // rather than the attribution. A user who already has the phone mic selected is the
+        // state this scenario is about, and it has no switch in it.
+        CaptureSettings.captureSource = .phoneMic
+        let mic = SeamTestSource()
+        stack = FakeBLEStack(deviceId: deviceId, deviceName: "Omi")
+        device = DeviceManager(makeCentral: stack.factory)
+        capture = CaptureManager(
+            target: DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x"),
+            baseDir: baseDir,
+            source: device,
+            micSource: mic,
+            finalize: { _, _ in })
+        // EXACTLY what App/RootView.swift installs — no test-only shortcut.
+        capture.captureDeviceContext = { [weak capture, weak device] in
+            OmiRestorationComposition.resolveDeviceContext(
+                binding: CaptureAccountScope.currentAccountBinding(),
+                savedDevice: device?.saved,
+                recording: capture?.recordingSourceForAttribution ?? .externalStream)
+        }
+        #if os(iOS)
+        capture.micPermissionOverrideForTests = true   // the sim cannot drive the real prompt
+        #endif
+        capture.startMicRecording()
+        mic.onState?(.streaming)
+        try await Self.waitUntil { self.capture.active != nil }
+        return try XCTUnwrapOrThrow(capture.active?.captureId, "the handset opened no conversation")
+    }
+
+    /// Drive `CaptureManager.onSourceState(.streaming)`'s COLD arm as `identity`, and report
+    /// which conversation it ended up in. This is the production call site the narrowing has
+    /// to be applied at — not the static function.
+    @MainActor
+    func openThroughManager(as identity: RecordingDeviceIdentity, named: String) async throws -> String {
+        let source = SeamTestSource()
+        let manager = CaptureManager(
+            target: DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x"),
+            baseDir: baseDir,
+            source: source,
+            finalize: { _, _ in })
+        let context = CaptureDeviceContext(identity: identity, displayName: named,
+                                           accountScope: scope)
+        manager.captureDeviceContext = { .resolved(context) }
+        managers.append(manager)
+        source.onState?(.streaming)
+        // The cold arm either resumes an existing capture or arms for speech; feed real voiced
+        // frames so the "opened a new one" branch actually produces a conversation to compare.
+        RealOmiFrames.openSession(source.onFrame)
+        try await Self.waitUntil { manager.active != nil }
+        return try XCTUnwrapOrThrow(manager.active?.captureId, "nothing was opened")
+    }
+
+    /// The SECOND production call site: the background-restoration spool's own resume.
+    @MainActor
+    func openThroughSpool(as identity: RecordingDeviceIdentity, named: String) async throws -> String {
+        let binding = try XCTUnwrapOrThrow(self.binding, "no account binding")
+        let spool = OmiRestorationComposition.makeRestorationSpool(
+            binding: binding, root: baseDir,
+            executor: DispatchQueue(label: "foundryx-attribution-spool-\(UUID().uuidString)"),
+            log: nil, silenceGap: 120, paused: { false },
+            deviceContext: .resolved(CaptureDeviceContext(identity: identity, displayName: named,
+                                                          accountScope: binding.scope)))
+        self.spool = spool
+        spool.handleState(.streaming)
+        spool.append(Data([5, 5, 5]))
+        try await Self.settle { spool.activeCaptureId != nil }
+        return try XCTUnwrapOrThrow(spool.activeCaptureId, "the spool opened nothing")
     }
 
     @MainActor
@@ -285,8 +391,9 @@ enum DeviceCaptureAttributionSteps {
             defineStep("the account scope cannot be resolved for a background restoration") { ctx, _, _ in
                 try await MainActor.run { try w.freshHandset() }
                 w.resolution = OmiRestorationComposition.resolveDeviceContext(
-                    binding: nil, savedDevice: SavedOmi(id: w.deviceId, name: "Omi",
-                                                        lastConnected: nil))
+                    binding: nil,
+                    savedDevice: SavedOmi(id: w.deviceId, name: "Omi", lastConnected: nil),
+                    recording: .externalStream)
                 return ctx
             },
 
@@ -325,7 +432,8 @@ enum DeviceCaptureAttributionSteps {
                 let binding = try XCTUnwrapOrThrow(w.binding, "no account binding for the restoration")
                 let resolution = OmiRestorationComposition.resolveDeviceContext(
                     binding: binding,
-                    savedDevice: SavedOmi(id: w.deviceId, name: "Omi", lastConnected: nil))
+                    savedDevice: SavedOmi(id: w.deviceId, name: "Omi", lastConnected: nil),
+                    recording: .externalStream)
                 w.resolution = resolution
                 let spool = OmiRestorationComposition.makeRestorationSpool(
                     binding: binding,
@@ -363,7 +471,129 @@ enum DeviceCaptureAttributionSteps {
                 return ctx
             },
 
+            // MARK: When — H1, the handset
+
+            defineStep("the handset's own microphone records a conversation") { ctx, _, _ in
+                w.handsetConversation = try await w.recordOnHandset(rememberADevice: true)
+                return ctx
+            },
+
+            defineStep("the handset records a conversation with no external device remembered at all") { ctx, _, _ in
+                w.handsetConversationNoDevice = try await w.recordOnHandset(rememberADevice: false)
+                return ctx
+            },
+
+            // MARK: When — M4, two devices
+
+            defineStep("device A recorded a conversation that is still inside the silence gap") { ctx, _, _ in
+                try await MainActor.run { try w.freshHandset() }
+                try w.seedConversation(
+                    id: CaptureManager.newCaptureId(),
+                    startedAt: UInt64(Date().timeIntervalSince1970),
+                    device: CaptureDeviceContext(identity: w.identity,
+                                                 displayName: "Omi A",
+                                                 accountScope: w.scope))
+                w.deviceBIdentity = RecordingDeviceIdentity(shape: .bleStream,
+                                                            hardwareToken: UUID().uuidString)
+                return ctx
+            },
+
+            defineStep("device B's capture manager sees its stream start") { ctx, _, _ in
+                let b = try XCTUnwrapOrThrow(w.deviceBIdentity, "device B was never named")
+                w.deviceBManagerConversation = try await w.openThroughManager(as: b, named: "Omi B")
+                return ctx
+            },
+
+            defineStep("device B's background restoration spool sees its stream start") { ctx, _, _ in
+                let b = try XCTUnwrapOrThrow(w.deviceBIdentity, "device B was never named")
+                w.deviceBSpoolConversation = try await w.openThroughSpool(as: b, named: "Omi B")
+                return ctx
+            },
+
+            defineStep("device A's capture manager sees its stream start") { ctx, _, _ in
+                w.deviceAReopened = try await w.openThroughManager(as: w.identity, named: "Omi A")
+                return ctx
+            },
+
             // MARK: Then
+
+            defineCheck("the conversation records the handset as its recorder") { _, _, _ in
+                // Whichever of the two handset scenarios just ran.
+                let id = try XCTUnwrapOrThrow(w.handsetConversationNoDevice ?? w.handsetConversation,
+                                              "the handset opened no conversation")
+                let recorded = try XCTUnwrapOrThrow(
+                    CaptureDeviceSidecar.load(captureId: id, baseDir: w.baseDir),
+                    "the handset's conversation has no device record")
+                guard recorded.identity.shape == .builtInMic else {
+                    throw BrineStepError(
+                        "a handset recording records shape \(recorded.identity.shape) — the "
+                            + "handset's own microphone is .builtInMic")
+                }
+                // Classify it here so the shared "not a device record that went missing"
+                // check has a subject: a handset recording is IDENTIFIED, never unknown,
+                // whether or not an external device happens to be remembered.
+                w.provenance = CaptureDeviceSidecar.provenance(captureId: id, baseDir: w.baseDir)
+            },
+
+            defineCheck("it is not attributed to the remembered external device") { _, _, _ in
+                let id = try XCTUnwrapOrThrow(w.handsetConversation, "the handset opened no conversation")
+                let recorded = try XCTUnwrapOrThrow(
+                    CaptureDeviceSidecar.load(captureId: id, baseDir: w.baseDir),
+                    "the handset's conversation has no device record")
+                guard recorded.identity != w.identity else {
+                    throw BrineStepError(
+                        "a HANDSET conversation records the remembered BLE device as its "
+                            + "recorder: \(recorded.identity) / \(recorded.displayName)")
+                }
+                // Non-vacuous: the device WAS remembered while this recording happened, so a
+                // resolver that reads the pairing had something to wrongly report.
+                guard DeviceManager.loadSaved()?.id.uuidString == w.identity.hardwareToken else {
+                    throw BrineStepError("no device was remembered — the check is vacuous")
+                }
+            },
+
+            defineCheck("its device record agrees with its source marker") { _, _, _ in
+                let id = try XCTUnwrapOrThrow(w.handsetConversation, "the handset opened no conversation")
+                let recorded = try XCTUnwrapOrThrow(
+                    CaptureDeviceSidecar.load(captureId: id, baseDir: w.baseDir),
+                    "the handset's conversation has no device record")
+                let marker = CaptureManager.capturedSourceOnDisk(id, baseDir: w.baseDir)
+                // PD-ARCHIVE-IDENTITY: .bleStream -> "omi"; .audioRoute/.builtInMic -> "phoneMic".
+                guard CaptureDeviceSidecar.sourceMarker(for: recorded.identity.shape) == marker else {
+                    throw BrineStepError(
+                        "the capture directory contradicts itself: .capture-source says "
+                            + "\(marker ?? "nil") while the device record says \(recorded.identity.shape)")
+                }
+            },
+
+            defineCheck("device B opens a new conversation rather than continuing device A's") { _, _, _ in
+                let opened = try XCTUnwrapOrThrow(w.deviceBManagerConversation,
+                                                  "device B's manager opened no conversation")
+                guard opened != w.seededConversation else {
+                    throw BrineStepError(
+                        "device B CONTINUED device A's conversation (\(opened)) — B's audio "
+                            + "would be appended to A's recording")
+                }
+            },
+
+            defineCheck("the spool opens a new conversation rather than continuing device A's") { _, _, _ in
+                let opened = try XCTUnwrapOrThrow(w.deviceBSpoolConversation,
+                                                  "device B's spool opened no conversation")
+                guard opened != w.seededConversation else {
+                    throw BrineStepError(
+                        "device B's restoration spool CONTINUED device A's conversation (\(opened))")
+                }
+            },
+
+            defineCheck("device A continues its own conversation") { _, _, _ in
+                // The control that makes both refusals above non-vacuous: the SAME code path,
+                // driven by the device that actually recorded it, must resume rather than mint.
+                guard w.deviceAReopened == w.seededConversation else {
+                    throw BrineStepError(
+                        "device A did not continue its own conversation: got "
+                            + "\(w.deviceAReopened ?? "nil"), expected \(w.seededConversation ?? "nil")")
+                }
+            },
 
             defineCheck("the conversation records the device that made it") { _, _, _ in
                 let id = try XCTUnwrapOrThrow(w.appConversation, "the app opened no conversation")
@@ -506,7 +736,7 @@ enum DeviceCaptureAttributionSteps {
                     throw BrineStepError("no binding available to exercise the second refusal")
                 }
                 let noDevice = OmiRestorationComposition.resolveDeviceContext(
-                    binding: binding, savedDevice: nil)
+                    binding: binding, savedDevice: nil, recording: .externalStream)
                 guard case .blocked(let deviceReason) = noDevice else {
                     throw BrineStepError(
                         "a restoration with NO remembered device still resolved a context — "
@@ -519,7 +749,8 @@ enum DeviceCaptureAttributionSteps {
                 // Non-vacuous: the same call WITH both must resolve.
                 let ok = OmiRestorationComposition.resolveDeviceContext(
                     binding: binding,
-                    savedDevice: SavedOmi(id: w.deviceId, name: "Omi", lastConnected: nil))
+                    savedDevice: SavedOmi(id: w.deviceId, name: "Omi", lastConnected: nil),
+                    recording: .externalStream)
                 guard case .resolved = ok else {
                     throw BrineStepError("nothing ever resolves — the refusal is free")
                 }

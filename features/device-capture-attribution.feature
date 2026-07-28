@@ -24,12 +24,31 @@ Feature: Every conversation records which device made it, and only that device c
     When a background restoration opens a conversation through the composition factory
     Then that conversation records the device that made it too
 
+  Scenario: a conversation recorded by the handset is not attributed to a remembered external device
+    Given a remembered recording device is active for this account
+    When the handset's own microphone records a conversation
+    Then the conversation records the handset as its recorder
+    And it is not attributed to the remembered external device
+    And its device record agrees with its source marker
+    When the handset records a conversation with no external device remembered at all
+    Then the conversation records the handset as its recorder
+    And it is not reported as a device record that went missing
+
   Scenario: a different device does not continue another device's conversation
     Given a conversation inside the silence gap was recorded by one device
     When a differently shaped device looks for a conversation to continue
     Then it finds nothing to continue
     When the device that recorded it looks for a conversation to continue
     Then it continues its own conversation
+
+  Scenario: a second device reconnecting opens its own conversation instead of continuing another's
+    Given device A recorded a conversation that is still inside the silence gap
+    When device B's capture manager sees its stream start
+    Then device B opens a new conversation rather than continuing device A's
+    When device B's background restoration spool sees its stream start
+    Then the spool opens a new conversation rather than continuing device A's
+    When device A's capture manager sees its stream start
+    Then device A continues its own conversation
 
   Scenario: a conversation recorded before the upgrade keeps its attribution and is not called missing
     Given a conversation inside the silence gap exists with no device record and a durable start before the upgrade

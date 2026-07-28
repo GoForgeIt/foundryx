@@ -34,8 +34,15 @@ public struct CaptureDeviceContext: Codable, Equatable, Sendable {
     public let identity: RecordingDeviceIdentity
     /// What to call it in the archive. Display only — never an identity.
     public let displayName: String
-    /// The account scope that owned the capture, so a record cannot be read across accounts
-    /// without noticing.
+    /// The account scope that owned the capture, at the moment it was written.
+    ///
+    /// PROVENANCE METADATA, NOT A CHECK (review finding L2). An earlier comment here claimed
+    /// it existed "so a record cannot be read across accounts without noticing" — nothing
+    /// notices: `mayContinue` compares identity only and `provenance` never looks at it. It
+    /// is recorded because a reader investigating an archive needs to know whose it was, and
+    /// it is asserted at write time. Making it a real gate means deciding what a disagreement
+    /// with the reading container SHOULD do to a user's capture, which is an account-boundary
+    /// policy question T5/T6 own — not something to smuggle in as a silent skip here.
     public let accountScope: String
 
     public init(identity: RecordingDeviceIdentity, displayName: String, accountScope: String) {
@@ -46,6 +53,35 @@ public struct CaptureDeviceContext: Codable, Equatable, Sendable {
 
     public var shape: RecordingDeviceShape { identity.shape }
     public var deviceId: String { identity.hardwareToken }
+}
+
+/// WHAT IS ACTUALLY RECORDING, asked of the capture that is opening rather than of the
+/// handset's address book.
+///
+/// THE BUG THIS TYPE EXISTS TO MAKE IMPOSSIBLE. The first version of the composition root
+/// answered *"which device does this handset remember"* and wrote that into every capture —
+/// so a phone-mic recording made while an Omi was paired was recorded in the archive as
+/// having been made BY the Omi. The capture directory contradicted itself (`.capture-source`
+/// said `phoneMic`, the device record said `bleStream/<omi-uuid>`), it contradicted the
+/// running app (the live surface already said "Phone"), and it was durable: every such
+/// conversation carried a false recorder forever after. "Which device does this handset
+/// remember" and "which device made this conversation" are different questions, and only one
+/// of them belongs in the archive.
+public enum CaptureRecordingSource: Equatable, Sendable {
+    /// The handset's own microphone (the Record button, the Action Button, the Siri intent).
+    case handsetMicrophone
+    /// A Bluetooth audio INPUT ROUTE the handset is recording from.
+    case handsetAudioRoute(token: String, displayName: String)
+    /// An external device streaming encoded frames to the handset — the remembered BLE device.
+    case externalStream
+
+    var shape: RecordingDeviceShape {
+        switch self {
+        case .handsetMicrophone: return .builtInMic
+        case .handsetAudioRoute: return .audioRoute
+        case .externalStream: return .bleStream
+        }
+    }
 }
 
 /// The composition root's answer. `blocked` is a first-class outcome, not an error case to
@@ -90,13 +126,51 @@ public enum CaptureDeviceSidecar {
     /// The sidecar file, beside the capture's segments.
     public static let fileName = ".capture-device.json"
 
-    /// The instant device records began being written (2026-07-28T00:00:00Z).
+    /// The instant device records began being written **in a build a user can have**.
     ///
-    /// A capture that STARTED before this could not have been given a record, so its absence
-    /// is expected rather than a fault. This is a fixed constant on purpose: deriving it
-    /// from anything observable at runtime (a build date, a first-launch stamp) would make
-    /// the same archive classify differently on two handsets.
-    public static let migrationEpoch: UInt64 = 1_785_196_800
+    /// WHY A FIXED CONSTANT. Deriving it at runtime — a build date, a first-launch stamp —
+    /// would classify the same archive differently on two handsets, which is the one thing a
+    /// provenance answer may not do.
+    ///
+    /// WHY *THIS* CONSTANT, AND THE HONEST COST. My first value was the day the code was
+    /// written (2026-07-28T00:00:00Z), and that was wrong in the direction this type exists
+    /// to prevent (review finding M2): the release ships AFTER the code is written, so every
+    /// conversation a user records on the CURRENT shipped build between the write date and
+    /// their upgrade would be classified `unknownPostMigration` — "made after device records
+    /// shipped but carries none" — which is false, for exactly the reason the case exists.
+    ///
+    /// The choice made here is the first of the reviewer's two options: **pin it at the
+    /// release timestamp**, deliberately LATE rather than early, and put it on the ship
+    /// checklist. Late is the safe direction: a capture made just after the real cutover and
+    /// before this instant reads `legacyPreMigration` — "recorded before the upgrade" —
+    /// which understates what we know but never invents a missing record. Early is the
+    /// unsafe direction: it accuses correct captures of having lost their identity.
+    ///
+    /// **SHIP CHECKLIST — this value must be moved to the release build's timestamp before
+    /// the build that first writes device records reaches a user.** Until then it is set to
+    /// a deliberately late placeholder (2026-09-01T00:00:00Z). Its false-classification
+    /// window while it stays late: captures recorded by an upgraded user between their
+    /// upgrade and this instant read `legacyPreMigration` instead of `identified`/`unknown`
+    /// — they still carry their real `.capture-device.json` when one was written, so
+    /// `provenance` returns `.identified` for them regardless and the epoch is never
+    /// consulted. The window therefore only affects captures that have NO record, where
+    /// "recorded before the upgrade" is the conservative reading.
+    ///
+    /// The alternative — keying to the build that first writes records — was not taken: it
+    /// reintroduces per-handset variance (two users on different builds classify the same
+    /// synced archive differently), which is the property the constant exists to hold.
+    public static let migrationEpoch: UInt64 = 1_788_220_800
+
+    /// PD-ARCHIVE-IDENTITY's wire-stable mapping, in one place so a reader can check the
+    /// device record against the shipped `.capture-source` marker rather than trusting that
+    /// they were written from the same belief: `.bleStream -> "omi"`,
+    /// `.audioRoute`/`.builtInMic -> "phoneMic"`.
+    public static func sourceMarker(for shape: RecordingDeviceShape) -> String {
+        switch shape {
+        case .bleStream: return CaptureSourceKind.omi.rawValue
+        case .audioRoute, .builtInMic: return CaptureSourceKind.phoneMic.rawValue
+        }
+    }
 
     public static func url(_ captureId: String, baseDir: URL) -> URL {
         baseDir.appendingPathComponent(captureId, isDirectory: true)

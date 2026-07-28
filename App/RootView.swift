@@ -657,10 +657,14 @@ private struct MainTabs: View {
         // capture-creation sites write the same device record and neither is asked to
         // discover an identity it does not possess. A blocked resolution writes no record
         // at all rather than a placeholder.
-        mgr.captureDeviceContext = { [weak dm] in
+        mgr.captureDeviceContext = { [weak mgr, weak dm] in
             OmiRestorationComposition.resolveDeviceContext(
                 binding: CaptureAccountScope.currentAccountBinding(),
-                savedDevice: dm?.saved)
+                savedDevice: dm?.saved,
+                // ASK WHAT IS RECORDING, not what is remembered. A phone-mic conversation
+                // made while an Omi is paired is a HANDSET recording; attributing it to the
+                // Omi writes a false recorder into the archive permanently.
+                recording: mgr?.recordingSourceForAttribution ?? .externalStream)
         }
         // Omi hardware button: a DOUBLE-click pauses/resumes the current recording — the
         // same action as the on-screen Pause. Fires only if the paired Omi firmware exposes

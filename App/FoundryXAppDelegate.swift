@@ -57,9 +57,12 @@ final class FoundryXAppDelegate: NSObject, UIApplicationDelegate {
             log: log,
             silenceGap: preferences.silenceGapSeconds,
             paused: { paused },
+            // A bluetooth-restoration relaunch exists BECAUSE an external stream reconnected;
+            // the handset's microphone is not involved in this path at all.
             deviceContext: OmiRestorationComposition.resolveDeviceContext(
                 binding: binding,
-                savedDevice: dm.saved))
+                savedDevice: dm.saved,
+                recording: .externalStream))
         let exposure = AccountExposureRegistration(
             participantID: "omi-restoration-spool",
             kind: .live,
