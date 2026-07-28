@@ -498,6 +498,7 @@ phase_uiproof() {
        -only-testing:FoundryXUITests/AmbientRecordingProofUITests/testAmbientSpeechOpensATappableRecordingConversation \
        -only-testing:FoundryXUITests/ForegroundRestoreProofUITests/testListeningSurfaceSurvivesBackgroundingAndStaysUsable \
        -only-testing:FoundryXUITests/ForegroundRestoreProofUITests/testLiveTranscriptRendersAndSurvivesBackgrounding \
+       -only-testing:FoundryXUITests/VaultFunnelReachableProofUITests/testOwnerCanReachVaultSetupFromSettings \
        >"$out" 2>&1; then
     echo "  uiproof: recording surface (phone-mic + Omi ambient + foreground restore) PASSED"
   else
