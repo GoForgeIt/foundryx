@@ -283,9 +283,12 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     /// Consecutive failed-connect attempts (bleQueue only) → exponential retry backoff.
     private var failToConnectAttempts = 0
 
-    private static let savedKey = "foundryx.omi.peripheral-id"
-    private static let savedNameKey = "foundryx.omi.peripheral-name"
-    private static let savedDateKey = "foundryx.omi.last-connected"
+    // Internal, not private, so the account-scoped device store's LEGACY MIGRATION can
+    // name the very same keys instead of re-typing the literals and drifting from them
+    // (track 20260725T2306, T2).
+    static let savedKey = "foundryx.omi.peripheral-id"
+    static let savedNameKey = "foundryx.omi.peripheral-name"
+    static let savedDateKey = "foundryx.omi.last-connected"
 
     public init(log: DoorLog? = nil) {
         self.log = log
