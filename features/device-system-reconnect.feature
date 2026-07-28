@@ -34,6 +34,12 @@ Feature: A system link drop reconnects and continues the same conversation, whil
     Then no connection is re-issued
     And the same drop on an armed device does re-issue one
 
+  Scenario: iOS relaunches the app for a restored connection and the conversation continues
+    Given an active external recording device is capturing a conversation
+    When iOS kills the app and relaunches it holding the still-connected device
+    Then the restored connection is rediscovered without issuing a new connect
+    And capture resumes the same conversation
+
   Scenario: a reconnect that never rediscovers the audio stream does not claim to have resumed
     Given an active external recording device is capturing a conversation
     When the system link drops and the device returns without its audio stream

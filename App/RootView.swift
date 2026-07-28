@@ -652,6 +652,16 @@ private struct MainTabs: View {
         // compiled out of a plain Release build entirely.
         StressChurn.installIfRequested(manager: mgr)
         #endif
+        // WHICH DEVICE this manager records from. Resolved HERE, at the composition root,
+        // by the same Kit factory the background-restoration bootstrap uses — so both
+        // capture-creation sites write the same device record and neither is asked to
+        // discover an identity it does not possess. A blocked resolution writes no record
+        // at all rather than a placeholder.
+        mgr.captureDeviceContext = { [weak dm] in
+            OmiRestorationComposition.resolveDeviceContext(
+                binding: CaptureAccountScope.currentAccountBinding(),
+                savedDevice: dm?.saved)
+        }
         // Omi hardware button: a DOUBLE-click pauses/resumes the current recording — the
         // same action as the on-screen Pause. Fires only if the paired Omi firmware exposes
         // the button service (see DeviceManager.OmiUUID.buttonService).

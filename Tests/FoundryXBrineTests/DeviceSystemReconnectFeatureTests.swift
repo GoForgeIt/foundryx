@@ -39,8 +39,8 @@ final class DeviceSystemReconnectFeatureTests: ProcessGlobalStateTestCase {
             let result = try await BrineFeatureRunner.run(
                 "device-system-reconnect",
                 registry: StepRegistry(DeviceSystemReconnectSteps.make(world: world)))
-            XCTAssertEqual(result.passed, 4,
-                           "device-system-reconnect must run all 4 scenarios")
+            XCTAssertEqual(result.passed, 5,
+                           "device-system-reconnect must run all 5 scenarios")
         } catch {
             await world.teardown()
             throw error
@@ -312,12 +312,21 @@ final class DeviceSystemReconnectWorld: @unchecked Sendable {
         try bootProcess(inRange: true)
     }
 
+    /// A BLUETOOTH-RESTORATION launch: iOS rebuilt the process because an event fired for
+    /// our central, and will hand the peripheral back through `willRestoreState` BEFORE the
+    /// central reports `poweredOn`. Modelled by not announcing the state at creation.
+    @MainActor
+    func bootRestorationProcess() throws {
+        try bootProcess(inRange: true, announceStateOnCreation: false)
+    }
+
     /// Everything an app launch builds: the transport, the device manager over it, and the
     /// capture manager attached to that device as its audio source. Called again — with the
     /// SAME saved pairing and capture directory — to model a relaunch.
     @MainActor
-    func bootProcess(inRange: Bool) throws {
-        stack = FakeBLEStack(deviceId: deviceId, deviceName: "Omi")
+    func bootProcess(inRange: Bool, announceStateOnCreation: Bool = true) throws {
+        stack = FakeBLEStack(deviceId: deviceId, deviceName: "Omi",
+                             announceStateOnCreation: announceStateOnCreation)
         if !inRange { stack.takeDeviceOutOfRange() }
         device = DeviceManager(makeCentral: stack.factory)
         capture = CaptureManager(
@@ -475,6 +484,60 @@ enum DeviceSystemReconnectSteps {
                     w.capture.active != nil && !w.capture.isAwaitingReconnect
                 }
                 return ctx
+            },
+
+            defineStep("iOS kills the app and relaunches it holding the still-connected device") { ctx, _, _ in
+                // NOT a link drop. iOS terminated the PROCESS while the Omi stayed
+                // connected, then relaunched us because a bluetooth-central event fired —
+                // and hands the LIVE peripheral back through `willRestoreState`. This is
+                // the path S04's other relaunch scenario cannot reach: there the link had
+                // dropped and a fresh connect was needed; here there is nothing to connect,
+                // and re-issuing one would throw away a live connection's discovery state
+                // instead of rediscovering it.
+                try await MainActor.run {
+                    w.killProcess()
+                    // A restoration launch: CoreBluetooth does NOT report `poweredOn`
+                    // before delivering the restored peripherals, so the fake does not
+                    // announce it either.
+                    try w.bootRestorationProcess()
+                }
+                await MainActor.run {
+                    w.stack.clearLog()
+                    w.stack.restoreState(peripheralState: .connected)
+                    w.stack.powerOn()
+                }
+                w.stack.drain()
+                try await DeviceSystemReconnectWorld.settle {
+                    w.capture.active?.captureId == w.conversationBeforeDrop
+                }
+                w.stack.drain()
+                w.transportLogAfterDrop = w.stack.log
+                w.connectsAfterDrop = w.stack.count(of: .connectIssued)
+                return ctx
+            },
+
+            defineCheck("the restored connection is rediscovered without issuing a new connect") { _, _, _ in
+                // The reclaim is what makes the powered-on callback rediscover the LIVE
+                // link. Without it the manager falls through to the ordinary auto-reconnect
+                // and issues a connect against a peripheral that is already connected —
+                // which is the classic state-restoration bug, and the observable difference.
+                guard w.stack.count(of: .servicesRequested([OmiUUID.audioService,
+                                                            OmiUUID.batteryService,
+                                                            OmiUUID.storageService])) > 0 else {
+                    throw BrineStepError(
+                        "the restored connection was never rediscovered; the transport saw "
+                            + "\(w.transportLogAfterDrop)")
+                }
+                guard w.connectsAfterDrop == 0 else {
+                    throw BrineStepError(
+                        "a new connect was issued against an already-connected restored "
+                            + "peripheral: \(w.transportLogAfterDrop)")
+                }
+                // Non-vacuous: this transport DOES record connects — scenario 1 depends on
+                // it, and the same fake reported them there.
+                guard w.stack.peripheral.boundToSink else {
+                    throw BrineStepError("the restored peripheral was never bound to the manager")
+                }
             },
 
             defineStep("the system link drops and the app is relaunched before the device returns") { ctx, _, _ in

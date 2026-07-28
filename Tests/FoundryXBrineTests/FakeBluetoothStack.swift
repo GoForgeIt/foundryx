@@ -73,6 +73,7 @@ final class FakeBLEStack: @unchecked Sendable {
     private var pendingConnect = false
     private var inRange = true
     private var poweredOn = true
+    private var announceStateOnCreation = true
 
     /// What the device advertises for onboard storage.
     enum StorageShape {
@@ -90,9 +91,11 @@ final class FakeBLEStack: @unchecked Sendable {
     /// A stock Omi: the audio service with its data + codec characteristics, and by default
     /// no onboard storage service (a device that keeps nothing while disconnected — the
     /// shape T3 already covers by outcome).
-    init(deviceId: UUID = UUID(), deviceName: String = "Omi", storage: StorageShape = .absent) {
+    init(deviceId: UUID = UUID(), deviceName: String = "Omi", storage: StorageShape = .absent,
+         announceStateOnCreation: Bool = true) {
         self.deviceId = deviceId
         self.deviceName = deviceName
+        self.announceStateOnCreation = announceStateOnCreation
         let audio = FakeBLEService(
             OmiUUID.audioService,
             characteristics: [FakeBLECharacteristic(OmiUUID.audioDataChar),
@@ -117,6 +120,13 @@ final class FakeBLEStack: @unchecked Sendable {
     }
 
     /// The `BLECentralFactory` to hand `DeviceManager(makeCentral:)`.
+    ///
+    /// `announceStateOnCreation` models the ordinary launch, where CoreBluetooth reports the
+    /// manager's state right after creation. A STATE-RESTORATION launch is different and the
+    /// difference is the whole point: iOS delivers `willRestoreState` FIRST, while the
+    /// central is not yet `poweredOn`, and only then reports `poweredOn`. Announcing the
+    /// state eagerly would make the restored peripheral arrive too late to be acted on,
+    /// which is not how the shipped code is reached.
     var factory: BLECentralFactory {
         { [weak self] sink, queue, _ in
             guard let self else {
@@ -128,11 +138,34 @@ final class FakeBLEStack: @unchecked Sendable {
             self.queue = queue
             self.central = made
             self.events.append(.centralCreated)
+            let announce = self.announceStateOnCreation
             self.lock.unlock()
-            // CoreBluetooth reports the manager's state right after creation; the whole
-            // automatic connect flow hangs off that callback.
-            self.deliver { $0.bleCentralDidUpdateState(made) }
+            if announce { self.deliver { $0.bleCentralDidUpdateState(made) } }
             return made
+        }
+    }
+
+    /// CB STATE RESTORATION: iOS relaunched the process because an event fired for this
+    /// central, and hands the peripherals back BEFORE the manager reports `poweredOn`.
+    /// `state` is the peripheral's link state at reclaim — `.connected` is the case that
+    /// matters, because the link SURVIVED the process death and re-issuing a connect on it
+    /// would throw away a live connection instead of rediscovering its services.
+    func restoreState(peripheralState state: CBPeripheralState = .connected) {
+        peripheral.setLinkState(state)
+        let central = currentCentral
+        deliver { sink in
+            guard let central else { return }
+            sink.bleCentral(central, willRestore: [self.peripheral])
+        }
+    }
+
+    /// The central reports `poweredOn`. On a restoration launch this is what releases the
+    /// reclaimed peripheral into the restore policy.
+    func powerOn() {
+        let central = currentCentral
+        deliver { sink in
+            guard let central else { return }
+            sink.bleCentralDidUpdateState(central)
         }
     }
 

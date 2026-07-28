@@ -44,14 +44,22 @@ final class FoundryXAppDelegate: NSObject, UIApplicationDelegate {
                 .appendingPathComponent("diag/log"))
         let dm = DeviceManager.shared(log: log)
         let paused = preferences.omiDesiredState != .listening
-        let spool = OmiRestorationSpool(
+        // The composition root resolves WHICH device this restoration is about to record
+        // from and hands it in. It lives in the Kit (`OmiRestorationComposition`) rather
+        // than here because `App/` is compiled by no test target — a boundary that cannot
+        // be executed cannot be falsified, and this is the boundary where a device identity
+        // enters a user's archive.
+        let spool = OmiRestorationComposition.makeRestorationSpool(
             binding: binding,
             root: binding.root,
             executor: DispatchQueue(
                 label: "foundryx.omi-restoration-owner"),
             log: log,
             silenceGap: preferences.silenceGapSeconds,
-            paused: { paused })
+            paused: { paused },
+            deviceContext: OmiRestorationComposition.resolveDeviceContext(
+                binding: binding,
+                savedDevice: dm.saved))
         let exposure = AccountExposureRegistration(
             participantID: "omi-restoration-spool",
             kind: .live,
