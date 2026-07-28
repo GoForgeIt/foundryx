@@ -231,6 +231,31 @@ public enum RecordingDeviceMigrationOutcome: Equatable, Sendable {
     case nothingToAdopt
 }
 
+/// The shipped DEVICE-GLOBAL Omi pairing, read as data.
+///
+/// WHY IT IS ITS OWN TYPE. `AccountPreferenceUsageGuard` requires every UserDefaults key to
+/// resolve STATICALLY at its use site, so reading `DeviceManager.savedKey` from another
+/// file is a guard violation (it did fail the guard, which is how this shape was chosen).
+/// The keys are therefore declared here, beside the reader that uses them, and
+/// `testLegacyPairingKeysMatchTheWriter` pins them equal to the three keys
+/// `DeviceManager.setSaved` / `markConnected` actually write, so the reader cannot drift
+/// from the writer.
+public enum LegacyDevicePairing {
+    static let idKey = "foundryx.omi.peripheral-id"
+    static let nameKey = "foundryx.omi.peripheral-name"
+    static let dateKey = "foundryx.omi.last-connected"
+
+    static func read(from defaults: UserDefaults) -> SavedOmi? {
+        guard let raw = defaults.string(forKey: Self.idKey),
+              let id = UUID(uuidString: raw) else { return nil }
+        let stamp = defaults.double(forKey: Self.dateKey)
+        return SavedOmi(
+            id: id,
+            name: defaults.string(forKey: Self.nameKey) ?? "Recording device",
+            lastConnected: stamp > 0 ? Date(timeIntervalSinceReferenceDate: stamp) : nil)
+    }
+}
+
 public enum RecordingDeviceMigration {
     /// Carry the shipped DEVICE-GLOBAL Omi pairing into the account-scoped store.
     /// Idempotent, and the legacy defaults are never deleted — a device paired before
@@ -240,19 +265,16 @@ public enum RecordingDeviceMigration {
         defaults: UserDefaults,
         into store: RecordingDeviceStore
     ) throws -> RecordingDeviceMigrationOutcome {
-        guard let peripheralID = defaults.string(forKey: DeviceManager.savedKey),
-              !peripheralID.isEmpty else {
-            return .nothingToAdopt
-        }
-        let identity = RecordingDeviceIdentity(shape: .bleStream, hardwareToken: peripheralID)
+        guard let legacy = LegacyDevicePairing.read(from: defaults) else { return .nothingToAdopt }
+        let identity = RecordingDeviceIdentity(shape: .bleStream,
+                                               hardwareToken: legacy.id.uuidString)
         guard try !store.records().contains(where: { $0.identity == identity }) else {
             return .alreadyAdopted
         }
-        let stamp = defaults.double(forKey: DeviceManager.savedDateKey)
         try store.upsert(RecordingDeviceRecord(
             identity: identity,
-            displayName: defaults.string(forKey: DeviceManager.savedNameKey) ?? "Recording device",
-            lastConnected: stamp > 0 ? Date(timeIntervalSinceReferenceDate: stamp) : nil))
+            displayName: legacy.name,
+            lastConnected: legacy.lastConnected))
         // The legacy keys are deliberately LEFT IN PLACE — see rule 2 in the file header.
         return .adopted(identity)
     }

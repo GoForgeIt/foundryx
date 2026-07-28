@@ -125,6 +125,20 @@ final class DeviceAccountScopeFeatureTests: XCTestCase {
         }
     }
 
+    /// The migration reader declares its own key literals so they resolve statically for
+    /// `AccountPreferenceUsageGuard`. That is only safe if they are the SAME keys the
+    /// shipped writer uses — pinned here, where the writer's internal constants are visible.
+    func testLegacyPairingKeysMatchTheWriter() {
+        XCTAssertEqual(LegacyDevicePairing.idKey, DeviceManager.savedKey)
+        XCTAssertEqual(LegacyDevicePairing.nameKey, DeviceManager.savedNameKey)
+        XCTAssertEqual(LegacyDevicePairing.dateKey, DeviceManager.savedDateKey)
+        // And every one of them is in the guard's phone-owned allow-list, so this
+        // migration is reading state the guard already knows is device-global.
+        for key in [LegacyDevicePairing.idKey, LegacyDevicePairing.nameKey, LegacyDevicePairing.dateKey] {
+            XCTAssertTrue(AccountPreferenceUsageGuard.phoneOwnedKeys.contains(key), key)
+        }
+    }
+
     private func permutations<T>(of items: [T]) -> [[T]] {
         guard items.count > 1 else { return [items] }
         var out: [[T]] = []
