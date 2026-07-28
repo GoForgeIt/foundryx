@@ -496,14 +496,32 @@ enum DeviceCaptureAttributionSteps {
                 guard !reason.isEmpty else {
                     throw BrineStepError("the refusal carries no reason — it cannot be acted on")
                 }
-                // Non-vacuous: the same call WITH a binding must resolve.
-                if let binding = w.binding {
-                    let ok = OmiRestorationComposition.resolveDeviceContext(
-                        binding: binding,
-                        savedDevice: SavedOmi(id: w.deviceId, name: "Omi", lastConnected: nil))
-                    guard case .resolved = ok else {
-                        throw BrineStepError("nothing ever resolves — the refusal is free")
-                    }
+                // BOTH REFUSALS, SEPARATELY. There are two ways the composition can fail to
+                // name what it is about to record — no owning account, and no device — and a
+                // probe that only ever exercises the first cannot tell a correct
+                // implementation from one that invents a device when none is remembered.
+                // (Executing the mutation is how I found that: my first version of this
+                // check passed against exactly that implementation.)
+                guard let binding = w.binding else {
+                    throw BrineStepError("no binding available to exercise the second refusal")
+                }
+                let noDevice = OmiRestorationComposition.resolveDeviceContext(
+                    binding: binding, savedDevice: nil)
+                guard case .blocked(let deviceReason) = noDevice else {
+                    throw BrineStepError(
+                        "a restoration with NO remembered device still resolved a context — "
+                            + "it invented a device identity: \(noDevice)")
+                }
+                guard deviceReason != reason else {
+                    throw BrineStepError(
+                        "both refusals give the same reason, so neither can be acted on")
+                }
+                // Non-vacuous: the same call WITH both must resolve.
+                let ok = OmiRestorationComposition.resolveDeviceContext(
+                    binding: binding,
+                    savedDevice: SavedOmi(id: w.deviceId, name: "Omi", lastConnected: nil))
+                guard case .resolved = ok else {
+                    throw BrineStepError("nothing ever resolves — the refusal is free")
                 }
             },
 

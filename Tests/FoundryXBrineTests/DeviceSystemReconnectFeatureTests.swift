@@ -337,6 +337,17 @@ final class DeviceSystemReconnectWorld: @unchecked Sendable {
         device.start()
     }
 
+    /// A relaunched process has FINISHED LAUNCHING when its library has hydrated: that is
+    /// what gates `finishStartupAfterHydration` (orphan reconcile, retention sweep), and it
+    /// is the work a returning device must not race.
+    ///
+    /// Not a bare sleep, and not a weakened assertion — it waits for an observable the
+    /// production code publishes, then asserts exactly what it asserted before.
+    @MainActor
+    func waitForRelaunchToHydrate() async throws {
+        try await Self.waitUntil { !self.capture.captures.isEmpty }
+    }
+
     /// Drop the process's objects the way a watchdog kill does: nothing is ended, nothing is
     /// finalized, the WAL is simply left on disk mid-conversation.
     @MainActor
@@ -501,6 +512,15 @@ enum DeviceSystemReconnectSteps {
                     // announce it either.
                     try w.bootRestorationProcess()
                 }
+                // WAIT FOR THE RELAUNCH TO FINISH LAUNCHING. A fresh CaptureManager hydrates
+                // its library off-main and then runs `finishStartupAfterHydration`, whose
+                // `reconcileOrphanedCaptures` can bind or discard the very capture this
+                // scenario is about. Racing the device's return against that is not the
+                // production sequence — a cold launch takes seconds, a BLE event does not
+                // wait for it — and it made this scenario fail 1 run in 5. Waiting for the
+                // hydrated timeline removes the race without weakening anything: the
+                // assertions that follow are unchanged.
+                try await w.waitForRelaunchToHydrate()
                 await MainActor.run {
                     w.stack.clearLog()
                     w.stack.restoreState(peripheralState: .connected)
@@ -548,10 +568,14 @@ enum DeviceSystemReconnectSteps {
                 }
                 // The relaunched process finishes its startup work (hydration, reconcile)
                 // BEFORE the device returns — which is what makes the next step the
-                // cold-resume path rather than a race against startup.
+                // cold-resume path rather than a race against startup. Both halves matter:
+                // the pending connect proves the transport is armed, and the hydrated
+                // timeline proves `reconcileOrphanedCaptures` has already run over the
+                // interrupted capture instead of landing on it mid-resume.
                 try await DeviceSystemReconnectWorld.settle {
                     w.stack.hasPendingConnect
                 }
+                try await w.waitForRelaunchToHydrate()
                 return ctx
             },
 
