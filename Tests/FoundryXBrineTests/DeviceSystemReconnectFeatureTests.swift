@@ -376,13 +376,17 @@ final class DeviceSystemReconnectWorld: @unchecked Sendable {
             .sorted()
     }
 
-    /// Wait for a condition that MUST hold, and fail loudly if it does not.
+    /// Wait for a PRECONDITION that must hold before the step under test can mean anything,
+    /// and fail loudly if it does not.
     ///
-    /// The bound is generous for the reason `origin/main`'s `2cd144f` raised
-    /// `ConversationCardTests`': under full-suite load a short bound measures the scheduler.
-    /// Nothing is weakened — the condition must still become true.
+    /// THE BOUND. `origin/main`'s `2cd144f` raised the house `waitUntil` bound to 30s because a
+    /// 3s bound was measuring the scheduler under full-suite load. This is twice that, and the
+    /// chains it waits on settle in tens of milliseconds — roughly a thousand-fold margin. It is
+    /// deliberately NOT the 300s some suites use: this is a `Given`, so when it does not hold
+    /// the run should say which precondition failed promptly rather than hang for five minutes
+    /// per scenario on every red. Nothing is weakened — the condition must still become true.
     @MainActor
-    static func waitUntil(timeout: TimeInterval = 300,
+    static func waitUntil(timeout: TimeInterval = 60,
                           _ condition: @escaping @MainActor () -> Bool) async throws {
         let start = Date()
         while !condition() {
