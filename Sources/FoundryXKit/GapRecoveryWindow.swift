@@ -58,6 +58,35 @@ public enum GapCaptureContinuation: Equatable, Sendable {
     case openFresh
 }
 
+/// What a transport event MEANS for the gap window.
+///
+/// These are pure so the funnel's decisions are drivable without a radio. The alternative —
+/// deciding inline in a CoreBluetooth delegate method — is what let a discarded `error` turn
+/// "we could not read this device's services" into "this device does not keep audio", a
+/// permanent-loss claim, with no test able to see the difference.
+enum GapWindowTrigger {
+
+    /// A service-discovery RESULT.
+    ///
+    /// A discovery that FAILED tells us nothing about whether the device stores audio: its
+    /// service list is empty because the read did not happen, not because the device has no
+    /// storage. Treating those two as the same fact is the false-loss direction this whole
+    /// task exists to prevent, so a failed discovery is `.storageUnavailable` (retriable,
+    /// not a loss) and `.deviceHasNoStorage` is reserved for a discovery that SUCCEEDED and
+    /// genuinely returned no storage service.
+    static func closeCause(discoveryError: String?,
+                           sawStorageService: Bool) -> GapRecoveryWindow.Close? {
+        if let discoveryError { return .storageUnavailable(reason: discoveryError) }
+        return sawStorageService ? nil : .deviceHasNoStorage
+    }
+
+    /// A link drop. With an engine running the engine settles and publishes; without one
+    /// the span was never requested and is still on the device.
+    static func closeCause(engineWasRunning: Bool) -> GapRecoveryWindow.Close? {
+        engineWasRunning ? nil : .linkDroppedBeforeEngine
+    }
+}
+
 /// One opened gap-recovery window.
 public struct GapRecoveryWindow: Equatable, Sendable {
 

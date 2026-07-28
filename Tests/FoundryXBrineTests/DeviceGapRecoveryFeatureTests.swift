@@ -33,6 +33,16 @@ final class DeviceGapRecoveryFeatureTests: XCTestCase {
                            "wrong outcome for \(ending)")
             XCTAssertEqual(GapRecoveryWindow.outcome(for: ending).isLoss, isLoss)
         }
+        // M3 — the most-reached close cause: every teardown with no prior explicit close
+        // publishes it, so its VALUE matters, not just that it is non-nil.
+        var generic = GapRecoveryWindow(interruptedCaptureId: "cap-1")
+        let genericOutcome = generic.close(.closedWithoutEngine(reason: "superseded"))
+        guard case .nothingToRecover = genericOutcome else {
+            return XCTFail("the generic teardown publishes \(String(describing: genericOutcome))")
+        }
+        XCTAssertEqual(genericOutcome?.isLoss, false,
+                       "a teardown that simply never collected the audio is not a loss")
+
         // The three reason-carrying endings, checked by SHAPE so the wording stays free.
         switch GapRecoveryWindow.outcome(for: .aborted(records: 2, frames: 40, reason: "link dropped")) {
         case .partiallyRecovered(let records, let frames, _):
@@ -44,6 +54,181 @@ final class DeviceGapRecoveryFeatureTests: XCTestCase {
                        "a failed sync leaves the span ON THE DEVICE — reporting it as a loss is a lie")
         XCTAssertTrue(GapRecoveryWindow.outcome(for: .unsupportedProtocol("not ring-shaped")).isLoss,
                       "firmware that cannot replay the gap means the audio really is gone")
+    }
+
+    // MARK: - The FUNNEL (finding H5)
+    //
+    // Everything above drives `GapRecoveryWindow` directly. That proves the MAPPING from a
+    // cause to an outcome and says nothing about whether the wiring picks the right cause,
+    // tags at open, or publishes once — four reviewer falsifications survived green against
+    // the value type alone. These drive `DeviceManager`'s real funnel functions on their
+    // real queue.
+
+    /// Build a DeviceManager with the outcome sink captured. `init` creates no
+    /// CBCentralManager (only `start()` does), so this is hermetic.
+    private func makeFunnel() -> (DeviceManager, () -> [GapRecoveryOutcome]) {
+        let manager = DeviceManager()
+        let box = OutcomeBox()
+        manager.onGapRecoveryOutcome = { box.append($0) }
+        return (manager, { box.all })
+    }
+
+    /// X1 — the window must be tagged AT OPEN. If the tag were read at CLOSE, changing the
+    /// snapshot after open would change what the window says.
+    func testTheWindowIsTaggedAtOpenNotAtClose() {
+        let (manager, outcomes) = makeFunnel()
+        manager.setInterruptedCapture("cap-open")
+        manager.runOnBleQueueForTests { manager.beginGapSyncWindow() }
+        // The conversation ends between open and close: a close-time read would see nil and
+        // publish nothing.
+        manager.setInterruptedCapture(nil)
+        manager.runOnBleQueueForTests { manager.applyLinkDrop(engineWasRunning: false) }
+        XCTAssertEqual(outcomes().count, 1,
+                       "the window was tagged at CLOSE, not at open — it published \(outcomes())")
+
+        // Control, so "one outcome" cannot be satisfied by a funnel that always publishes:
+        // a window opened while nothing was interrupted must stay silent.
+        let (quiet, quietOutcomes) = makeFunnel()
+        quiet.setInterruptedCapture(nil)
+        quiet.runOnBleQueueForTests { quiet.beginGapSyncWindow() }
+        quiet.setInterruptedCapture("cap-appeared-later")
+        quiet.runOnBleQueueForTests { quiet.applyLinkDrop(engineWasRunning: false) }
+        XCTAssertEqual(quietOutcomes(), [], "a window that interrupted nothing published anyway")
+    }
+
+    /// X2 — one opened window publishes at most one outcome THROUGH THE FUNNEL. The value
+    /// type enforces it only if the funnel writes the mutated window back.
+    func testTheFunnelPublishesAtMostOneOutcomePerWindow() {
+        let (manager, outcomes) = makeFunnel()
+        manager.setInterruptedCapture("cap-1")
+        manager.runOnBleQueueForTests {
+            manager.beginGapSyncWindow()
+            manager.applyLinkDrop(engineWasRunning: false)
+            manager.closeGapWindow(.engineFinished(.synced(records: 9, frames: 900)))
+            manager.closeGapWindow(.deviceHasNoStorage)
+        }
+        XCTAssertEqual(outcomes().count, 1,
+                       "one window published \(outcomes().count) outcomes: \(outcomes())")
+        guard case .nothingToRecover = outcomes()[0] else {
+            return XCTFail("the FIRST cause must win, got \(outcomes()[0])")
+        }
+    }
+
+    /// X7 — the plan's one named reachable sequence, driven through the funnel: window open,
+    /// link gone before any engine existed. Deleting that close must red here.
+    func testALinkDropBeforeAnyEngineKeepsTheSpanOnTheDevice() {
+        let (manager, outcomes) = makeFunnel()
+        manager.setInterruptedCapture("cap-1")
+        manager.runOnBleQueueForTests {
+            manager.beginGapSyncWindow()
+            manager.applyLinkDrop(engineWasRunning: false)
+        }
+        XCTAssertEqual(outcomes().count, 1, "the named sequence published \(outcomes())")
+        XCTAssertFalse(outcomes()[0].isLoss, "\(outcomes()[0]) reports a loss")
+        // MUST distinguish WHICH cause produced it. `.linkDroppedBeforeEngine` and the
+        // generic teardown BOTH map to `.nothingToRecover`, so asserting only the case lets
+        // a deleted close pass on the teardown fallback — the X7 falsification survived
+        // exactly that way. Compare against the production mapping for the specific cause,
+        // computed here rather than written as a literal, so no wording is pinned.
+        var probe = GapRecoveryWindow(interruptedCaptureId: "probe")
+        let fromLinkDrop = probe.close(.linkDroppedBeforeEngine)
+        var teardownProbe = GapRecoveryWindow(interruptedCaptureId: "probe")
+        let fromTeardown = teardownProbe.close(
+            .closedWithoutEngine(reason: "the window closed before it was collected"))
+        XCTAssertNotEqual(fromLinkDrop, fromTeardown,
+                          "the two causes are indistinguishable, so this check cannot see a deleted close")
+        XCTAssertEqual(outcomes()[0], fromLinkDrop,
+                       "the named sequence did not publish the LINK-DROP outcome — it published \(outcomes()[0])")
+        // With an engine running the ENGINE publishes and the funnel adds nothing — so the
+        // branch above is a decision, not a constant. This models the real ordering:
+        // `OmiOfflineSyncEngine.linkDropped()` -> `finish()` -> `finished?()` is fully
+        // synchronous, so `gapSyncFinished` has already closed the window by the time
+        // `applyLinkDrop` runs. (My first version of this control passed
+        // `engineWasRunning: true` with no engine outcome, which the generic teardown then
+        // published — a test artifact, not a production path.)
+        let (withEngine, engineOutcomes) = makeFunnel()
+        withEngine.setInterruptedCapture("cap-1")
+        withEngine.runOnBleQueueForTests {
+            withEngine.beginGapSyncWindow()
+            withEngine.closeGapWindow(.engineFinished(.synced(records: 2, frames: 80)))
+            withEngine.applyLinkDrop(engineWasRunning: true)
+        }
+        XCTAssertEqual(engineOutcomes().count, 1,
+                       "the drop added an outcome on top of the engine's: \(engineOutcomes())")
+        guard case .recovered = engineOutcomes()[0] else {
+            return XCTFail("the engine's outcome did not win: \(engineOutcomes()[0])")
+        }
+    }
+
+    /// H3 / X5 — a service discovery that FAILED must not be reported as a device that keeps
+    /// no audio, and must not consume the window before the drop that follows it.
+    func testAFailedServiceDiscoveryIsNotReportedAsPermanentLoss() {
+        // Successful discovery, genuinely no storage service: an honest loss.
+        let (noStorage, noStorageOutcomes) = makeFunnel()
+        noStorage.setInterruptedCapture("cap-1")
+        noStorage.runOnBleQueueForTests {
+            noStorage.beginGapSyncWindow()
+            noStorage.applyServiceDiscovery(errorDescription: nil, sawStorageService: false)
+        }
+        XCTAssertEqual(noStorageOutcomes().count, 1)
+        XCTAssertTrue(noStorageOutcomes()[0].isLoss,
+                      "a device that really keeps no audio must be reported as a loss")
+
+        // FAILED discovery: the service list is empty because the read did not happen.
+        let (failed, failedOutcomes) = makeFunnel()
+        failed.setInterruptedCapture("cap-1")
+        failed.runOnBleQueueForTests {
+            failed.beginGapSyncWindow()
+            failed.applyServiceDiscovery(errorDescription: "connection interrupted",
+                                         sawStorageService: false)
+        }
+        XCTAssertEqual(failedOutcomes().count, 1)
+        XCTAssertFalse(failedOutcomes()[0].isLoss,
+                       "a failed discovery was reported as permanently lost audio: \(failedOutcomes()[0])")
+
+        // Successful discovery WITH storage closes nothing — the engine path continues.
+        let (ok, okOutcomes) = makeFunnel()
+        ok.setInterruptedCapture("cap-1")
+        ok.runOnBleQueueForTests {
+            ok.beginGapSyncWindow()
+            ok.applyServiceDiscovery(errorDescription: nil, sawStorageService: true)
+        }
+        XCTAssertEqual(okOutcomes(), [], "a healthy discovery closed the window early")
+    }
+
+    /// H3's ordering aggravation: a link drop DURING discovery delivers
+    /// `didDiscoverServices(error:)` BEFORE `didDisconnectPeripheral`. If the first event
+    /// consumed the window with a loss, the plan's mandated `.nothingToRecover` could never
+    /// fire on the ordering that most plausibly produces it.
+    func testADropDuringDiscoveryStillReportsTheSpanAsStillOnTheDevice() {
+        let (manager, outcomes) = makeFunnel()
+        manager.setInterruptedCapture("cap-1")
+        manager.runOnBleQueueForTests {
+            manager.beginGapSyncWindow()
+            manager.applyServiceDiscovery(errorDescription: "the connection was interrupted",
+                                          sawStorageService: false)
+            manager.applyLinkDrop(engineWasRunning: false)
+        }
+        XCTAssertEqual(outcomes().count, 1, "the ordering published \(outcomes())")
+        XCTAssertFalse(outcomes()[0].isLoss,
+                       "a link drop during discovery was reported as lost audio: \(outcomes()[0])")
+    }
+
+    /// H4 — the seam must be WIREABLE from a main-actor composition root. This is the
+    /// wiring a T5 composition writes; it existing and compiling is the assertion. The
+    /// previous closure-shaped seam could not compile here at all.
+    @MainActor
+    func testTheInterruptedCaptureSeamIsWireableFromTheMainActor() {
+        let manager = DeviceManager()
+        let capture = CaptureManagerStub()
+        // T5-shaped wiring: the main actor PUSHES; DeviceManager never reads across actors.
+        capture.onInterruptedCaptureChanged = { [weak manager] id in
+            manager?.setInterruptedCapture(id)
+        }
+        capture.suspend(captureId: "cap-live")
+        XCTAssertEqual(manager.interruptedCaptureAtOpen, "cap-live")
+        capture.suspend(captureId: nil)
+        XCTAssertNil(manager.interruptedCaptureAtOpen)
     }
 
     /// The rule the plan states: at most one outcome per opened window, and exactly one
@@ -283,4 +468,31 @@ enum DeviceGapRecoverySteps {
             },
         ]
     }
+}
+
+
+// MARK: - helpers
+
+/// Thread-safe collector for outcomes published from `bleQueue`.
+final class OutcomeBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [GapRecoveryOutcome] = []
+    func append(_ outcome: GapRecoveryOutcome) {
+        lock.lock(); storage.append(outcome); lock.unlock()
+    }
+    var all: [GapRecoveryOutcome] {
+        lock.lock(); defer { lock.unlock() }; return storage
+    }
+}
+
+/// The main-actor side of the seam, standing in for `CaptureManager` so the WIRING can be
+/// asserted without constructing the whole capture stack. It publishes exactly as
+/// `CaptureManager.suspendedSession`'s `didSet` does.
+@MainActor
+final class CaptureManagerStub {
+    var onInterruptedCaptureChanged: (@Sendable (String?) -> Void)?
+    private var suspended: String? {
+        didSet { onInterruptedCaptureChanged?(suspended) }
+    }
+    func suspend(captureId: String?) { suspended = captureId }
 }

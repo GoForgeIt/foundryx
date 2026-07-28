@@ -1330,7 +1330,17 @@ public final class CaptureManager: ObservableObject {
     /// so the silence-boundary check compares on one clock). Non-nil ⇒ `active` is SUSPENDED,
     /// not ended: a reconnect before `SilenceSegmenter.defaultSilenceGap` of voiced silence
     /// resumes it (same captureId), else `resolveReconnectGrace` ends it at the real boundary.
-    private var suspendedSession: (wal: CaptureWAL, at: TimeInterval)?
+    private var suspendedSession: (wal: CaptureWAL, at: TimeInterval)? {
+        // `didSet` rather than a push at each of the six assignment sites: the same reason
+        // the gap window enumerates its close causes instead of counting call sites — a
+        // seventh assignment must not be able to skip the notification.
+        didSet { onInterruptedCaptureChanged?(suspendedSession?.wal.captureId) }
+    }
+
+    /// Pushed whenever the conversation a device drop interrupted changes. `DeviceManager`
+    /// holds the value as a snapshot it can read on its own queue; this side is
+    /// `@MainActor`, so it must PUSH rather than be read (track 20260725T2306, T3).
+    public var onInterruptedCaptureChanged: (@Sendable (String?) -> Void)?
 
     /// True while an Omi conversation is being HELD open awaiting a possible reconnect (a
     /// transient BLE drop inside the grace window). The capture surface can surface a

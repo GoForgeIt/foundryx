@@ -120,10 +120,35 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     // AudioFrameSource — the connected device's Opus stream.
     public var onFrame: ((Data) -> Void)?
     public var onState: ((AudioSourceState) -> Void)?
-    /// Which conversation a drop interrupted, supplied by the owner of capture state
-    /// (`CaptureManager`). `DeviceManager` reports transport facts and must NOT infer this —
-    /// it cannot see paused state or session boundaries (track 20260725T2306, T3).
-    public var interruptedCaptureId: (() -> String?)?
+    /// Which conversation a drop interrupted, PUSHED by the owner of capture state.
+    ///
+    /// WHY A PUSHED SNAPSHOT AND NOT A CLOSURE. The first shape of this seam was a
+    /// synchronous `(() -> String?)?` read at window open. It could not be wired: the fact
+    /// lives on `CaptureManager`, which is `@MainActor`, while `beginGapSyncWindow()` runs
+    /// on `bleQueue` — so every legal implementation either needed an `await` (destroying
+    /// the tag-AT-OPEN property this seam exists for) or `assumeIsolated` from the wrong
+    /// queue (a data race). The seam compiled only because nothing had wired it yet.
+    ///
+    /// TIMING SEMANTICS. The main actor pushes a `Sendable` value whenever the answer
+    /// changes; `DeviceManager` reads the last pushed value synchronously, under a lock,
+    /// at the moment a window opens. The tag is therefore AT OPEN with respect to what the
+    /// main actor has published, and the snapshot lags the main actor by the push only —
+    /// never by a queue hop taken while the window is opening.
+    public func setInterruptedCapture(_ captureId: String?) {
+        interruptedCaptureLock.lock()
+        interruptedCaptureSnapshot = captureId
+        interruptedCaptureLock.unlock()
+    }
+
+    private let interruptedCaptureLock = NSLock()
+    private var interruptedCaptureSnapshot: String?
+
+    /// The snapshot as of now. Read on `bleQueue` when a window opens.
+    var interruptedCaptureAtOpen: String? {
+        interruptedCaptureLock.lock()
+        defer { interruptedCaptureLock.unlock() }
+        return interruptedCaptureSnapshot
+    }
     /// Published once per gap-recovery window that followed an interrupted conversation.
     /// T5 renders it; nothing else may invent one.
     public var onGapRecoveryOutcome: ((GapRecoveryOutcome) -> Void)?
@@ -654,12 +679,12 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     /// connected path) BEFORE service discovery, so no live frame can slip ahead of
     /// recovered gap audio. A one-shot decision deadline releases the hold if the
     /// storage service / subscription never materializes.
-    private func beginGapSyncWindow() {
+    func beginGapSyncWindow() {
         gapSyncHolding = true
         liveHold.removeAll()
         // Tag AT OPEN. Asking later would ask after the reconnect has already changed the
         // capture state the question is about.
-        gapWindow = GapRecoveryWindow(interruptedCaptureId: interruptedCaptureId?())
+        gapWindow = GapRecoveryWindow(interruptedCaptureId: interruptedCaptureAtOpen)
         let generationAtStart = gapSyncGeneration
         bleQueue.asyncAfter(deadline: .now() + gapSyncDecisionTimeout) { [weak self] in
             guard let self, self.gapSyncGeneration == generationAtStart, self.gapSyncHolding,
@@ -673,7 +698,7 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     /// The ONE place a gap-recovery outcome reaches anybody. Every close path calls this
     /// with its cause; the window itself decides whether there is anything to say, so no
     /// call site can invent an outcome and a second close is a no-op by construction.
-    private func closeGapWindow(_ cause: GapRecoveryWindow.Close) {
+    func closeGapWindow(_ cause: GapRecoveryWindow.Close) {
         guard var window = gapWindow else { return }
         let outcome = window.close(cause)
         gapWindow = window
@@ -683,7 +708,7 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
 
     /// Close the hold: optionally flush the held live frames (in arrival order)
     /// into the normal frame path, and drop the engine.
-    private func endGapSyncWindow(flush: Bool) {
+    func endGapSyncWindow(flush: Bool) {
         // A teardown that reached no engine still owes the user an answer when it
         // interrupted a conversation. If an engine already finished, its outcome was
         // published first and this is a no-op.
@@ -798,6 +823,11 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     /// capture UI, whose live-tile gate (`isShowingCapture` → `sourcePresentation`) reads
     /// `device.connectionState`. Leak-gated; the symbol cannot exist in a shipping build.
     public func forceConnectionStateForTests(_ s: DeviceConnectionState) { setState(s) }
+
+    /// Test seam: run the gap-window funnel on ITS OWNING QUEUE, synchronously, so a test
+    /// drives the real functions with their real threading instead of a copy of them.
+    /// Leak-gated; the symbol cannot exist in a shipping build.
+    func runOnBleQueueForTests(_ body: () -> Void) { bleQueue.sync(execute: body) }
     #endif
     private func setDiscovered(_ d: [DiscoveredDevice]) {
         DispatchQueue.main.async {
@@ -969,15 +999,9 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
         setBatteryLevel(nil)          // the level is stale once the link drops
         // Settle any in-flight gap sync FIRST so held live audio is released (in
         // order) into the session before `.stopped` ends it.
-        if gapSync == nil {
-            // The reachable sequence the plan names: didConnect -> window opens -> the link
-            // goes before service discovery ever produced an engine. The unread span was
-            // never requested, so it is still on the device — never a loss.
-            closeGapWindow(.linkDroppedBeforeEngine)
-        } else {
-            gapSync?.linkDropped()   // settles through gapSyncFinished, which publishes
-        }
-        endGapSyncWindow(flush: true)
+        let engineWasRunning = gapSync != nil
+        if engineWasRunning { gapSync?.linkDropped() }   // settles through gapSyncFinished
+        applyLinkDrop(engineWasRunning: engineWasRunning)
         audioChar = nil; storageDataChar = nil; storageControlChar = nil
         emitSourceState(.stopped)            // ends the ambient capture session
         // A USER-suspended link (Omi toggled off) must stay down — don't fight the
@@ -1012,13 +1036,33 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
                 p.discoverCharacteristics([OmiUUID.storageDataChar, OmiUUID.storageControlChar], for: svc)
             }
         }
-        if !hasStorage {
+        applyServiceDiscovery(errorDescription: error?.localizedDescription,
+                              sawStorageService: hasStorage)
+    }
+
+    /// The gap-window consequences of a service-discovery result, CB-free so the funnel is
+    /// drivable without a radio.
+    func applyServiceDiscovery(errorDescription: String?, sawStorageService: Bool) {
+        guard let cause = GapWindowTrigger.closeCause(discoveryError: errorDescription,
+                                                      sawStorageService: sawStorageService) else { return }
+        if case .deviceHasNoStorage = cause {
             log?.info("Omi: no storage service — offline cache sync unavailable, live only")
-            // A device with NO storage service never buffered the gap. That is a different
-            // fact from "we could not collect it", and the user is owed the honest one.
-            closeGapWindow(.deviceHasNoStorage)
-            endGapSyncWindow(flush: true)
+        } else {
+            log?.warn("Omi: service discovery failed (\(errorDescription ?? "?")) — "
+                + "offline cache unavailable this time; the device keeps it")
         }
+        closeGapWindow(cause)
+        endGapSyncWindow(flush: true)
+    }
+
+    /// The gap-window consequences of a link drop, CB-free for the same reason. The caller
+    /// settles the engine; with an engine running the engine publishes and this closes
+    /// nothing.
+    func applyLinkDrop(engineWasRunning: Bool) {
+        if let cause = GapWindowTrigger.closeCause(engineWasRunning: engineWasRunning) {
+            closeGapWindow(cause)
+        }
+        endGapSyncWindow(flush: true)
     }
 
     public func peripheral(_ p: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
