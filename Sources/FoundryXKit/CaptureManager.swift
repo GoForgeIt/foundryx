@@ -1336,7 +1336,18 @@ public final class CaptureManager: ObservableObject {
     /// `blocked` so every existing construction keeps its exact shipped behaviour: no
     /// device record is written and resume falls through to the legacy source-marker arm.
     /// The app sets it (`App/RootView.swift`); nothing inside `CaptureManager` discovers it.
-    public var captureDeviceContext: () -> CaptureDeviceContextResolution = {
+    ///
+    /// WHAT IS RECORDING IS A PARAMETER, NOT SOMETHING THE CLOSURE FETCHES (review round 9,
+    /// L4). The first shape of this closure took nothing and the composition root reached
+    /// back into the manager for `recordingSourceForAttribution` — through a `weak` capture,
+    /// because the closure is stored ON the manager. That forced the call site to supply a
+    /// fallback for "the manager is gone", i.e. to give a DEFAULT to the one parameter
+    /// `resolveDeviceContext` deliberately declares without one, whose fallback value
+    /// (`.externalStream`) is exactly the wrong answer for the bug that parameter exists to
+    /// prevent. Handing the source IN removes the question: the manager is the authority on
+    /// what is recording, so the manager is what says it, and no call site has anything left
+    /// to default.
+    public var captureDeviceContext: (CaptureRecordingSource) -> CaptureDeviceContextResolution = { _ in
         .blocked(reason: "no device context was supplied to this capture manager")
     }
 
@@ -1355,7 +1366,7 @@ public final class CaptureManager: ObservableObject {
     /// The identity to narrow a resume by, or nil when the composition root could not
     /// resolve one (in which case the shipped, un-narrowed rule applies).
     private var resumingDeviceIdentity: RecordingDeviceIdentity? {
-        captureDeviceContext().context?.identity
+        captureDeviceContext(recordingSourceForAttribution).context?.identity
     }
 
     private var suspendedSession: (wal: CaptureWAL, at: TimeInterval)? {
@@ -3953,7 +3964,7 @@ public final class CaptureManager: ObservableObject {
         // (the other is OmiRestorationSpool's background open); both write it, or a
         // conversation's attribution would depend on which one happened to open it.
         // A blocked context writes NOTHING — never a placeholder.
-        if let deviceContext = captureDeviceContext().context,
+        if let deviceContext = captureDeviceContext(recordingSourceForAttribution).context,
            !CaptureDeviceSidecar.write(deviceContext, captureId: id, baseDir: baseDir) {
             log?.error("capture \(id): opened but its device record could not be written")
         }

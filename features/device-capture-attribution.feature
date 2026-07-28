@@ -45,10 +45,23 @@ Feature: Every conversation records which device made it, and only that device c
     Given device A recorded a conversation that is still inside the silence gap
     When device B's capture manager sees its stream start
     Then device B opens a new conversation rather than continuing device A's
-    When device B's background restoration spool sees its stream start
-    Then the spool opens a new conversation rather than continuing device A's
     When device A's capture manager sees its stream start
     Then device A continues its own conversation
+
+  Scenario: a second device's background restoration opens its own conversation instead of continuing another's
+    Given device A recorded a conversation the background restoration would find
+    When device B's background restoration spool sees its stream start
+    Then the spool opens a new conversation rather than continuing device A's
+    When device A's background restoration spool sees its stream start
+    Then device A's spool continues its own conversation
+
+  Scenario: a device record that cannot be read is its own answer, never "no record"
+    Given a conversation inside the silence gap has a device record that cannot be read
+    Then it is reported as having an unreadable device record
+    And it is not reported as recorded before the upgrade
+    And it is not reported as a device record that went missing
+    When any device looks for a conversation to continue
+    Then no device may continue it
 
   Scenario: a conversation recorded before the upgrade keeps its attribution and is not called missing
     Given a conversation inside the silence gap exists with no device record and a durable start before the upgrade

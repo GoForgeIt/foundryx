@@ -26,8 +26,8 @@ final class DeviceCaptureAttributionFeatureTests: ProcessGlobalStateTestCase {
             let result = try await BrineFeatureRunner.run(
                 "device-capture-attribution",
                 registry: StepRegistry(DeviceCaptureAttributionSteps.make(world: world)))
-            XCTAssertEqual(result.passed, 7,
-                           "device-capture-attribution must run all 7 scenarios")
+            XCTAssertEqual(result.passed, 9,
+                           "device-capture-attribution must run all 9 scenarios")
         } catch {
             await world.teardown()
             throw error
@@ -149,6 +149,11 @@ final class DeviceCaptureAttributionWorld: @unchecked Sendable {
     var deviceBManagerConversation: String?
     var deviceBSpoolConversation: String?
     var deviceAReopened: String?
+    /// The restoration spool's OWN capture root — see `openThroughSpool`.
+    var spoolRoot: URL?
+    var deviceASpoolResumed: String?
+    /// The capture whose device record was deliberately corrupted.
+    var corruptedConversation: String?
 
     private var directories: [URL] = []
     /// Extra managers built by the two-device scenario; held so nothing deallocates mid-run.
@@ -191,6 +196,9 @@ final class DeviceCaptureAttributionWorld: @unchecked Sendable {
         deviceBManagerConversation = nil
         deviceBSpoolConversation = nil
         deviceAReopened = nil
+        spoolRoot = nil
+        deviceASpoolResumed = nil
+        corruptedConversation = nil
         deviceId = UUID()
         pairing.stage(id: deviceId, name: "Omi")
         // `selectCaptureSource` PERSISTS to process-global `CaptureSettings`. Brine runs every
@@ -224,17 +232,19 @@ final class DeviceCaptureAttributionWorld: @unchecked Sendable {
     /// source marker, and one segment so the resume scan's recency test can see it.
     func seedConversation(id: String,
                           startedAt: UInt64,
+                          in root: URL? = nil,
                           sourceTag: String? = CaptureSourceKind.omi.rawValue,
                           device context: CaptureDeviceContext? = nil) throws {
-        let dir = baseDir.appendingPathComponent(id, isDirectory: true)
+        let root = root ?? baseDir!
+        let dir = root.appendingPathComponent(id, isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        ConversationMetaStore.recordStart(captureId: id, baseDir: baseDir, at: startedAt)
+        ConversationMetaStore.recordStart(captureId: id, baseDir: root, at: startedAt)
         if let sourceTag {
             try Data(sourceTag.utf8).write(
-                to: CaptureManager.sourceMarkerURL(id, baseDir: baseDir), options: [.atomic])
+                to: CaptureManager.sourceMarkerURL(id, baseDir: root), options: [.atomic])
         }
         if let context {
-            XCTAssertTrue(CaptureDeviceSidecar.write(context, captureId: id, baseDir: baseDir))
+            XCTAssertTrue(CaptureDeviceSidecar.write(context, captureId: id, baseDir: root))
         }
         try Data([1, 2, 3, 4]).write(to: dir.appendingPathComponent("seg-000000000000.opus"))
         seededConversation = id
@@ -266,12 +276,13 @@ final class DeviceCaptureAttributionWorld: @unchecked Sendable {
             source: device,
             micSource: mic,
             finalize: { _, _ in })
-        // EXACTLY what App/RootView.swift installs — no test-only shortcut.
-        capture.captureDeviceContext = { [weak capture, weak device] in
+        // EXACTLY what App/RootView.swift installs — no test-only shortcut. The manager hands
+        // in what is recording; this closure defaults nothing.
+        capture.captureDeviceContext = { [device] recording in
             OmiRestorationComposition.resolveDeviceContext(
                 binding: CaptureAccountScope.currentAccountBinding(),
                 savedDevice: device?.saved,
-                recording: capture?.recordingSourceForAttribution ?? .externalStream)
+                recording: recording)
         }
         #if os(iOS)
         capture.micPermissionOverrideForTests = true   // the sim cannot drive the real prompt
@@ -295,7 +306,7 @@ final class DeviceCaptureAttributionWorld: @unchecked Sendable {
             finalize: { _, _ in })
         let context = CaptureDeviceContext(identity: identity, displayName: named,
                                            accountScope: scope)
-        manager.captureDeviceContext = { .resolved(context) }
+        manager.captureDeviceContext = { _ in .resolved(context) }
         managers.append(manager)
         source.onState?(.streaming)
         // The cold arm either resumes an existing capture or arms for speech; feed real voiced
@@ -306,11 +317,22 @@ final class DeviceCaptureAttributionWorld: @unchecked Sendable {
     }
 
     /// The SECOND production call site: the background-restoration spool's own resume.
+    ///
+    /// IT RUNS IN ITS OWN ROOT, and that is load-bearing rather than tidy (review round 9, M1).
+    /// The first version of this scenario drove the spool AFTER device B's capture manager had
+    /// already opened a conversation of B's own in the same directory. With the narrowing
+    /// removed, the un-narrowed scan then returned whichever of the two candidates sorted
+    /// first — and both were stamped in the same second, so the tie was broken by the random
+    /// hex suffix of `newCaptureId()`. The mutation that proves this call site narrows
+    /// therefore only reds ~80% of the time, and in the other 20% the spool had in fact
+    /// continued device B's OWN conversation, which the `!=` check could not see. Here the ONLY
+    /// conversation on disk when the spool runs is device A's, so "it did not continue A's" and
+    /// "it opened a new one" are the same sentence, and the mutation is deterministic.
     @MainActor
     func openThroughSpool(as identity: RecordingDeviceIdentity, named: String) async throws -> String {
         let binding = try XCTUnwrapOrThrow(self.binding, "no account binding")
         let spool = OmiRestorationComposition.makeRestorationSpool(
-            binding: binding, root: baseDir,
+            binding: binding, root: spoolRoot ?? baseDir,
             executor: DispatchQueue(label: "foundryx-attribution-spool-\(UUID().uuidString)"),
             log: nil, silenceGap: 120, paused: { false },
             deviceContext: .resolved(CaptureDeviceContext(identity: identity, displayName: named,
@@ -412,7 +434,7 @@ enum DeviceCaptureAttributionSteps {
                         finalize: { _, _ in })
                     // The composition root is what knows the device. Nothing inside
                     // CaptureManager discovers it.
-                    w.capture.captureDeviceContext = { .resolved(context) }
+                    w.capture.captureDeviceContext = { _ in .resolved(context) }
                     w.device.start()
                 }
                 try await DeviceCaptureAttributionWorld.waitUntil {
@@ -498,6 +520,50 @@ enum DeviceCaptureAttributionSteps {
                 return ctx
             },
 
+            defineStep("device A recorded a conversation the background restoration would find") { ctx, _, _ in
+                try await MainActor.run { try w.freshHandset() }
+                // The spool's own root, holding device A's conversation and NOTHING ELSE.
+                let root = w.baseDir.appendingPathComponent("restoration", isDirectory: true)
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                w.spoolRoot = root
+                try w.seedConversation(
+                    id: CaptureManager.newCaptureId(),
+                    startedAt: UInt64(Date().timeIntervalSince1970),
+                    in: root,
+                    device: CaptureDeviceContext(identity: w.identity,
+                                                 displayName: "Omi A",
+                                                 accountScope: w.scope))
+                // NON-VACUITY, at the Given rather than buried in a Then: without the device
+                // narrowing this conversation IS what the spool's scan returns. If it were not,
+                // "device B opened a new one" would be true for free.
+                guard CaptureManager.resumableCaptureId(baseDir: root, silenceGap: 120)
+                        == w.seededConversation else {
+                    throw BrineStepError(
+                        "the un-narrowed scan does not return device A's conversation, so "
+                            + "nothing is at stake in this scenario")
+                }
+                w.deviceBIdentity = RecordingDeviceIdentity(shape: .bleStream,
+                                                            hardwareToken: UUID().uuidString)
+                return ctx
+            },
+
+            defineStep("a conversation inside the silence gap has a device record that cannot be read") { ctx, _, _ in
+                try await MainActor.run { try w.freshHandset() }
+                let id = CaptureManager.newCaptureId()
+                try w.seedConversation(
+                    id: id,
+                    startedAt: UInt64(Date().timeIntervalSince1970),
+                    device: CaptureDeviceContext(identity: w.identity,
+                                                 displayName: "Omi",
+                                                 accountScope: w.scope))
+                // A record that IS there and cannot be decoded — a truncated write, a bad
+                // sector, a half-restored backup. The bytes are deliberately not JSON.
+                try Data("{\"identity\":".utf8).write(
+                    to: CaptureDeviceSidecar.url(id, baseDir: w.baseDir), options: [.atomic])
+                w.corruptedConversation = id
+                return ctx
+            },
+
             defineStep("device B's capture manager sees its stream start") { ctx, _, _ in
                 let b = try XCTUnwrapOrThrow(w.deviceBIdentity, "device B was never named")
                 w.deviceBManagerConversation = try await w.openThroughManager(as: b, named: "Omi B")
@@ -512,6 +578,11 @@ enum DeviceCaptureAttributionSteps {
 
             defineStep("device A's capture manager sees its stream start") { ctx, _, _ in
                 w.deviceAReopened = try await w.openThroughManager(as: w.identity, named: "Omi A")
+                return ctx
+            },
+
+            defineStep("device A's background restoration spool sees its stream start") { ctx, _, _ in
+                w.deviceASpoolResumed = try await w.openThroughSpool(as: w.identity, named: "Omi A")
                 return ctx
             },
 
@@ -582,6 +653,100 @@ enum DeviceCaptureAttributionSteps {
                 guard opened != w.seededConversation else {
                     throw BrineStepError(
                         "device B's restoration spool CONTINUED device A's conversation (\(opened))")
+                }
+                // The sentence the scenario actually makes, asserted as itself. Device A's
+                // conversation was the ONLY one in this root when the spool ran (the Given
+                // proves the un-narrowed scan returns it), so a spool that did not continue it
+                // must have MINTED one — and the new conversation carries device B's record,
+                // not A's, or "it opened its own" would be a claim about a name rather than
+                // about attribution.
+                let root = try XCTUnwrapOrThrow(w.spoolRoot, "the spool had no root of its own")
+                let b = try XCTUnwrapOrThrow(w.deviceBIdentity, "device B was never named")
+                let recorded = try XCTUnwrapOrThrow(
+                    CaptureDeviceSidecar.load(captureId: opened, baseDir: root),
+                    "the conversation the spool opened carries no device record")
+                guard recorded.identity == b else {
+                    throw BrineStepError(
+                        "the spool opened \(opened) but it records \(recorded.identity), not "
+                            + "device B (\(b))")
+                }
+            },
+
+            defineCheck("device A's spool continues its own conversation") { _, _, _ in
+                // The control that makes the refusal above non-vacuous: the SAME spool path,
+                // in the SAME root, driven by the device that actually recorded it, resumes
+                // rather than mints. Without this, a spool that refused everything would pass.
+                guard w.deviceASpoolResumed == w.seededConversation else {
+                    throw BrineStepError(
+                        "device A's restoration spool did not continue its own conversation: "
+                            + "got \(w.deviceASpoolResumed ?? "nil"), expected "
+                            + "\(w.seededConversation ?? "nil")")
+                }
+            },
+
+            defineCheck("it is reported as having an unreadable device record") { _, _, _ in
+                let id = try XCTUnwrapOrThrow(w.corruptedConversation, "nothing was corrupted")
+                let p = CaptureDeviceSidecar.provenance(captureId: id, baseDir: w.baseDir)
+                w.provenance = p
+                guard case .unreadableRecord(let diagnostic) = p else {
+                    throw BrineStepError(
+                        "a device record that could not be decoded is reported as \(p) — "
+                            + "'I could not answer' was collapsed into one of the answers")
+                }
+                guard !diagnostic.isEmpty else {
+                    throw BrineStepError("the unreadable record carries no diagnostic")
+                }
+                // Non-vacuous: the SAME capture with its record intact is `identified`, so this
+                // answer is produced by the corruption and not by the seed.
+                let intact = CaptureManager.newCaptureId()
+                try w.seedConversation(
+                    id: intact,
+                    startedAt: UInt64(Date().timeIntervalSince1970),
+                    device: CaptureDeviceContext(identity: w.identity, displayName: "Omi",
+                                                 accountScope: w.scope))
+                w.seededConversation = id      // seedConversation moved it; put it back
+                guard case .identified = CaptureDeviceSidecar.provenance(captureId: intact,
+                                                                         baseDir: w.baseDir) else {
+                    throw BrineStepError("nothing is ever identified here — the check is vacuous")
+                }
+            },
+
+            defineCheck("it is not reported as recorded before the upgrade") { _, _, _ in
+                let p = try XCTUnwrapOrThrow(w.provenance, "nothing was classified")
+                guard p != .legacyPreMigration else {
+                    throw BrineStepError(
+                        "a conversation whose device record is CORRUPT was reported as having "
+                            + "been recorded before device records shipped — it was written "
+                            + "after, and by a device we simply cannot name")
+                }
+            },
+
+            defineCheck("no device may continue it") { _, _, _ in
+                let id = try XCTUnwrapOrThrow(w.corruptedConversation, "nothing was corrupted")
+                // The device that DID record it cannot be recognised any more, so it may not
+                // continue it either — that is the honest consequence of not being able to read
+                // the record, and the alternative (anyone may) is the exact bug the record
+                // exists to prevent, arrived at through a decode failure instead of an absence.
+                for (label, probe) in [("the recording device", w.identity),
+                                       ("a different device", w.otherIdentity)] {
+                    guard CaptureManager.resumableCaptureId(
+                            baseDir: w.baseDir, silenceGap: 120, resumingDevice: probe) != id else {
+                        throw BrineStepError(
+                            "\(label) continued a conversation whose device record could not be "
+                                + "read — an unreadable record was treated as no record")
+                    }
+                }
+                // Non-vacuous: with the record readable, that same scan DOES return it.
+                let readable = CaptureManager.newCaptureId()
+                try w.seedConversation(
+                    id: readable,
+                    startedAt: UInt64(Date().timeIntervalSince1970),
+                    device: CaptureDeviceContext(identity: w.identity, displayName: "Omi",
+                                                 accountScope: w.scope))
+                guard CaptureManager.resumableCaptureId(
+                        baseDir: w.baseDir, silenceGap: 120,
+                        resumingDevice: w.identity) == readable else {
+                    throw BrineStepError("nothing is resumable at all — the refusal is free")
                 }
             },
 

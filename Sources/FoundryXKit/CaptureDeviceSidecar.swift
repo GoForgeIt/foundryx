@@ -119,6 +119,30 @@ public enum CaptureDeviceProvenance: Equatable, Sendable {
     /// is not knowable. Takes the LEGACY reading — never guessed post-migration, because
     /// guessing that direction invents a missing record that may never have been owed.
     case undatable(diagnostic: String)
+    /// A device record IS there and cannot be read. A THIRD state, not a flavour of the
+    /// other two (review round 9, L2 / round 8, L4).
+    ///
+    /// WHY IT IS ITS OWN CASE. `load` used to swallow a decode failure with `try?` and return
+    /// `nil`, so a truncated write, a bad sector, or a half-restored backup arrived at the
+    /// "there is no record" arm — which says *"nobody wrote one"* (either era, depending on
+    /// the date) and, worse, hands the resume gate the answer *"anyone may continue this"*.
+    /// Both are false: someone DID write one, it names exactly one device, and we cannot read
+    /// which. In a type whose whole design is that "I could not answer" must be a value, a
+    /// silent third state is the one thing it may not have.
+    case unreadableRecord(diagnostic: String)
+}
+
+/// What is actually on disk where a capture's device record goes.
+///
+/// Three states, because there are three. Absence and unreadability lead to different
+/// answers everywhere they are consulted, and folding them together is what made the
+/// unreadable case invisible.
+public enum CaptureDeviceRecordRead: Equatable, Sendable {
+    case present(CaptureDeviceContext)
+    /// No record file at all.
+    case absent
+    /// A record file exists and could not be turned into a record.
+    case unreadable(diagnostic: String)
 }
 
 public enum CaptureDeviceSidecar {
@@ -195,10 +219,39 @@ public enum CaptureDeviceSidecar {
         }
     }
 
+    /// The full three-state answer. Everything that consults the record goes through here.
+    public static func read(captureId: String, baseDir: URL) -> CaptureDeviceRecordRead {
+        let target = url(captureId, baseDir: baseDir)
+        guard FileManager.default.fileExists(atPath: target.path) else { return .absent }
+        let data: Data
+        do {
+            data = try Data(contentsOf: target)
+        } catch {
+            return .unreadable(diagnostic:
+                "this recording's device record could not be read from disk "
+                    + "(\(error.localizedDescription))")
+        }
+        guard !data.isEmpty else {
+            return .unreadable(diagnostic:
+                "this recording's device record is empty — the write did not complete")
+        }
+        do {
+            return .present(try JSONDecoder().decode(CaptureDeviceContext.self, from: data))
+        } catch {
+            return .unreadable(diagnostic:
+                "this recording's device record could not be understood "
+                    + "(\(error.localizedDescription))")
+        }
+    }
+
+    /// The record, or `nil` when there is nothing readable there. Callers that must tell an
+    /// ABSENT record from an UNREADABLE one use `read` — this is the convenience for the ones
+    /// that only need the context itself.
     public static func load(captureId: String, baseDir: URL) -> CaptureDeviceContext? {
-        guard let data = try? Data(contentsOf: url(captureId, baseDir: baseDir)),
-              !data.isEmpty else { return nil }
-        return try? JSONDecoder().decode(CaptureDeviceContext.self, from: data)
+        if case .present(let context) = read(captureId: captureId, baseDir: baseDir) {
+            return context
+        }
+        return nil
     }
 
     /// The durable start of a capture, in Unix seconds.
@@ -219,8 +272,16 @@ public enum CaptureDeviceSidecar {
 
     public static func provenance(captureId: String, baseDir: URL,
                                   migrationEpoch: UInt64 = migrationEpoch) -> CaptureDeviceProvenance {
-        if let context = load(captureId: captureId, baseDir: baseDir) {
+        switch read(captureId: captureId, baseDir: baseDir) {
+        case .present(let context):
             return .identified(context)
+        case .unreadable(let diagnostic):
+            // NOT dated, NOT guessed. A capture whose record is corrupt is post-migration by
+            // construction — the record only exists in that era — so the epoch has nothing to
+            // add, and neither of the two "no record" answers is true about it.
+            return .unreadableRecord(diagnostic: diagnostic)
+        case .absent:
+            break
         }
         guard let started = durableStart(captureId: captureId, baseDir: baseDir) else {
             return .undatable(diagnostic:
@@ -240,10 +301,23 @@ public enum CaptureDeviceSidecar {
     /// fragment exactly the conversations this track exists to keep whole. So the answer is
     /// yes for every era except the one where we KNOW the answer and it is a different
     /// device.
+    ///
+    /// AN UNREADABLE RECORD IS REFUSED, and it is the one place the two "cannot answer"
+    /// states diverge. An ABSENT record means nobody ever claimed this conversation, so the
+    /// shipped un-narrowed rule is the honest one. An UNREADABLE record means exactly one
+    /// device claimed it and we cannot tell which — so "anyone may continue" is a coin flip
+    /// on whether a second device's audio gets appended to the first device's conversation,
+    /// which is the precise failure the record exists to prevent. Refusing costs one
+    /// conversation split in two, honestly; allowing costs one conversation that is a lie.
     static func mayContinue(captureId: String, baseDir: URL,
                             device: RecordingDeviceIdentity?) -> Bool {
-        guard let device,
-              let recorded = load(captureId: captureId, baseDir: baseDir) else { return true }
-        return recorded.identity == device
+        // No resuming identity ⇒ the caller cannot be narrowed at all and the shipped rule
+        // applies, exactly as before.
+        guard let device else { return true }
+        switch read(captureId: captureId, baseDir: baseDir) {
+        case .present(let recorded): return recorded.identity == device
+        case .absent: return true
+        case .unreadable: return false
+        }
     }
 }

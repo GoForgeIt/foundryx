@@ -36,6 +36,27 @@ ASC_KEY_PATH=~/.appstoreconnect/private_keys/AuthKey_47S3XFDK6D.p8 \
 This registers the bundle id and creates the FoundryX app in App Store Connect. (You can also do it
 by hand in App Store Connect → Apps → + → New App, bundle id `com.goforgeit.foundryx`.)
 
+## Before you push: one-time release-gated constant
+
+**Device-record migration epoch.** `CaptureDeviceSidecar.migrationEpoch`
+(`Sources/FoundryXKit/CaptureDeviceSidecar.swift`) is the instant device records began being
+written *in a build a user can have*. It decides what the app says about a conversation that
+carries **no** device record: recorded at-or-after it ⇒ *"its device record went missing"*;
+before it ⇒ *"recorded before the upgrade"*.
+
+It is currently pinned to a deliberately **late placeholder**, which is the safe direction —
+late understates what is known, early accuses correct captures of a fault they never had. It
+stays safe only while it is in the future.
+
+> **On the release that first writes device records:** set `migrationEpoch` to that release's
+> build timestamp (Unix seconds, UTC), and record which build it shipped in beside the
+> constant. Do not derive it from a build date at runtime — two handsets would then classify
+> the same synced archive differently, which is the one thing this value may not do.
+
+`DeviceCompositionRootGateTests.testTheMigrationEpochHasNotSilentlyBecomeEarly` goes **red**
+once the epoch is in the past, so a slipped release cannot let it become early in silence. If
+it reds, move the constant — never the assertion.
+
 ## Push a build to TestFlight
 
 ```bash
