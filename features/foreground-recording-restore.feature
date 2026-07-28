@@ -14,6 +14,7 @@ Feature: A listening conversation survives switching apps
 
   Scenario: the live transcript survives returning to the app
     Given an ambient conversation is listening with live transcript words
-    When I switch to another app and return to FoundryX
+    When I switch to another app and live transcription is interrupted
+    And I return to FoundryX
     Then the same conversation's live transcript still shows the captured words
-    And the live transcript continues growing with new speech
+    And new speech after I return is added to the live transcript

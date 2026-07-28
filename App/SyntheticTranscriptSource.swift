@@ -21,6 +21,7 @@
 #if DEBUG || PERF_HARNESS
 import AVFoundation
 import Foundation
+import UIKit
 
 final class SyntheticTranscriptLiveTranscriber: LiveTranscribing, @unchecked Sendable {
     let transcript: AsyncStream<LiveTranscript>
@@ -32,6 +33,7 @@ final class SyntheticTranscriptLiveTranscriber: LiveTranscribing, @unchecked Sen
     private var finished = false
     private var framesSinceWord = 0
     private var emittedWords: [String] = []
+    private var backgroundObserver: NSObjectProtocol?
 
     /// Decoded Omi PCM arrives in 20 ms frames. Ten frames per word keeps the proof
     /// visibly progressive without making it slow.
@@ -42,6 +44,23 @@ final class SyntheticTranscriptLiveTranscriber: LiveTranscribing, @unchecked Sen
         var streamContinuation: AsyncStream<LiveTranscript>.Continuation!
         transcript = AsyncStream { streamContinuation = $0 }
         continuation = streamContinuation
+        // Fidelity seam for the foreground-restoration proof: iOS can retire Speech's
+        // result publisher while the process is suspended. Make that interruption
+        // deterministic in the simulator. The source keeps speaking, but this producer
+        // cannot emit again; only RootView's foreground hook can install the next one.
+        backgroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            self?.interruptForSuspension()
+        }
+    }
+
+    deinit {
+        if let backgroundObserver {
+            NotificationCenter.default.removeObserver(backgroundObserver)
+        }
     }
 
     static func factory() -> LiveTranscriberFactory {
@@ -83,6 +102,17 @@ final class SyntheticTranscriptLiveTranscriber: LiveTranscribing, @unchecked Sen
         }
         continuation.finish()
         return settled
+    }
+
+    private func interruptForSuspension() {
+        let wasInterrupted = lock.withLock {
+            guard !finished else { return false }
+            finished = true
+            return true
+        }
+        if wasInterrupted {
+            continuation.finish()
+        }
     }
 }
 

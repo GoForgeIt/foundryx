@@ -172,6 +172,23 @@ Feature: My recordings belong to my account, not to the phone
     Then the frame is not recorded
     And restoration does not inherit the first account's legacy choices
 
+  Scenario: a locked restore uses only the prior owner's capture choices
+    Given an account used wearable capture before the phone locked
+    When iOS restores wearable capture before the owner unlocks the phone
+    Then only that account's prior capture choices are restored
+    And its explicit listening, pause, and source choices are honored
+    And capture stays paused when no prior listening choice exists
+    And no other account's choices are applied
+
+  Scenario: an unfinished account switch never records with another account's choices
+    Given wearable capture belonged to the first account
+    When the second account's sign-in has not finished
+    Then capture does not record
+    And it does not reuse the first account's or signed-out capture choices
+    And the second account starts paused with its default source choices
+    And the app remains responsive until sign-in finishes
+    And the second account's own capture choices appear after sign-in
+
   Scenario: the current owner's choices survive the update
     Given onboarding, welcome, persona, and ambient choices exist from before the update
     When that owner signs in after the update

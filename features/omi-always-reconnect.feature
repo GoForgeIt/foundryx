@@ -41,9 +41,9 @@ Feature: Omi always reconnects and syncs its offline cache
     When the Omi reconnects and the gap audio arrives
     Then the same conversation continues under its original capture id
 
-  Scenario: rapid listening restarts keep one buffered conversation
+  Scenario: replacing the listening owner keeps one buffered conversation
     Given my Omi has opened a conversation and its first audio is still buffered
-    When the app restarts listening several times while I keep speaking
+    When the app replaces the active listening owner while I keep speaking
     Then I still have one conversation
     And all recorded audio belongs to the original conversation
 

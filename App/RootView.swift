@@ -460,6 +460,11 @@ private struct MainTabs: View {
     /// instant it becomes `router.selected`, so a deep link / notification / intent that
     /// routes straight to a tab before the flag flips still renders it immediately.
     @State private var deferredTabsReady = false
+    /// Launch, permission sheets, and other transient interruptions can all produce an
+    /// `.active` transition without suspending Speech. Restart live transcription only
+    /// after this tab tree observed a real background, otherwise a second `.active` can
+    /// retire the just-installed replacement before it receives PCM.
+    @State private var liveTranscriptionWasBackgrounded = false
 
     init(target: DoorTarget, remote: RemoteSession, brains: BrainStore, local: Bool,
          vaultFunnel: VaultFunnelModel, accountDeletion: AccountDeletionModel,
@@ -942,7 +947,10 @@ private struct MainTabs: View {
         // always-mounted owner on foreground; the manager carries the already-rendered
         // words into the replacement so RecordingScreen never restores as a blank shell.
         .onChange(of: scenePhase) { phase in
-            if phase == .active {
+            if phase == .background {
+                liveTranscriptionWasBackgrounded = true
+            } else if phase == .active, liveTranscriptionWasBackgrounded {
+                liveTranscriptionWasBackgrounded = false
                 manager.restoreLiveTranscriptionAfterForeground()
             }
         }

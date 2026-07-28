@@ -186,13 +186,14 @@ final class ForegroundRestoreProofUITests: XCTestCase {
         // The replacement LiveTranscriber must remain wired to the same RecordingScreen
         // binding after foregrounding. A non-empty retained snapshot alone proves restore,
         // but not that new speech can still grow it.
+        let postReturnWords = "and new speech"
         let growthDeadline = Date().addingTimeInterval(20)
-        while after.label.count <= before.count, Date() < growthDeadline {
+        while !after.label.contains(postReturnWords), Date() < growthDeadline {
             RunLoop.current.run(until: Date().addingTimeInterval(0.5))
         }
-        XCTAssertGreaterThan(
-            after.label.count, before.count,
-            "the same conversation's live transcript continues GROWING with new speech "
-            + "after returning to the app")
+        XCTAssertTrue(
+            after.label.contains(postReturnWords),
+            "new speech AFTER returning to the app must be added to the same live transcript")
+        XCTAssertGreaterThan(after.label.count, before.count)
     }
 }

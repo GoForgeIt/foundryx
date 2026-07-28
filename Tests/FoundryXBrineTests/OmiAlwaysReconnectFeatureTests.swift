@@ -134,33 +134,27 @@ private final class OmiReconnectWorld: @unchecked Sendable {
     }
 
     @MainActor
-    func recreateListeningOwnerSeveralTimes() async throws {
+    func replaceActiveListeningOwner() async throws {
         guard let base = baseDir, let src = source else {
-            throw BrineStepError("no buffered conversation to restart")
+            throw BrineStepError("no buffered conversation whose owner can be replaced")
         }
-        for _ in 0..<3 {
-            // MainTabs can be initialized speculatively several times while SwiftUI
-            // preserves the existing StateObject. These candidates are real managers, but
-            // they must remain inert unless SwiftUI accepts and presents their owner.
-            let discardedCandidate = makeCaptureManager(
-                baseDir: base,
-                source: src,
-                attachToSourcesImmediately: false
-            )
-            captureManagers.append(discardedCandidate)
-            if let hydration = discardedCandidate.hydration { await hydration.value }
-            // MainTabs used to replay DeviceManager's current `.streaming` state from
-            // init. If the candidate stole the callback, this makes it a live owner; with
-            // deferred ownership the replay still reaches the original accepted manager.
-            src.onState?(.streaming)
-            for _ in 0..<10 { src.onFrame?(Data([0xA2])) }
+        // Model the accepted SwiftUI StateObject being REPLACED, not speculative
+        // construction that leaves callbacks on the original manager. The replacement
+        // claims the real source callbacks immediately. Keep it paused until it has
+        // re-adopted the segmentless durable capture, then resume and route enough speech
+        // to force a WAL segment under whichever capture it chose.
+        CaptureSettings.omiCaptureDesiredState = .paused
+        let replacement = makeCaptureManager(baseDir: base, source: src)
+        captureManagers.append(replacement)
+        if let hydration = replacement.hydration { await hydration.value }
+        src.onState?(.streaming)
+        try await waitUntil("replacement listening owner to adopt a conversation") {
+            replacement.active != nil
         }
-
-        // Make the ownership error observable on disk: after the restart burst, speech
-        // must still append to the original capture rather than one of its siblings.
+        replacement.resume()
         for _ in 0..<60 { src.onFrame?(Data([0xA3])) }
-        captureManagers.first?.active?.flushAndWait()
-        secondCaptureId = captureManagers.first?.active?.captureId
+        replacement.active?.flushAndWait()
+        secondCaptureId = replacement.active?.captureId
     }
 
     @MainActor
@@ -414,8 +408,8 @@ private enum OmiReconnectSteps {
                 try await world.openBufferedConversation()
                 return ctx
             },
-            defineStep("the app restarts listening several times while I keep speaking") { ctx, _, _ in
-                try await world.recreateListeningOwnerSeveralTimes()
+            defineStep("the app replaces the active listening owner while I keep speaking") { ctx, _, _ in
+                try await world.replaceActiveListeningOwner()
                 return ctx
             },
             defineStep("I still have one conversation") { ctx, _, _ in
@@ -425,12 +419,10 @@ private enum OmiReconnectSteps {
                         "expected only the original conversation, got \(ids.sorted())"
                     )
                 }
-                let candidatesStayedInactive = await MainActor.run {
-                    world.captureManagers.dropFirst().allSatisfy { $0.active == nil }
-                }
-                guard candidatesStayedInactive else {
+                guard world.secondCaptureId == world.firstCaptureId else {
                     throw BrineStepError(
-                        "a discarded listening-owner candidate became a live capture owner"
+                        "the replacement owner adopted \(world.secondCaptureId ?? "?") "
+                        + "instead of the original \(world.firstCaptureId ?? "?")"
                     )
                 }
                 return ctx
