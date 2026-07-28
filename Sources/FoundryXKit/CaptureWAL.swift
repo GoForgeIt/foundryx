@@ -71,6 +71,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     private let session: URLSession
     private let log: DoorLog?
     private let chunkFrames: Int
+    private let accountBinding: CaptureAccountScope.AccountBinding?
     private let startedAt = Date()
     /// Test seam: when set, replaces the real door POST for each segment (so the
     /// drain/backoff/auth-expired paths are exercised deterministically, no network).
@@ -239,14 +240,18 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         let c = StatusCache(v: StatusCache.schema, totalSegments: s.totalSegments,
                             syncedSegments: s.syncedSegments, bytes: s.bytes, watermark: watermark)
         guard let data = try? JSONEncoder().encode(c) else { return }
-        try? data.write(to: statusCacheURL(), options: [.atomic])
+        _ = try? performDurableMutation {
+            try data.write(to: statusCacheURL(), options: [.atomic])
+        }
     }
 
     /// Invalidate (delete) the durable status cache — called at EVERY segment mutation so the
     /// next warm pass rescans instead of serving a stale snapshot. Cheap unlink; no-op if absent.
     private func invalidateStatusCache() {
         hasWarmed = false   // a real segment change re-arms warmStatus (change-token semantics)
-        try? FileManager.default.removeItem(at: statusCacheURL())
+        _ = performDurableMutation {
+            try? FileManager.default.removeItem(at: statusCacheURL())
+        }
     }
 
     /// Nonisolated invalidation for an OUT-OF-INSTANCE mutation (the retention audio prune
@@ -260,6 +265,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     public init(captureId: String,
                 target: DoorTarget,
                 baseDir: URL? = nil,
+                binding: CaptureAccountScope.AccountBinding? = nil,
                 chunkFrames: Int = 50,            // ~1s at Omi's ~50 frames/s
                 session: URLSession = URLSession(configuration: .ephemeral),
                 log: DoorLog? = nil,
@@ -271,12 +277,29 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         self.chunkFrames = chunkFrames
         self.uploadOverride = upload
         io.setSpecific(key: ioKey, value: true)
-        let root = baseDir ?? CaptureWAL.documentsCaptures()
+        let currentBinding = CaptureAccountScope.currentAccountBinding()
+        let root = baseDir ?? binding?.root
+            ?? currentBinding?.root ?? CaptureWAL.documentsCaptures()
+        if let binding {
+            self.accountBinding =
+                binding.root.standardizedFileURL == root.standardizedFileURL
+                    ? binding
+                    : nil
+        } else {
+            self.accountBinding =
+                currentBinding?.root.standardizedFileURL
+                        == root.standardizedFileURL
+                    ? currentBinding
+                    : CaptureAccountScope.binding(forExplicitRoot: root)
+        }
         self.dir = root.appendingPathComponent(captureId, isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         self.status = CaptureStatus(id: captureId, stage: .recording, totalSegments: 0,
                                     syncedSegments: 0, bytes: 0, startedAt: startedAt,
                                     streaming: false, lastSyncError: nil)
+        _ = try? performDurableMutation {
+            try FileManager.default.createDirectory(
+                at: dir, withIntermediateDirectories: true)
+        }
         // NO eager segment scan here — see the LAZY SEGMENT SCAN note above. The watermark
         // and next-append seq are derived on first use; the launch warm pass fills status.
     }
@@ -325,6 +348,19 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// Every retained WAL mutation re-enters the immutable account binding's
+    /// admission door. The shared lease is atomic/memory-only on the producer path,
+    /// so a deletion in another process cannot race a segment, ACK, watermark, or
+    /// status-cache publication after revoking the captured epoch.
+    private func performDurableMutation<Result>(
+        _ mutation: () throws -> Result
+    ) rethrows -> Result? {
+        guard let accountBinding else { return nil }
+        return try CaptureAccountScope.perform(as: accountBinding) { _ in
+            try mutation()
+        }
+    }
+
     // MARK: segment write (durable-on-phone)
 
     private func flushLocked() {
@@ -335,7 +371,16 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         buffer.removeAll(keepingCapacity: true)
         let url = dir.appendingPathComponent(CaptureWAL.segName(seq))
         do {
-            try body.write(to: url, options: [.atomic])   // temp + atomic rename
+            guard try performDurableMutation({
+                try FileManager.default.createDirectory(
+                    at: dir, withIntermediateDirectories: true)
+                try body.write(to: url, options: [.atomic]) // temp + atomic rename
+                return true
+            }) == true else {
+                log?.warn(
+                    "capture \(captureId): rejected WAL segment \(seq) for stale account binding")
+                return
+            }
             invalidateStatusCache()   // a new segment changes total/bytes → force a rescan next warm
             log?.info("capture \(captureId): wrote segment \(seq) (\(body.count)B) to WAL")
         } catch {
@@ -423,7 +468,16 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
                 case .success(let seq):
                     guard let job = jobs.first(where: { $0.seq == seq }) else { break }
                     do {
-                        try Data().write(to: ackURL(job.url), options: [.atomic])   // 200 ACK ⇒ saved to computer
+                        guard try performDurableMutation({
+                            try Data().write(
+                                to: ackURL(job.url),
+                                options: [.atomic])
+                            return true
+                        }) == true else {
+                            firstTransientError =
+                                "ACK rejected for stale account binding"
+                            continue
+                        }
                         advanceWatermark(throughAcked: seq)                        // durable resume point moves forward
                         invalidateStatusCache()   // synced count/watermark changed → rescan next warm
                         uploaded += 1
@@ -548,7 +602,10 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
             let ack = ackURL(segURL)
             guard !FileManager.default.fileExists(atPath: ack.path) else { continue }
             do {
-                try Data().write(to: ack, options: [.atomic])
+                guard try performDurableMutation({
+                    try Data().write(to: ack, options: [.atomic])
+                    return true
+                }) == true else { continue }
                 newlyMarked += 1
             } catch {
                 log?.warn("capture \(captureId): bulk-ACK seq \(seq) marker write failed: \(error.localizedDescription)")
@@ -610,7 +667,10 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     }
 
     private func persistWatermark(_ v: Int64) {
-        try? Data(String(v).utf8).write(to: watermarkURL(), options: [.atomic])
+        _ = try? performDurableMutation {
+            try Data(String(v).utf8).write(
+                to: watermarkURL(), options: [.atomic])
+        }
     }
 
     /// Advance the watermark over a freshly-ACK'd seq (and any contiguous already-ACK'd

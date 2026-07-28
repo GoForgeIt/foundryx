@@ -131,8 +131,11 @@ final class AccountDataIsolationFeatureTests: ProcessGlobalStateTestCase {
             let world = try AccountDataIsolationWorld()
             defer { try? world.cleanup() }
             try world.anotherProcessCapturesSignedInAccountWork()
+            try world.assertOtherProcessRetainsAudioAndChatChanges()
             try world.durablyMarkCapturedAccountPendingDeletion()
             try world.assertOtherProcessRejectedCapturedWork()
+            try world.assertOtherProcessAccountStorageFailsClosed()
+            try world.assertRetainedChangesCannotRecreateDeletedStorage()
             try world.assertCapturedBindingIsNoLongerCurrentInOtherProcess()
             return
         }
@@ -173,6 +176,21 @@ final class AccountDataIsolationFeatureTests: ProcessGlobalStateTestCase {
             CaptureAccountScope.currentAccountBinding())
         try FileManager.default.createDirectory(
             at: binding.root, withIntermediateDirectories: true)
+        let retainedWALID = "cross-process-retained-wal"
+        let retainedWAL = CaptureWAL(
+            captureId: retainedWALID,
+            target: DoorTarget(
+                baseURL: URL(string: "http://127.0.0.1:0")!,
+                bearer: ""),
+            baseDir: binding.root)
+        retainedWAL.appendFrame(Data("retained-before-barrier".utf8))
+        let chatURL = ChatConversationStore.storageURL(
+            inAccountRoot: binding.root)
+        let retainedChat = ChatConversationStore(storageURL: chatURL)
+        let retainedChatID = try XCTUnwrap(retainedChat.activeId.isEmpty
+            ? nil
+            : retainedChat.activeId)
+        CaptureAccountScope.resetResolutionPersistenceEntriesForTests()
         try Data(binding.scope.utf8).write(
             to: URL(fileURLWithPath: readyPath),
             options: .atomic)
@@ -201,11 +219,57 @@ final class AccountDataIsolationFeatureTests: ProcessGlobalStateTestCase {
                 to: publication, options: .atomic)
             return true
         } != nil
+        let resolvedRoot = CaptureAccountScope.currentRoot()
+        let rootAccessClosed =
+            resolvedRoot.standardizedFileURL != binding.root.standardizedFileURL
+            && CaptureWAL.documentsCaptures().standardizedFileURL
+                != binding.root.standardizedFileURL
+            && ChatConversationStore.defaultStorageURL().standardizedFileURL
+                != chatURL.standardizedFileURL
+
+        // Stage only the retained WAL's already-known destination. This is a test
+        // harness probe, not a root-resolution path: a retained producer must reject
+        // its stale binding even if its old directory happens to exist after cleanup.
+        let retainedWALDir = binding.root.appendingPathComponent(
+            retainedWALID, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: retainedWALDir, withIntermediateDirectories: true)
+        retainedWAL.appendFrame(Data("retained-after-barrier".utf8))
+        retainedWAL.flushAndWait()
+        let retainedWALSegment = retainedWALDir.appendingPathComponent(
+            CaptureWAL.segName(0))
+        let retainedWALPersisted = FileManager.default.fileExists(
+            atPath: retainedWALSegment.path)
+
+        try? FileManager.default.removeItem(at: binding.root)
+        retainedChat.setMessages(
+            [.init(role: "user", text: "retained after deletion")],
+            for: retainedChatID)
+        let retainedChatPersisted =
+            FileManager.default.fileExists(atPath: chatURL.path)
+
+        try? FileManager.default.removeItem(at: binding.root)
+        let postBarrierWAL = CaptureWAL(
+            captureId: "cross-process-post-barrier-wal",
+            target: DoorTarget(
+                baseURL: URL(string: "http://127.0.0.1:0")!,
+                bearer: ""),
+            chunkFrames: 1)
+        postBarrierWAL.appendFrame(Data("post-barrier".utf8))
+        postBarrierWAL.flushAndWait()
+        let accountRootRecreated = FileManager.default.fileExists(
+            atPath: binding.root.path)
         let result: [String: Any] = [
             "accepted": accepted,
             "current": binding.isCurrent,
             "published": FileManager.default.fileExists(
                 atPath: publication.path),
+            "rootAccessClosed": rootAccessClosed,
+            "rootResolutionPersistenceEntries":
+                CaptureAccountScope.resolutionPersistenceEntryCountForTests,
+            "retainedWALPersisted": retainedWALPersisted,
+            "retainedChatPersisted": retainedChatPersisted,
+            "accountRootRecreated": accountRootRecreated,
         ]
         let encoded = try JSONSerialization.data(
             withJSONObject: result, options: [.sortedKeys])
@@ -681,6 +745,8 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
     private var state = State()
     private var pairingHarness: PairingScenarioHarness?
     private var accountVaultRouter: VaultFunnelModel?
+    private var selectiveDeletionHarness:
+        SelectiveDeletionBehaviorHarness?
     #if os(macOS)
     private var crossProcessDeletionProbe: CrossProcessDeletionProbe?
     #endif
@@ -729,6 +795,8 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
             stopCrossProcessDeletionProbeLocked()
             pairingHarness?.cleanup()
             pairingHarness = nil
+            selectiveDeletionHarness?.cleanup()
+            selectiveDeletionHarness = nil
             for service in [cellKeychainService, doorKeychainService] {
                 let query: [String: Any] = [
                     kSecClass as String: kSecClassGenericPassword,
@@ -851,6 +919,11 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
                 throw BrineStepError(
                     "pending deletion did not survive durable typed readback")
             }
+            let accountRoot = captureContainer.appendingPathComponent(
+                scope, isDirectory: true)
+            if fileManager.fileExists(atPath: accountRoot.path) {
+                try fileManager.removeItem(at: accountRoot)
+            }
             try Data("release".utf8).write(
                 to: probe.releaseURL, options: .atomic)
             let deadline = Date().addingTimeInterval(5)
@@ -892,6 +965,54 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         #endif
     }
 
+    func assertOtherProcessRetainsAudioAndChatChanges() throws {
+        #if os(macOS)
+        try queue.sync {
+            guard crossProcessDeletionProbe != nil else {
+                throw BrineStepError(
+                    "other process did not prepare retained audio and chat changes")
+            }
+        }
+        #else
+        throw XCTSkip("cross-process xctest scenario requires macOS")
+        #endif
+    }
+
+    func assertOtherProcessAccountStorageFailsClosed() throws {
+        #if os(macOS)
+        try queue.sync {
+            let result = try crossProcessDeletionResultLocked()
+            guard result["rootAccessClosed"] as? Bool == true,
+                  result["rootResolutionPersistenceEntries"] as? Int == 0 else {
+                throw BrineStepError(
+                    "other process resolved account storage outside the cached atomic gate")
+            }
+        }
+        #else
+        throw XCTSkip("cross-process xctest scenario requires macOS")
+        #endif
+    }
+
+    func assertRetainedChangesCannotRecreateDeletedStorage() throws {
+        #if os(macOS)
+        try queue.sync {
+            let result = try crossProcessDeletionResultLocked()
+            guard result["retainedWALPersisted"] as? Bool == false,
+                  result["retainedChatPersisted"] as? Bool == false,
+                  result["accountRootRecreated"] as? Bool == false,
+                  let probe = crossProcessDeletionProbe,
+                  !fileManager.fileExists(
+                    atPath: probe.publicationURL
+                        .deletingLastPathComponent().path) else {
+                throw BrineStepError(
+                    "retained WAL/chat work recreated deleted account storage")
+            }
+        }
+        #else
+        throw XCTSkip("cross-process xctest scenario requires macOS")
+        #endif
+    }
+
     func assertCapturedBindingIsNoLongerCurrentInOtherProcess() throws {
         #if os(macOS)
         try queue.sync {
@@ -907,6 +1028,143 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
     }
 
     // MARK: - Account-scoped app preferences
+
+    func twoAccountsUseThisPhone() throws {
+        try queue.sync {
+            try beginScenarioLocked()
+            let harness = SelectiveDeletionBehaviorHarness()
+            try harness.prepareTwoAccountPhone()
+            selectiveDeletionHarness = harness
+        }
+    }
+
+    func currentAccountHasDeletionInputs() throws {
+        guard let harness = selectiveDeletionHarness else {
+            throw BrineStepError(
+                "two-account deletion world was not prepared")
+        }
+        try harness.assertCurrentOwnerInputsWereSeeded()
+    }
+
+    func openCurrentAccountLocalDeletionConfirmation() throws {
+        guard let harness = selectiveDeletionHarness else {
+            throw BrineStepError(
+                "two-account deletion world was not prepared")
+        }
+        harness.openLocalConfirmation()
+    }
+
+    func assertCurrentAccountOnlyDeletionCopy() throws {
+        guard let harness = selectiveDeletionHarness else {
+            throw BrineStepError("deletion confirmation was not opened")
+        }
+        try harness.assertCurrentAccountOnlyCopy()
+    }
+
+    func assertOtherAccountsAndPhonePreservedCopy() throws {
+        guard let harness = selectiveDeletionHarness else {
+            throw BrineStepError("deletion confirmation was not opened")
+        }
+        try harness.assertPreservationCopy()
+    }
+
+    func interruptLocalDeletionAtEveryPoint() async throws {
+        guard let harness = selectiveDeletionHarness else {
+            throw BrineStepError("deletion confirmation was not opened")
+        }
+        try await harness.interruptAtEveryFaultPoint()
+    }
+
+    func assertDeletingAccountIsBlocked() throws {
+        guard let harness = selectiveDeletionHarness else {
+            throw BrineStepError("deletion was not interrupted")
+        }
+        try harness.assertDeletedOwnerBlocked()
+    }
+
+    func assertDeletingAccountDataUnavailable() throws {
+        guard let harness = selectiveDeletionHarness else {
+            throw BrineStepError("deletion was not interrupted")
+        }
+        try harness.assertDeletedOwnerDataUnavailable()
+    }
+
+    func assertDeletingAccountWidgetInactive() throws {
+        guard let harness = selectiveDeletionHarness else {
+            throw BrineStepError("deletion was not interrupted")
+        }
+        try harness.assertWidgetInactive()
+    }
+
+    func assertDeletionOffersVisibleRetry() throws {
+        guard let harness = selectiveDeletionHarness else {
+            throw BrineStepError("deletion was not interrupted")
+        }
+        try harness.assertVisibleRetry()
+    }
+
+    func assertOtherAccountUnchangedDuringDeletion() throws {
+        guard let harness = selectiveDeletionHarness else {
+            throw BrineStepError("deletion was not interrupted")
+        }
+        try harness.assertOtherAccountUnchanged()
+    }
+
+    func assertPhoneSetupUnchangedDuringDeletion() throws {
+        guard let harness = selectiveDeletionHarness else {
+            throw BrineStepError("deletion was not interrupted")
+        }
+        try harness.assertPhoneUnchanged()
+    }
+
+    func retryInterruptedDeletion() async throws {
+        guard let harness = selectiveDeletionHarness else {
+            throw BrineStepError("deletion was not interrupted")
+        }
+        try await harness.retryEveryInterruption()
+    }
+
+    func deletedAccountSignsInAgain() throws {
+        guard let harness = selectiveDeletionHarness else {
+            throw BrineStepError("deletion did not complete")
+        }
+        try harness.signDeletedOwnerInAgain()
+    }
+
+    func assertDeletedAccountReceivesFreshFirstRun() throws {
+        guard let harness = selectiveDeletionHarness else {
+            throw BrineStepError("deleted account did not return")
+        }
+        try harness.assertFreshFirstRun()
+    }
+
+    func assertDeletedAccountCaptureStartsPaused() throws {
+        guard let harness = selectiveDeletionHarness else {
+            throw BrineStepError("deleted account did not return")
+        }
+        try harness.assertCaptureStartsPaused()
+    }
+
+    func assertDeletedAccountDataDoesNotReturn() throws {
+        guard let harness = selectiveDeletionHarness else {
+            throw BrineStepError("deleted account did not return")
+        }
+        try harness.assertDeletedDataDoesNotReturn()
+    }
+
+    func assertPostReturnChoicesPersist() async throws {
+        guard let harness = selectiveDeletionHarness else {
+            throw BrineStepError("deleted account did not return")
+        }
+        try await harness.assertPostReturnChoicesPersist()
+    }
+
+    func assertOtherAccountUnchangedAfterDeletionRoundTrip() throws {
+        guard let harness = selectiveDeletionHarness else {
+            throw BrineStepError("deleted account did not return")
+        }
+        try harness.assertOtherAccountStillUnchangedAfterReturn()
+    }
 
     func firstAccountCompletedWelcomeAndOnboarding() throws {
         try queue.sync {
@@ -4212,6 +4470,8 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         stopCrossProcessDeletionProbeLocked()
         pairingHarness?.cleanup()
         pairingHarness = nil
+        selectiveDeletionHarness?.cleanup()
+        selectiveDeletionHarness = nil
         state.transitionProbe?.stop()
         state.transitionProbe = nil
         for service in [cellKeychainService, doorKeychainService] {
@@ -5100,6 +5360,95 @@ private enum AccountDataIsolationSteps {
             ) { _, _, _ in
                 try w.assertGuardIdentifiesUndeclaredSavedChoice()
             },
+            defineStep("two accounts use this phone") { ctx, _, _ in
+                try w.twoAccountsUseThisPhone()
+                return ctx
+            },
+            defineStep(
+                "the current account has choices, recordings, and computer connections on this phone"
+            ) { ctx, _, _ in
+                try w.currentAccountHasDeletionInputs()
+                return ctx
+            },
+            defineStep(
+                "the current account opens the local deletion confirmation"
+            ) { ctx, _, _ in
+                try w.openCurrentAccountLocalDeletionConfirmation()
+                return ctx
+            },
+            defineCheck(
+                "it says only the current account's local data will be erased"
+            ) { _, _, _ in
+                try w.assertCurrentAccountOnlyDeletionCopy()
+            },
+            defineCheck(
+                "it says other accounts and this phone's device setup will be preserved"
+            ) { _, _, _ in
+                try w.assertOtherAccountsAndPhonePreservedCopy()
+            },
+            defineStep("local deletion is interrupted at any point") {
+                ctx, _, _ in
+                try await w.interruptLocalDeletionAtEveryPoint()
+                return ctx
+            },
+            defineCheck(
+                "the current account cannot open the app or use capture"
+            ) { _, _, _ in
+                try w.assertDeletingAccountIsBlocked()
+            },
+            defineCheck(
+                "none of its local choices, recordings, or computer connections is available"
+            ) { _, _, _ in
+                try w.assertDeletingAccountDataUnavailable()
+            },
+            defineCheck("the widget shows no activity for that account") {
+                _, _, _ in
+                try w.assertDeletingAccountWidgetInactive()
+            },
+            defineCheck("the app offers a visible retry") { _, _, _ in
+                try w.assertDeletionOffersVisibleRetry()
+            },
+            defineCheck(
+                "the other account's choices, recordings, and computer connections remain unchanged"
+            ) { _, _, _ in
+                try w.assertOtherAccountUnchangedDuringDeletion()
+            },
+            defineCheck(
+                "this phone's paired-device setup remains unchanged"
+            ) { _, _, _ in
+                try w.assertPhoneSetupUnchangedDuringDeletion()
+            },
+            defineStep("I retry deletion and it succeeds") { ctx, _, _ in
+                try await w.retryInterruptedDeletion()
+                return ctx
+            },
+            defineStep("the deleted account signs in again") {
+                ctx, _, _ in
+                try w.deletedAccountSignsInAgain()
+                return ctx
+            },
+            defineCheck("the deleted account receives a fresh first run") {
+                _, _, _ in
+                try w.assertDeletedAccountReceivesFreshFirstRun()
+            },
+            defineCheck("capture starts paused") { _, _, _ in
+                try w.assertDeletedAccountCaptureStartsPaused()
+            },
+            defineCheck(
+                "none of its deleted choices, recordings, or computer connections returns"
+            ) { _, _, _ in
+                try w.assertDeletedAccountDataDoesNotReturn()
+            },
+            defineCheck(
+                "choices made after its return are not deleted again"
+            ) { _, _, _ in
+                try await w.assertPostReturnChoicesPersist()
+            },
+            defineCheck(
+                "signing back into the other account shows its choices, recordings, and computer connections unchanged"
+            ) { _, _, _ in
+                try w.assertOtherAccountUnchangedAfterDeletionRoundTrip()
+            },
             defineStep(
                 "the first account completed welcome and onboarding on this phone"
             ) { ctx, _, _ in
@@ -5576,6 +5925,12 @@ private enum AccountDataIsolationSteps {
                 return ctx
             },
             defineStep(
+                "that process retains unsaved audio and chat changes for the account"
+            ) { ctx, _, _ in
+                try w.assertOtherProcessRetainsAudioAndChatChanges()
+                return ctx
+            },
+            defineStep(
                 "this process durably marks that account pending deletion"
             ) { ctx, _, _ in
                 try w.durablyMarkCapturedAccountPendingDeletion()
@@ -5585,6 +5940,16 @@ private enum AccountDataIsolationSteps {
                 "the other process rejects the captured work before it can publish"
             ) { _, _, _ in
                 try w.assertOtherProcessRejectedCapturedWork()
+            },
+            defineCheck(
+                "account storage access in the other process fails closed"
+            ) { _, _, _ in
+                try w.assertOtherProcessAccountStorageFailsClosed()
+            },
+            defineCheck(
+                "retained audio and chat changes cannot recreate the deleted account storage"
+            ) { _, _, _ in
+                try w.assertRetainedChangesCannotRecreateDeletedStorage()
             },
             defineCheck(
                 "the captured account binding is no longer current in the other process"

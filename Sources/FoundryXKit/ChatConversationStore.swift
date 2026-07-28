@@ -105,6 +105,10 @@ public final class ChatConversationStore: ObservableObject {
 
     /// Where the list is persisted as JSON (nil ⇒ in-memory only, for tests).
     private let storageURL: URL?
+    /// Immutable owner captured with the retained storage URL. Every durable
+    /// mutation validates its shared admission epoch before recreating a directory
+    /// or publishing JSON.
+    private let accountBinding: CaptureAccountScope.AccountBinding?
     /// Stable per-turn metadata (the phone never changes these mid-session).
     public let platform: String
     public let org: String
@@ -112,8 +116,25 @@ public final class ChatConversationStore: ObservableObject {
     /// `storageURL == nil` ⇒ ephemeral (tests). The production app passes the
     /// account-private location via `defaultStorageURL()`. Seeds one empty conversation
     /// when there's nothing persisted so the UI always has an active chat.
-    public init(storageURL: URL? = nil, platform: String = "foundryx", org: String = "acme") {
+    public init(
+        storageURL: URL? = nil,
+        binding: CaptureAccountScope.AccountBinding? = nil,
+        platform: String = "foundryx",
+        org: String = "acme"
+    ) {
         self.storageURL = storageURL
+        let storageRoot = storageURL?.deletingLastPathComponent()
+        if let binding, let storageRoot {
+            self.accountBinding =
+                binding.root.standardizedFileURL
+                    == storageRoot.standardizedFileURL
+                    ? binding
+                    : nil
+        } else {
+            self.accountBinding = storageRoot.flatMap {
+                CaptureAccountScope.binding(forExplicitRoot: $0)
+            }
+        }
         self.platform = platform
         self.org = org
         load()
@@ -259,12 +280,16 @@ public final class ChatConversationStore: ObservableObject {
     }
 
     private func persist() {
-        guard let url = storageURL else { return }
+        guard let url = storageURL,
+              let accountBinding else { return }
         let snapshot = Persisted(conversations: conversations, activeId: activeId)
         guard let data = try? JSONEncoder.iso8601.encode(snapshot) else { return }
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
-                                                 withIntermediateDirectories: true)
-        try? data.write(to: url, options: .atomic)
+        _ = try? CaptureAccountScope.perform(as: accountBinding) { _ in
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+        }
     }
 
     /// The default account-private on-device location for the conversation list.

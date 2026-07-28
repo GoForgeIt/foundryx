@@ -279,7 +279,8 @@ public enum CaptureAccountScope {
     }
 
     private static let activationStateKey = "foundryx.capture-account-activation.v2"
-    private static let oldPersistedScopeKey = "foundryx.capture-account-scope"
+    // `foundryx.capture-account-scope` is a device-global bootstrap slot.
+    // Account activation and sign-out may supersede it, but never own or erase it.
     public static let identityDidChangeNotification =
         Notification.Name("foundryx.capture-account-identity-did-change")
 
@@ -312,6 +313,7 @@ public enum CaptureAccountScope {
     nonisolated(unsafe) private static var cachedSharedAdmissionScope: String?
     nonisolated(unsafe) private static var cachedSharedAdmissionCell:
         SharedAccountAdmissionCell?
+    nonisolated(unsafe) private static var cachedSharedAdmissionEpoch: UInt64?
     nonisolated(unsafe) private static var containerOverride: URL?
     nonisolated(unsafe) private static var applicationSupportOverride: URL?
     nonisolated(unsafe) private static var defaultsOverride: UserDefaults?
@@ -467,28 +469,18 @@ public enum CaptureAccountScope {
     ) throws {
         guard transaction.requiresActivation else {
             try persistenceQueue.sync {
-                let deletionCompleted = try completedDeletionAllowsReturn(
+                _ = try completedDeletionAllowsReturn(
                     ownerScope: transaction.scope)
-                let suppressLegacyAdoption =
-                    transaction.suppressLegacyAdoption || deletionCompleted
-                let ownsLegacyPrivateData = try (
-                    !suppressLegacyAdoption
-                    && legacyPrivateDataBelongs(to: transaction.scope))
-                if ownsLegacyPrivateData {
-                    try adoptLegacyPairingRecord(
-                        for: transaction.scope,
-                        defaults: currentDefaults())
-                }
                 let defaults = currentDefaults()
                 let preferenceValues: [String: AccountPreferenceValue]?
                 if activatePreferences {
-                    preferenceValues = try AccountPreferenceActivationStore.prepare(
+                    // This branch restores the previous owner after an interrupted
+                    // transition. Its scoped bytes are already established and must
+                    // not be normalized as though the owner were signing in fresh.
+                    preferenceValues = AccountPreferenceActivationStore.restoreExisting(
                         scope: transaction.scope,
-                        generation: identityGeneration,
-                        identity: transaction.identity,
-                        establishedLegacyOwner: ownsLegacyPrivateData,
                         defaults: defaults
-                    ).adoptedValues
+                    )
                 } else {
                     preferenceValues = nil
                 }
@@ -523,6 +515,16 @@ public enum CaptureAccountScope {
                     activationMigrationPauseHookForTests
                 }
                 pause?()
+                // Capture this before claimLegacyPrivateData can create the target
+                // root. Existing scoped preferences or private files prove that this
+                // owner is a restore, so activation must be byte-preserving. Absence
+                // leaves the fresh-owner path available for an account returning
+                // after completed deletion.
+                let restoreExistingPreferences =
+                    scopedOwnerHasExistingState(
+                        scope: transaction.scope,
+                        container: container,
+                        defaults: currentDefaults())
                 let suppressLegacyAdoption =
                     transaction.suppressLegacyAdoption
                     || deletionCompleted
@@ -539,7 +541,7 @@ public enum CaptureAccountScope {
                     ownsLegacyPrivateData = try claimLegacyPrivateData(
                         for: transaction.scope)
                 }
-                if ownsLegacyPrivateData {
+                if ownsLegacyPrivateData && !restoreExistingPreferences {
                     try adoptLegacyPairingRecord(
                         for: transaction.scope,
                         defaults: currentDefaults())
@@ -547,13 +549,21 @@ public enum CaptureAccountScope {
                 let defaults = currentDefaults()
                 let preferenceValues: [String: AccountPreferenceValue]?
                 if activatePreferences {
-                    preferenceValues = try AccountPreferenceActivationStore.prepare(
-                        scope: transaction.scope,
-                        generation: identityGeneration,
-                        identity: transaction.identity,
-                        establishedLegacyOwner: ownsLegacyPrivateData,
-                        defaults: defaults
-                    ).adoptedValues
+                    if restoreExistingPreferences {
+                        preferenceValues =
+                            AccountPreferenceActivationStore.restoreExisting(
+                                scope: transaction.scope,
+                                defaults: defaults)
+                    } else {
+                        preferenceValues =
+                            try AccountPreferenceActivationStore.prepare(
+                                scope: transaction.scope,
+                                generation: identityGeneration,
+                                identity: transaction.identity,
+                                establishedLegacyOwner: ownsLegacyPrivateData,
+                                defaults: defaults
+                            ).adoptedValues
+                    }
                 } else {
                     preferenceValues = nil
                 }
@@ -566,7 +576,6 @@ public enum CaptureAccountScope {
                     throw CaptureAccountScopeError.activationState(
                         "the signed-in mirror could not be durably recorded")
                 }
-                defaults.removeObject(forKey: oldPersistedScopeKey)
                 installResolution(
                     .account(transaction.scope),
                     widgetOwner: transaction.scope,
@@ -577,6 +586,43 @@ public enum CaptureAccountScope {
                 throw CaptureAccountScopeError.activationState(
                     "account deletion admission denied activation")
             }
+        }
+    }
+
+    /// A read-only preservation test for activation. Every recognized scoped
+    /// preference is matched by its exact owner-qualified key, and private storage
+    /// counts only when that exact owner's root contains data. Unresolved state takes
+    /// the preserving branch; this helper never authorizes removal or adoption.
+    private static func scopedOwnerHasExistingState(
+        scope: String,
+        container: URL,
+        defaults: UserDefaults
+    ) -> Bool {
+        let scoped = ScopedPreferences(scope: scope)
+        let scopedKeys =
+            AccountPreferenceCatalog.entries.map(\.canonicalKey)
+            + [
+                "foundryx.cell.url",
+                "foundryx.cell.authMode",
+                "foundryx.door.url",
+            ]
+        if scopedKeys.contains(where: {
+            defaults.object(forKey: scoped.key($0)) != nil
+        }) {
+            return true
+        }
+
+        let root = container.appendingPathComponent(
+            scope, isDirectory: true)
+        guard FileManager.default.fileExists(atPath: root.path) else {
+            return false
+        }
+        do {
+            return try !FileManager.default.contentsOfDirectory(
+                atPath: root.path).isEmpty
+        } catch {
+            // Failure to prove emptiness must preserve the owner's bytes.
+            return true
         }
     }
 
@@ -695,7 +741,6 @@ public enum CaptureAccountScope {
             try persistActivationRecord(.signedOut(aliases: record.aliases))
             let defaults = currentDefaults()
             defaults.set(false, forKey: AuthStore.signedInMirrorKey)
-            defaults.removeObject(forKey: oldPersistedScopeKey)
             let preferences = try AccountPreferenceActivationStore.prepare(
                 scope: signedOutScope,
                 generation: identityGeneration,
@@ -1161,6 +1206,10 @@ public enum CaptureAccountScope {
             return nil
         }
         let revision = generation
+        let expectedAdmissionEpoch =
+            cachedSharedAdmissionScope == scope
+                ? cachedSharedAdmissionEpoch
+                : nil
         let hook = beforeAccountBindingPublicationHook
         beforeAccountBindingPublicationHook = nil
         stateLock.unlock()
@@ -1170,7 +1219,8 @@ public enum CaptureAccountScope {
             guard let cell = try? SharedAccountAdmissionRegistry.cell(
                 container: base,
                 ownerScope: scope),
-                  let epoch = cell.openEpoch else {
+                  let epoch = cell.openEpoch,
+                  expectedAdmissionEpoch.map({ $0 == epoch }) ?? true else {
                 return nil
             }
             admissionCell = cell
@@ -1193,6 +1243,7 @@ public enum CaptureAccountScope {
         }
         cachedSharedAdmissionScope = scope
         cachedSharedAdmissionCell = admissionCell
+        cachedSharedAdmissionEpoch = admissionEpoch
         stateLock.unlock()
         // Published OUTSIDE `stateLock`: this takes the widget store's own lock and
         // performs a cross-process `synchronize()`. Nesting the two locks would make
@@ -1238,8 +1289,16 @@ public enum CaptureAccountScope {
             cachedSharedAdmissionScope == scope
                 ? cachedSharedAdmissionCell
                 : nil
-        let admissionEpoch = admissionCell?.openEpoch
-        guard !isAccountScope(scope) || admissionEpoch != nil else {
+        let admissionEpoch =
+            cachedSharedAdmissionScope == scope
+                ? cachedSharedAdmissionEpoch
+                : nil
+        guard !isAccountScope(scope)
+                || (
+                    admissionEpoch.map {
+                        admissionCell?.isCurrent(epoch: $0) == true
+                    } ?? false
+                ) else {
             stateLock.unlock()
             return nil
         }
@@ -1285,8 +1344,26 @@ public enum CaptureAccountScope {
             stateLock.lock()
             let admissionBlocked =
                 deletionAdmissionBlockedLocked(scope)
+            let sharedAdmission =
+                cachedSharedAdmissionScope == scope
+                    ? cachedSharedAdmissionCell
+                    : nil
+            let sharedEpoch =
+                cachedSharedAdmissionScope == scope
+                    ? cachedSharedAdmissionEpoch
+                    : nil
             stateLock.unlock()
             guard !admissionBlocked else {
+                return failClosedRoot
+            }
+            // A process that already published this account cached the mapped cell
+            // and its admitted epoch. A deletion in another process revokes that
+            // exact epoch atomically; root access must observe the same barrier as
+            // `perform(as:)` without opening a file, taking a durable lock, or
+            // entering `persistenceQueue`. A missing cache is not evidence of a
+            // deletion and therefore retains the existing fail-open behavior.
+            if let sharedAdmission, let sharedEpoch,
+               !sharedAdmission.isCurrent(epoch: sharedEpoch) {
                 return failClosedRoot
             }
             return base.appendingPathComponent(scope, isDirectory: true)
@@ -2026,6 +2103,7 @@ public enum CaptureAccountScope {
         cachedAccountPreferenceSnapshot = nil
         cachedSharedAdmissionScope = nil
         cachedSharedAdmissionCell = nil
+        cachedSharedAdmissionEpoch = nil
         blockedDeletionAdmissions.insert(binding.scope)
         pendingDeletionAdmissions.remove(binding.scope)
         generation &+= 1
@@ -2092,6 +2170,7 @@ public enum CaptureAccountScope {
             cachedAccountPreferenceSnapshot = nil
             cachedSharedAdmissionScope = nil
             cachedSharedAdmissionCell = nil
+            cachedSharedAdmissionEpoch = nil
             blockedDeletionAdmissions.insert(ownerScope)
             generation &+= 1
             let blockedGeneration = generation
@@ -2148,6 +2227,7 @@ public enum CaptureAccountScope {
             generation &+= 1
             cachedSharedAdmissionScope = nil
             cachedSharedAdmissionCell = nil
+            cachedSharedAdmissionEpoch = nil
         }
         let revision = generation
         if let preferenceValues,
@@ -2190,10 +2270,12 @@ public enum CaptureAccountScope {
             return false
         }
         let allowed: Bool
+        let admittedEpoch: UInt64?
         switch AccountDeletionLifecycleStore(container: container)
             .read(ownerScope: ownerScope) {
         case .missing:
-            allowed = admission.openEpoch != nil
+            admittedEpoch = admission.openEpoch
+            allowed = admittedEpoch != nil
         case .record(let record) where record.phase == .completed:
             let signedIn = currentDefaults().object(
                 forKey: AuthStore.signedInMirrorKey) != nil
@@ -2202,9 +2284,11 @@ public enum CaptureAccountScope {
             if signedIn {
                 admission.reopenAfterCompletedDeletion()
             }
-            allowed = signedIn && admission.openEpoch != nil
+            admittedEpoch = admission.openEpoch
+            allowed = signedIn && admittedEpoch != nil
         case .record, .blocked:
             admission.revoke()
+            admittedEpoch = nil
             allowed = false
         }
         stateLock.withLock {
@@ -2212,11 +2296,13 @@ public enum CaptureAccountScope {
                 blockedDeletionAdmissions.remove(ownerScope)
                 cachedSharedAdmissionScope = ownerScope
                 cachedSharedAdmissionCell = admission
+                cachedSharedAdmissionEpoch = admittedEpoch
             } else {
                 blockedDeletionAdmissions.insert(ownerScope)
                 if cachedSharedAdmissionScope == ownerScope {
                     cachedSharedAdmissionScope = nil
                     cachedSharedAdmissionCell = nil
+                    cachedSharedAdmissionEpoch = nil
                 }
             }
         }
@@ -2382,6 +2468,7 @@ public enum CaptureAccountScope {
         blockedDeletionAdmissions.removeAll()
         cachedSharedAdmissionScope = nil
         cachedSharedAdmissionCell = nil
+        cachedSharedAdmissionEpoch = nil
         generation &+= 1
         stateLock.unlock()
         preferenceMutationLock.unlock()
@@ -2404,6 +2491,7 @@ public enum CaptureAccountScope {
         blockedDeletionAdmissions.removeAll()
         cachedSharedAdmissionScope = nil
         cachedSharedAdmissionCell = nil
+        cachedSharedAdmissionEpoch = nil
         generation &+= 1
         stateLock.unlock()
         preferenceMutationLock.unlock()
@@ -2542,6 +2630,7 @@ public enum CaptureAccountScope {
         cachedAccountPreferenceSnapshot = nil
         cachedSharedAdmissionScope = nil
         cachedSharedAdmissionCell = nil
+        cachedSharedAdmissionEpoch = nil
         markerSyncFailureForTests = false
         generation &+= 1
         stateLock.unlock()

@@ -515,6 +515,11 @@ public enum AccountPreferenceUsageGuard {
             }
             if context.type == "CaptureAccountScope",
                let enclosingMethod = context.method {
+                if enclosingMethod == "scopedOwnerHasExistingState",
+                   method == "object",
+                   compactUse == "scoped.key($0)" {
+                    return nil
+                }
                 let allowedMethods = [
                     "writeAccountPreference",
                     "removeAccountPreference",

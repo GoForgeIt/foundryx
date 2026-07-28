@@ -353,6 +353,36 @@ final class AccountPreferenceUsageGuardTests: XCTestCase {
         let violations = AccountPreferenceUsageGuard.scan(sources: [source])
         XCTAssertEqual(violations.count, 1)
         XCTAssertEqual(violations.first?.line, 5)
+
+        let probeSource = AccountPreferenceSourceFile(
+            path: "Fixture/ExistingStateProbe.swift",
+            text: """
+            import Foundation
+            enum CaptureAccountScope {
+                static let defaults: UserDefaults = .standard
+                static func scopedOwnerHasExistingState(
+                    scoped: ScopedPreferences,
+                    keys: [String]
+                ) -> Bool {
+                    keys.contains {
+                        defaults.object(forKey: scoped.key($0)) != nil
+                    }
+                }
+                static func unrelatedProbe(
+                    scoped: ScopedPreferences,
+                    keys: [String]
+                ) -> Bool {
+                    keys.contains {
+                        defaults.object(forKey: scoped.key($0)) != nil
+                    }
+                }
+            }
+            """)
+        let probeViolations = AccountPreferenceUsageGuard.scan(
+            sources: [probeSource])
+        XCTAssertEqual(probeViolations.count, 1)
+        XCTAssertEqual(probeViolations.first?.line, 17)
+        XCTAssertEqual(probeViolations.first?.keyOrUse, "scoped.key($0)")
     }
 
     func testTrackARegistryAndExactLegacySeamsAreSealed() {

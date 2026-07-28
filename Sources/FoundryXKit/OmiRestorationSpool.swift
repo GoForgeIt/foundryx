@@ -199,7 +199,12 @@ public final class OmiRestorationSpool: @unchecked Sendable {
         // Spool-only WAL: placeholder target (it never uploads — CaptureManager's
         // drain owns sync after handover).
         let placeholder = DoorTarget(baseURL: URL(string: "http://127.0.0.1:0")!, bearer: "")
-        let w = CaptureWAL(captureId: id, target: placeholder, baseDir: baseDir, log: log)
+        let w = CaptureWAL(
+            captureId: id,
+            target: placeholder,
+            baseDir: baseDir,
+            binding: accountBinding,
+            log: log)
         if resumed == nil {
             // Same durable birth stamps beginSession writes, so the capture is a
             // first-class conversation (card start, source gate for future resumes).

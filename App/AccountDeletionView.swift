@@ -22,7 +22,7 @@ struct AccountDeletionView: View {
     var body: some View {
         List {
             Section {
-                Text("Delete what you choose — this phone only, your hosted Vault, or your whole account. Deletions can't be undone.")
+                Text("Delete what you choose — only the current account's local data, its hosted Vault, or the account everywhere. Other accounts and this phone's device setup are preserved.")
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
             }
             ForEach(AccountDeletionScope.allCases, id: \.self) { scope in
@@ -43,6 +43,17 @@ struct AccountDeletionView: View {
                 Section {
                     Text("Couldn't complete “\(scope.title).” Check your connection and try again.")
                         .grainTextStyle(.caption).foregroundStyle(GrainColor.dangerRed)
+                }
+            }
+            if case .blocked(let scope) = model.phase {
+                Section {
+                    Text("Deletion is pending. This account stays closed until cleanup finishes.")
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.dangerRed)
+                    Button("Retry deletion") {
+                        Task { await run(scope) }
+                    }
+                    .disabled(isBusy)
                 }
             }
         }
@@ -83,15 +94,19 @@ extension AccountDeletionModel {
     /// The production deletion model: wipes the on-device library locally, and calls the relay
     /// control plane (AccountClient → /account/delete) for the hosted-Vault / everywhere scopes.
     @MainActor static func live() -> AccountDeletionModel {
+        let auth = FoundryAuth()
+        let localDeletion = CurrentOwnerSelectiveDeletionRunner(
+            containerProvider: { CaptureAccountScope.container() },
+            defaults: .standard,
+            secretStore: SystemPairingSecretStore(),
+            pairingServices: (
+                cell: "com.goforgeit.foundryx.cell",
+                door: DoorConfigStore.service),
+            exposureCoordinator: .process,
+            identityProvider: { auth.signedInIdentity })
         let service = LiveAccountDeletionService(
             eraseLocal: {
-                // Wipe the on-device capture library and the app's persisted preferences.
-                let dir = CaptureWAL.documentsCaptures()
-                try? FileManager.default.removeItem(at: dir)
-                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                if let domain = Bundle.main.bundleIdentifier {
-                    UserDefaults.standard.removePersistentDomain(forName: domain)
-                }
+                try await localDeletion.eraseVerifiedCurrentOwner()
             },
             deleteRemote: { scope, idToken in
                 guard let token = idToken,

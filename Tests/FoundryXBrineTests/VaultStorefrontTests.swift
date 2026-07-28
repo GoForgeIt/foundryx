@@ -72,6 +72,52 @@ final class VaultStorefrontTests: XCTestCase {
         XCTAssertEqual(service.calls, [.thisPhone, .hostedVault, .everywhere])
     }
 
+    func testPendingLocalDeletionSurfacesBlockedRetryState() async {
+        let service = PendingDeletionService()
+        let model = await AccountDeletionModel(service: service)
+
+        await model.delete(scope: .thisPhone, idToken: nil)
+
+        let phase = await MainActor.run { model.phase }
+        XCTAssertEqual(phase, .blocked(.thisPhone))
+    }
+
+    func testHostedVaultNeverInvokesLocalErasure() async throws {
+        let calls = DeletionCallRecorder()
+        let service = LiveAccountDeletionService(
+            eraseLocal: {
+                calls.recordLocal()
+            },
+            deleteRemote: { scope, _ in
+                calls.recordRemote(scope)
+            })
+
+        try await service.deleteHostedVault(idToken: "id-token")
+
+        XCTAssertEqual(calls.localCount, 0)
+        XCTAssertEqual(calls.remoteScopes, [.hostedVault])
+    }
+
+    func testEverywhereRemoteFailureDoesNotStartLocalErasure() async {
+        let calls = DeletionCallRecorder()
+        let service = LiveAccountDeletionService(
+            eraseLocal: {
+                calls.recordLocal()
+            },
+            deleteRemote: { scope, _ in
+                calls.recordRemote(scope)
+                throw AccountDeletionError.server
+            })
+
+        do {
+            try await service.deleteAccountEverywhere(idToken: "id-token")
+            XCTFail("expected remote account deletion to fail")
+        } catch {}
+
+        XCTAssertEqual(calls.localCount, 0)
+        XCTAssertEqual(calls.remoteScopes, [.everywhere])
+    }
+
     // MARK: hermetic brine — wire the @storefront scenarios to the real models
 
     func testStorefrontScenarios() async throws {
@@ -114,6 +160,37 @@ final class StubDeletionService: AccountDeletionService, @unchecked Sendable {
     func eraseThisPhone() async throws { calls.append(.thisPhone) }
     func deleteHostedVault(idToken: String?) async throws { calls.append(.hostedVault) }
     func deleteAccountEverywhere(idToken: String?) async throws { calls.append(.everywhere) }
+}
+
+final class PendingDeletionService:
+    AccountDeletionService, @unchecked Sendable
+{
+    func eraseThisPhone() async throws {
+        throw AccountDeletionError.cleanupPending
+    }
+    func deleteHostedVault(idToken: String?) async throws {}
+    func deleteAccountEverywhere(idToken: String?) async throws {
+        throw AccountDeletionError.cleanupPending
+    }
+}
+
+private final class DeletionCallRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var local = 0
+    private var remote: [AccountDeletionScope] = []
+
+    var localCount: Int { lock.withLock { local } }
+    var remoteScopes: [AccountDeletionScope] {
+        lock.withLock { remote }
+    }
+
+    func recordLocal() {
+        lock.withLock { local += 1 }
+    }
+
+    func recordRemote(_ scope: AccountDeletionScope) {
+        lock.withLock { remote.append(scope) }
+    }
 }
 
 // MARK: - Brine world + steps (real VaultFunnelModel with an injected storefront + real

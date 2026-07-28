@@ -481,7 +481,8 @@ private struct MainTabs: View {
         _chats = StateObject(wrappedValue: ChatConversationStore(
             storageURL: accountBinding.map {
                 ChatConversationStore.storageURL(inAccountRoot: $0.root)
-            }))
+            },
+            binding: accountBinding))
         let log = DoorLog()
         // Ship the phone's BLE/audio/capture/chat log to the relay diag sink so
         // it's observable server-side (no copying logs off the device).

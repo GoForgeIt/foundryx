@@ -3557,7 +3557,13 @@ public final class CaptureManager: ObservableObject {
         let upload: (@Sendable (UInt64, Data) async throws -> Void)?
         if let uploadSegment { upload = { seq, body in try await uploadSegment(id, seq, body) } }
         else { upload = nil }
-        return CaptureWAL(captureId: id, target: target, baseDir: baseDir, log: log, upload: upload)
+        return CaptureWAL(
+            captureId: id,
+            target: target,
+            baseDir: baseDir,
+            binding: accountBinding,
+            log: log,
+            upload: upload)
     }
 
     private func hasLocalAudio(_ captureId: String) -> Bool {

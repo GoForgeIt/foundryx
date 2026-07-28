@@ -11,6 +11,9 @@ Feature: Deleting an account stops work already running elsewhere
 
   Scenario: pending deletion revokes account work cached in another process
     Given another process has captured work for the signed-in account
+    And that process retains unsaved audio and chat changes for the account
     When this process durably marks that account pending deletion
     Then the other process rejects the captured work before it can publish
+    And account storage access in the other process fails closed
+    And retained audio and chat changes cannot recreate the deleted account storage
     And the captured account binding is no longer current in the other process

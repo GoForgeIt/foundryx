@@ -31,7 +31,7 @@ public enum AccountDeletionScope: String, CaseIterable, Equatable, Sendable {
 
     public var title: String {
         switch self {
-        case .thisPhone:   return "Erase this phone"
+        case .thisPhone:   return "Erase this account's local data"
         case .hostedVault: return "Delete your hosted Vault"
         case .everywhere:  return "Delete your account everywhere"
         }
@@ -40,18 +40,18 @@ public enum AccountDeletionScope: String, CaseIterable, Equatable, Sendable {
     public var subtitle: String {
         switch self {
         case .thisPhone:
-            return "Wipe every recording, transcript, and setting from this iPhone. A hosted Vault, if you have one, stays untouched."
+            return "Erase only the current account's choices, recordings, and computer connections from this iPhone. Other accounts and this phone's device setup are preserved. A hosted Vault, if you have one, stays untouched."
         case .hostedVault:
             return "Tear down your private hosted Vault and everything in it. Your account stays, so you can turn a Vault back on later."
         case .everywhere:
-            return "Delete your account and every Vault, everywhere — on this phone and on our servers. This can't be undone."
+            return "Delete the current account and every Vault on our servers, then erase only this account's local data. Other accounts and this phone's device setup are preserved. This can't be undone."
         }
     }
 
     /// The destructive-confirmation verb shown on the final button.
     public var confirmLabel: String {
         switch self {
-        case .thisPhone:   return "Erase this phone"
+        case .thisPhone:   return "Erase current account"
         case .hostedVault: return "Delete hosted Vault"
         case .everywhere:  return "Delete everything"
         }
@@ -61,6 +61,8 @@ public enum AccountDeletionScope: String, CaseIterable, Equatable, Sendable {
 /// A deletion failure surfaced to the model (e.g. the relay returned a non-2xx).
 public enum AccountDeletionError: Error, Equatable, Sendable {
     case server
+    case ownerUnproven
+    case cleanupPending
 }
 
 // MARK: - Seam (network + local)
@@ -89,6 +91,7 @@ public final class AccountDeletionModel: ObservableObject {
         case deleting(AccountDeletionScope)
         case done(AccountDeletionScope)
         case failed(AccountDeletionScope)
+        case blocked(AccountDeletionScope)
     }
 
     @Published public private(set) var phase: Phase = .idle
@@ -110,6 +113,8 @@ public final class AccountDeletionModel: ObservableObject {
                 try await service.deleteAccountEverywhere(idToken: idToken)
             }
             phase = .done(scope)
+        } catch AccountDeletionError.cleanupPending {
+            phase = .blocked(scope)
         } catch {
             phase = .failed(scope)
         }
@@ -143,5 +148,102 @@ public struct LiveAccountDeletionService: AccountDeletionService {
     public func deleteAccountEverywhere(idToken: String?) async throws {
         try await deleteRemote(.everywhere, idToken)
         try await eraseLocal()
+    }
+}
+
+/// Owner-proving adapter between the UI service and the durable selective
+/// lifecycle. A new deletion requires an exact current binding for the verified
+/// Keychain identity. Recovery requires that same identity plus a pending record
+/// and the persisted activation owner; no free-form or inferred scope can erase.
+final class CurrentOwnerSelectiveDeletionRunner: @unchecked Sendable {
+    private let containerProvider: @Sendable () -> URL
+    private let defaults: UserDefaults
+    private let secretStore: any PairingSecretStore
+    private let pairingServices: (cell: String, door: String)
+    private let exposureCoordinator: AccountExposureCoordinator
+    private let identityProvider: @Sendable () -> AuthIdentity?
+
+    init(
+        container: URL,
+        defaults: UserDefaults,
+        secretStore: any PairingSecretStore,
+        pairingServices: (cell: String, door: String),
+        exposureCoordinator: AccountExposureCoordinator,
+        identityProvider: @escaping @Sendable () -> AuthIdentity?
+    ) {
+        self.containerProvider = { container }
+        self.defaults = defaults
+        self.secretStore = secretStore
+        self.pairingServices = pairingServices
+        self.exposureCoordinator = exposureCoordinator
+        self.identityProvider = identityProvider
+    }
+
+    init(
+        containerProvider: @escaping @Sendable () -> URL,
+        defaults: UserDefaults,
+        secretStore: any PairingSecretStore,
+        pairingServices: (cell: String, door: String),
+        exposureCoordinator: AccountExposureCoordinator,
+        identityProvider: @escaping @Sendable () -> AuthIdentity?
+    ) {
+        self.containerProvider = containerProvider
+        self.defaults = defaults
+        self.secretStore = secretStore
+        self.pairingServices = pairingServices
+        self.exposureCoordinator = exposureCoordinator
+        self.identityProvider = identityProvider
+    }
+
+    func eraseVerifiedCurrentOwner() async throws {
+        guard let identity = identityProvider(),
+              let ownerScope = try? CaptureAccountScope.key(for: identity),
+              AccountDeletionLifecycleStore.isValidOwnerScope(ownerScope)
+        else {
+            throw AccountDeletionError.ownerUnproven
+        }
+        let container = containerProvider()
+
+        let lifecycle = AccountDeletionLifecycle.live(
+            container: container,
+            defaults: defaults,
+            secretStore: secretStore,
+            pairingServices: pairingServices,
+            exposureCoordinator: exposureCoordinator,
+            verifiedIdentityForScope: { requestedScope in
+                requestedScope == ownerScope ? identity : nil
+            },
+            legacyEnumerationObserver: { _ in })
+
+        do {
+            switch lifecycle.record(ownerScope: ownerScope) {
+            case .record(let record) where record.phase == .cleanupPending:
+                _ = try await lifecycle.recover(ownerScope: ownerScope)
+            case .missing, .record:
+                guard let binding =
+                        CaptureAccountScope.currentAccountBinding(),
+                      binding.scope == ownerScope,
+                      binding.root.deletingLastPathComponent()
+                        .standardizedFileURL
+                        == container.standardizedFileURL,
+                      CaptureAccountScope.isCurrent(binding) else {
+                    throw AccountDeletionError.ownerUnproven
+                }
+                _ = try await lifecycle.begin(binding: binding)
+            case .blocked:
+                throw AccountDeletionError.cleanupPending
+            }
+        } catch AccountDeletionError.cleanupPending {
+            throw AccountDeletionError.cleanupPending
+        } catch {
+            switch lifecycle.record(ownerScope: ownerScope) {
+            case .record(let record) where record.phase == .cleanupPending:
+                throw AccountDeletionError.cleanupPending
+            case .blocked:
+                throw AccountDeletionError.cleanupPending
+            default:
+                throw error
+            }
+        }
     }
 }

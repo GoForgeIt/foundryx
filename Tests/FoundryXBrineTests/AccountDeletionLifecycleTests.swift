@@ -583,7 +583,6 @@ final class AccountDeletionLifecycleTests: XCTestCase {
         let lifecycle = AccountDeletionLifecycle.live(
             container: fixture.root,
             defaults: fixture.defaults,
-            widgetDefaults: fixture.defaults,
             secretStore: DeletionTypedSecretStore(),
             pairingServices: (cell: "cell.test", door: "door.test"),
             exposureCoordinator: AccountExposureCoordinator(),
@@ -1372,6 +1371,114 @@ final class AccountDeletionLifecycleTests: XCTestCase {
         ) { _ in true })
     }
 
+    func testCurrentOwnerRunnerUsesVerifiedBindingAndSelectiveLifecycle()
+        async throws
+    {
+        let fixture = try SelectiveDeletionIntegrationFixture(
+            legacyProof: .ownedByB)
+        defer { fixture.cleanup() }
+        let controls = fixture.snapshotPreservedControls()
+        let runner = CurrentOwnerSelectiveDeletionRunner(
+            container: fixture.root,
+            defaults: fixture.defaults,
+            secretStore: fixture.secrets,
+            pairingServices: (
+                cell: fixture.cellService,
+                door: fixture.doorService),
+            exposureCoordinator: fixture.exposureCoordinator,
+            identityProvider: { fixture.identityB })
+
+        try await runner.eraseVerifiedCurrentOwner()
+
+        XCTAssertTrue(fixture.allScopedBInputsAreAbsent)
+        XCTAssertTrue(fixture.allProvedLegacyInputsAreAbsent)
+        XCTAssertEqual(fixture.snapshotPreservedControls(), controls)
+        XCTAssertEqual(
+            fixture.lifecycle.record(ownerScope: fixture.bindingB.scope)
+                .record?.phase,
+            .completed)
+    }
+
+    func testCurrentOwnerRunnerProvesIdentityBeforeTouchingContainer()
+        async
+    {
+        let containerWasTouched = DeletionCompletionFlag()
+        let runner = CurrentOwnerSelectiveDeletionRunner(
+            containerProvider: {
+                containerWasTouched.markFinished()
+                return FileManager.default.temporaryDirectory
+            },
+            defaults: .standard,
+            secretStore: DeletionTypedSecretStore(),
+            pairingServices: (cell: "cell.test", door: "door.test"),
+            exposureCoordinator: AccountExposureCoordinator(),
+            identityProvider: { nil })
+
+        await XCTAssertThrowsErrorAsync {
+            try await runner.eraseVerifiedCurrentOwner()
+        }
+
+        XCTAssertFalse(containerWasTouched.isFinished)
+    }
+
+    func testCurrentOwnerRunnerNeverErasesForMismatchedIdentity()
+        async throws
+    {
+        let fixture = try SelectiveDeletionIntegrationFixture(
+            legacyProof: .ownedByB)
+        defer { fixture.cleanup() }
+        let controls = fixture.snapshotPreservedControls()
+        let runner = CurrentOwnerSelectiveDeletionRunner(
+            container: fixture.root,
+            defaults: fixture.defaults,
+            secretStore: fixture.secrets,
+            pairingServices: (
+                cell: fixture.cellService,
+                door: fixture.doorService),
+            exposureCoordinator: fixture.exposureCoordinator,
+            identityProvider: { fixture.identityA })
+
+        await XCTAssertThrowsErrorAsync {
+            try await runner.eraseVerifiedCurrentOwner()
+        }
+
+        XCTAssertTrue(fixture.allScopedBInputsRemainPresent)
+        XCTAssertEqual(fixture.snapshotPreservedControls(), controls)
+        XCTAssertEqual(
+            fixture.lifecycle.record(ownerScope: fixture.bindingB.scope),
+            .missing)
+    }
+
+    func testCurrentOwnerRunnerRecoversPendingWithoutRepublishingOwner()
+        async throws
+    {
+        let fixture = try SelectiveDeletionIntegrationFixture(
+            legacyProof: .ownedByB,
+            failingAt: .init(.before, .pairingSecrets))
+        defer { fixture.cleanup() }
+        let controls = fixture.snapshotPreservedControls()
+        await XCTAssertThrowsErrorAsync {
+            try await fixture.lifecycle.begin(binding: fixture.bindingB)
+        }
+        fixture.allowRecovery()
+        let runner = CurrentOwnerSelectiveDeletionRunner(
+            container: fixture.root,
+            defaults: fixture.defaults,
+            secretStore: fixture.secrets,
+            pairingServices: (
+                cell: fixture.cellService,
+                door: fixture.doorService),
+            exposureCoordinator: fixture.exposureCoordinator,
+            identityProvider: { fixture.identityB })
+
+        try await runner.eraseVerifiedCurrentOwner()
+
+        XCTAssertNil(CaptureAccountScope.currentAccountBinding())
+        XCTAssertNil(CaptureAccountScope.currentScopedPreferences())
+        XCTAssertTrue(fixture.allScopedBInputsAreAbsent)
+        XCTAssertEqual(fixture.snapshotPreservedControls(), controls)
+    }
+
     func testLiveLegacyCleanupPreservesInputsWithoutExactOwnerProof()
         async throws
     {
@@ -1476,7 +1583,7 @@ final class AccountDeletionLifecycleTests: XCTestCase {
         XCTAssertTrue(fixture.freshStateWasDeleted)
     }
 
-    func testWholeDomainDeletionDebtRemainsUntilTask8() throws {
+    func testTask8RemovesEveryWholeDomainDeletionDebt() throws {
         let repository = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -1486,11 +1593,9 @@ final class AccountDeletionLifecycleTests: XCTestCase {
         let debt = violations.filter {
             $0.reason == "whole preference-domain removal is forbidden"
         }
-        XCTAssertEqual(debt.count, 1)
-        XCTAssertEqual(debt.first?.path, "App/AccountDeletionView.swift")
-        XCTAssertEqual(
-            debt.first?.operationFingerprint,
-            "UserDefaults.standard.removePersistentDomain(forName: Bundle.main.bundleIdentifier)")
+        XCTAssertTrue(
+            debt.isEmpty,
+            "selective account deletion must never remove a whole preference domain")
     }
 }
 
@@ -2231,7 +2336,9 @@ private final class DeletionMetadataObservation: @unchecked Sendable {
     }
 }
 
-private final class SelectiveDeletionIntegrationFixture {
+private final class SelectiveDeletionIntegrationFixture:
+    @unchecked Sendable
+{
     enum LegacyProof: Equatable {
         case absent
         case ownedByA
@@ -2258,6 +2365,7 @@ private final class SelectiveDeletionIntegrationFixture {
     private var exposureOwners: [DeletionRegistrationOwner] = []
     private var exposureRegistrations: [AccountExposureRegistration] = []
     private let metadataObservation = DeletionMetadataObservation()
+    private let faultControl: DeletionFaultControl
 
     private let trackAKeys = [
         "foundryx.cell.url",
@@ -2278,8 +2386,10 @@ private final class SelectiveDeletionIntegrationFixture {
     init(
         legacyProof: LegacyProof,
         identityEmail: String = "owner-b@example.test",
-        registerRetryParticipants: Bool = false
+        registerRetryParticipants: Bool = false,
+        failingAt faultPoint: DeletionFaultPoint? = nil
     ) throws {
+        faultControl = DeletionFaultControl(failingPoint: faultPoint)
         let discriminator = UUID().uuidString.lowercased()
         root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "foundryx-live-deletion-\(discriminator)",
@@ -2428,7 +2538,6 @@ private final class SelectiveDeletionIntegrationFixture {
         lifecycle = AccountDeletionLifecycle.live(
             container: root,
             defaults: defaults,
-            widgetDefaults: appGroupDefaults,
             secretStore: secrets,
             pairingServices: (cell: cellService, door: doorService),
             exposureCoordinator: exposureCoordinator,
@@ -2439,7 +2548,8 @@ private final class SelectiveDeletionIntegrationFixture {
                 if url.lastPathComponent == ".account-deletions-v1" {
                     observation.wasEnumerated = true
                 }
-            })
+            },
+            faultInjector: faultControl.injector)
     }
 
     var historicalSignupMarkerObject: Any? {
@@ -2554,6 +2664,17 @@ private final class SelectiveDeletionIntegrationFixture {
         return snapshot
     }
 
+    func activationAliases() -> [String: String]? {
+        guard let data = defaults.data(
+            forKey: "foundryx.capture-account-activation.v2"),
+              let object = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+              let aliases = object["aliases"] as? [String: String] else {
+            return nil
+        }
+        return aliases
+    }
+
     func snapshotLegacyInputs() -> [String: Data] {
         var result: [String: Data] = [:]
         for key in AccountPreferenceCatalog.entries.map(\.canonicalKey)
@@ -2581,6 +2702,20 @@ private final class SelectiveDeletionIntegrationFixture {
         appGroupDefaults.removePersistentDomain(
             forName: appGroupDefaultsName)
         try? FileManager.default.removeItem(at: root)
+    }
+
+    func installTestEnvironment() {
+        CaptureAccountScope.resetTestEnvironment()
+        CaptureAccountScope.setContainerForTests(root)
+        CaptureAccountScope.setDefaultsForTests(defaults)
+        CaptureWidgetSnapshotStore.setDefaultsForTesting(appGroupDefaults)
+        CaptureAccountScope.setPairingKeychainServicesForTests(
+            cell: cellService,
+            door: doorService)
+    }
+
+    func allowRecovery() {
+        faultControl.failingPoint = nil
     }
 
     func seedFreshBState(
@@ -2762,6 +2897,381 @@ private final class DeletionTypedSecretStore:
 
     func value(service: String, account: String) -> String? {
         read(service: service, account: account)
+    }
+}
+
+/// Scenario-9 driver shared by the Brine step file. Each fault point owns a
+/// separate real live-deletion fixture so interruption state is retained until
+/// the later retry and fresh-return steps inspect it.
+final class SelectiveDeletionBehaviorHarness: @unchecked Sendable {
+    private struct InterruptedCase {
+        let point: DeletionFaultPoint
+        let fixture: SelectiveDeletionIntegrationFixture
+        let preservedBefore: [String: Data]
+        let activationAliasesBefore: [String: String]
+    }
+
+    private var interruptedCases: [InterruptedCase] = []
+    private var preparedFixture: SelectiveDeletionIntegrationFixture?
+    private(set) var confirmationWasOpened = false
+
+    func prepareTwoAccountPhone() throws {
+        preparedFixture?.cleanup()
+        preparedFixture = try SelectiveDeletionIntegrationFixture(
+            legacyProof: .ownedByB)
+        confirmationWasOpened = false
+    }
+
+    func assertCurrentOwnerInputsWereSeeded() throws {
+        guard let fixture = preparedFixture,
+              fixture.allScopedBInputsRemainPresent,
+              !fixture.snapshotPreservedControls().isEmpty else {
+            throw BrineStepError(
+                "the two-account phone did not seed both owners and phone controls")
+        }
+    }
+
+    func openLocalConfirmation() {
+        confirmationWasOpened = true
+    }
+
+    func assertCurrentAccountOnlyCopy() throws {
+        guard confirmationWasOpened,
+              AccountDeletionScope.thisPhone.title
+                .localizedCaseInsensitiveContains("account"),
+              AccountDeletionScope.thisPhone.subtitle.contains(
+                "current account") else {
+            throw BrineStepError(
+                "local deletion does not promise current-account-only erasure")
+        }
+    }
+
+    func assertPreservationCopy() throws {
+        guard AccountDeletionScope.thisPhone.subtitle.contains(
+                "Other accounts"),
+              AccountDeletionScope.thisPhone.subtitle.contains(
+                "device setup") else {
+            throw BrineStepError(
+                "local deletion does not promise to preserve other accounts "
+                    + "and this phone's device setup")
+        }
+    }
+
+    func interruptAtEveryFaultPoint() async throws {
+        preparedFixture?.cleanup()
+        preparedFixture = nil
+        for point in DeletionFaultPoint.requiredV1 {
+            let fixture = try SelectiveDeletionIntegrationFixture(
+                legacyProof: .ownedByB,
+                failingAt: point)
+            let preserved = fixture.snapshotPreservedControls()
+            guard let activationAliases = fixture.activationAliases(),
+                  !activationAliases.isEmpty else {
+                fixture.cleanup()
+                throw BrineStepError(
+                    "\(point.boundary.rawValue) \(point.stage.rawValue) "
+                        + "did not seed activation aliases")
+            }
+            do {
+                _ = try await fixture.lifecycle.begin(
+                    binding: fixture.bindingB)
+                fixture.cleanup()
+                throw BrineStepError(
+                    "\(point.boundary.rawValue) \(point.stage.rawValue) "
+                        + "did not interrupt deletion")
+            } catch let error as BrineStepError {
+                fixture.cleanup()
+                throw error
+            } catch {
+                interruptedCases.append(.init(
+                    point: point,
+                    fixture: fixture,
+                    preservedBefore: preserved,
+                    activationAliasesBefore: activationAliases))
+            }
+        }
+        guard interruptedCases.count == DeletionFaultPoint.requiredV1.count
+        else {
+            throw BrineStepError(
+                "did not retain all 34 interrupted deletion cases")
+        }
+    }
+
+    func assertDeletedOwnerBlocked() throws {
+        for item in interruptedCases {
+            item.fixture.installTestEnvironment()
+            guard item.fixture.lifecycle.record(
+                    ownerScope: item.fixture.bindingB.scope) != .missing,
+                  CaptureAccountScope.currentAccountBinding() == nil,
+                  CaptureAccountScope.currentScopedPreferences() == nil,
+                  CaptureAccountScope.perform(
+                    as: item.fixture.bindingB, { _ in true }) == nil else {
+                throw BrineStepError(
+                    "\(label(item.point)) left the deleting account open")
+            }
+        }
+    }
+
+    func assertDeletedOwnerDataUnavailable() throws {
+        for item in interruptedCases {
+            item.fixture.installTestEnvironment()
+            guard CaptureAccountScope.currentRoot()
+                    != item.fixture.bindingB.root,
+                  CaptureAccountScope.currentScopedPreferences() == nil else {
+                throw BrineStepError(
+                    "\(label(item.point)) exposed deleting-account data")
+            }
+        }
+    }
+
+    func assertWidgetInactive() throws {
+        for item in interruptedCases {
+            guard item.fixture.widgetOwnerAndPayloadAreAbsent else {
+                throw BrineStepError(
+                    "\(label(item.point)) retained deleting-account widget activity")
+            }
+        }
+    }
+
+    func assertVisibleRetry() throws {
+        let source = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "App/AccountDeletionView.swift"),
+            encoding: .utf8)
+        guard source.contains("Retry deletion"),
+              source.contains("case .blocked") else {
+            throw BrineStepError(
+                "pending deletion has no explicit blocked retry action")
+        }
+    }
+
+    func assertOtherAccountUnchanged() throws {
+        for item in interruptedCases {
+            guard item.fixture.snapshotPreservedControls()
+                    == item.preservedBefore else {
+                throw BrineStepError(
+                    "\(label(item.point)) changed the other account")
+            }
+        }
+    }
+
+    func assertPhoneUnchanged() throws {
+        try assertOtherAccountUnchanged()
+    }
+
+    func retryEveryInterruption() async throws {
+        for item in interruptedCases {
+            item.fixture.installTestEnvironment()
+            item.fixture.allowRecovery()
+            let record: AccountDeletionLifecycleRecord
+            switch item.fixture.lifecycle.record(
+                ownerScope: item.fixture.bindingB.scope) {
+            case .missing:
+                guard let binding =
+                        CaptureAccountScope.currentAccountBinding(),
+                      binding.scope == item.fixture.bindingB.scope else {
+                    throw BrineStepError(
+                        "\(label(item.point)) cannot retry from active owner")
+                }
+                record = try await item.fixture.lifecycle.begin(
+                    binding: binding)
+            case .record(let pending) where pending.phase == .cleanupPending:
+                record = try await item.fixture.lifecycle.recover(
+                    ownerScope: item.fixture.bindingB.scope)
+            case .record:
+                record = try await item.fixture.lifecycle.recover(
+                    ownerScope: item.fixture.bindingB.scope)
+            case .blocked(let reason):
+                throw BrineStepError(
+                    "\(label(item.point)) retry record is blocked: \(reason)")
+            }
+            guard record.phase == .completed,
+                  item.fixture.allScopedBInputsAreAbsent,
+                  item.fixture.allProvedLegacyInputsAreAbsent,
+                  item.fixture.snapshotPreservedControls()
+                    == item.preservedBefore else {
+                throw BrineStepError(
+                    "\(label(item.point)) retry did not selectively complete")
+            }
+        }
+    }
+
+    func signDeletedOwnerInAgain() throws {
+        for item in interruptedCases {
+            item.fixture.installTestEnvironment()
+            try CaptureAccountScope.activateForTests(
+                item.fixture.identityB,
+                activatePreferences: true)
+            guard let binding =
+                    CaptureAccountScope.currentAccountBinding(),
+                  binding.scope == item.fixture.bindingB.scope else {
+                throw BrineStepError(
+                    "\(label(item.point)) did not permit a fresh owner return")
+            }
+        }
+    }
+
+    func assertFreshFirstRun() throws {
+        for item in interruptedCases {
+            item.fixture.installTestEnvironment()
+            try CaptureAccountScope.activateForTests(
+                item.fixture.identityB,
+                activatePreferences: true)
+            guard AccountPreferences.read(
+                    AccountPreferenceCatalog.onboardingCompleted)
+                    == .value(false),
+                  AccountPreferences.read(
+                    AccountPreferenceCatalog.welcomeSeen)
+                    == .value(false) else {
+                throw BrineStepError(
+                    "\(label(item.point)) resurrected completed first run")
+            }
+        }
+    }
+
+    func assertCaptureStartsPaused() throws {
+        for item in interruptedCases {
+            item.fixture.installTestEnvironment()
+            try CaptureAccountScope.activateForTests(
+                item.fixture.identityB,
+                activatePreferences: true)
+            guard let binding =
+                    CaptureAccountScope.currentAccountBinding(),
+                  CaptureSettings.snapshot(binding: binding).omiDesiredState
+                    == .paused else {
+                throw BrineStepError(
+                    "\(label(item.point)) did not return capture paused")
+            }
+        }
+    }
+
+    func assertDeletedDataDoesNotReturn() throws {
+        let pairingKeys = [
+            "foundryx.cell.url",
+            "foundryx.cell.authMode",
+            "foundryx.door.url",
+        ]
+        for item in interruptedCases {
+            item.fixture.installTestEnvironment()
+            try CaptureAccountScope.activateForTests(
+                item.fixture.identityB,
+                activatePreferences: true)
+            guard let binding =
+                    CaptureAccountScope.currentAccountBinding(),
+                  !FileManager.default.fileExists(
+                    atPath: binding.root.appendingPathComponent(
+                        "payload.bin").path),
+                  pairingKeys.allSatisfy({
+                    item.fixture.defaults.object(
+                        forKey: "\(binding.scope).\($0)") == nil
+                  }),
+                  item.fixture.secrets.inspect(
+                    service: item.fixture.cellService,
+                    account: binding.scope) == .notFound,
+                  item.fixture.secrets.inspect(
+                    service: item.fixture.doorService,
+                    account: binding.scope) == .notFound else {
+                throw BrineStepError(
+                    "\(label(item.point)) resurrected deleted local data")
+            }
+        }
+    }
+
+    func assertPostReturnChoicesPersist() async throws {
+        for item in interruptedCases {
+            item.fixture.installTestEnvironment()
+            try CaptureAccountScope.activateForTests(
+                item.fixture.identityB,
+                activatePreferences: true)
+            let value = "after-return-\(item.point.stage.rawValue)-"
+                + item.point.boundary.rawValue
+            guard AccountPreferences.write(
+                    value,
+                    for: AccountPreferenceCatalog.ambientAgentName)
+                    == .saved else {
+                throw BrineStepError(
+                    "\(label(item.point)) could not save a fresh choice")
+            }
+            _ = try await item.fixture.lifecycle.recover(
+                ownerScope: item.fixture.bindingB.scope)
+            guard AccountPreferences.read(
+                    AccountPreferenceCatalog.ambientAgentName)
+                    == .value(value) else {
+                throw BrineStepError(
+                    "\(label(item.point)) stale epoch deleted a fresh choice")
+            }
+        }
+    }
+
+    func assertOtherAccountStillUnchangedAfterReturn() throws {
+        for item in interruptedCases {
+            item.fixture.installTestEnvironment()
+            try CaptureAccountScope.activateForTests(
+                item.fixture.identityA,
+                activatePreferences: true)
+            var preservedBefore = item.preservedBefore
+            var preservedAfter = item.fixture.snapshotPreservedControls()
+            let activationKey =
+                "phone|foundryx.capture-account-activation.v2"
+            preservedBefore.removeValue(forKey: activationKey)
+            preservedAfter.removeValue(forKey: activationKey)
+            let aliasesAfter = item.fixture.activationAliases() ?? [:]
+            // `capture-account-activation.v2` is expected to change when a
+            // different owner activates. The preservation oracle therefore
+            // keeps its real coverage by requiring every pre-existing alias
+            // mapping to remain present and byte-for-byte unmodified, while
+            // comparing every other owner/phone control exactly.
+            let aliasesPreserved =
+                item.activationAliasesBefore.allSatisfy {
+                    aliasesAfter[$0.key] == $0.value
+                }
+            guard preservedAfter == preservedBefore,
+                  aliasesPreserved else {
+                let changed = Set(preservedBefore.keys)
+                    .union(preservedAfter.keys)
+                    .sorted()
+                    .compactMap { key -> String? in
+                        let before = preservedBefore[key] ?? Data()
+                        let after = preservedAfter[key] ?? Data()
+                        guard before != after else { return nil }
+                        return "\(key): \(String(decoding: before, as: UTF8.self))"
+                            + " -> \(String(decoding: after, as: UTF8.self))"
+                    }
+                    .joined(separator: "; ")
+                let changedAliases = item.activationAliasesBefore
+                    .filter { aliasesAfter[$0.key] != $0.value }
+                    .map { key, value in
+                        "\(key): \(value) -> \(aliasesAfter[key] ?? "nil")"
+                    }
+                    .sorted()
+                    .joined(separator: "; ")
+                throw BrineStepError(
+                    "\(label(item.point)) changed the other account after return: "
+                        + [changed, changedAliases]
+                            .filter { !$0.isEmpty }
+                            .joined(separator: "; "))
+            }
+        }
+    }
+
+    func cleanup() {
+        preparedFixture?.cleanup()
+        preparedFixture = nil
+        for item in interruptedCases {
+            item.fixture.cleanup()
+        }
+        interruptedCases.removeAll()
+    }
+
+    private var repositoryRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+    }
+
+    private func label(_ point: DeletionFaultPoint) -> String {
+        "\(point.boundary.rawValue) \(point.stage.rawValue)"
     }
 }
 

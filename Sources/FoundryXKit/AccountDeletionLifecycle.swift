@@ -994,11 +994,14 @@ final class AccountDeletionLifecycle: @unchecked Sendable {
         try preflightBegin(binding: binding)
         try enter(ownerScope: binding.scope)
         defer { leave(ownerScope: binding.scope) }
-        try inject(.before, .pendingSync)
         let (pending, _) =
             try environment.authorizePendingDeletion(binding) {
                 try self.store.createPending(ownerScope: binding.scope)
             }
+        // Synthetic interruption coverage begins only after the request is
+        // durably admitted. Pre-admission persistence failures are exercised
+        // separately and must never be represented as pending deletion.
+        try inject(.before, .pendingSync)
         try inject(.after, .pendingSync)
         try inject(.before, .pendingReadback)
         eventObserver(.pendingDurableReadback)
@@ -1192,7 +1195,6 @@ final class AccountDeletionLifecycle: @unchecked Sendable {
 private final class LiveAccountDeletionContext: @unchecked Sendable {
     let container: URL
     let defaults: UserDefaults
-    let widgetDefaults: UserDefaults
     let secretStore: any PairingSecretStore
     let pairingServices: (cell: String, door: String)
     let exposureCoordinator: AccountExposureCoordinator
@@ -1202,7 +1204,6 @@ private final class LiveAccountDeletionContext: @unchecked Sendable {
     init(
         container: URL,
         defaults: UserDefaults,
-        widgetDefaults: UserDefaults,
         secretStore: any PairingSecretStore,
         pairingServices: (cell: String, door: String),
         exposureCoordinator: AccountExposureCoordinator,
@@ -1212,7 +1213,6 @@ private final class LiveAccountDeletionContext: @unchecked Sendable {
     ) {
         self.container = container
         self.defaults = defaults
-        self.widgetDefaults = widgetDefaults
         self.secretStore = secretStore
         self.pairingServices = pairingServices
         self.exposureCoordinator = exposureCoordinator
@@ -1392,19 +1392,18 @@ extension AccountDeletionLifecycle {
     static func live(
         container: URL,
         defaults: UserDefaults,
-        widgetDefaults: UserDefaults,
         secretStore: any PairingSecretStore,
         pairingServices: (cell: String, door: String),
         exposureCoordinator: AccountExposureCoordinator,
         verifiedIdentityForScope:
             @escaping @Sendable (String) -> AuthIdentity?,
         legacyEnumerationObserver:
-            @escaping @Sendable (URL) -> Void
+            @escaping @Sendable (URL) -> Void,
+        faultInjector: DeletionFaultInjector = .none
     ) -> AccountDeletionLifecycle {
         let context = LiveAccountDeletionContext(
             container: container,
             defaults: defaults,
-            widgetDefaults: widgetDefaults,
             secretStore: secretStore,
             pairingServices: pairingServices,
             exposureCoordinator: exposureCoordinator,
@@ -1468,6 +1467,7 @@ extension AccountDeletionLifecycle {
             })
         return AccountDeletionLifecycle(
             store: AccountDeletionLifecycleStore(container: container),
-            environment: environment)
+            environment: environment,
+            faultInjector: faultInjector)
     }
 }

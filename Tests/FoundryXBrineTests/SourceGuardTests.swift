@@ -93,21 +93,12 @@ final class SourceGuardTests: XCTestCase {
         }
         XCTAssertEqual(
             deletionDebt.count,
-            1,
-            "the temporary deletion debt is an exact one-entry ratchet")
-        let debt = try XCTUnwrap(deletionDebt.first)
-        XCTAssertEqual(debt.path, "App/AccountDeletionView.swift")
-        XCTAssertEqual(
-            debt.ownership,
-            "AccountDeletionModel.live->eraseLocal")
-        XCTAssertEqual(
-            debt.operationFingerprint,
-            "UserDefaults.standard.removePersistentDomain(forName: Bundle.main.bundleIdentifier)")
-        XCTAssertGreaterThan(debt.line, 0, "line is required diagnostic context")
+            0,
+            "Task 8 removes the temporary whole-domain deletion debt")
         XCTAssertEqual(
             violations.count,
-            1,
-            "every violation except the exact preexisting deletion debt fails the source guard:\n"
+            0,
+            "every undeclared preference use fails the source guard:\n"
                 + violations.map {
                     "\($0.path):\($0.line): \($0.keyOrUse) — \($0.reason)"
                 }.joined(separator: "\n"))
