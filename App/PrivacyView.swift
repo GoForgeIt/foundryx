@@ -11,27 +11,27 @@ struct PrivacyView: View {
     var body: some View {
         List {
             Section {
-                Text("FoundryX is built so your conversations belong to you. Here is exactly where things live — no fine print.")
+                Text("FoundryX is built so your voice notes belong to you. Here is exactly where things live — no fine print.")
                     .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
             }
 
             Section("On “Just my phone”") {
-                row("Recordings & transcripts", "Stay on this phone. Nothing leaves.")
+                row("Voice notes & transcripts", "Stay on this phone. Nothing leaves.")
                 row("Titles & summaries", "Made by Apple's on-device model. Nothing leaves.")
                 row("Ambient intelligence", "Runs on this phone. Nothing leaves unless you accept a suggestion.")
                 row("Your voice key", "Stored on this phone only.")
             }
 
             Section("On “My computer”") {
-                row("Recordings", "Travel end-to-end encrypted to YOUR computer — never our servers.")
+                row("Voice notes", "Travel end-to-end encrypted to YOUR computer — never our servers.")
                 row("Transcription", "Your computer uses one cloud speech service (Deepgram) to transcribe. Audio is sent for that purpose only.")
                 row("Memory & answers", "Live in Lore on your computer. Questions are answered from your own machine.")
                 row("Titles & summaries", "Made by local models on your computer.")
             }
 
             Section("Always") {
-                row("Sign-in", "Your email identifies you; it is never linked to conversation content.")
-                row("Off means off", "Ambient off = zero live analysis. Deleting a conversation deletes it.")
+                row("Sign-in", "Your email identifies you; it is never linked to voice note content.")
+                row("Off means off", "Ambient off = zero live analysis. Deleting a voice note deletes it.")
                 row("Your agent", "Never acts without your confirmation, and answers only to your voice.")
             }
         }

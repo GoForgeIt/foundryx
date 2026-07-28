@@ -312,7 +312,7 @@ public final class ChatConversationStore: ObservableObject {
 public enum ChatListOrganizer {
     public enum Provenance: String, CaseIterable, Sendable {
         case all = "All"
-        case fromConversations = "From conversations"
+        case fromConversations = "From voice notes"
         case startedByMe = "Started by me"
     }
 

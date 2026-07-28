@@ -200,7 +200,9 @@ struct RootView: View {
             case .computerBrain:
                 if let target = remote.makeDoorTarget() {
                     MainTabs(target: target, remote: remote, brains: brains, local: false,
-                             vaultFunnel: vaultFunnel, accountDeletion: accountDeletion, showingAccount: $showingAccount)
+                             vaultFunnel: vaultFunnel, accountDeletion: accountDeletion, showingAccount: $showingAccount,
+                             showingOnboarding: $showingOnboarding,
+                             onboardingSkipsWelcome: onboardingSkipsWelcome)
                         // A resolved-host change OR a refreshed bearer (after a token-expiry
                         // re-auth) rebuilds the tabs (+ their clients) so every door request
                         // uses the fresh id_token — never a stale, expired one.
@@ -225,7 +227,9 @@ struct RootView: View {
                     idToken: identityCoordinator.currentToken?.value) {
                     MainTabs(target: target, remote: remote, brains: brains, local: false,
                              vaultFunnel: vaultFunnel, accountDeletion: accountDeletion,
-                             showingAccount: $showingAccount)
+                             showingAccount: $showingAccount,
+                             showingOnboarding: $showingOnboarding,
+                             onboardingSkipsWelcome: onboardingSkipsWelcome)
                         // A re-pair (new URL/grant) or a refreshed id_token rebuilds
                         // the tabs so every door request uses the fresh bearer.
                         .id("cell#" + cfg.url + "#" + target.bearer.suffix(12)
@@ -239,7 +243,9 @@ struct RootView: View {
                 MainTabs(target: DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!,
                                             bearer: "local"),
                          remote: remote, brains: brains, local: true,
-                         vaultFunnel: vaultFunnel, accountDeletion: accountDeletion, showingAccount: $showingAccount)
+                         vaultFunnel: vaultFunnel, accountDeletion: accountDeletion, showingAccount: $showingAccount,
+                             showingOnboarding: $showingOnboarding,
+                             onboardingSkipsWelcome: onboardingSkipsWelcome)
                     .id("local-brain#acct-\(remote.identityRevision)")
                     .sheet(isPresented: $showingAccount) {
                         SignInView(remote: remote) { showingAccount = false }
@@ -251,7 +257,7 @@ struct RootView: View {
         .fullScreenCover(isPresented: Binding(
             get: { vaultFunnel.state != .idle },
             set: { if !$0 { vaultFunnel.dismiss() } })) {
-            VaultFunnelView(model: vaultFunnel)
+            VaultFunnelView(model: vaultFunnel, onSignInAgain: { showingAccount = true })
         }
         // Server reconciliation is the mechanism (design law): reconcile entitlement on every
         // foreground so a checkout finished/abandoned in the browser still resolves. Keep the
@@ -322,12 +328,8 @@ struct RootView: View {
         .onChange(of: dest) { d in
             if d != .signInGate { presentFirstRunSurfacesIfNeeded() }
         }
-        .fullScreenCover(isPresented: $showingOnboarding) {
-            OnboardingFlowView(baseDir: CaptureWAL.documentsCaptures(),
-                               skipWelcome: onboardingSkipsWelcome) {
-                showingOnboarding = false
-            }
-        }
+        // (The onboarding cover itself is presented by MainTabs — it needs that view's
+        // CaptureManager for the first-note step. RootView still owns WHEN it fires.)
         // The standalone persona welcome (B2) for installs whose onboarding is
         // already done: shows once before the tabs; both actions mark it seen
         // (inside PersonaWelcomeStep) and it stays reachable from Settings →
@@ -429,6 +431,21 @@ private struct MainTabs: View {
     /// Owned by RootView; MainTabs only passes it through.
     let accountDeletion: AccountDeletionModel
     @Binding var showingAccount: Bool
+    /// First-run onboarding. RootView decides WHEN (it owns the sign-in/destination
+    /// logic); the cover is presented HERE because the ending's first-note step drives
+    /// the real capture path, and `manager` is a StateObject of this view — not of
+    /// RootView.
+    @Binding var showingOnboarding: Bool
+    let onboardingSkipsWelcome: Bool
+    /// DEV-only: `-Onboarding` forces the first-run flow up over `-MainPreview`, so the
+    /// ending (first note → ask it → destination) can be UI-proved without a real
+    /// sign-in. RootView owns the real trigger; this is a second, local one because the
+    /// preview path passes `.constant(false)` for the binding.
+    ///
+    /// COMPILED OUT OF A SHIPPING BUILD and listed in `ci-gates.sh` LEAK_SEAM_ARGS on day
+    /// one — that file's own rule: "a seam nobody is checking for is a seam that comes
+    /// back."
+    @State private var forcedOnboarding = false
 
     @StateObject private var device: DeviceManager
     @StateObject private var battery: BatteryMonitor
@@ -468,7 +485,9 @@ private struct MainTabs: View {
 
     init(target: DoorTarget, remote: RemoteSession, brains: BrainStore, local: Bool,
          vaultFunnel: VaultFunnelModel, accountDeletion: AccountDeletionModel,
-         showingAccount: Binding<Bool>) {
+         showingAccount: Binding<Bool>,
+         showingOnboarding: Binding<Bool> = .constant(false),
+         onboardingSkipsWelcome: Bool = false) {
         self.target = target
         self.remote = remote
         self.brains = brains
@@ -476,6 +495,8 @@ private struct MainTabs: View {
         self.vaultFunnel = vaultFunnel
         self.accountDeletion = accountDeletion
         _showingAccount = showingAccount
+        _showingOnboarding = showingOnboarding
+        self.onboardingSkipsWelcome = onboardingSkipsWelcome
         let accountBinding = CaptureAccountScope.currentAccountBinding()
         self.accountBinding = accountBinding
         _chats = StateObject(wrappedValue: ChatConversationStore(
@@ -940,9 +961,30 @@ private struct MainTabs: View {
         // off the launch critical path (TARGET 2). `.task` runs post-appearance; a tab
         // selected before this fires still builds via the per-tab `router.selected` gate.
         .task { deferredTabsReady = true }
+        // First-run onboarding (runs ONCE after the first sign-in). Presented here rather
+        // than in RootView because the ending drives the REAL capture path: the first
+        // voice note is an actual note in the actual library, and "Set up my Vault" is
+        // the entry to cell provisioning — previously reachable only by digging through
+        // Settings.
+        #if DEBUG || PERF_HARNESS
+        .onAppear {
+            if ProcessInfo.processInfo.arguments.contains("-Onboarding") { forcedOnboarding = true }
+        }
+        #endif
+        .fullScreenCover(isPresented: Binding(
+            get: { showingOnboarding || forcedOnboarding },
+            set: { if !$0 { showingOnboarding = false; forcedOnboarding = false } })) {
+            OnboardingFlowView(baseDir: CaptureWAL.documentsCaptures(),
+                               skipWelcome: onboardingSkipsWelcome,
+                               manager: manager,
+                               brains: brains,
+                               onChooseVault: { vaultFunnel.beginSetup() }) {
+                showingOnboarding = false
+            }
+        }
         // The Action Button's "Ask me" chooser (Phase 5, decision #4).
         .confirmationDialog("FoundryX", isPresented: $router.showActionChooser) {
-            Button("Start recording") {
+                Button("Start a note") {
                 router.selected = .capture
                 manager.startMicRecording()
             }

@@ -245,12 +245,12 @@ enum AmbientNotifier {
     /// The first chat turn an accepted card sends — the moment + the ask, so the
     /// agent has the context the user's own ears had.
     private static func chatSeed(_ c: AmbientCandidate) -> String {
-        "While I was recording, this came up: “\(c.utterance)”\n\nPlease \(c.summary.isEmpty ? "help with that" : c.summary)."
+        "While I was taking a note, this came up: “\(c.utterance)”\n\nPlease \(c.summary.isEmpty ? "help with that" : c.summary)."
     }
 
     private static func playbookSeed(_ c: AmbientCandidate,
                                      _ pick: AmbientPlaybookPick) -> String {
-        "While I was recording, this came up: “\(c.utterance)”.\n\nThis looks like the “\(pick.kind)” playbook — \(pick.reason).\n\nPlease run it, and tell me which playbook you're running and why as you go."
+        "While I was taking a note, this came up: “\(c.utterance)”.\n\nThis looks like the “\(pick.kind)” playbook — \(pick.reason).\n\nPlease run it, and tell me which playbook you're running and why as you go."
     }
 
     /// Fire a sample notification so the user can experience the surface before any

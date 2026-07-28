@@ -45,7 +45,7 @@ struct SignInView: View {
                     // live on your devices under your keys — NOT "never leave this
                     // device" (they can sync to your computer / cloud brain if you
                     // choose one). Sign-in is pre-persona, so the copy stays neutral.
-                    Text("Record, transcribe, and remember. Your memory stays on your devices, under your keys.")
+                    Text("Make voice notes and remember. Your knowledge stays on your devices, under your keys.")
                         .grainTextStyle(.body)
                         .foregroundStyle(GrainColor.textMuted)
                         .multilineTextAlignment(.center)

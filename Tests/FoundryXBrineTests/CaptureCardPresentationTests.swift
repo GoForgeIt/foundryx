@@ -116,7 +116,7 @@ final class CaptureCardPresentationTests: XCTestCase {
     func testStatusWordLadder() {
         XCTAssertEqual(present(status: status(stage: .recording, total: 0, synced: 0,
                                               streaming: true)).statusWord,
-                       "Recording")
+                       "Taking a note")
         XCTAssertEqual(present(status: status(stage: .savedToComputer)).statusWord,
                        "Saved to computer")
         XCTAssertEqual(present(status: status(stage: .savedToComputer),
@@ -178,7 +178,7 @@ final class CaptureCardPresentationTests: XCTestCase {
     // MARK: Scenario: the record CTA describes where audio is saved
 
     func testRecordCTACopy() {
-        XCTAssertEqual(CaptureHomeCopy.recordTitle, "Record a conversation")
+        XCTAssertEqual(CaptureHomeCopy.recordTitle, "Make a voice note")
         XCTAssertEqual(CaptureHomeCopy.recordSubtitle(local: true),
                        "Saved on this phone. It joins your full history when your computer connects.")
         XCTAssertEqual(CaptureHomeCopy.recordSubtitle(local: false),
@@ -188,8 +188,8 @@ final class CaptureCardPresentationTests: XCTestCase {
     // "Recent on this phone · N conversations" headline + the Search all action.
     func testRecentHeadlineCopy() {
         XCTAssertEqual(CaptureHomeCopy.recentHeadline, "Recent on this phone")
-        XCTAssertEqual(CaptureHomeCopy.conversationCount(1), "1 conversation")
-        XCTAssertEqual(CaptureHomeCopy.conversationCount(5), "5 conversations")
+        XCTAssertEqual(CaptureHomeCopy.conversationCount(1), "1 voice note")
+        XCTAssertEqual(CaptureHomeCopy.conversationCount(5), "5 voice notes")
         XCTAssertEqual(CaptureHomeCopy.searchAll, "Search all")
     }
 
@@ -220,7 +220,7 @@ final class CaptureCardPresentationTests: XCTestCase {
     // MARK: Scenario: the recording caption reads a human state, not diagnostics
 
     func testMeterCaptionIsHuman() {
-        XCTAssertEqual(MeterCaptionText.caption(paused: false, isRecordingMic: true), "Recording")
+        XCTAssertEqual(MeterCaptionText.caption(paused: false, isRecordingMic: true), "Taking a note")
         XCTAssertEqual(MeterCaptionText.caption(paused: false, isRecordingMic: false), "Listening…")
         XCTAssertEqual(MeterCaptionText.caption(paused: true, isRecordingMic: true),
                        "Paused, not listening")

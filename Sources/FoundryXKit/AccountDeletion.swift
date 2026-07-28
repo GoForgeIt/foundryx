@@ -40,7 +40,7 @@ public enum AccountDeletionScope: String, CaseIterable, Equatable, Sendable {
     public var subtitle: String {
         switch self {
         case .thisPhone:
-            return "Erase only the current account's choices, recordings, and computer connections from this iPhone. Other accounts and this phone's device setup are preserved. A hosted Vault, if you have one, stays untouched."
+            return "Erase only the current account's choices, voice notes, and computer connections from this iPhone. Other accounts and this phone's device setup are preserved. A hosted Vault, if you have one, stays untouched."
         case .hostedVault:
             return "Tear down your private hosted Vault and everything in it. Your account stays, so you can turn a Vault back on later."
         case .everywhere:

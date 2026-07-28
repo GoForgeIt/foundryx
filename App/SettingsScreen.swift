@@ -79,7 +79,7 @@ struct SettingsScreen: View {
             }
             Section {
                 brainRow(.justMyPhone,
-                         subtitle: "Free. Recordings, transcripts, and summaries never leave this phone.")
+                         subtitle: "Free. Voice notes, transcripts, and summaries never leave this phone.")
                 // LIVE connection info in-app (track 20260715T1502, Nick 2026-07-16:
                 // status lives on the welcome or in the app — this is the in-app home,
                 // what a straight-in user glances instead of any gate).
@@ -136,20 +136,20 @@ struct SettingsScreen: View {
                     }
                 }
                 .onChange(of: actionChoice) { c in ActionButtonChoice.current = c }
-                Text("Bind “FoundryX Action” to the Action Button, Control Center, or back-tap in iOS Settings; Siri: “Start FoundryX recording”.")
+                Text("Bind “FoundryX Action” to the Action Button, Control Center, or back-tap in iOS Settings; Siri: “Start a FoundryX voice note”.")
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             } header: {
                 GrainSectionEyebrow("ACTION BUTTON")
             }
 
             Section {
-                Toggle("Act on conversations", isOn: $ambientEnabled)
+                Toggle("Act on voice notes", isOn: $ambientEnabled)
                     .onChange(of: ambientEnabled) { on in
                         _ = AmbientPrefs.setEnabled(on)
                     }
                 Text(ambientEnabled
-                     ? "While recording, your phone privately watches for moments like “I'll have to look that up” and offers to help. Everything stays on this phone until you accept."
-                     : "Off. Recordings are captured exactly as before — no live analysis of any kind.")
+                     ? "While taking a note, your phone privately watches for moments like “I'll have to look that up” and offers to help. Everything stays on this phone until you accept."
+                     : "Off. Voice notes are captured exactly as before — no live analysis of any kind.")
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
                 if ambientEnabled {
                     HStack {
@@ -324,7 +324,10 @@ struct SettingsScreen: View {
             SignInView(remote: remote) { showingVaultSignIn = false }
         }
         .fullScreenCover(isPresented: $showingTour) {
-            OnboardingFlowView(baseDir: CaptureWAL.documentsCaptures()) { showingTour = false }
+            OnboardingFlowView(baseDir: CaptureWAL.documentsCaptures(),
+                               manager: manager,
+                               brains: brains,
+                               onChooseVault: { vaultFunnel.beginSetup() }) { showingTour = false }
         }
         // B5: the waitlist's sign-in leg. On a successful sign-in the POST fires
         // with the fresh token; a dismissal without a token leaves the caption.

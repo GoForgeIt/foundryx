@@ -165,9 +165,9 @@ final class ConversationDetailTests: XCTestCase {
         ]
         let outcomes = [
             CardOutcomeRecord(ts: 150, outcome: "run",
-                              seed: "While I was recording, this came up: \u{201C}send the deck to Maria\u{201D}\n\nPlease do the thing."),
+                              seed: "While I was taking a note, this came up: \u{201C}send the deck to Maria\u{201D}\n\nPlease do the thing."),
             CardOutcomeRecord(ts: 250, outcome: "dismissed",
-                              seed: "While I was recording, this came up: \u{201C}book the dentist\u{201D}\n\nPlease do the thing."),
+                              seed: "While I was taking a note, this came up: \u{201C}book the dentist\u{201D}\n\nPlease do the thing."),
         ]
         let cards = ConversationActions.cards(
             for: capture, decisions: decisions, outcomes: outcomes)
@@ -366,7 +366,7 @@ final class ConversationDetailTests: XCTestCase {
             captureId: "cap-quiet", decisions: [], outcomes: [], answers: [], userActions: [])
         XCTAssertTrue(face.isEmpty)
         XCTAssertEqual(ConversationActionsPresentation.emptyStateText,
-                       "Nothing surfaced from this conversation yet.")
+                       "Nothing surfaced from this voice note yet.")
         XCTAssertEqual(ConversationActionsPresentation.addActionLabel, "Add an action")
     }
 
@@ -686,7 +686,7 @@ private enum DetailFacesSteps {
                     throw DetailFacesError("expected an empty face, got \(face.rows.count) rows")
                 }
                 guard ConversationActionsPresentation.emptyStateText
-                    == "Nothing surfaced from this conversation yet." else {
+                    == "Nothing surfaced from this voice note yet." else {
                     throw DetailFacesError("wrong empty-state copy")
                 }
             },

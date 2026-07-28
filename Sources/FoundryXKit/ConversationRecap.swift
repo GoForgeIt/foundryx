@@ -107,10 +107,10 @@ public struct ConversationRecap: Equatable, Sendable, Identifiable {
     /// - Parameter weekUpdated: true right after the user tapped "Update week to date".
     public func freshnessLine(weekUpdated: Bool = false) -> String {
         let n = conversationCount
-        let countPhrase = "\(n) conversation\(n == 1 ? "" : "s")"
+        let countPhrase = "\(n) voice note\(n == 1 ? "" : "s")"
         switch span {
         case .day:
-            return "Grows after each processed conversation · Updated after \(countPhrase) · \(Self.timeString(updatedAt))"
+            return "Grows after each processed voice note · Updated after \(countPhrase) · \(Self.timeString(updatedAt))"
         case .week:
             return "Week to date · Updated after \(countPhrase). Final weekly recap closes Sunday."
         case .weekToDate:
@@ -268,8 +268,8 @@ public enum ConversationRecapEngine {
         let n = convos.count
         let opener: String
         switch span {
-        case .day: opener = n == 1 ? "One conversation today." : "\(n) conversations today."
-        case .week, .weekToDate: opener = "\(n) conversation\(n == 1 ? "" : "s") this week."
+        case .day: opener = n == 1 ? "One voice note today." : "\(n) voice notes today."
+        case .week, .weekToDate: opener = "\(n) voice note\(n == 1 ? "" : "s") this week."
         }
         // Narrative: opener + each conversation's summary (falling back to title),
         // as sentences. Bounded so it stays readable.
@@ -277,7 +277,7 @@ public enum ConversationRecapEngine {
             let body = c.summary.trimmingCharacters(in: .whitespacesAndNewlines)
             let t = c.title.trimmingCharacters(in: .whitespacesAndNewlines)
             if !body.isEmpty { return body.hasSuffix(".") ? body : body + "." }
-            return t.isEmpty ? "An untitled conversation." : "\(t)."
+            return t.isEmpty ? "An untitled voice note." : "\(t)."
         }
         let narrative = ([opener] + sentences).joined(separator: " ")
         // Insights: one per conversation subject (title preferred), deduped.

@@ -9,7 +9,7 @@ public struct RecordingPillPresentation: Equatable, Sendable {
         case .idle:
             return RecordingPillPresentation(word: "Listening", tone: .neutral)
         case .recordingActive:
-            return RecordingPillPresentation(word: "Recording", tone: .recording)
+            return RecordingPillPresentation(word: "Taking a note", tone: .recording)
         case .paused:
             return RecordingPillPresentation(word: "Paused", tone: .paused)
         }

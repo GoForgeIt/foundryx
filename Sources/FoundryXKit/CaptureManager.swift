@@ -563,7 +563,7 @@ public final class CaptureManager: ObservableObject {
                     let started = card?.startedAt ?? s.started
                     let title = (card?.title?.isEmpty == false)
                         ? card!.title!
-                        : "Conversation"
+                        : "Voice note"
                     rows.append(ConversationRowLite(
                         captureId: s.id,
                         title: title,
@@ -984,6 +984,17 @@ public final class CaptureManager: ObservableObject {
     /// back). Reset to false whenever a fresh recording STARTS and whenever one is
     /// explicitly STOPPED/ended, so a new recording always presents full-screen.
     @Published public private(set) var recordingScreenMinimized = false
+    /// A surface that OWNS THE SCREEN and is driving capture itself (today: onboarding's
+    /// first-note step) holds this for its lifetime, and the library's recording cover
+    /// stays down regardless of the session lifecycle.
+    ///
+    /// `recordingScreenMinimized` is deliberately NOT enough: it is reset to false on
+    /// every fresh start, on `armForSpeech`, and when an ambient capture opens — so a
+    /// caller that minimizes once gets overridden the moment the session actually
+    /// establishes, and the full-screen recorder slams up over whatever was there. That
+    /// is a real defect, not a test artifact: it dropped a user out of onboarding
+    /// mid-flow, and they finished on Capture home having never seen the rest.
+    @Published public var suppressesRecordingSurface = false
     /// The session-owned, pause-aware elapsed clock (track 20260717T0630). Anchored to
     /// the RECORDING SESSION, not the conversation: internal silence-gap rolls PRESERVE
     /// it (`beginSession` stamps only when nil), and ONLY explicit boundaries clear it
@@ -2650,7 +2661,7 @@ public final class CaptureManager: ObservableObject {
         } else if isRecordingMic {
             lastRecordBlockReason = nil   // already recording — not an error state
         } else if !(active == nil || suspendedSession != nil) {
-            lastRecordBlockReason = "Finish the current conversation first"
+            lastRecordBlockReason = "Finish the current voice note first"
         } else {
             lastRecordBlockReason = nil
         }
@@ -5660,7 +5671,7 @@ public final class CaptureManager: ObservableObject {
             // card tombstone — they simply appear once the off-main WAL hydration lands.
             guard let card = ConversationCardStore.load(captureId: name, baseDir: baseDir) else { continue }
             let started = card.startedAt ?? CaptureIdTime.startedAt(fromCaptureId: name) ?? 0
-            let title = (card.title?.isEmpty == false) ? card.title! : "Conversation"
+            let title = (card.title?.isEmpty == false) ? card.title! : "Voice note"
             rows.append(ConversationRowLite(
                 captureId: name, title: title, dateLabel: Self.warmDateLabel(started)))
         }

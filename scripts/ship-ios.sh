@@ -79,11 +79,22 @@ WIDGET_APPEX="$APP/PlugIns/FoundryXWidget.appex"
 [ -d "$WIDGET_APPEX" ] || { echo "archive produced no widget .appex at $WIDGET_APPEX"; exit 1; }
 cp build/signing/FoundryX_Widget_AppStore.mobileprovision "$WIDGET_APPEX/embedded.mobileprovision"
 
-# 4. Build the signing chain: PRIVATE KEY + leaf cert + WWDR G3 intermediate.
-#    (dist.pem holds ONLY the leaf cert; the key lives in dist.key — rcodesign needs
-#    both, plus the intermediate, or App Store rejects "not an Apple submission cert".)
-openssl x509 -inform DER -in build/signing/AppleWWDRCAG3.cer -out build/wwdrg3.pem 2>/dev/null
-cat build/signing/dist.key build/signing/dist.pem build/wwdrg3.pem > build/sign-chain.pem
+# 4. Signing chain — LEGACY PATH, only when the exported PEM material is present.
+#    The identity now comes from the login keychain (see step 6), which already carries
+#    the leaf + intermediate, so this is skipped when dist.key/dist.pem are absent.
+#    They ARE absent by default: build/ is gitignored and a clean removes them, and the
+#    private key cannot be recovered from disk (2026-07-28).
+if [ -f build/signing/dist.key ] && [ -f build/signing/dist.pem ]; then
+  openssl x509 -inform DER -in build/signing/AppleWWDRCAG3.cer -out build/wwdrg3.pem 2>/dev/null
+  cat build/signing/dist.key build/signing/dist.pem build/wwdrg3.pem > build/sign-chain.pem
+else
+  # Keychain path: pull the WWDR G3 intermediate (a PUBLIC cert) straight from the
+  # keychain, so a `build/` clean cannot leave this repo unable to ship.
+  security find-certificate -a -c "Apple Worldwide Developer Relations" -p 2>/dev/null \
+    | awk '/BEGIN CERT/{n++} n==2' > build/wwdrg3.pem
+  openssl x509 -noout -subject -in build/wwdrg3.pem >/dev/null 2>&1 \
+    || { echo "could not extract the WWDR intermediate from the keychain" >&2; exit 1; }
+fi
 
 # 5. MINIMAL CONCRETE entitlements. The wildcard profile-template entitlements
 #    (associated-domains=*, ubiquity-kvstore=TEAM.*, push-to-talk, iCloud) are
@@ -137,12 +148,33 @@ PLIST
 #    nested entities); the scoped 'PlugIns/...appex:' entry OVERRIDES them for the widget so
 #    it gets its own application-identifier. rcodesign reads each bundle's embedded profile.
 echo "==> rcodesign sign (app + widget)"
+# Signs from the LOGIN KEYCHAIN, not from an exported PEM chain. build/signing/dist.key
+# (the Apple Distribution PRIVATE KEY) is gitignored and was lost in a `build/` clean on
+# 2026-07-28 — it exists nowhere on disk, only in the keychain. Re-exporting it needs a
+# GUI prompt, so the durable fix is to stop depending on the export at all.
+# Fingerprint: Apple Distribution: Nicholas Rinard (ND7H73W8VZ).
+# The keychain supplies the PRIVATE KEY + leaf; --pem-file adds the WWDR intermediate.
+# Both are required: without the intermediate the App Store rejects the upload with
+# "not signed using an Apple submission certificate" (error 90034). The intermediate is
+# extracted from the keychain at step 4 — it is a public cert, always available there.
 ~/.cargo/bin/rcodesign sign \
-  --pem-file build/sign-chain.pem \
+  --keychain-fingerprint 7DF5FFBDAD7DC8D701E711470F2127D9318A6D3DA2B0EEC5C801CB748CA5426A \
+  --pem-file build/wwdrg3.pem \
   --entitlements-xml-file build/entitlements-min.xml \
   --entitlements-xml-file "PlugIns/FoundryXWidget.appex:build/entitlements-widget.xml" \
   --code-signature-flags runtime \
-  "$APP" 2>&1 | grep -iE "cryptographic signature|error" || true
+  "$APP" 2>&1 | tee build/rcodesign.log | grep -iE "cryptographic signature|error" || true
+# FAIL LOUDLY on a signing error. This previously piped to `|| true` and swallowed
+# everything, so a flag error meant an UNSIGNED app was packaged and uploaded — Apple
+# rejected it with the confusing "not signed using an Apple submission certificate"
+# (90034) two builds in a row before the real cause was visible (2026-07-28).
+if grep -qiE "^error:|cannot be used with" build/rcodesign.log; then
+  echo "rcodesign FAILED — refusing to package an unsigned app:" >&2
+  grep -iE "^error:|cannot be used with" build/rcodesign.log >&2
+  exit 1
+fi
+grep -qi "cryptographic signature" build/rcodesign.log || {
+  echo "rcodesign produced NO signature — refusing to upload" >&2; exit 1; }
 
 # 7. Package the IPA.
 echo "==> package IPA"

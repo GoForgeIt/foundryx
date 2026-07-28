@@ -80,7 +80,7 @@ struct RecordingScreen: View {
         if let preview { return RecordingClock(startedAt: preview.since) }
         return manager.recordingClock
     }
-    private var statusWord: String { manager.isPaused ? "Paused" : "Recording" }
+    private var statusWord: String { manager.isPaused ? "Paused" : "Taking a note" }
 
     var body: some View {
         let rows = suggestionRows
@@ -137,7 +137,7 @@ struct RecordingScreen: View {
                 .overlay(Circle().strokeBorder(GrainColor.hairline, lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Minimize recording")
+        .accessibilityLabel("Minimize note")
         .accessibilityIdentifier("minimize-recording")
     }
 
@@ -196,7 +196,7 @@ struct RecordingScreen: View {
                 .overlay(Circle().strokeBorder(GrainColor.hairline, lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("End recording")
+        .accessibilityLabel("End note")
     }
 
     /// Pause / Resume — filled forge, switches to amber when paused.
@@ -209,7 +209,7 @@ struct RecordingScreen: View {
                 .background(Circle().fill(manager.isPaused ? GrainColor.amber : GrainColor.forgeBlue))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(manager.isPaused ? "Resume recording" : "Pause recording")
+        .accessibilityLabel(manager.isPaused ? "Resume note" : "Pause note")
     }
 
     // MARK: 3 — recording title (fades in once enough was said)
@@ -289,7 +289,7 @@ struct RecordingScreen: View {
             .buttonStyle(.grain(.filled, size: .lg))
             .frame(maxWidth: .infinity)
 
-            Text("Saves this recording and returns to Capture.")
+            Text("Saves this voice note and returns to Capture.")
                 .font(GrainFont.sans(8.5))
                 .foregroundStyle(GrainColor.textMuted)
                 .multilineTextAlignment(.center)

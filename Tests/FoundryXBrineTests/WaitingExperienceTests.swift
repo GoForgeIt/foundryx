@@ -12,7 +12,7 @@ final class WaitingExperienceTests: XCTestCase {
         XCTAssertEqual(WaitCopy.make(for: .recap, onDevice: true).headline, "Summarizing on your iPhone")
         XCTAssertEqual(WaitCopy.make(for: .transcription, onDevice: true).headline, "Transcribing locally")
         XCTAssertEqual(WaitCopy.make(for: .doorFetch, onDevice: false).headline, "Fetching from your Mac")
-        XCTAssertEqual(WaitCopy.make(for: .title, onDevice: true).headline, "Naming this conversation")
+        XCTAssertEqual(WaitCopy.make(for: .title, onDevice: true).headline, "Naming this voice note")
     }
 
     func testTitleAndSyncCopyReflectTier() {
@@ -79,9 +79,9 @@ final class WaitingExperienceTests: XCTestCase {
     func testTranscriptionPhaseLadder() {
         let m = WaitingExperienceModel(kind: .transcription, onDevice: true)
         // Before the first rung: the base privacy line stands (no premature "taking long").
-        XCTAssertFalse(m.statusLine(elapsed: 5).contains("longer recordings take longer"))
+        XCTAssertFalse(m.statusLine(elapsed: 5).contains("longer voice notes take longer"))
         // 20s+ admits the honest truth.
-        XCTAssertTrue(m.statusLine(elapsed: 20).contains("longer recordings take longer"))
+        XCTAssertTrue(m.statusLine(elapsed: 20).contains("longer voice notes take longer"))
         // 45s+ escalates to the long-recording phase.
         XCTAssertTrue(m.statusLine(elapsed: 60).contains("this was a long one"))
     }
@@ -149,7 +149,7 @@ final class WaitingExperienceTests: XCTestCase {
 
         let withStats = WaitingTipDeck(kind: .recap, onDevice: true,
                                        stats: .init(conversationCount: 1284, segmentsOnComputer: 9021))
-        XCTAssertTrue(withStats.tips.contains { $0.text.contains("1,284 conversations") },
+        XCTAssertTrue(withStats.tips.contains { $0.text.contains("1,284 voice notes") },
                       "expected a grouped conversation-count tip")
         XCTAssertTrue(withStats.tips.contains { $0.text.contains("9,021 segments") },
                       "expected a grouped segment-count tip")
@@ -165,6 +165,6 @@ final class WaitingExperienceTests: XCTestCase {
     func testConversationCountTipIsSingularForOne() {
         let deck = WaitingTipDeck(kind: .recap, onDevice: true,
                                   stats: .init(conversationCount: 1))
-        XCTAssertTrue(deck.tips.contains { $0.text.contains("1 conversation so far") })
+        XCTAssertTrue(deck.tips.contains { $0.text.contains("1 voice note so far") })
     }
 }

@@ -143,7 +143,7 @@ struct ActivityView: View {
             Text("Activity")
                 .grainTextStyle(.title)
                 .foregroundStyle(GrainColor.ink)
-            Text("Recaps of your conversations, plus the nudges, answers, and runs they produced. Everything links back to where it came from.")
+            Text("Recaps of your voice notes, plus the nudges, answers, and runs they produced. Everything links back to where it came from.")
                 .grainTextStyle(.caption)
                 .foregroundStyle(GrainColor.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
@@ -166,7 +166,7 @@ struct ActivityView: View {
             Text("Nothing yet.")
                 .grainTextStyle(.body)
                 .foregroundStyle(GrainColor.ink)
-            Text("When a conversation surfaces something worth acting on, it will appear here. Quiet days stay quiet.")
+            Text("When a voice note surfaces something worth acting on, it will appear here. Quiet days stay quiet.")
                 .grainTextStyle(.caption)
                 .foregroundStyle(GrainColor.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
@@ -338,7 +338,7 @@ struct ActivityView: View {
 
     private func sourceLabel(for source: ActivityEntry.Source) -> String {
         switch source {
-        case .conversation: return "From a conversation"
+        case .conversation: return "From a voice note"
         case .chat: return "Open the chat"
         case .none: return ""
         }

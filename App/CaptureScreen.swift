@@ -256,7 +256,14 @@ struct CaptureScreen: View {
         // computed binding goes false → SwiftUI dismisses. (Supersedes the inline strip,
         // which stays behind the cover as the pre-record "listening" surface.)
         .fullScreenCover(isPresented: Binding(
-            get: { (manager.isRecordingMic || manager.active != nil) && !manager.recordingScreenMinimized },
+            get: { (manager.isRecordingMic || manager.active != nil)
+                    && !manager.recordingScreenMinimized
+                    // A surface already owning the screen and driving capture itself
+                    // (onboarding's first-note step) suppresses this cover for its
+                    // whole lifetime — two competing full-screen covers means SwiftUI
+                    // drops one, and it was dropping the flow the user was mid-way
+                    // through.
+                    && !manager.suppressesRecordingSurface },
             set: { _ in })) {
             RecordingScreen(
                 manager: manager,
@@ -385,7 +392,7 @@ struct CaptureScreen: View {
             }
             Button("Cancel", role: .cancel) { newCategoryName = "" }
         } message: {
-            Text("Categories are yours: rename or delete them any time. Deleting one never deletes its conversations.")
+            Text("Categories are yours: rename or delete them any time. Deleting one never deletes its voice notes.")
         }
         // NOTE: the on-device summary backfill was REMOVED — it drove up to ~12 conversations ×
         // 2 Foundation-Models inferences on every home-list appear, and Apple's FoundationModels
@@ -411,7 +418,7 @@ struct CaptureScreen: View {
         // Live Activity level mid-session (Bug 2). Let the manager decide — it only stops
         // the meter when genuinely idle.
         .onDisappear { manager.captureSurfaceDidDisappear() }
-        .confirmationDialog("Delete conversation?",
+        .confirmationDialog("Delete voice note?",
                             isPresented: Binding(
                                 get: { pendingDeleteId != nil },
                                 set: { if !$0 { pendingDeleteId = nil } }),
@@ -479,7 +486,7 @@ struct CaptureScreen: View {
             && (c.utterance.range(of: agentName, options: .caseInsensitive) != nil
                 || c.summary.range(of: agentName, options: .caseInsensitive) != nil)
         let ask = c.summary.isEmpty ? "help with that" : c.summary
-        let seed = "While I was recording, this came up: “\(c.utterance)”\n\nPlease \(ask)."
+        let seed = "While I was taking a note, this came up: “\(c.utterance)”\n\nPlease \(ask)."
         return RecordingSuggestion(
             id: c.utterance,   // stable identity = the candidate's dedup key
             tint: isAgent ? .agent : .memory,
@@ -565,7 +572,7 @@ struct CaptureScreen: View {
             .grainTextStyle(.caption)
             .foregroundStyle(GrainColor.forgeBlue)
             .buttonStyle(.plain)
-            .accessibilityLabel("Search all conversations")
+            .accessibilityLabel("Search all voice notes")
         }
         .padding(.horizontal, GrainSpacing.x4)
         .padding(.top, GrainSpacing.x3)
@@ -807,7 +814,7 @@ struct CaptureScreen: View {
                 local: false)
         } label: {
             VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-                Text(hit.title.isEmpty ? "Untitled conversation" : hit.title)
+                Text(hit.title.isEmpty ? "Untitled voice note" : hit.title)
                     .grainTextStyle(.body)
                     .foregroundStyle(GrainColor.ink)
                     .lineLimit(1)
@@ -1123,7 +1130,7 @@ struct CaptureScreen: View {
         .onTapGesture { if tile.hasRecorder { manager.restoreRecordingScreen() } }
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(tile.hasRecorder ? .isButton : [])
-        .accessibilityLabel(tile.hasRecorder ? "Live recording, tap to open" : "Listening")
+        .accessibilityLabel(tile.hasRecorder ? "Voice note in progress, tap to open" : "Listening")
         .padding(.horizontal, GrainSpacing.x4)
         .padding(.top, GrainSpacing.x2)
     }
@@ -1213,7 +1220,7 @@ struct CaptureScreen: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(find.searchOpen ? "Close conversation search" : "Search all conversations")
+        .accessibilityLabel(find.searchOpen ? "Close voice note search" : "Search all voice notes")
         .accessibilityValue(find.searchOpen ? "Open" : "Closed")
     }
 
@@ -1381,7 +1388,7 @@ struct CaptureScreen: View {
         var parts: [String] = []
         let convos = manager.processingConversationCount
         if convos > 0 {
-            parts.append("\(convos) conversation\(convos == 1 ? "" : "s") processing")
+            parts.append("\(convos) voice note\(convos == 1 ? "" : "s") processing")
         }
         let n = manager.pendingSegments
         if n > 0 {
@@ -1401,13 +1408,13 @@ struct CaptureScreen: View {
             Image(grain: .waveform)
                 .font(.system(size: GrainSpacing.x8 + GrainSpacing.x2, weight: .light))
                 .foregroundStyle(GrainColor.textFaint)
-            Text("No conversations yet").grainTextStyle(.title).foregroundStyle(GrainColor.ink)
+            Text("No voice notes yet").grainTextStyle(.title).foregroundStyle(GrainColor.ink)
             // Phone-only tier: no computer, no required Omi — record with the mic and
             // everything is transcribed + stays on-device. Computer tier keeps the
             // ambient-Omi + sync story.
             Text(local
-                 ? "Tap record to capture your first conversation. It’s transcribed and titled right here on your phone. Nothing ever leaves this device."
-                 : "Connect your Omi above, or tap record. Capture runs ambiently while your Omi is connected. Audio is held on your phone and synced to your computer; nothing leaves your devices.")
+                 ? "Make your first voice note. It’s transcribed and titled here on your phone. Nothing leaves this device."
+                 : "Connect your Omi above, or make a voice note. Capture stays ambient while your Omi is connected. Audio stays on your phone and syncs to your computer. Nothing leaves your devices.")
                 .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
                 .multilineTextAlignment(.center).padding(.horizontal, GrainSpacing.x6)
             Spacer()

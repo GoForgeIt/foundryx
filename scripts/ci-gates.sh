@@ -225,7 +225,7 @@ LEAK_SEAM_TYPES=(DemoSeed StressChurn SyntheticMicFrameSource SyntheticTranscrip
 # PRODUCTION code (it suppresses the launch-cost window when the harness owns the sensor),
 # so its presence in Release is correct, not a leak.
 LEAK_SEAM_ARGS=(-SyntheticMic -BrainSetupFailed -StressSeed -StressSegs -StressChurn -StallDemo -MainPreview
-                -WelcomePreview -Screen -RemoteChat -SyntheticOmi -SyntheticTranscript)
+                -WelcomePreview -Screen -RemoteChat -SyntheticOmi -SyntheticTranscript -Onboarding)
 # -WelcomePreview / -Screen / -RemoteChat were found SHIPPING IN RELEASE alongside -MainPreview.
 # They are listed here, not merely fixed at the call site, because fixing an instance without
 # policing the class is how the first one survived: a seam nobody is checking for is a seam that
@@ -498,6 +498,7 @@ phase_uiproof() {
        -only-testing:FoundryXUITests/AmbientRecordingProofUITests/testAmbientSpeechOpensATappableRecordingConversation \
        -only-testing:FoundryXUITests/ForegroundRestoreProofUITests/testListeningSurfaceSurvivesBackgroundingAndStaysUsable \
        -only-testing:FoundryXUITests/ForegroundRestoreProofUITests/testLiveTranscriptRendersAndSurvivesBackgrounding \
+       -only-testing:FoundryXUITests/VaultFunnelReachableProofUITests/testOwnerCanReachVaultSetupFromSettings \
        >"$out" 2>&1; then
     echo "  uiproof: recording surface (phone-mic + Omi ambient + foreground restore) PASSED"
   else

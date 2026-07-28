@@ -186,6 +186,54 @@ public enum VaultProvisionStatus: Equatable, Sendable {
     case provisioning
     /// The Vault is live: connect to `cellURL` with `handoff` as the door bearer.
     case ready(cellURL: String, handoff: String)
+    /// A TERMINAL server state — provisioning failed, the Vault is suspended, or the
+    /// account is not entitled.
+    ///
+    /// This case exists because its absence trapped a paying user. The server has always
+    /// been able to answer `failed`, `suspended` and `unentitled`; the client mapped all
+    /// three (and anything else it did not recognise) onto `.pending`, so a provision
+    /// that aborted at 14:05 was still rendering "Checking your payment…" five hours
+    /// later. An unknown status is now terminal-with-an-exit rather than eternal
+    /// progress: being wrong in the direction of "tell the user something" is recoverable;
+    /// being wrong in the direction of "spin forever" is not.
+    case failed(VaultProvisionFailure)
+}
+
+/// Why a Vault did not come up, in terms the funnel can render honestly.
+public enum VaultProvisionFailure: Equatable, Sendable {
+    /// Payment took, provisioning did not finish. Retryable.
+    case provisioningFailed
+    /// The Vault exists but is suspended.
+    case suspended
+    /// The server does not consider this account entitled.
+    case notEntitled
+    /// The sign-in the funnel presented was rejected. Retryable AFTER signing in again —
+    /// distinct from `provisioningFailed` because the remedy is different.
+    case signInExpired
+    /// A status string this build has never seen.
+    case unknown(String)
+
+    /// What the user is told. Short, no jargon, and never blames them.
+    public var headline: String {
+        switch self {
+        case .provisioningFailed: return "Setting up your Vault didn't finish"
+        case .suspended: return "Your Vault is paused"
+        case .notEntitled: return "We couldn't confirm your Vault"
+        case .signInExpired: return "Your sign-in expired"
+        case .unknown: return "Something went wrong setting up your Vault"
+        }
+    }
+
+    /// Does the remedy start with signing in again, rather than retrying?
+    public var needsSignIn: Bool { self == .signInExpired }
+
+    /// Is retrying meaningful? `suspended` is not something a retry fixes.
+    public var isRetryable: Bool {
+        switch self {
+        case .suspended: return false
+        default: return true
+        }
+    }
 }
 
 /// The result of persisting a checkout attempt: the opaque id we reconcile against,
@@ -347,6 +395,10 @@ public enum VaultFunnelState: Equatable, Sendable {
     case settingUp
     /// "Your Vault is live." — connected to the cell (CellConfig carried for the app).
     case live(CellConfig)
+    /// A TERMINAL, ESCAPABLE stop. Renders what went wrong plus a way out — the state
+    /// that did not exist when a paying user was held on "Checking your payment…"
+    /// indefinitely.
+    case failed(VaultProvisionFailure)
 }
 
 /// Drives the Vault funnel: routing, browser hand-off, and reconcile. Holds the seams and
@@ -367,6 +419,22 @@ public final class VaultFunnelModel: ObservableObject {
     private let cellStore: CellStore
     private let attempts: VaultCheckoutAttemptStore
     private let idToken: @Sendable () -> String?
+    /// An ASYNC token seam that may REFRESH before answering.
+    ///
+    /// The synchronous `idToken` above reads a cached snapshot that nothing refreshes.
+    /// Google id_tokens expire after an hour, so every Vault reconcile made more than an
+    /// hour after sign-in was signed with a dead token and rejected 401 — the actual
+    /// cause of the owner being stuck. `FoundryAuth.currentIdToken()` has always known
+    /// how to refresh; the funnel simply was not asking it. nil ⇒ fall back to the
+    /// cached value, so existing call sites and tests are unaffected.
+    private let refreshingIdToken: (@Sendable () async -> String?)?
+
+    /// The bearer to sign a reconcile with: refreshed when a refreshing seam is wired,
+    /// else the cached snapshot.
+    private func freshIdToken() async -> String? {
+        if let refreshingIdToken { return await refreshingIdToken() ?? idToken() }
+        return idToken()
+    }
     /// The App Store storefront country code (StoreKit `Storefront`, read via a thin adapter
     /// at the app edge). Gates the purchase path — track T-STOREFRONT.
     private let storefrontCountryCode: @Sendable () -> String?
@@ -389,6 +457,7 @@ public final class VaultFunnelModel: ObservableObject {
                 checkoutBase: URL = URL(string: "https://goforgeit.com/vault/start")!,
                 returnCallback: URL = URL(string: "foundryx://vault/return")!,
                 idToken: @escaping @Sendable () -> String? = { nil },
+                refreshingIdToken: (@Sendable () async -> String?)? = nil,
                 storefrontCountryCode: @escaping @Sendable () -> String? = { nil }) {
         self.service = service
         self.browser = browser
@@ -397,6 +466,7 @@ public final class VaultFunnelModel: ObservableObject {
         self.checkoutBase = checkoutBase
         self.returnCallback = returnCallback
         self.idToken = idToken
+        self.refreshingIdToken = refreshingIdToken
         self.storefrontCountryCode = storefrontCountryCode
     }
 
@@ -480,6 +550,19 @@ public final class VaultFunnelModel: ObservableObject {
 
     /// Dismiss the funnel (Not now) — back to the free app, action not performed.
     public func dismiss() { state = .idle }
+
+    /// ABANDON a checkout that is going nowhere: clear the durable attempt and return to
+    /// the app.
+    ///
+    /// `dismiss()` alone was never an exit — it sets `.idle`, but the next foreground
+    /// finds the still-durable attempt and puts the user straight back into
+    /// "Checking your payment…". Nothing but a SUCCESSFUL connect ever cleared an
+    /// attempt, so a failed provision meant every launch, forever, with no button to
+    /// press. This is that button.
+    public func abandonCheckout(generation: UInt64 = CaptureAccountScope.identityGeneration) {
+        attempts.clear(generation: generation)
+        state = .idle
+    }
 
     // MARK: browser hand-off
 
@@ -580,9 +663,20 @@ public final class VaultFunnelModel: ObservableObject {
         // If nothing is on screen yet but an attempt is mid-flight, surface the durable
         // "checking" state so the user sees progress, never a dead free screen.
         if case .idle = state { state = .checkingPayment }
-        guard let status = try? await service.reconcile(attemptId: pending.attemptId, idToken: idToken())
-        else { return }        // network blip: keep the current durable state, retry next foreground
-        await apply(status, generation: generation)
+        do {
+            let status = try await service.reconcile(
+                attemptId: pending.attemptId, idToken: await freshIdToken())
+            await apply(status, generation: generation)
+        } catch VaultSignupError.unauthorized {
+            // The server rejected our bearer. This is NOT a blip to sit on: an expired
+            // id_token cannot fix itself by waiting, and the old code retried it silently
+            // on every foreground forever.
+            state = .failed(.signInExpired)
+        } catch {
+            // A genuine network blip: keep the durable waiting state and retry next
+            // foreground. This is the ONLY error class that should be invisible.
+            return
+        }
     }
 
     /// Apply a server-authoritative status to the funnel + entitlement.
@@ -601,6 +695,19 @@ public final class VaultFunnelModel: ObservableObject {
                 cellURL: cellURL,
                 handoff: handoff,
                 generation: generation)
+        case .failed(let reason):
+            // A terminal failure CLEARS its own attempt, so it cannot haunt every future
+            // launch. Nothing but a successful connect used to clear one, which is why a
+            // provision that aborted once put the user back on "Checking your payment…"
+            // on every single launch afterwards.
+            //
+            // `signInExpired` is deliberately EXEMPT: the checkout itself may be perfectly
+            // good and merely unverifiable right now, so the attempt is kept and signing
+            // in again resumes it rather than losing a paid-for Vault.
+            if !reason.needsSignIn {
+                attempts.clear(generation: generation)
+            }
+            state = .failed(reason)
         }
     }
 

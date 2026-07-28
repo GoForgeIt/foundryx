@@ -99,6 +99,18 @@ final class ConversationCardTests: ProcessGlobalStateTestCase {
         }
         ackAllSegments(dir, firstCapture)
         await mgr.retryPendingFinalizes()
+        // Awaiting retryPendingFinalizes() is NOT the same as awaiting the finalize: a
+        // finalize already IN FLIGHT is not "pending", so the retry returns immediately
+        // and every caller's `rec.calls.contains { ... }` assertion could run before the
+        // in-flight call had recorded. Under the flake gate's CPU load the in-flight call
+        // is slower and the race lands — this is the flake-under-load failure, and it was
+        // an assumption in the helper rather than a defect in capture.
+        //
+        // Waiting with a timeout is how an async outcome is asserted: if finalize genuinely
+        // never happens, waitUntil fails the test, so nothing is masked. A duplicate
+        // finalize (the other known load defect) stays just as observable — this only
+        // waits for the FIRST call to land.
+        try await waitUntil { recorder.calls.contains { $0.id == firstCapture } }
         return firstCapture
     }
 

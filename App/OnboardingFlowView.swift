@@ -13,6 +13,7 @@
 // pipeline capture uses) and Grain components. FoundryXKit types are same-module.
 
 import SwiftUI
+import AVFoundation
 import Grain
 
 /// First-run flag, one place (mirrors AmbientPrefs' style).
@@ -57,12 +58,33 @@ struct OnboardingFlowView: View {
     var skipWelcome: Bool = false
     let onDone: () -> Void
 
-    private enum Step { case welcome, voice, ambient }
-    @State private var step: Step
+    /// The live capture surface, when the caller has one. The ending's first-note step
+    /// drives the REAL capture path, so without a manager the flow stops after the
+    /// ambient step exactly as it used to (Settings' "replay the tour" passes one; any
+    /// future call site that cannot simply gets the old ending).
+    var manager: CaptureManager? = nil
+    /// The account-scoped brain preference the destination step writes. `BrainChoice` IS
+    /// the destination choice — there is deliberately no second preference for it.
+    var brains: BrainStore? = nil
+    /// Chose the Vault at the destination step — the host hands off to the Vault funnel
+    /// (cell provisioning) instead of just closing the flow.
+    var onChooseVault: (() -> Void)? = nil
 
-    init(baseDir: URL, skipWelcome: Bool = false, onDone: @escaping () -> Void) {
+    @State private var step: OnboardingStep
+    /// What the user said in their first note, handed to the ask-it step.
+    @State private var firstNoteText = ""
+
+    init(baseDir: URL,
+         skipWelcome: Bool = false,
+         manager: CaptureManager? = nil,
+         brains: BrainStore? = nil,
+         onChooseVault: (() -> Void)? = nil,
+         onDone: @escaping () -> Void) {
         self.baseDir = baseDir
         self.skipWelcome = skipWelcome
+        self.manager = manager
+        self.brains = brains
+        self.onChooseVault = onChooseVault
         self.onDone = onDone
         _step = State(initialValue: skipWelcome ? .voice : .welcome)
     }
@@ -72,7 +94,36 @@ struct OnboardingFlowView: View {
             switch step {
             case .welcome: welcome
             case .voice: OnboardingVoiceStep(baseDir: baseDir) { step = .ambient }
-            case .ambient: OnboardingAmbientStep { finish() }
+            case .ambient:
+                OnboardingAmbientStep {
+                    // The ending exists only where the real capture path is reachable.
+                    if manager != nil { step = .firstNote } else { finish() }
+                }
+            case .firstNote:
+                if let manager {
+                    OnboardingFirstNoteStep(manager: manager, live: manager.live,
+                                            onNext: { text in
+                                                firstNoteText = text
+                                                step = .askIt
+                                            },
+                                            onSkip: { finish() })
+                } else {
+                    Color.clear.onAppear { finish() }
+                }
+            case .askIt:
+                OnboardingAskItStep(noteText: firstNoteText,
+                                    answerer: makeSystemNoteAnswerer()) { step = .destination }
+            case .destination:
+                OnboardingDestinationStep(
+                    brains: brains ?? BrainStore(),
+                    onChooseVault: {
+                        // Mark the flow done BEFORE handing off: the funnel is a separate
+                        // surface, and a user who backs out of it must not be re-onboarded.
+                        markComplete()
+                        onDone()
+                        onChooseVault?()
+                    },
+                    onFinish: { _ in finish() })
             }
         }
         .padding(GrainSpacing.x6)
@@ -82,13 +133,19 @@ struct OnboardingFlowView: View {
     }
 
     private func finish() {
-        // Set the once-flag on first completion; ALWAYS call onDone so a re-run
-        // from Settings ("Show the welcome tour") can still dismiss itself.
+        markComplete()
+        onDone()
+    }
+
+    /// Set the once-flags without dismissing. Split out from `finish()` because the
+    /// Vault hand-off needs the flow marked done BEFORE the funnel takes over.
+    private func markComplete() {
+        // Set the once-flag on first completion; `finish()` ALWAYS calls onDone so a
+        // re-run from Settings ("Show the welcome tour") can still dismiss itself.
         if !OnboardingPrefs.completed { OnboardingPrefs.completed = true }
         // The flow OPENED with the persona welcome, so it counts as seen —
         // the standalone welcome must not re-present over a finished flow.
         WelcomePrefs.markSeen()
-        onDone()
     }
 
     @ViewBuilder private var welcome: some View {
@@ -356,6 +413,13 @@ struct OnboardingVoiceStep: View {
     @State private var phase: Phase = .intro
     @State private var mic: MicFrameSource?
     @State private var frames: [Data] = []
+    /// Which passage words have actually been HEARD. A byte-count bar says how long is
+    /// left; this says whether the mic is picking the reader up — the one thing that
+    /// matters when the output is a voice key. Purely additive: when the OS has no
+    /// on-device recogniser nothing lights up and enrolment behaves exactly as before.
+    @State private var progress = PassageProgress(passage: OwnerVoicePassage.text)
+    @State private var listener: LiveTranscribing?
+    @State private var listenTask: Task<Void, Never>?
     /// Live voice energy for the ring, from recent Opus frame sizes (silence
     /// frames are a few bytes; speech frames are tens — the door's VAD uses the
     /// same property). Smoothed on append.
@@ -371,19 +435,26 @@ struct OnboardingVoiceStep: View {
         }
     }
 
-    /// The read-aloud doubles as the product introduction: in the ~20 seconds it
-    /// takes to speak, it teaches what FoundryX does, where the data lives, the
-    /// agent's name, and the "look that up" ritual — so enrolling the voice IS the
-    /// walkthrough. Keep any edits speakable (no abbreviations, no URLs).
-    private let passage = """
-    “This is my FoundryX. It remembers my conversations for me, \
-    and everything it hears stays on my own devices. \
-    When I say something like ‘I’ll have to look that up,’ \
-    it can find the answer in my own memory. \
-    And when I call my agent — Foundry — it acts for me, \
-    and answers to my voice alone. \
-    A voice is a kind of key, and this one is mine.”
-    """
+    /// The read-aloud doubles as the product introduction — it lives in FoundryXKit
+    /// (`OwnerVoicePassage`) because the matcher is tested against it.
+    private var passage: String { OwnerVoicePassage.text }
+
+    /// The passage with every heard word locked in at full strength and the rest muted,
+    /// so the reader can see where they are. Built as ONE `AttributedString` (a run per
+    /// word) rather than folding `Text + Text`: the latter nests a
+    /// `ConcatenatedTextStorage` per word and blows the main-thread stack — the same
+    /// trap `LiveTranscriptTicker.styledText` documents.
+    private var styledPassage: Text {
+        var attributed = AttributedString()
+        for (i, word) in progress.words.enumerated() {
+            var run = AttributedString((i == 0 ? "" : " ") + word)
+            let heard = progress.states[i] == .spoken
+            run.foregroundColor = heard ? GrainColor.ink : GrainColor.textMuted.opacity(0.55)
+            if heard { run.inlinePresentationIntent = .stronglyEmphasized }
+            attributed.append(run)
+        }
+        return Text(attributed)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x4) {
@@ -403,14 +474,15 @@ struct OnboardingVoiceStep: View {
             Text("Read this aloud (~20 seconds). Your voice becomes the key that lets only YOU command your agent. It never leaves your devices.")
                 .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
 
-            Text(passage)
-                .grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+            styledPassage
+                .grainTextStyle(.body)
                 .padding(GrainSpacing.x4)
-                .background(RoundedRectangle(cornerRadius: 12).fill(GrainColor.forgeBlueBg))
+                .background(RoundedRectangle(cornerRadius: GrainRadius.card, style: .continuous).fill(GrainColor.forgeBlueBg))
+                .accessibilityIdentifier("enrolment-passage")
 
             switch phase {
             case .intro:
-                GrainButton("Start recording", variant: .filled, size: .regular) { start() }
+                GrainButton("Start reading", variant: .filled, size: .regular) { start() }
             case .recording(let n):
                 ProgressView(value: Double(min(n, Self.targetFrames)),
                              total: Double(Self.targetFrames))
@@ -441,8 +513,10 @@ struct OnboardingVoiceStep: View {
 
     private func start() {
         frames = []
+        progress = PassageProgress(passage: OwnerVoicePassage.text)
         phase = .recording(0)
         let source = MicFrameSource()
+        startListening(on: source)
         source.onFrame = { data in
             Task { @MainActor in
                 guard case .recording = phase else { return }
@@ -471,6 +545,37 @@ struct OnboardingVoiceStep: View {
     private func stopMicIfNeeded() {
         mic?.stop()
         mic = nil
+        stopListening()
+    }
+
+    /// Tap the SAME mic the enrolment recorder is using and run the on-device live
+    /// transcriber over it, folding whatever it hears into the passage matcher.
+    ///
+    /// Strictly best-effort. Every failure here is swallowed: an OS with no recogniser
+    /// (`defaultFactory` returns nil), a denied speech-recognition authorisation, or a
+    /// mid-read error all leave the passage unlit while the read-aloud, the length gate
+    /// and the stored sample carry on untouched. Enrolling a voice must never be
+    /// blocked by speech recognition being unavailable.
+    private func startListening(on source: MicFrameSource) {
+        guard let transcriber = LiveTranscription.defaultFactory()() else { return }
+        listener = transcriber
+        source.onPCM = { buffer in transcriber.append(buffer) }
+        listenTask = Task {
+            do { try await transcriber.start() } catch { return }   // no preview, no harm
+            for await live in transcriber.transcript {
+                let heard = live.displayText
+                await MainActor.run { progress.consume(heard) }
+            }
+        }
+    }
+
+    private func stopListening() {
+        listenTask?.cancel()
+        listenTask = nil
+        let t = listener
+        listener = nil
+        guard let t else { return }
+        Task { _ = await t.finish() }
     }
 }
 
@@ -496,10 +601,21 @@ struct OnboardingAmbientStep: View {
     var body: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x4) {
             Text("Ambient intelligence").grainTextStyle(.title).foregroundStyle(GrainColor.ink)
-            Text("While you record, your phone can privately notice moments like “I'll have to look that up” and offer to help — everything stays on your phone until you accept a suggestion.")
+            Text("While you're taking a note, your phone can privately notice moments like “I'll have to look that up” and offer to help — everything stays on your phone until you accept a suggestion.")
                 .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
             Text("Off by default. You can change this any time in Settings.")
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+
+            // Worked examples BEFORE the decision. The sample push notification fires
+            // only after consent, which meant the first concrete thing the user ever saw
+            // arrived once they had already agreed — they were consenting to something
+            // they had not seen. These are inert: no action closure reaches the broker,
+            // and nothing here is stored as a real card
+            // (features/onboarding-ambient-preview.feature).
+            if !enabled {
+                ScrollView { AmbientPreviewCards() }
+                    .frame(maxHeight: 300)
+            }
 
             if enabled {
                 Label("On — check your lock screen", systemImage: "bell.badge.fill")

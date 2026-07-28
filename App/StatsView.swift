@@ -11,7 +11,7 @@ struct StatsView: View {
                     Text("Your library")
                         .grainTextStyle(.title)
                         .foregroundStyle(GrainColor.ink)
-                    Text("Local conversations on this phone")
+                    Text("Voice notes on this phone")
                         .grainTextStyle(.caption)
                         .foregroundStyle(GrainColor.textMuted)
                 }
@@ -19,8 +19,8 @@ struct StatsView: View {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())],
                           alignment: .leading,
                           spacing: GrainSpacing.x3) {
-                    StatTile(label: "Conversations", value: "\(summary.totalConversations)")
-                    StatTile(label: "Hours recorded", value: hours(summary.totalDurationSeconds))
+                    StatTile(label: "Voice notes", value: "\(summary.totalConversations)")
+                    StatTile(label: "Hours of notes", value: hours(summary.totalDurationSeconds))
                     StatTile(label: "Avg length", value: duration(summary.averageDurationSeconds))
                     StatTile(label: "Speakers", value: "\(summary.totalSpeakersIdentified)")
                     StatTile(label: "Words", value: integer(summary.totalWords))
@@ -32,7 +32,7 @@ struct StatsView: View {
                         .grainTextStyle(.body)
                         .foregroundStyle(GrainColor.ink)
                     if summary.conversationsPerDay.isEmpty {
-                        Text("No conversations yet")
+                        Text("No voice notes yet")
                             .grainTextStyle(.caption)
                             .foregroundStyle(GrainColor.textFaint)
                     } else {

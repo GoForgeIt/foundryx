@@ -11,8 +11,8 @@ import AppIntents
 
 @available(iOS 16.0, *)
 struct StartFoundryXRecordingIntent: AppIntent {
-    static let title: LocalizedStringResource = "Start FoundryX Recording"
-    static let description = IntentDescription("Start recording from the phone microphone.")
+    static let title: LocalizedStringResource = "Start FoundryX Voice Note"
+    static let description = IntentDescription("Start a voice note from the phone microphone.")
     static let openAppWhenRun = true
 
     @MainActor
@@ -49,7 +49,7 @@ enum ActionButtonChoice: String, CaseIterable {
 
     var label: String {
         switch self {
-        case .record: return "Start recording"
+        case .record: return "Start a note"
         case .chat: return "Open chat"
         case .ask: return "Ask me each time"
         }
@@ -60,7 +60,7 @@ enum ActionButtonChoice: String, CaseIterable {
 struct FoundryXActionIntent: AppIntent {
     static let title: LocalizedStringResource = "FoundryX Action"
     static let description = IntentDescription(
-        "Runs your chosen FoundryX action — start recording, open chat, or ask each time.")
+        "Runs your chosen FoundryX action — start a note, open chat, or ask each time.")
     static let openAppWhenRun = true
 
     @MainActor
@@ -79,9 +79,9 @@ struct FoundryXShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
             intent: StartFoundryXRecordingIntent(),
-            phrases: ["Start \(.applicationName) recording",
-                      "Record with \(.applicationName)"],
-            shortTitle: "Start Recording",
+            phrases: ["Start a \(.applicationName) voice note",
+                      "Make a voice note with \(.applicationName)"],
+            shortTitle: "Start Voice Note",
             systemImageName: "waveform")
         AppShortcut(
             intent: OpenFoundryXChatIntent(),

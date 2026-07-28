@@ -35,7 +35,7 @@ final class ConversationProgressTests: XCTestCase {
         XCTAssertEqual(ConversationProgress.transcribing.label(local: false), "Transcribing…")
         // Shared labels are brain-agnostic.
         for local in [true, false] {
-            XCTAssertEqual(ConversationProgress.recording.label(local: local), "Recording")
+            XCTAssertEqual(ConversationProgress.recording.label(local: local), "Taking a note")
             XCTAssertEqual(ConversationProgress.ready.label(local: local), "Ready")
             XCTAssertEqual(ConversationProgress.savedOnPhone.label(local: local), "Saved on phone")
         }
@@ -60,7 +60,7 @@ final class ConversationProgressTests: XCTestCase {
     }
 
     func testLabelsAreCalm() {
-        XCTAssertEqual(ConversationProgress.recording.label, "Recording")
+        XCTAssertEqual(ConversationProgress.recording.label, "Taking a note")
         XCTAssertEqual(ConversationProgress.savedOnPhone.label, "Saved on phone")
         XCTAssertEqual(ConversationProgress.savedToComputer.label, "Saved to computer")
         XCTAssertEqual(ConversationProgress.transcribing.label, "Transcribing…")

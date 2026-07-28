@@ -40,7 +40,7 @@ Feature: Actions link to their chats, and chats know where they came from
 
   Scenario: The chat list can show only chats from conversations
     Given chats that came from conversations and chats I started myself
-    When I filter the chat list to "From conversations"
+    When I filter the chat list to "From voice notes"
     Then only the conversation-born chats remain
 
   Scenario: The chat list can show only chats I started

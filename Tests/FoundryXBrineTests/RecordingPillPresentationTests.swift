@@ -12,7 +12,7 @@ final class RecordingPillPresentationTests: XCTestCase {
     func testRecordingActivePresentsRecording() {
         let presentation = RecordingPillPresentation.make(from: .recordingActive)
 
-        XCTAssertEqual(presentation.word, "Recording")
+        XCTAssertEqual(presentation.word, "Taking a note")
         XCTAssertEqual(presentation.tone, .recording)
     }
 
