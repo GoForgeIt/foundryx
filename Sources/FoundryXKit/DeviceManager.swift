@@ -151,7 +151,45 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     }
     /// Published once per gap-recovery window that followed an interrupted conversation.
     /// T5 renders it; nothing else may invent one.
-    public var onGapRecoveryOutcome: ((GapRecoveryOutcome) -> Void)?
+    ///
+    /// IT CARRIES THE ACCOUNT, and that is load-bearing (hazard N7). This callback is NOT
+    /// gated by the account-exposure close while `onState` IS — both are published from the
+    /// same `didDisconnect` after the exposure has been claimed closed, and only the state is
+    /// suppressed. A consumer handed a bare outcome cannot notice, and would render one
+    /// account's recording history into whichever account is on screen. `GapRecoveryReport`
+    /// makes the scope impossible to skip; `GapRecoveryRendering.decide` is what T5 does
+    /// with it.
+    public var onGapRecoveryOutcome: ((GapRecoveryReport) -> Void)?
+
+    /// The account whose audio a gap window is about, PUSHED by the composition root — the
+    /// same shape as `setInterruptedCapture`, and for the same two reasons.
+    ///
+    /// IT IS A SNAPSHOT AND NOT A LOOKUP. A window opens on `bleQueue`, and
+    /// `CaptureAccountScope.currentAccountBinding()` takes a process-wide lock, reads the
+    /// durable container, and consults the shared admission registry on disk. Calling that
+    /// from the radio's queue makes the transport wait on account bookkeeping — measured, not
+    /// feared: doing it here stalled the reconnect seam suite past its 60s precondition bound
+    /// under concurrent load, while the same suite ran in 3.5s without it.
+    ///
+    /// AND `nil` IS FAIL-CLOSED, not a hole. An unset scope makes `GapRecoveryRendering`
+    /// WITHHOLD the outcome with a stated reason rather than render it into whatever account
+    /// is on screen. `DeviceCompositionRootGateTests` is what holds the production wiring in
+    /// place, because `App/` is compiled by no test target.
+    public func setAccountScopeForGapOutcomes(_ scope: String?) {
+        accountScopeLock.lock()
+        accountScopeSnapshot = scope
+        accountScopeLock.unlock()
+    }
+
+    private let accountScopeLock = NSLock()
+    private var accountScopeSnapshot: String?
+
+    /// The snapshot as of now. Read on `bleQueue` when a window opens.
+    var accountScopeAtGapOpen: String? {
+        accountScopeLock.lock()
+        defer { accountScopeLock.unlock() }
+        return accountScopeSnapshot
+    }
 
     /// Fired when the Omi hardware button is DOUBLE-clicked (wired to pause/resume the
     /// current recording). Detected from the Omi button-trigger characteristic — see
@@ -505,10 +543,16 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
         // state. A pairing tap while the central is not yet ready is still the intent, and
         // leaving the store detached until the radio happens to be ready is exactly the
         // silent staleness this fixes.
+        // T5: THE STORE GOES LIVE HERE. `recordUserReconnect` only ever cleared a detach on a
+        // record that already existed, so a first-ever pair left the account-scoped store
+        // empty — it remembered the devices a user had thrown away and none of the ones they
+        // kept, and `RecordingDeviceActivation` therefore had nothing to choose from. Pairing
+        // is the gesture that means "remember this one", so it upserts and selects.
         logDetachOutcome(
-            RecordingDeviceStore.recordUserReconnect(
+            RecordingDeviceStore.recordUserPair(
                 identity: RecordingDeviceIdentity(shape: .bleStream,
-                                                  hardwareToken: device.id.uuidString)),
+                                                  hardwareToken: device.id.uuidString),
+                displayName: device.name),
             gesture: "pair")
         guard let c = central,
               let p = c.retrievePeripherals(withIdentifiers: [device.id]).first
@@ -694,7 +738,8 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
         liveHold.removeAll()
         // Tag AT OPEN. Asking later would ask after the reconnect has already changed the
         // capture state the question is about.
-        gapWindow = GapRecoveryWindow(interruptedCaptureId: interruptedCaptureAtOpen)
+        gapWindow = GapRecoveryWindow(interruptedCaptureId: interruptedCaptureAtOpen,
+                                      accountScopeAtOpen: accountScopeAtGapOpen)
         let generationAtStart = gapSyncGeneration
         bleQueue.asyncAfter(deadline: .now() + gapSyncDecisionTimeout) { [weak self] in
             guard let self, self.gapSyncGeneration == generationAtStart, self.gapSyncHolding,
@@ -713,7 +758,8 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
         let outcome = window.close(cause)
         gapWindow = window
         guard let outcome else { return }
-        onGapRecoveryOutcome?(outcome)
+        onGapRecoveryOutcome?(GapRecoveryReport(outcome: outcome,
+                                                accountScope: window.accountScopeAtOpen))
     }
 
     /// Close the hold: optionally flush the held live frames (in arrival order)

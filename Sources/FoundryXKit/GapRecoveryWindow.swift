@@ -49,6 +49,27 @@ public enum GapRecoveryOutcome: Equatable, Sendable {
     }
 }
 
+/// A published gap outcome, WITH the account whose audio it is about.
+///
+/// THE SCOPE IS PART OF THE FACT, not decoration (track T5, carried hazard N7). The outcome is
+/// published from `didDisconnect`, which also runs during an account-exposure close — and the
+/// close gates the source state while leaving the gap outcome ungated. A consumer handed a
+/// bare `GapRecoveryOutcome` has no way to notice, and would render one account's recording
+/// history into whichever account happens to be on screen. Carrying the scope the window was
+/// OPENED under makes that impossible to miss: the renderer cannot get the sentence without
+/// first being handed the account it belongs to.
+public struct GapRecoveryReport: Equatable, Sendable {
+    public let outcome: GapRecoveryOutcome
+    /// The account scope current when the window opened. `nil` when none was resolvable —
+    /// a first-class answer, not an absence to paper over.
+    public let accountScope: String?
+
+    public init(outcome: GapRecoveryOutcome, accountScope: String?) {
+        self.outcome = outcome
+        self.accountScope = accountScope
+    }
+}
+
 /// How a conversation interrupted by the drop continues once the link returns.
 public enum GapCaptureContinuation: Equatable, Sendable {
     case resumeSame(captureId: String)
@@ -125,11 +146,16 @@ public struct GapRecoveryWindow: Equatable, Sendable {
     /// The conversation the drop interrupted, as reported by the owner of capture state.
     /// `nil` means the drop interrupted nothing.
     public let interruptedCaptureId: String?
+    /// The account whose audio this window is about, captured AT OPEN — not at close. By the
+    /// time it closes the exposed account may already have changed, which is precisely the
+    /// case the scope exists to catch.
+    public let accountScopeAtOpen: String?
     public private(set) var isOpen: Bool
     public private(set) var published: GapRecoveryOutcome?
 
-    public init(interruptedCaptureId: String?) {
+    public init(interruptedCaptureId: String?, accountScopeAtOpen: String? = nil) {
         self.interruptedCaptureId = interruptedCaptureId
+        self.accountScopeAtOpen = accountScopeAtOpen
         self.isOpen = true
         self.published = nil
     }

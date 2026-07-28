@@ -210,6 +210,70 @@ extension RecordingDeviceStore {
         }
     }
 
+    /// Called from the transport when the USER PAIRS a device — the gesture that makes an
+    /// account remember it at all.
+    ///
+    /// WHY THIS IS NOT `recordUserReconnect` (T5). Reconnect deliberately refuses to upsert an
+    /// unknown device, because inventing a remembered device the account never paired would
+    /// put it in the set `RecordingDeviceActivation` chooses from. Pairing is the opposite
+    /// gesture: it is exactly the user saying *"remember this one"*. Until T5 wired this, a
+    /// first-ever pair left the account-scoped store empty and the only records in it came
+    /// from `forget()` — so the store remembered devices a user had thrown away and none of
+    /// the ones they kept.
+    ///
+    /// It also SELECTS the device. Tapping a device in the list is a choice, and preference is
+    /// what makes that choice outrank recency in `RecordingDeviceActivation` — vendor identity
+    /// never enters that comparison, so a user's own pick is the only thing that can.
+    @discardableResult
+    public static func recordUserPair(
+        identity: RecordingDeviceIdentity,
+        displayName: String,
+        at date: Date? = nil
+    ) -> RecordingDeviceDetachOutcome {
+        guard let store = current() else {
+            return .unavailable(RecordingDeviceStoreError.noResolvableAccountScope
+                .errorDescription ?? "no account scope")
+        }
+        do {
+            let existing = try store.records().first { $0.identity == identity }
+            try store.upsert(RecordingDeviceRecord(
+                identity: identity,
+                displayName: displayName,
+                // A re-pair must not lose the connection history the account already had.
+                lastConnected: date ?? existing?.lastConnected,
+                userDetached: false,
+                userPreferred: true))
+            try store.prefer(identity)   // at most one preferred device, always
+            return .recorded(scope: store.scope)
+        } catch {
+            return .unavailable(error.localizedDescription)
+        }
+    }
+
+    /// The user picked an ALREADY-REMEMBERED device as the one to record with.
+    ///
+    /// Asymmetric with `recordUserPair` for the same reason `recordUserReconnect` is: choosing
+    /// a device this account does not remember cannot be honoured by inventing it.
+    @discardableResult
+    public static func recordUserSelection(
+        identity: RecordingDeviceIdentity
+    ) -> RecordingDeviceDetachOutcome {
+        guard let store = current() else {
+            return .unavailable(RecordingDeviceStoreError.noResolvableAccountScope
+                .errorDescription ?? "no account scope")
+        }
+        do {
+            guard try store.records().contains(where: { $0.identity == identity }) else {
+                return .noMatchingRecord(scope: store.scope)
+            }
+            try store.reconnect(identity)   // choosing it is also un-detaching it
+            try store.prefer(identity)
+            return .recorded(scope: store.scope)
+        } catch {
+            return .unavailable(error.localizedDescription)
+        }
+    }
+
     /// ASYMMETRIC WITH `recordUserDetach`, ON PURPOSE. A detach for a device the store has
     /// never seen is upserted, because the detach is itself the fact worth remembering. A
     /// reconnect for an unknown device is NOT upserted: doing so would invent a remembered

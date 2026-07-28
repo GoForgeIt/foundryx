@@ -684,10 +684,31 @@ private struct MainTabs: View {
         // is the authority on that), so this closure has nothing to reach back for and
         // nothing to default — see `CaptureManager.captureDeviceContext`.
         mgr.captureDeviceContext = { recording in
-            OmiRestorationComposition.resolveDeviceContext(
-                binding: CaptureAccountScope.currentAccountBinding(),
-                savedDevice: dm.saved,
+            let binding = CaptureAccountScope.currentAccountBinding()
+            return OmiRestorationComposition.resolveDeviceContext(
+                binding: binding,
+                // The ACCOUNT-SCOPED store answers which device is active, chosen only among
+                // what the transport currently has attached (T5, S05). The legacy
+                // device-global pairing is now an input to that store's migration, not the
+                // answer itself.
+                activeDevice: OmiRestorationComposition.activeExternalDevice(
+                    binding: binding, attached: dm.saved),
                 recording: recording)
+        }
+        // N7: WHICH ACCOUNT a gap-recovery outcome belongs to. `onGapRecoveryOutcome` is NOT
+        // gated by the account-exposure close while `onState` IS, so an outcome can arrive
+        // after the account door has shut. Pushing the scope the window opened under is what
+        // lets `GapRecoveryRendering.decide` withhold it instead of rendering one person's
+        // recording history into the next person's timeline.
+        dm.setAccountScopeForGapOutcomes(accountBinding?.scope)
+        dm.onGapRecoveryOutcome = { report in
+            switch GapRecoveryRendering.decide(
+                report, currentScope: CaptureAccountScope.currentAccountBinding()?.scope) {
+            case .show(let line):
+                log.info("gap recovery: \(line)")
+            case .withheld(let reason):
+                log.info("gap recovery: withheld — \(reason)")
+            }
         }
         // Omi hardware button: a DOUBLE-click pauses/resumes the current recording — the
         // same action as the on-screen Pause. Fires only if the paired Omi firmware exposes

@@ -69,7 +69,7 @@ final class DeviceGapRecoveryFeatureTests: XCTestCase {
     private func makeFunnel() -> (DeviceManager, () -> [GapRecoveryOutcome]) {
         let manager = DeviceManager()
         let box = OutcomeBox()
-        manager.onGapRecoveryOutcome = { box.append($0) }
+        manager.onGapRecoveryOutcome = { box.append($0.outcome) }
         return (manager, { box.all })
     }
 

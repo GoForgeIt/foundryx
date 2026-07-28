@@ -43,6 +43,9 @@ final class FoundryXAppDelegate: NSObject, UIApplicationDelegate {
             RemoteConfig.fromBundle()?.gatewayHTTPURL
                 .appendingPathComponent("diag/log"))
         let dm = DeviceManager.shared(log: log)
+        // N7, on the headless path too: a gap outcome names the account it is about, or it is
+        // withheld. This bootstrap already holds the one proved-owner binding.
+        dm.setAccountScopeForGapOutcomes(binding.scope)
         let paused = preferences.omiDesiredState != .listening
         // The composition root resolves WHICH device this restoration is about to record
         // from and hands it in. It lives in the Kit (`OmiRestorationComposition`) rather
@@ -61,7 +64,8 @@ final class FoundryXAppDelegate: NSObject, UIApplicationDelegate {
             // the handset's microphone is not involved in this path at all.
             deviceContext: OmiRestorationComposition.resolveDeviceContext(
                 binding: binding,
-                savedDevice: dm.saved,
+                activeDevice: OmiRestorationComposition.activeExternalDevice(
+                    binding: binding, attached: dm.saved),
                 recording: .externalStream))
         let exposure = AccountExposureRegistration(
             participantID: "omi-restoration-spool",

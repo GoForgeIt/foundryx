@@ -31,9 +31,78 @@ public enum OmiRestorationComposition {
     public static let handsetToken = "handset"
     public static let handsetDisplayName = "Phone"
 
+    /// The ACTIVE device, and why there is not one.
+    ///
+    /// `noneActive` carries a reason because there are several genuinely different ways to
+    /// have no active device — nothing remembered, the one remembered device detached, the
+    /// store unreadable — and a capture that could not be attributed must be able to say
+    /// which. Collapsing them into `nil` is how "no device" and "a device we could not read"
+    /// became the same event.
+    public enum ActiveDeviceResolution: Equatable, Sendable {
+        case active(RecordingDeviceRecord)
+        case noneActive(reason: String)
+
+        public var record: RecordingDeviceRecord? {
+            if case .active(let r) = self { return r }
+            return nil
+        }
+    }
+
+    /// THE ACCOUNT-SCOPED ANSWER, replacing the legacy single-vendor pairing (review finding
+    /// L1; S05 requires attribution to follow the SELECTED ACTIVE device).
+    ///
+    /// READINESS COMES FROM THE TRANSPORT, NEVER FROM THE STORE, and that is what reconciles
+    /// this with the lesson T4 paid for. `RecordingDeviceActivation` chooses only among READY
+    /// devices, and `attached` is what the radio actually has right now — so the device this
+    /// returns is necessarily one that is attached, i.e. one that can be recording. A device
+    /// the user prefers but that is not attached is not ready and cannot be chosen, so
+    /// "the selected active device" and "the device that is actually recording" cannot
+    /// disagree here. The address book proposes; the transport disposes.
+    ///
+    /// The legacy pairing is adopted on the way past, idempotently. Without it a user who
+    /// paired before this track would have an empty account store on first launch, their first
+    /// post-upgrade conversation would resolve to nothing, and `provenance` would then accuse
+    /// it of having lost a device record it was never owed.
+    public static func activeExternalDevice(
+        binding: CaptureAccountScope.AccountBinding?,
+        attached: SavedOmi?,
+        defaults: UserDefaults = .standard
+    ) -> ActiveDeviceResolution {
+        guard let binding else {
+            return .noneActive(reason: "no account scope is resolvable, so this handset has no "
+                + "account-scoped memory of recording devices to choose from")
+        }
+        let store = RecordingDeviceStore(root: binding.root, scope: binding.scope)
+        do {
+            try RecordingDeviceMigration.adoptLegacyPairing(defaults: defaults, into: store)
+            let remembered = try store.records()
+            let ready: Set<RecordingDeviceIdentity> = attached.map {
+                [RecordingDeviceIdentity(shape: .bleStream, hardwareToken: $0.id.uuidString)]
+            } ?? []
+            guard let active = RecordingDeviceActivation.active(among: remembered, ready: ready) else {
+                if remembered.isEmpty {
+                    return .noneActive(reason: "this account remembers no recording device")
+                }
+                if ready.isEmpty {
+                    return .noneActive(reason: "this account remembers "
+                        + "\(remembered.count) recording device(s) but none is attached")
+                }
+                return .noneActive(reason: "the attached recording device is one this account "
+                    + "has explicitly detached, so it is not active")
+            }
+            return .active(active)
+        } catch {
+            // LOUD, not empty. An unreadable store is not "no devices" — reporting it as such
+            // would silently un-pair every device the person owns and then attribute their
+            // conversations to nothing.
+            return .noneActive(reason: "this account's recording devices could not be read "
+                + "(\(RecordingDeviceLogRedaction.redactingAccountScopes(error.localizedDescription)))")
+        }
+    }
+
     public static func resolveDeviceContext(
         binding: CaptureAccountScope.AccountBinding?,
-        savedDevice: SavedOmi?,
+        activeDevice: ActiveDeviceResolution,
         recording: CaptureRecordingSource
     ) -> CaptureDeviceContextResolution {
         guard let binding else {
@@ -57,17 +126,18 @@ public enum OmiRestorationComposition {
                 displayName: displayName,
                 accountScope: binding.scope))
         case .externalStream:
-            // Only HERE does the remembered pairing answer the question, because only here is
-            // the remembered pairing the thing that is recording.
-            guard let savedDevice else {
+            // Only HERE does the remembered device answer the question, because only here is a
+            // remembered device the thing that is recording.
+            guard case .active(let device) = activeDevice else {
+                let reason: String
+                if case .noneActive(let why) = activeDevice { reason = why } else { reason = "" }
                 return .blocked(reason:
-                    "an external stream is recording but no device is remembered, so this "
-                        + "audio could not be attributed to a device")
+                    "an external stream is recording but no device is active for this account "
+                        + "(\(reason)), so this audio could not be attributed to a device")
             }
             return .resolved(CaptureDeviceContext(
-                identity: RecordingDeviceIdentity(shape: .bleStream,
-                                                  hardwareToken: savedDevice.id.uuidString),
-                displayName: savedDevice.name,
+                identity: device.identity,
+                displayName: device.displayName,
                 accountScope: binding.scope))
         }
     }

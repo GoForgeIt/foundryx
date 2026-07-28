@@ -57,6 +57,32 @@ final class DeviceCompositionRootGateTests: XCTestCase {
         }
     }
 
+    // MARK: - N7: the gap-outcome renderer is wired, and it is wired with an account
+
+    /// `GapRecoveryRendering.decide` fails CLOSED — an unscoped report is withheld. That makes
+    /// a missing production wiring silent-by-design, so this is what makes it loud: both
+    /// composition roots must push the scope, and the app-side one must render through the
+    /// decision rather than straight from the outcome.
+    func testBothCompositionRootsGiveGapOutcomesAnAccount() throws {
+        for path in ["App/RootView.swift", "App/FoundryXAppDelegate.swift"] {
+            let source = try String(contentsOf: Self.repoRoot.appendingPathComponent(path),
+                                    encoding: .utf8)
+            XCTAssertTrue(source.contains("setAccountScopeForGapOutcomes("),
+                          "\(path) never tells DeviceManager which account a gap window is "
+                              + "about, so every gap outcome from it is withheld — silently, "
+                              + "because withholding is the fail-closed default")
+        }
+        let rootView = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent("App/RootView.swift"),
+            encoding: .utf8)
+        XCTAssertTrue(rootView.contains("GapRecoveryRendering.decide("),
+                      "the app renders gap outcomes without asking whether they belong to the "
+                          + "account on screen — N7 is exactly that hole")
+        XCTAssertFalse(rootView.contains("GapRecoveryCopy.line(for:"),
+                       "a gap sentence was built directly from the outcome, bypassing the "
+                           + "account decision that is the whole point of N7")
+    }
+
     /// The same boundary from the other side: no production or test call site may omit
     /// `recording:`, and the type system is what enforces it. This asserts the enforcement
     /// still EXISTS — a default added to the declaration would silently retire it.

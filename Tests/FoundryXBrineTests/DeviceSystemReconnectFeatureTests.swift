@@ -138,7 +138,7 @@ final class DeviceSystemReconnectFeatureTests: ProcessGlobalStateTestCase {
         let device = DeviceManager(makeCentral: stack.factory)
         let outcomes = OutcomeBox()
         let states = SourceStateBox()
-        device.onGapRecoveryOutcome = { outcomes.append($0) }
+        device.onGapRecoveryOutcome = { outcomes.append($0.outcome) }
         device.onState = { states.append($0) }
         device.setInterruptedCapture("cap-n7")
 

@@ -279,9 +279,11 @@ final class DeviceCaptureAttributionWorld: @unchecked Sendable {
         // EXACTLY what App/RootView.swift installs — no test-only shortcut. The manager hands
         // in what is recording; this closure defaults nothing.
         capture.captureDeviceContext = { [device] recording in
-            OmiRestorationComposition.resolveDeviceContext(
-                binding: CaptureAccountScope.currentAccountBinding(),
-                savedDevice: device?.saved,
+            let binding = CaptureAccountScope.currentAccountBinding()
+            return OmiRestorationComposition.resolveDeviceContext(
+                binding: binding,
+                activeDevice: OmiRestorationComposition.activeExternalDevice(
+                    binding: binding, attached: device?.saved),
                 recording: recording)
         }
         #if os(iOS)
@@ -414,7 +416,8 @@ enum DeviceCaptureAttributionSteps {
                 try await MainActor.run { try w.freshHandset() }
                 w.resolution = OmiRestorationComposition.resolveDeviceContext(
                     binding: nil,
-                    savedDevice: SavedOmi(id: w.deviceId, name: "Omi", lastConnected: nil),
+                    activeDevice: .active(RecordingDeviceRecord(identity: w.identity,
+                                                                displayName: "Omi")),
                     recording: .externalStream)
                 return ctx
             },
@@ -454,7 +457,9 @@ enum DeviceCaptureAttributionSteps {
                 let binding = try XCTUnwrapOrThrow(w.binding, "no account binding for the restoration")
                 let resolution = OmiRestorationComposition.resolveDeviceContext(
                     binding: binding,
-                    savedDevice: SavedOmi(id: w.deviceId, name: "Omi", lastConnected: nil),
+                    activeDevice: OmiRestorationComposition.activeExternalDevice(
+                        binding: binding,
+                        attached: SavedOmi(id: w.deviceId, name: "Omi", lastConnected: nil)),
                     recording: .externalStream)
                 w.resolution = resolution
                 let spool = OmiRestorationComposition.makeRestorationSpool(
@@ -697,16 +702,21 @@ enum DeviceCaptureAttributionSteps {
                     throw BrineStepError("the unreadable record carries no diagnostic")
                 }
                 // Non-vacuous: the SAME capture with its record intact is `identified`, so this
-                // answer is produced by the corruption and not by the seed.
+                // answer is produced by the corruption and not by the seed. Its own directory,
+                // so it cannot change what the resume scan in this scenario's later check sees.
+                let intactRoot = w.baseDir.appendingPathComponent("intact-probe", isDirectory: true)
+                try FileManager.default.createDirectory(at: intactRoot,
+                                                        withIntermediateDirectories: true)
                 let intact = CaptureManager.newCaptureId()
                 try w.seedConversation(
                     id: intact,
                     startedAt: UInt64(Date().timeIntervalSince1970),
+                    in: intactRoot,
                     device: CaptureDeviceContext(identity: w.identity, displayName: "Omi",
                                                  accountScope: w.scope))
                 w.seededConversation = id      // seedConversation moved it; put it back
                 guard case .identified = CaptureDeviceSidecar.provenance(captureId: intact,
-                                                                         baseDir: w.baseDir) else {
+                                                                         baseDir: intactRoot) else {
                     throw BrineStepError("nothing is ever identified here — the check is vacuous")
                 }
             },
@@ -736,15 +746,23 @@ enum DeviceCaptureAttributionSteps {
                                 + "read — an unreadable record was treated as no record")
                     }
                 }
-                // Non-vacuous: with the record readable, that same scan DOES return it.
+                // Non-vacuous: with the record readable, that same scan DOES return it. IN ITS
+                // OWN DIRECTORY — sharing `baseDir` would make which id comes back depend on
+                // how the other captures in this scenario happened to sort, which is the
+                // ordering hazard round 9's M1 was about, arriving in a control this time.
+                let probeRoot = w.baseDir.appendingPathComponent("readable-probe", isDirectory: true)
+                try FileManager.default.createDirectory(at: probeRoot,
+                                                        withIntermediateDirectories: true)
                 let readable = CaptureManager.newCaptureId()
                 try w.seedConversation(
                     id: readable,
                     startedAt: UInt64(Date().timeIntervalSince1970),
+                    in: probeRoot,
                     device: CaptureDeviceContext(identity: w.identity, displayName: "Omi",
                                                  accountScope: w.scope))
+                w.seededConversation = id      // seedConversation moved it; put it back
                 guard CaptureManager.resumableCaptureId(
-                        baseDir: w.baseDir, silenceGap: 120,
+                        baseDir: probeRoot, silenceGap: 120,
                         resumingDevice: w.identity) == readable else {
                     throw BrineStepError("nothing is resumable at all — the refusal is free")
                 }
@@ -901,7 +919,10 @@ enum DeviceCaptureAttributionSteps {
                     throw BrineStepError("no binding available to exercise the second refusal")
                 }
                 let noDevice = OmiRestorationComposition.resolveDeviceContext(
-                    binding: binding, savedDevice: nil, recording: .externalStream)
+                    binding: binding,
+                    activeDevice: OmiRestorationComposition.activeExternalDevice(
+                        binding: binding, attached: nil),
+                    recording: .externalStream)
                 guard case .blocked(let deviceReason) = noDevice else {
                     throw BrineStepError(
                         "a restoration with NO remembered device still resolved a context — "
@@ -914,7 +935,9 @@ enum DeviceCaptureAttributionSteps {
                 // Non-vacuous: the same call WITH both must resolve.
                 let ok = OmiRestorationComposition.resolveDeviceContext(
                     binding: binding,
-                    savedDevice: SavedOmi(id: w.deviceId, name: "Omi", lastConnected: nil),
+                    activeDevice: OmiRestorationComposition.activeExternalDevice(
+                        binding: binding,
+                        attached: SavedOmi(id: w.deviceId, name: "Omi", lastConnected: nil)),
                     recording: .externalStream)
                 guard case .resolved = ok else {
                     throw BrineStepError("nothing ever resolves — the refusal is free")
