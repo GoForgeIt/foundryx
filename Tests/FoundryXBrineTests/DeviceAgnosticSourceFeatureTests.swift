@@ -14,9 +14,13 @@ final class DeviceAgnosticSourceFeatureTests: XCTestCase {
 
     func testDeviceAgnosticSourceFeature() async throws {
         let world = DeviceAgnosticSourceWorld()
-        try await BrineFeatureRunner.run(
+        // L3: pin the POPULATION. BrineFeatureRunner asserts only that nothing failed;
+        // deleting a scenario (or an Examples row) would otherwise leave this suite green.
+        let result = try await BrineFeatureRunner.run(
             "device-agnostic-source",
             registry: StepRegistry(DeviceAgnosticSourceSteps.make(world: world)))
+        XCTAssertEqual(result.passed, 9,
+                       "device-agnostic-source must run all 9 scenarios (6 plain + 3 outline rows)")
     }
 
     // MARK: unit — the same rule, proved by substitution rather than by inspection

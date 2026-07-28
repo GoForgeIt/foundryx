@@ -11,6 +11,13 @@ Feature: Device and liveness transitions speak only when authorized
   DEFINITIONS and the production seams they drive belong to T8; until T8 lands, no test
   runs this feature and the file is a declaration only.
 
+  OPEN ITEM FOR THE PLAN OWNER: this is the one place in the track where a feature file
+  ships without step definitions, which the standing BDD rule forbids ("step definitions
+  MUST be written as part of the same task as the feature file, not deferred"). It is
+  forced by the plan, which requires T0's verifier to parse these two scenarios while
+  assigning the scenarios themselves to T8. Recorded here so it cannot be inherited
+  silently; see implementation-t0-t2.md and the review's finding L5.
+
   Scenario: in-flight user capture stays silent across device/liveness transition and source switch
     Given a live user-started capture is open
     And no registered playbook matches and nobody has mentioned an agent

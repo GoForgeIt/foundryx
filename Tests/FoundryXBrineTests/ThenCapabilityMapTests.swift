@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import CryptoKit
 
 /// T0 verifier for track 20260725T2306_device_agnostic_recording_source.
 ///
@@ -159,6 +160,18 @@ final class ThenCapabilityMapTests: XCTestCase {
         return rows
     }
 
+    /// The task-level declarations, independent of the per-scenario `owner` column.
+    static func parseTaskDeclarations(
+        _ data: Data
+    ) throws -> (capabilities: [String: [String]], assertions: [String: [String]]) {
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let capabilities = root["taskCapabilities"] as? [String: [String]],
+              let assertions = root["taskAssertions"] as? [String: [String]] else {
+            throw MapError("then-capabilities.json has no taskCapabilities / taskAssertions")
+        }
+        return (capabilities, assertions)
+    }
+
     static func parseMap(_ data: Data) throws -> [MapEntry] {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let raw = root["scenarios"] as? [[String: Any]] else {
@@ -262,6 +275,91 @@ final class ThenCapabilityMapTests: XCTestCase {
             XCTAssertEqual(entry.owner, row.owner, "\(entry.id): owner disagrees with the plan ledger")
             XCTAssertEqual(entry.deps, row.deps, "\(entry.id): dependencies disagree with the plan ledger")
             XCTAssertEqual(entry.name, row.name, "\(entry.id): scenario name disagrees with the plan ledger")
+        }
+    }
+
+    /// L2 — the plan's owner/capability rule, made durable.
+    ///
+    /// The plan states it: "the sole owner must declare that it **asserts every Then**; each
+    /// required capability must be in the implementation set of the owner or a declared
+    /// earlier dependency." That check lived only in a plan-time Node script, so nothing in
+    /// CI re-ran it after T0 — a reviewer mutation that reassigned `S08`'s owner from `T2` to
+    /// `T5`, consistently in BOTH the pinned ledger and the map, stayed green. It reds now.
+    ///
+    /// `taskAssertions` is declared independently of the `owner` column FOR THAT REASON:
+    /// derived from it, the first arm would be a tautology.
+    func testEveryOwnerAssertsItsScenarioAndCanImplementItsCapabilities() throws {
+        let (_, _, ledger, _) = try loadEverything()
+        let (capabilities, assertions) = try Self.parseTaskDeclarations(try Data(contentsOf: Self.mapURL))
+        XCTAssertFalse(capabilities.isEmpty, "STOP: no task capability declarations")
+        XCTAssertFalse(assertions.isEmpty, "STOP: no task assertion declarations")
+
+        // Every declared assertion names a real ledger row, so the declaration cannot drift
+        // into naming scenarios that do not exist.
+        let ledgerIDs = Set(ledger.map(\.id))
+        for (task, ids) in assertions {
+            for id in ids {
+                XCTAssertTrue(ledgerIDs.contains(id), "\(task) claims to assert unknown scenario \(id)")
+            }
+        }
+
+        var checked = 0
+        for row in ledger {
+            XCTAssertTrue(assertions[row.owner]?.contains(row.id) ?? false,
+                          "\(row.id): \(row.owner) is the ledger owner but does not declare that it asserts every Then")
+            let built = Set(([row.owner] + row.deps).flatMap { capabilities[$0] ?? [] })
+            let missing = Set(row.required).subtracting(built)
+            XCTAssertTrue(missing.isEmpty,
+                          "\(row.id): \(missing.sorted()) implemented by neither owner \(row.owner) nor a declared earlier dependency \(row.deps)")
+            checked += 1
+        }
+        XCTAssertEqual(checked, Self.expectedLedgerRows, "STOP: not every ledger row was checked")
+    }
+
+    /// L4 — the vendored artifacts must still be the ones `PROVENANCE.txt` pins.
+    ///
+    /// The hermetic arm always runs: an edit to either pinned copy reds immediately. The
+    /// second arm is opportunistic — it can only run where the hearth checkout exists beside
+    /// the repo — and when it CAN run, a mismatch is a hard failure, not a warning. Absence
+    /// of the hearth never turns the hermetic arm off.
+    func testVendoredArtifactsStillMatchTheirRecordedHashes() throws {
+        let provenance = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent(
+                "Tests/FoundryXBrineTests/fixtures/device-agnostic/PROVENANCE.txt"),
+            encoding: .utf8)
+
+        func recordedHash(for name: String) throws -> String {
+            let line = try XCTUnwrap(
+                provenance.components(separatedBy: .newlines)
+                    .first { $0.hasSuffix(" \(name)") || $0.hasSuffix("/\(name)") },
+                "PROVENANCE.txt records no sha256 for \(name)")
+            return try XCTUnwrap(line.split(separator: " ").first.map(String.init))
+        }
+        func hash(of url: URL) throws -> String {
+            SHA256.hash(data: try Data(contentsOf: url)).map { String(format: "%02x", $0) }.joined()
+        }
+
+        var compared = 0
+        for (name, url) in [("spec.md", Self.specURL), ("plan.md", Self.planURL)] {
+            XCTAssertEqual(try hash(of: url), try recordedHash(for: name),
+                           "the vendored \(name) no longer matches its recorded sha256")
+            compared += 1
+        }
+        XCTAssertEqual(compared, 2, "STOP: the drift check compared nothing")
+
+        // Opportunistic: has the hearth artifact been revised out from under the pin?
+        let hearth = Self.repoRoot
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                "foundryx-hearth/tracks/20260725T2306_device_agnostic_recording_source",
+                isDirectory: true)
+        guard FileManager.default.fileExists(atPath: hearth.path) else { return }
+        for name in ["spec.md", "plan.md"] {
+            let live = hearth.appendingPathComponent(name)
+            guard FileManager.default.fileExists(atPath: live.path) else { continue }
+            XCTAssertEqual(try hash(of: live), try recordedHash(for: name),
+                           "the hearth's \(name) has been revised; the pinned copy and "
+                               + "PROVENANCE.txt are stale and the verifier is validating an old artifact")
         }
     }
 

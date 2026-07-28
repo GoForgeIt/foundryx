@@ -7,6 +7,31 @@
     "from the pinned spec.md / plan.md and fails if this file and those artifacts disagree in",
     "either direction. Normalization = trim + collapse internal whitespace runs to one space."
   ],
+  "_tasks_about": [
+    "L2. `taskCapabilities` and `taskAssertions` are transcribed from the plan's own",
+    "capability-check script (plan.md, task T0). They are declared INDEPENDENTLY of the",
+    "per-scenario `owner` column on purpose: deriving `taskAssertions` from `owner` would",
+    "make the ownership check a tautology, and a reviewer mutation that reassigned S08's",
+    "owner consistently in BOTH the ledger and this map survived green without them."
+  ],
+  "taskCapabilities": {
+    "T1": ["rendered-list", "rendered-refusal", "rendered-capabilities", "device-availability", "reconnect"],
+    "T2": ["pairing-migration", "account-isolation", "active-selection", "preference-handoff", "detach-persistence", "account-correlation-resistance"],
+    "T3": ["gap-copy", "resume-same-capture"],
+    "T4": ["capture-finalize", "capture-integrity", "archive-attribution"],
+    "T5": ["rendered-list", "rendered-refusal", "rendered-capabilities", "rendered-history", "onboarding-suppression", "both-status-surfaces"],
+    "T6": ["bounded-liveness", "active-device-liveness", "last-heard-age", "malformed-evidence-recovery"],
+    "T7": ["privacy-status-handoff"],
+    "T8": ["zero-agent-actions", "zero-notifications", "zero-live-activity", "zero-widget", "source-switch-silence", "authorized-agent-action", "cause-complete-agent-actions"]
+  },
+  "taskAssertions": {
+    "T2": ["S08"],
+    "T4": ["S04"],
+    "T5": ["S01", "S02", "S03", "S05", "S06", "S07"],
+    "T6": ["S09", "S10", "S11", "S12", "S13"],
+    "T7": ["S14"],
+    "T8": ["S15", "S16", "S17", "P01", "P02"]
+  },
   "scenarios": [
     {
       "id": "S01",
