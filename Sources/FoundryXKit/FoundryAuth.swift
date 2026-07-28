@@ -224,6 +224,23 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
     public var signedInEmail: String? { AuthStore.load()?.email }
     public var signedInIdentity: AuthIdentity? { AuthStore.load() }
     public func restorePersistedIdentity() throws -> AuthIdentity? {
+        // A keychain that CANNOT ANSWER is not an error to show the user. Launching
+        // while the device is locked returns errSecInteractionNotAllowed, and a
+        // simulator/test host returns errSecMissingEntitlement — in both cases
+        // `loadFallibly()` throws, `restore()` catches it, and the sign-in screen
+        // displayed "Sign-in could not secure local data: reading identity failed".
+        // Nothing is wrong: the identity is simply unreadable right now. Return nil so
+        // the caller keeps its mirror-derived state, exactly as it already does for a
+        // locked launch (Nick 2026-07-28, seen on the launch screen).
+        //
+        // Crucially this does NOT confirm sign-out: only a READABLE keychain miss may
+        // do that, or a locked relaunch would strand an authenticated account.
+        switch AuthStore.identityPresence() {
+        case .unreadableLocked, .unreadable:
+            return nil
+        case .absent, .present:
+            break
+        }
         guard let identity = try AuthStore.loadFallibly() else {
             try CaptureAccountScope.confirmSignedOutAfterReadableKeychain()
             return nil
