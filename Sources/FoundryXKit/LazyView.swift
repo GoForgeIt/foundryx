@@ -24,9 +24,10 @@ import SwiftUI
 ///
 /// — restored the whole pathology with every gate green (MUT-R13-P5, SURVIVED). `swift test`
 /// compiles the SPM package only; it cannot see `App/`, so no test could even NAME the type
-/// while it was declared there. Here it can: `LazyViewDefersItsContentTests` constructs one
-/// with a closure that counts its own invocations and asserts the count is ZERO until `body`
-/// is asked for. The App target compiles `Sources/FoundryXKit` directly into its own module,
+/// while it was declared there. Here it can:
+/// `DeviceCompositionRootGateTests.testLazyViewDoesNotBuildItsContentUntilItsBodyIsAsked`
+/// constructs one with a closure that counts its own invocations and asserts the count is
+/// ZERO until `body` is asked for. The App target compiles `Sources/FoundryXKit` directly into its own module,
 /// so this is the same type at the same call sites — and a second `LazyView` declared under
 /// `App/` would now be a redeclaration the compile gate rejects.
 struct LazyView<Content: View>: View {
