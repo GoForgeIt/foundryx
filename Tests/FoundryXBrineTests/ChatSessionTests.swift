@@ -63,6 +63,68 @@ final class ChatSessionTests: XCTestCase {
                      "Auto (router) must OMIT requested_target so Kiln's router decides")
     }
 
+    func testChatRequestCarriesSensitivityWhenPrivate() throws {
+        let store = ChatConversationStore()
+        let id = store.active!.id
+        store.setSensitivity(ChatConversationStore.Sensitivity.private, for: id)
+        let req = store.chatRequest(text: "hi", for: id)
+        XCTAssertEqual(req.sensitivity, "confidential")
+
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(req)) as! [String: Any]
+        XCTAssertEqual(json["sensitivity"] as? String, "confidential")
+    }
+
+    func testDefaultOmitsSensitivity() throws {
+        let store = ChatConversationStore()
+        let id = store.active!.id            // Open (default) ⇒ no sensitivity on the wire
+        let req = store.chatRequest(text: "hi", for: id)
+        XCTAssertNil(req.sensitivity)
+
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(req)) as! [String: Any]
+        XCTAssertNil(json["sensitivity"],
+                     "Open must OMIT sensitivity so the door uses its default")
+    }
+
+    /// Going Private CLEARS a pinned model, because a pin is a route.
+    ///
+    /// Without this, a chat pinned to a cloud model and then switched to Private wears
+    /// the Private badge while still routing to cloud — the badge contradicting the
+    /// actual route is precisely what the privacy control exists to prevent. Enforced in
+    /// the store rather than in the button that calls it, so a second caller cannot
+    /// implement half of it.
+    func testGoingPrivateClearsAPinnedCloudModel() {
+        let store = ChatConversationStore()
+        let id = store.newConversation().id
+        store.setModel("anthropic/claude-opus-4", for: id)
+        XCTAssertEqual(store.active?.modelTargetId, "anthropic/claude-opus-4",
+                       "precondition: the chat is pinned to a cloud model")
+
+        store.setSensitivity(ChatConversationStore.Sensitivity.private, for: id)
+
+        XCTAssertNil(store.active?.modelTargetId,
+                     "Private must drop the cloud pin — otherwise the badge says Private "
+                     + "while the turn still routes to cloud")
+        XCTAssertEqual(store.active?.sensitivity, ChatConversationStore.Sensitivity.private)
+    }
+
+    /// Leaving Private does NOT silently re-pin anything.
+    func testLeavingPrivateLeavesTheModelUnpinned() {
+        let store = ChatConversationStore()
+        let id = store.newConversation().id
+        store.setSensitivity(ChatConversationStore.Sensitivity.private, for: id)
+        store.setSensitivity(nil, for: id)
+        XCTAssertNil(store.active?.modelTargetId, "Open restores the router, not an old pin")
+        XCTAssertNil(store.active?.sensitivity)
+    }
+
+    func testNewConversationInheritsSensitivity() {
+        let store = ChatConversationStore()
+        store.setSensitivity(ChatConversationStore.Sensitivity.private, for: store.active!.id)
+        let convo = store.newConversation()
+        XCTAssertEqual(convo.sensitivity, "confidential",
+                       "a new chat keeps the prior chat's privacy posture")
+    }
+
     func testPersistenceRoundTrips() {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("foundryx-chat-test-\(UUID().uuidString).json")
@@ -72,9 +134,23 @@ final class ChatSessionTests: XCTestCase {
         first.setMessages([.init(role: "user", text: "remember me")], for: id)
         first.setModel("claude-max", for: id)
 
+        // A pinned model survives reload — asserted on an OPEN chat, because Private and
+        // a pin are mutually exclusive by design (Private offers only Auto, and
+        // `setSensitivity` drops the pin so the badge cannot contradict the route). This
+        // test previously set both and asserted both survived, which encoded a state the
+        // product does not allow.
+        let reloadedOpen = ChatConversationStore(storageURL: url)
+        XCTAssertEqual(reloadedOpen.conversation(id)?.messages.first?.text, "remember me")
+        XCTAssertEqual(reloadedOpen.conversation(id)?.modelTargetId, "claude-max")
+
+        // The privacy posture survives reload too — and going Private drops the pin.
+        first.setSensitivity(ChatConversationStore.Sensitivity.private, for: id)
         let reloaded = ChatConversationStore(storageURL: url)
-        XCTAssertEqual(reloaded.conversation(id)?.messages.first?.text, "remember me")
-        XCTAssertEqual(reloaded.conversation(id)?.modelTargetId, "claude-max")
+        XCTAssertEqual(reloaded.conversation(id)?.sensitivity, "confidential",
+                       "privacy posture must survive reload")
+        XCTAssertNil(reloaded.conversation(id)?.modelTargetId,
+                     "the dropped pin must also survive reload — a pin resurrected by a "
+                     + "reload would route a Private chat to cloud after a restart")
     }
 
     func testModelOptionDecodesLabelFallback() throws {

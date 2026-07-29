@@ -49,7 +49,10 @@ final class ModelPickerTests: XCTestCase {
         XCTAssertTrue(menu.groups.isEmpty)
         XCTAssertTrue(menu.auto.secure)
         XCTAssertTrue(menu.auto.recommended)
-        XCTAssertTrue(menu.auto.caption.lowercased().contains("local"))
+        // The Auto caption describes SELECTION; the data-location promise moved to the
+        // per-chat Privacy control when that control was introduced.
+        XCTAssertFalse(menu.auto.caption.lowercased().contains("local"),
+                       "the picker must not promise a data location it does not decide")
     }
 
     // MARK: hermetic brine — wire the feature scenarios to real state
@@ -175,9 +178,22 @@ enum ModelPickerSteps {
                     throw ModelPickerError("Auto entry not secure+recommended: \(String(describing: auto))")
                 }
             },
-            defineCheck("the Auto entry caption mentions keeping data local") { _, _, _ in
+            defineCheck("the Auto entry caption describes how it picks a model, not where data goes") { _, _, _ in
+                // The caption must describe SELECTION, and must NOT promise a data location —
+                // that promise belongs to the per-chat Privacy control, which is the thing
+                // that actually decides it. A picker claiming "local" while the chat is set
+                // to Open would be exactly the contradiction the Privacy control removes.
                 let caption = world.menu?.auto.caption.lowercased() ?? ""
-                guard caption.contains("local") else { throw ModelPickerError("caption '\(caption)' omits 'local'") }
+                guard !caption.isEmpty else { throw ModelPickerError("Auto caption is empty") }
+                for promise in ["local", "on-device", "private", "sensitive"] where caption.contains(promise) {
+                    throw ModelPickerError(
+                        "caption '\(caption)' promises a data location ('\(promise)') the model "
+                        + "picker does not control — that belongs to the Privacy control")
+                }
+                guard caption.contains("pick") || caption.contains("best") || caption.contains("route")
+                else {
+                    throw ModelPickerError("caption '\(caption)' does not describe how a model is chosen")
+                }
             },
 
             // --- selection passes the right requested_target (real ChatRequest encoding) ---

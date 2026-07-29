@@ -67,6 +67,11 @@ public final class ChatConversationStore: ObservableObject {
         public var title: String
         public var messages: [StoredMessage]
         public var modelTargetId: String?
+        /// Per-conversation privacy level sent as `sensitivity` on each turn. nil ⇒ the
+        /// field is omitted ⇒ the door's default. `Sensitivity.private` (= "confidential")
+        /// tells Kiln's router to keep the turn on compliant/on-device targets; nil/"public"
+        /// lets it pick the fastest model. (Decode-old-data safe: a missing key ⇒ nil.)
+        public var sensitivity: String?
         public var createdAt: Date
         public var updatedAt: Date
         /// Provenance (EXT3). Optional so legacy persisted chats decode; nil
@@ -81,6 +86,7 @@ public final class ChatConversationStore: ObservableObject {
                     title: String = "New chat",
                     messages: [StoredMessage] = [],
                     modelTargetId: String? = nil,
+                    sensitivity: String? = nil,
                     createdAt: Date = Date(),
                     updatedAt: Date = Date(),
                     origin: ChatOrigin? = nil) {
@@ -88,6 +94,7 @@ public final class ChatConversationStore: ObservableObject {
             self.title = title
             self.messages = messages
             self.modelTargetId = modelTargetId
+            self.sensitivity = sensitivity
             self.createdAt = createdAt
             self.updatedAt = updatedAt
             self.origin = origin
@@ -167,7 +174,12 @@ public final class ChatConversationStore: ObservableObject {
                                 origin: ChatOrigin = .manual) -> Conversation {
         // Inherit the previous active chat's model so a "new chat" keeps the user's pick.
         let inherited = modelTargetId ?? active?.modelTargetId
-        let convo = Conversation(modelTargetId: inherited, origin: origin)
+        // A new chat inherits BOTH: the active chat's sensitivity (so a private
+        // conversation does not silently become public when you continue it) and the
+        // capture→chat origin main threads through for provenance.
+        let convo = Conversation(modelTargetId: inherited,
+                                 sensitivity: active?.sensitivity,
+                                 origin: origin)
         conversations.insert(convo, at: 0)
         activeId = convo.id
         persist()
@@ -199,9 +211,31 @@ public final class ChatConversationStore: ObservableObject {
 
     // MARK: - Mutations
 
+    /// Privacy levels surfaced in the UI, mapped to the door's `sensitivity` wire value.
+    /// "Standard" is nil (the door's default). NOTE: confirm against Kiln's sensitivity
+    /// taxonomy (public | confidential | phi) — "confidential" is the non-PHI private tier.
+    public enum Sensitivity {
+        public static let `private` = "confidential"
+    }
+
     /// Set the chosen model (target_id) for a conversation. nil ⇒ "Auto (router)".
     public func setModel(_ targetId: String?, for id: String) {
         mutate(id) { $0.modelTargetId = targetId }
+    }
+
+    /// Set the conversation's privacy level. nil ⇒ Standard (door default). Pass
+    /// `Sensitivity.private` to keep the turn on compliant / on-device targets.
+    /// Set a conversation's sensitivity.
+    ///
+    /// Going PRIVATE also clears any pinned model, because a pin is a route: leaving a
+    /// cloud model pinned while the chat is badged "Private" would make the badge a lie.
+    /// This is enforced HERE rather than in the button that happens to call it — the
+    /// invariant belongs with the data, so a second caller cannot forget half of it.
+    public func setSensitivity(_ value: String?, for id: String) {
+        mutate(id) { convo in
+            convo.sensitivity = value
+            if value == Sensitivity.private { convo.modelTargetId = nil }
+        }
     }
 
     /// Replace a conversation's whole message history (used to snapshot the live
@@ -234,6 +268,7 @@ public final class ChatConversationStore: ObservableObject {
                            platform: platform,
                            chatId: id,
                            org: org,
+                           sensitivity: convo?.sensitivity,
                            requestedTarget: convo?.modelTargetId,
                            origin: shipOrigin ? convo?.origin?.kind : nil,
                            originCaptureId: shipOrigin ? convo?.origin?.captureId : nil,

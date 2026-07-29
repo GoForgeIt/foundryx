@@ -25,9 +25,9 @@ public enum ModelProvider: String, Sendable, CaseIterable {
     public static let order: [ModelProvider] = [.anthropic, .openai, .local]
 }
 
-/// The secure, recommended "Auto (router)" default. The router policy-routes and keeps
-/// `pi:local` on-device, only reaching cloud when allowed — so it is the privacy-preserving
-/// pick, surfaced with a shield badge + caption and selected by default.
+/// The recommended "Auto (router)" default. The router picks the best model for each turn;
+/// WHERE a turn's data goes is governed by the separate Privacy control (sensitivity), not by
+/// this picker. Selected by default.
 public struct AutoEntry: Sendable, Equatable {
     public let title: String
     public let caption: String
@@ -35,7 +35,7 @@ public struct AutoEntry: Sendable, Equatable {
     public let recommended: Bool
 
     public init(title: String = "Auto (router)",
-                caption: String = "Keeps sensitive data local",
+                caption: String = "Picks the best model for each turn",
                 secure: Bool = true,
                 recommended: Bool = true) {
         self.title = title
