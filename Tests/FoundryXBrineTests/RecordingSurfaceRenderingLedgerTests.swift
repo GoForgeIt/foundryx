@@ -125,10 +125,17 @@ final class RecordingSurfaceRenderingLedgerTests: XCTestCase {
         XCTAssertTrue(list.contains("CaptureAttributionPresentation.metaLine("),
                       "the row builds its own meta copy again instead of the tested composition, "
                           + "which is a second, untested implementation of it")
-        XCTAssertTrue(list.contains("loadAttribution:"),
-                      "the attribution is no longer loaded off the main thread — reading two "
-                          + "files per body pass inside a LazyVStack is the exact regression "
-                          + "class scripts/ci-gates.sh was written for")
+        // THE CALL SITE, not the parameter. `loadAttribution:` on its own is satisfied by the
+        // declaration on `CaptureCard`, which a row that is never handed a loader still
+        // carries — a mutation that renamed the argument at the call site survived this check
+        // in exactly that way.
+        XCTAssertTrue(list.contains("loadAttribution: { [weak manager] in"),
+                      "the conversation row is never HANDED an attribution loader, so the "
+                          + "`CaptureCard` parameter stays nil and the row shows nothing about "
+                          + "its recorder — the parameter existing is not the same as it being "
+                          + "passed")
+        XCTAssertTrue(list.contains("attribution: attribution)"),
+                      "the loaded attribution never reaches the composed meta line")
 
         let detail = try Self.source("App/ConversationFacesView.swift")
         XCTAssertTrue(detail.contains("attribution.deviceName"),
