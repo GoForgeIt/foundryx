@@ -227,7 +227,31 @@ final class DeviceRenderedSurfaceFeatureTests: ProcessGlobalStateTestCase {
             .noneActive(reason: .attachedButDetached),
             "a device the user detached reads the same as one that was never there")
 
-        // (e) The fault. It is the ONE arm `isFault` may be true for.
+        // (e) THE FAULT, DRIVEN THROUGH THE REAL RESOLVER — not constructed. A truncated
+        // write, a bad sector or a half-restored backup lands here, and an earlier version of
+        // this test only ever built the value by hand: a mutation that routed the catch arm
+        // into `.nothingRemembered` SURVIVED it. Corrupting the file on disk is what makes the
+        // arm reachable, and reaching it is the whole point — reporting an unreadable store as
+        // "no devices" silently un-pairs everything the person owns.
+        let store = try world.store()
+        try Data("{ this is not JSON".utf8).write(to: store.fileURL, options: .atomic)
+        let faulted = OmiRestorationComposition.activeExternalDevice(
+            binding: binding, attached: attached, defaults: world.legacyDefaults)
+        guard case .noneActive(let faultReason) = faulted, faultReason.isFault else {
+            return XCTFail(
+                "an unreadable recording-device store resolved to \(faulted) — anything other "
+                    + "than the fault arm tells a person their devices are gone")
+        }
+        XCTAssertFalse(faultReason.sentence.contains(binding.scope),
+                       "the fault sentence leaks the account scope it is about")
+        // And the CONTEXT resolution refuses rather than attributing to nothing.
+        let blocked = OmiRestorationComposition.resolveDeviceContext(
+            binding: binding, activeDevice: faulted, recording: .externalStream)
+        XCTAssertNil(blocked.context,
+                     "an external stream was attributed to a device while the store that "
+                         + "names devices could not be read")
+        try FileManager.default.removeItem(at: store.fileURL)
+
         let unreadable = OmiRestorationComposition.NoActiveDeviceReason
             .storeUnreadable(redactedError: "the file could not be decoded")
         let all: [OmiRestorationComposition.NoActiveDeviceReason] = [
