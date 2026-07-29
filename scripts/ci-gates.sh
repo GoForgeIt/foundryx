@@ -480,7 +480,7 @@ phase_lint() {
 # PCM-driven deterministic word source, leaving the real view/binding/restore path intact.
 # A missing simulator is a LOUD failure, never a silent skip.
 phase_uiproof() {
-  echo "==> [uiproof] recording-surface UI E2E on a simulator (phone-mic + Omi ambient + foreground restore)"
+  echo "==> [uiproof] recording-surface UI E2E on a simulator (phone-mic + Omi ambient + foreground restore + recorder attribution)"
   local udid
   udid=$(xcrun simctl list devices available 2>/dev/null | grep -E "iPhone" | grep -Eo "[0-9A-F-]{36}" | head -1)
   if [ -z "$udid" ]; then
@@ -499,8 +499,9 @@ phase_uiproof() {
        -only-testing:FoundryXUITests/ForegroundRestoreProofUITests/testListeningSurfaceSurvivesBackgroundingAndStaysUsable \
        -only-testing:FoundryXUITests/ForegroundRestoreProofUITests/testLiveTranscriptRendersAndSurvivesBackgrounding \
        -only-testing:FoundryXUITests/VaultFunnelReachableProofUITests/testOwnerCanReachVaultSetupFromSettings \
+       -only-testing:FoundryXUITests/RecordingDeviceProofUITests/testTheRecorderIsNamedOnTheConversationRowAndInItsDetail \
        >"$out" 2>&1; then
-    echo "  uiproof: recording surface (phone-mic + Omi ambient + foreground restore) PASSED"
+    echo "  uiproof: recording surface (phone-mic + Omi ambient + foreground restore + recorder attribution) PASSED"
   else
     tail -50 "$out"
     fail "uiproof-recording-surface"

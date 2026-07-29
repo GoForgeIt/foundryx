@@ -7,6 +7,11 @@ import Foundation
 /// with real content in the simulator and can be screenshot-verified against the
 /// prototype. No effect in a normal launch.
 enum DemoSeed {
+    /// The recorder the `-MainPreview` library's newest conversation carries. Deliberately a
+    /// name nothing else in the app can produce, so a UI proof asserting it on screen is
+    /// asserting the seeded device record and not a coincidence.
+    static let proofRecorderName = "Proof Recorder Alpha"
+
     /// Large-library perf harness: `-StressSeed <N>` drops N synthetic conversation
     /// cards on disk (same stores the real pipeline uses) so a cold launch hydrates a
     /// big timeline. Pairs with the `capture-hydrate` + `capture-list-first-paint`
@@ -281,6 +286,27 @@ enum DemoSeed {
                     fetchedAt: UInt64(max(0, now))),
                 captureId: id, baseDir: base)
         }
+
+        // WHICH DEVICE RECORDED IT — the fact this whole device-agnostic track exists to put
+        // on screen (track 20260725T2306, review round 12 H12-2).
+        //
+        // WHY THE SEED IS HERE. Until this, `conversation-device` appeared in ZERO of the
+        // UI-proof files and `DemoSeed` wrote no `.capture-device.json`, so the two facts the
+        // track delivers — the recorder named on the conversation row, and named again in the
+        // detail header — had no gate that could observe them. Both were held by source-text
+        // searches, and two mutations proved what that is worth: deleting the row's `.task`
+        // (so `attribution` stays nil forever) and passing `attribution: nil` at the detail
+        // push site each left the whole suite green. `RecordingDeviceProofUITests` reds on
+        // both, because it reads the rendered screen. This is the state it reads.
+        //
+        // The NEWEST demo card carries it, so the proof finds it without scrolling.
+        CaptureDeviceSidecar.write(
+            CaptureDeviceContext(
+                identity: RecordingDeviceIdentity(shape: .bleStream,
+                                                  hardwareToken: "demo-proof-recorder"),
+                displayName: proofRecorderName,
+                accountScope: CaptureAccountScope.currentAccountBinding()?.scope ?? "demo"),
+            captureId: "omi-demo-1", baseDir: base)
 
         // T2 AC1 repro (the headline bug): a card that DOES show a summary, whose cached
         // content carries NO summary. Before the card fallback, opening this showed the

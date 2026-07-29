@@ -208,6 +208,51 @@ final class RecordingSurfaceRenderingLedgerTests: XCTestCase {
                           + "with something the user can act on")
     }
 
+    // MARK: - the rendered fact has a gate that can observe it
+
+    /// A UI PROOF THAT NOBODY RUNS IS NOT A GATE.
+    ///
+    /// The two facts this track delivers — the recorder named on the conversation row, and
+    /// named again in the detail header — are held by `RecordingDeviceProofUITests`, because
+    /// nothing that `swift test` can compile is able to see them (review round 12, H12-2:
+    /// deleting the row's loader `.task` and passing `attribution: nil` at the detail push
+    /// site each left the whole suite green). That proof only counts while the pipeline
+    /// executes it: `phase_uiproof` runs an explicit `-only-testing:` list, so a case that is
+    /// not on that list never runs at all.
+    ///
+    /// This also pins the seed the proof reads. `DemoSeed` must write a device record, and
+    /// the detail capsule must keep the identifier the proof looks it up by.
+    func testTheRenderedAttributionProofExistsAndIsActuallyRun() throws {
+        let proof = try Self.source("UITests/RecordingDeviceProofUITests.swift")
+        XCTAssertTrue(
+            proof.contains("func testTheRecorderIsNamedOnTheConversationRowAndInItsDetail"),
+            "the UI proof for the rendered recorder attribution is gone — the row and the "
+                + "detail header are back to being held by source-text searches that a "
+                + "deleted rendering satisfies")
+
+        let gates = try Self.source("scripts/ci-gates.sh")
+        XCTAssertTrue(
+            gates.contains(
+                "-only-testing:FoundryXUITests/RecordingDeviceProofUITests/"
+                    + "testTheRecorderIsNamedOnTheConversationRowAndInItsDetail"),
+            "`phase_uiproof` does not run RecordingDeviceProofUITests. It executes an explicit "
+                + "`-only-testing:` list, so a proof that is not on it never runs — and an "
+                + "unrun proof is documentation, not a gate")
+
+        let seed = AppSourceTree.withoutComments(of: try Self.source("App/DemoSeed.swift"))
+        XCTAssertTrue(
+            seed.contains("CaptureDeviceSidecar.write("),
+            "`DemoSeed` no longer writes a `.capture-device.json`, so the UI proof's library "
+                + "has no device record to name and the proof cannot observe anything")
+
+        let detail = AppSourceTree.withoutComments(
+            of: try Self.source("App/ConversationFacesView.swift"))
+        XCTAssertTrue(
+            detail.contains("\"conversation-device\""),
+            "the detail capsule lost the accessibility identifier the UI proof looks it up "
+                + "by — the proof would red, but for the wrong reason")
+    }
+
     // MARK: - helpers
 
     private static func source(_ path: String) throws -> String {
