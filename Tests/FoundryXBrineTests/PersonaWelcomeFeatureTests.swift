@@ -31,11 +31,16 @@ private final class PersonaWelcomeWorld: @unchecked Sendable {
         defaults = UserDefaults(suiteName: name)!
         defaults.removePersistentDomain(forName: name)
     }
+    /// This world is about a user who has JUST signed in for the first time, so the account
+    /// has no recording history — stated rather than defaulted, because a default here would
+    /// hide the very input S07 turns on.
+    var hasRecordingHistory = false
     var firstRun: WelcomeFrontDoor.FirstRunPresentation {
         WelcomeFrontDoor.firstRunPresentation(
             letStraightIn: WelcomePrefs.letStraightIn(defaults: defaults),
             onboardingCompleted: onboardingCompleted,
-            welcomeSeen: WelcomePrefs.seen(defaults: defaults))
+            welcomeSeen: WelcomePrefs.seen(defaults: defaults),
+            hasRecordingHistory: hasRecordingHistory)
     }
 }
 

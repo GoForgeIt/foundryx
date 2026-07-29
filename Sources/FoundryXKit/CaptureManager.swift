@@ -1369,8 +1369,28 @@ public final class CaptureManager: ObservableObject {
     /// live surface's "Phone" label keys off, and what `endSession`'s usage token keys off —
     /// so reading it here keeps the durable record agreeing with all three instead of with
     /// the handset's address book.
+    /// The Bluetooth audio INPUT ROUTE the handset is recording THROUGH, when it is one.
+    ///
+    /// WHY THIS SEAM EXISTS (T5, S01). A Bluetooth audio-route recorder records through the
+    /// handset's phone-mic path — `captureSource == .phoneMic`, `isRecordingMic == true` —
+    /// which is indistinguishable, from inside `CaptureManager`, from the handset's own
+    /// built-in microphone. So every conversation made with a Field Recorder was attributed
+    /// to "Phone": the device the user connected, whose name is on the row they tapped, never
+    /// appeared against its own recordings. The registry is what knows which route is active,
+    /// and the registry lives outside this type, so the composition root hands it in.
+    ///
+    /// `nil` means the handset's OWN microphone, which is the honest default: a manager that
+    /// guessed a route here would attribute a plain Record-button conversation to whatever
+    /// happened to be paired, which is the bug T4 paid for.
+    public var activeAudioRoute: () -> (token: String, displayName: String)? = { nil }
+
     public var recordingSourceForAttribution: CaptureRecordingSource {
-        if isRecordingMic || captureSource == .phoneMic { return .handsetMicrophone }
+        if isRecordingMic || captureSource == .phoneMic {
+            if let route = activeAudioRoute() {
+                return .handsetAudioRoute(token: route.token, displayName: route.displayName)
+            }
+            return .handsetMicrophone
+        }
         return .externalStream
     }
 

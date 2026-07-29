@@ -98,7 +98,8 @@ final class WelcomeFrontDoorTests: XCTestCase {
         XCTAssertEqual(
             WelcomeFrontDoor.firstRunPresentation(letStraightIn: false,
                                                   onboardingCompleted: false,
-                                                  welcomeSeen: true),
+                                                  welcomeSeen: true,
+                                                  hasRecordingHistory: false),
             .onboarding(skipWelcome: true),
             "the gate already WAS the welcome — onboarding starts at the voice step")
     }
@@ -110,7 +111,8 @@ final class WelcomeFrontDoorTests: XCTestCase {
         XCTAssertEqual(
             WelcomeFrontDoor.firstRunPresentation(letStraightIn: false,
                                                   onboardingCompleted: false,
-                                                  welcomeSeen: false),
+                                                  welcomeSeen: false,
+                                                  hasRecordingHistory: false),
             .onboarding(skipWelcome: false))
     }
 
@@ -118,7 +120,8 @@ final class WelcomeFrontDoorTests: XCTestCase {
         XCTAssertEqual(
             WelcomeFrontDoor.firstRunPresentation(letStraightIn: false,
                                                   onboardingCompleted: true,
-                                                  welcomeSeen: true),
+                                                  welcomeSeen: true,
+                                                  hasRecordingHistory: false),
             .none, "AC4: no legacy post-entry welcome, ever")
     }
 
@@ -126,7 +129,8 @@ final class WelcomeFrontDoorTests: XCTestCase {
         for completed in [true, false] {
             let p = WelcomeFrontDoor.firstRunPresentation(letStraightIn: false,
                                                           onboardingCompleted: completed,
-                                                          welcomeSeen: true)
+                                                          welcomeSeen: true,
+                                                          hasRecordingHistory: false)
             XCTAssertNotEqual(p, .standaloneWelcome,
                               "markSeen-first in enterApp() makes the repeat impossible")
         }
@@ -138,7 +142,8 @@ final class WelcomeFrontDoorTests: XCTestCase {
                 XCTAssertEqual(
                     WelcomeFrontDoor.firstRunPresentation(letStraightIn: true,
                                                           onboardingCompleted: completed,
-                                                          welcomeSeen: seen),
+                                                          welcomeSeen: seen,
+                                                          hasRecordingHistory: false),
                     .none, "straight-in: nothing presents (completed=\(completed) seen=\(seen))")
             }
         }
@@ -148,7 +153,8 @@ final class WelcomeFrontDoorTests: XCTestCase {
         XCTAssertEqual(
             WelcomeFrontDoor.firstRunPresentation(letStraightIn: false,
                                                   onboardingCompleted: true,
-                                                  welcomeSeen: false),
+                                                  welcomeSeen: false,
+                                                  hasRecordingHistory: false),
             .standaloneWelcome, "B2 preserved: onboarded-but-unseen sees it once")
     }
 }

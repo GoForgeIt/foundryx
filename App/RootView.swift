@@ -859,6 +859,19 @@ private struct MainTabs: View {
         reg.onSourceEnabledChanged = { [weak dm] category, on in
             if category == .omi { dm?.setEnabled(on) }
         }
+        // WHICH ROUTE, when the phone-mic path is really a Bluetooth recorder (T5, S01). The
+        // registry owns the active source and is only built here, so the wiring lives here
+        // rather than beside the rest of the capture composition. Without it, every
+        // conversation made with a Bluetooth audio-route recorder is attributed to "Phone" —
+        // the device the user connected never appears against its own recordings.
+        mgr.activeAudioRoute = { [weak reg] in
+            guard let reg,
+                  let active = reg.activeSourceId,
+                  let source = reg.sources.first(where: { $0.id == active }),
+                  source.category == .bluetoothMic,
+                  let uid = source.routeUID else { return nil }
+            return (token: uid, displayName: source.displayName)
+        }
         _sources = StateObject(wrappedValue: reg)
         if let accountBinding {
             let preferences = CaptureSettings.snapshot(

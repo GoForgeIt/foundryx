@@ -44,14 +44,19 @@ final class DevicePagePresentationTests: XCTestCase {
     }
 
     func testConnectedMetricsShowFirmwareAndBattery() {
-        let m = DeviceMetricsPresentation.resolve(omiConnected: true, batteryPercent: 78, signal: "Strong")
+        let m = DeviceMetricsPresentation.resolve(omiConnected: true, batteryPercent: 78, signal: "Strong",
+                                                 firmware: .reported("2.4.1"))
         XCTAssertEqual(m.battery, "78%")
         XCTAssertEqual(m.signal, "Strong")
-        XCTAssertEqual(m.firmware, "2.4.1")   // hard-coded per spec until a real DIS read lands
+        // The value the DEVICE reported, and the only way one can get here. The prototype's
+        // hard-coded "2.4.1" for every connected device is gone (T5 / spec R3): a version a
+        // user might quote to support is the most plausible-looking default in the strip.
+        XCTAssertEqual(m.firmware, "2.4.1")
     }
 
     func testDisconnectedMetricsShowNA() {
-        let m = DeviceMetricsPresentation.resolve(omiConnected: false, batteryPercent: nil, signal: "N/A")
+        let m = DeviceMetricsPresentation.resolve(omiConnected: false, batteryPercent: nil, signal: "N/A",
+                                                 firmware: .unavailable)
         XCTAssertEqual(m.battery, "N/A")
         XCTAssertEqual(m.firmware, "N/A")
     }

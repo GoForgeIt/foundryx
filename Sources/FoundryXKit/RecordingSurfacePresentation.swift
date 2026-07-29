@@ -298,6 +298,66 @@ public enum CaptureAttributionPresentation {
     }
 }
 
+// MARK: - The account's recording history, and what recorded each conversation
+
+/// One row of the rendered history.
+public struct RecordingHistoryRow: Equatable, Sendable, Identifiable {
+    public var id: String { captureId }
+    public let captureId: String
+    public let attribution: CaptureAttribution
+
+    public init(captureId: String, attribution: CaptureAttribution) {
+        self.captureId = captureId
+        self.attribution = attribution
+    }
+}
+
+public enum RecordingHistory {
+
+    /// Every conversation in this account's capture root, newest first, each with what
+    /// recorded it.
+    ///
+    /// ERA IS NOT A FILTER. A conversation recorded before device records shipped and one
+    /// recorded after are both history; the difference shows up only in the attribution
+    /// sentence. Filtering by era here is how a legacy-only user's archive would disappear on
+    /// upgrade — the exact thing R5 forbids.
+    public static func rows(baseDir: URL) -> [RecordingHistoryRow] {
+        let fm = FileManager.default
+        let names = ((try? fm.contentsOfDirectory(atPath: baseDir.path)) ?? [])
+            // ONE rule for what a conversation directory is, and it is `CaptureLibrary`'s —
+            // the same predicate `isEmpty` uses. Two scans with two rules is how "you have no
+            // recordings" and "here are your recordings" come to disagree, and this file
+            // would be the second one.
+            .filter(CaptureLibrary.isNoteDirectory)
+            .filter { name in
+                var isDir: ObjCBool = false
+                let path = baseDir.appendingPathComponent(name, isDirectory: true).path
+                return fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+            }
+            // Newest first, by the id's own embedded start time — the same ordering rule the
+            // resume scan uses, so history and resume cannot disagree about which is newest.
+            .sorted { a, b in
+                let ta = CaptureIdTime.startedAt(fromCaptureId: a) ?? 0
+                let tb = CaptureIdTime.startedAt(fromCaptureId: b) ?? 0
+                return ta != tb ? ta > tb : a > b
+            }
+        return names.map {
+            RecordingHistoryRow(
+                captureId: $0,
+                attribution: CaptureAttributionPresentation.attribution(captureId: $0,
+                                                                        baseDir: baseDir))
+        }
+    }
+
+    /// Does this account have any recording history at all? The durable evidence that its
+    /// owner has already connected something and used it — see `OnboardingGate`. Delegates
+    /// to `CaptureLibrary` rather than counting `rows`, so the two answers are the same
+    /// answer by construction and not by agreement.
+    public static func hasAny(baseDir: URL) -> Bool {
+        !CaptureLibrary.isEmpty(baseDir: baseDir)
+    }
+}
+
 // MARK: - What became of the audio recorded during a gap
 
 public enum GapRecoveryCopy {
