@@ -868,7 +868,7 @@ enum DeviceRenderedSurfaceSteps {
                 return ctx
             },
 
-            defineCheck("the rendered app has exactly one recording-device connection affordance") { _, _, _ in
+            defineCheck("exactly one recording-device connection affordance is offered") { _, _, _ in
                 // The affordance is a VALUE, and there is one of it. A second entry point
                 // would be a second string here, and a vendor-specific one would name a
                 // vendor — both are checkable, which a screenshot is not.
@@ -879,7 +879,7 @@ enum DeviceRenderedSurfaceSteps {
                 try assertNamesNoVendor(affordance, what: "the connection affordance")
             },
 
-            defineCheck("all devices are visible together without a vendor or family choice") { _, _, _ in
+            defineCheck("all devices are offered together without a vendor or family choice") { _, _, _ in
                 let rows = await MainActor.run { w.listRows }
                 let discovered = await MainActor.run { w.discovered }
                 guard rows.count == discovered.count else {
@@ -906,7 +906,7 @@ enum DeviceRenderedSurfaceSteps {
                 }
             },
 
-            defineCheck("no reachable list control hides any device by family") { _, _, _ in
+            defineCheck("no list control that hides a device by family is offered") { _, _, _ in
                 let rows = await MainActor.run { w.listRows }
                 guard !rows.isEmpty else {
                     throw BrineStepError("the list is empty — nothing could be hidden, vacuously")
@@ -1001,6 +1001,31 @@ enum DeviceRenderedSurfaceSteps {
                     throw BrineStepError("every conversation renders \"\(name)\" — the check is vacuous")
                 }
                 try? FileManager.default.removeItem(at: baseDir.appendingPathComponent(orphan))
+
+                // AND IT REACHES THE ROW. This is the exact composition
+                // `App/CaptureScreen.swift` puts into the conversation card's meta line, so
+                // this clause is now a statement about what a person sees rather than about a
+                // value nothing calls. `RecordingSurfaceRenderingLedgerTests` is what holds
+                // the App-side call site, which `swift test` cannot compile.
+                let row = CaptureAttributionPresentation.metaLine("3:04 – 3:21 PM · 17 min",
+                                                                   attribution: attribution)
+                guard row.contains(name) else {
+                    throw BrineStepError(
+                        "the conversation row says \"\(row)\" and never names the device that "
+                            + "recorded it")
+                }
+                // An unnameable recorder does NOT put a shrug on the row — the row has no
+                // space for the diagnostic that would make it an answer.
+                let hedged = CaptureAttributionPresentation.metaLine(
+                    "3:04 – 3:21 PM",
+                    attribution: CaptureAttribution(
+                        deviceName: CaptureAttributionPresentation.unknownDeviceName,
+                        diagnostic: "its device record went missing"))
+                guard !hedged.contains(CaptureAttributionPresentation.unknownDeviceName) else {
+                    throw BrineStepError(
+                        "the row prints \"\(CaptureAttributionPresentation.unknownDeviceName)\" "
+                            + "with nothing a user can act on")
+                }
             },
 
             defineCheck("generic device copy names no vendor") { _, _, _ in
@@ -1183,7 +1208,7 @@ private func capabilityAndSubstitutionSteps(
             return ctx
         },
 
-        defineCheck("the device surface shows both capabilities as unavailable") { _, _, _ in
+        defineCheck("the device experience reports both capabilities as unavailable") { _, _, _ in
             let lines = await MainActor.run { w.capabilityLines }
             for label in ["Firmware", "Gap recovery"] {
                 let line = try XCTUnwrapOrThrow(lines.first { $0.label == label },
@@ -1243,7 +1268,7 @@ private func capabilityAndSubstitutionSteps(
             return ctx
         },
 
-        defineCheck("the surface says that the gap audio was not recoverable") { _, _, _ in
+        defineCheck("the gap sentence for that outcome says the audio was not recoverable") { _, _, _ in
             let line = try await MainActor.run {
                 try XCTUnwrapOrThrow(w.gapLine, "the gap window said nothing at all")
             }
@@ -1265,7 +1290,7 @@ private func capabilityAndSubstitutionSteps(
             return ctx
         },
 
-        defineCheck("the surface does not say that the gap audio was not recoverable") { _, _, _ in
+        defineCheck("the gap sentence for that outcome does not say the audio was not recoverable") { _, _, _ in
             let line = try await MainActor.run {
                 try XCTUnwrapOrThrow(w.gapLine, "the gap window said nothing at all")
             }
@@ -1624,7 +1649,7 @@ private func historySteps(_ w: DeviceRenderedSurfaceWorld) -> [StepDefinition] {
             }
         },
 
-        defineCheck("the legacy history remains visible without onboarding") { _, _, _ in
+        defineCheck("the legacy history keeps its attribution without onboarding") { _, _, _ in
             let (rows, firstRun) = await MainActor.run { (w.historyRows, w.firstRun) }
             guard rows.count == 2 else {
                 throw BrineStepError("the legacy history shows \(rows.count) conversations, not 2")
@@ -1715,7 +1740,7 @@ private func historySteps(_ w: DeviceRenderedSurfaceWorld) -> [StepDefinition] {
             return ctx
         },
 
-        defineCheck("its recording history remains visible") { _, _, _ in
+        defineCheck("its recording history keeps its attribution") { _, _, _ in
             let rows = await MainActor.run { w.historyRows }
             guard rows.count == 3 else {
                 throw BrineStepError("the history shows \(rows.count) conversations, not 3")

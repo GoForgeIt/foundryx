@@ -1,12 +1,12 @@
-Feature: One rendered recording-device experience, and copy that tells the truth
+Feature: One recording-device experience, and copy that tells the truth
 
-  Track 20260725T2306_device_agnostic_recording_source, task T5. The rendered app has ONE
-  recording-device connection affordance leading to ONE list of everything discovery found,
-  in an order derived from the device's own reported name and never from its family, with no
-  reachable control that removes a row because of its shape. A device that cannot supply
-  usable audio is listed WITH an actionable, brand-free reason rather than hidden. A
-  capability the device did not declare is shown as unavailable — never as a plausible
-  default, and specifically never as a firmware version a user might quote to support.
+  Track 20260725T2306_device_agnostic_recording_source, task T5. There is ONE recording-device
+  connection affordance leading to ONE list of everything discovery found, in an order derived
+  from the device's own reported name and never from its family, with no control that removes
+  a row because of its shape. A device that cannot supply usable audio is listed WITH an
+  actionable, brand-free reason rather than hidden. A capability the device did not declare is
+  reported as unavailable — never as a plausible default, and specifically never as a firmware
+  version a user might quote to support.
 
   A conversation is attributed on the timeline to the device that RECORDED it, read from the
   device record beside it; a conversation from before device records shipped keeps its
@@ -15,18 +15,27 @@ Feature: One rendered recording-device experience, and copy that tells the truth
   ready — so a substitution changes what NEW audio is attributed to and changes nothing
   about what is already archived.
 
+  WHAT IS DRAWN TODAY, AND WHAT IS ONLY DEFINED. The App target draws the recorder's name
+  beside its own recordings (the conversation row's meta line and the detail header capsule)
+  and the device metrics strip. The one device list, its capability lines and the gap sentence
+  are DEFINED and asserted here and no view calls them yet — that surface is T6's, and
+  `RecordingSurfaceRenderingLedgerTests` is the ledger that says which half a value is in and
+  reds when either half moves. This feature therefore says "offered" and "reports" where the
+  claim is about the defined experience, and "attributes" / "shows" only where a view draws it.
+
   Driven against the real `RecordingSourceCatalog`, the real `RecordingDeviceStore` and
   `RecordingDeviceActivation` in a sandboxed account container, the real `CaptureManager`
-  writing real capture directories, and the same presentation values the App target renders.
+  writing real capture directories, the real `DeviceManager` producing gap outcomes, and the
+  same presentation values the App target renders.
 
   Scenario Outline: each device shape connects through the one experience
     Given the app is signed in and has no recording device
     And an eligible "<shape>" device named "<name>" is discoverable
     And eligible devices of the other shapes are discoverable
-    Then the rendered app has exactly one recording-device connection affordance
+    Then exactly one recording-device connection affordance is offered
     When I open that affordance
-    Then all devices are visible together without a vendor or family choice
-    And no reachable list control hides any device by family
+    Then all devices are offered together without a vendor or family choice
+    And no list control that hides a device by family is offered
     When I connect "<name>" and record a conversation
     Then the production capture path finalizes the conversation
     And the timeline attributes it to "<name>"
@@ -51,12 +60,12 @@ Feature: One rendered recording-device experience, and copy that tells the truth
 
   Scenario: absent capabilities are not invented
     Given a connected device declares no firmware value and no gap recovery
-    Then the device surface shows both capabilities as unavailable
+    Then the device experience reports both capabilities as unavailable
     And it shows no fabricated firmware value
     When the device disconnects and audio from the gap cannot be recovered
-    Then the surface says that the gap audio was not recoverable
+    Then the gap sentence for that outcome says the audio was not recoverable
     When the device disconnects still holding the audio it recorded
-    Then the surface does not say that the gap audio was not recoverable
+    Then the gap sentence for that outcome does not say the audio was not recoverable
 
   Scenario: another device substitutes without vendor priority
     Given two differently shaped devices are remembered across relaunch and both are ready
@@ -74,14 +83,14 @@ Feature: One rendered recording-device experience, and copy that tells the truth
     Given a legacy Omi pairing and legacy recordings exist before upgrade
     When the signed-in account launches the upgraded app
     Then the device remains paired and active without a physical re-pair
-    And the legacy history remains visible without onboarding
+    And the legacy history keeps its attribution without onboarding
     When a second account signs in on the same handset
     Then it cannot see or activate the first account's device
 
   Scenario: device-agnostic history does not trigger onboarding
     Given an account's history contains only recordings made after device-agnostic source support
     When that account launches the upgraded app
-    Then its recording history remains visible
+    Then its recording history keeps its attribution
     And device onboarding does not run
 
   Scenario: a gap outcome is rendered into the account whose audio it is about

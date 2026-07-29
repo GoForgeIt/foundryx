@@ -935,6 +935,13 @@ struct CaptureScreen: View {
                 loadWaveform: { [weak manager] in
                     WaveformThumb.profile(sizes: manager?.segmentSizes(for: wal.captureId) ?? [],
                                           buckets: 24, seed: wal.captureId)
+                },
+                // The ACCOUNT-SCOPED root, not `CaptureWAL.documentsCaptures()` — reading the
+                // device-global tree would attribute from the wrong account's archive.
+                loadAttribution: { [weak manager] in
+                    guard let baseDir = manager?.baseDir else { return nil }
+                    return CaptureAttributionPresentation.attribution(captureId: wal.captureId,
+                                                                       baseDir: baseDir)
                 }
             )
         }
@@ -951,6 +958,9 @@ struct CaptureScreen: View {
                 .map { CaptureCardPresentation.timeRangeString(meta: $0, fallback: wal.status.startedAt) }
                 ?? CaptureCardPresentation.timeRangeString(meta: nil, fallback: wal.status.startedAt),
             place: manager.conversationMeta(for: wal.captureId)?.location?.label,
+            // Read ONCE, at push time — not per body pass — from the ACCOUNT-SCOPED root.
+            attribution: CaptureAttributionPresentation.attribution(captureId: wal.captureId,
+                                                                     baseDir: manager.baseDir),
             conversationDate: manager.conversationMeta(for: wal.captureId)
                 .map { Date(timeIntervalSince1970: TimeInterval($0.startedAt)) }
                 ?? wal.status.startedAt
@@ -1448,6 +1458,12 @@ private struct CaptureCard: View {
     /// audio pruned or not yet loaded — no waveform is drawn, never a fake one).
     var loadWaveform: (@Sendable () -> [Double])? = nil
     @State private var waveform: [Double] = []
+    /// WHICH DEVICE RECORDED THIS, read off the capture directory (two small file reads).
+    /// Loaded exactly like the waveform — once, off the main thread — because
+    /// `CaptureAttributionPresentation.attribution(captureId:baseDir:)` touches disk and a
+    /// computed property is re-evaluated on every body pass inside a LazyVStack.
+    var loadAttribution: (@Sendable () -> CaptureAttribution?)? = nil
+    @State private var attribution: CaptureAttribution?
 
     /// EVERYTHING the card shows, as pure tested data (track 20260714T1800): title,
     /// summary, one human status word, the quiet meta line, the category pill. The
@@ -1475,7 +1491,9 @@ private struct CaptureCard: View {
             title: p.title,
             categoryLabel: p.categoryLabel,
             summaryLine: p.summaryLine,
-            meta: p.metaLine,
+            // The device that RECORDED this conversation, named on the row. Composed in the
+            // Kit so the copy is a tested value and not string arithmetic in a view body.
+            meta: CaptureAttributionPresentation.metaLine(p.metaLine, attribution: attribution),
             statusWord: p.statusWord,
             status: statusTone(for: p),
             waveform: p.waveform,
@@ -1494,6 +1512,11 @@ private struct CaptureCard: View {
             guard waveform.isEmpty, let loadWaveform else { return }
             let profile = await Task.detached(priority: .utility) { loadWaveform() }.value
             waveform = profile
+        }
+        // Same shape as the waveform: one lazy read of the two on-disk surfaces.
+        .task {
+            guard attribution == nil, let loadAttribution else { return }
+            attribution = await Task.detached(priority: .utility) { loadAttribution() }.value
         }
     }
 

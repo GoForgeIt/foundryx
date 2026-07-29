@@ -1336,11 +1336,6 @@ public final class CaptureManager: ObservableObject {
         return now - lastVoicedAt >= silenceGap
     }
 
-    /// A held-open Omi conversation awaiting a possible reconnect (its WAL + when the
-    /// disconnect happened, in reference-date seconds — the same clock as `lastVoicedInstant()`
-    /// so the silence-boundary check compares on one clock). Non-nil ⇒ `active` is SUSPENDED,
-    /// not ended: a reconnect before `SilenceSegmenter.defaultSilenceGap` of voiced silence
-    /// resumes it (same captureId), else `resolveReconnectGrace` ends it at the real boundary.
     /// WHICH device this manager is recording from, supplied by the composition root.
     ///
     /// Read at each capture-creation site and at each resume decision. Defaulted to
@@ -1362,13 +1357,6 @@ public final class CaptureManager: ObservableObject {
         .blocked(reason: "no device context was supplied to this capture manager")
     }
 
-    /// WHAT IS ACTUALLY RECORDING right now, for the composition root to attribute by.
-    ///
-    /// This is the question the archive needs answered. `isRecordingMic` is the manager's own
-    /// authority on it — it is what the phone-mic arm of `onSourceState` keys off, what the
-    /// live surface's "Phone" label keys off, and what `endSession`'s usage token keys off —
-    /// so reading it here keeps the durable record agreeing with all three instead of with
-    /// the handset's address book.
     /// The Bluetooth audio INPUT ROUTE the handset is recording THROUGH, when it is one.
     ///
     /// WHY THIS SEAM EXISTS (T5, S01). A Bluetooth audio-route recorder records through the
@@ -1384,6 +1372,13 @@ public final class CaptureManager: ObservableObject {
     /// happened to be paired, which is the bug T4 paid for.
     public var activeAudioRoute: () -> (token: String, displayName: String)? = { nil }
 
+    /// WHAT IS ACTUALLY RECORDING right now, for the composition root to attribute by.
+    ///
+    /// This is the question the archive needs answered. `isRecordingMic` is the manager's own
+    /// authority on it — it is what the phone-mic arm of `onSourceState` keys off, what the
+    /// live surface's "Phone" label keys off, and what `endSession`'s usage token keys off —
+    /// so reading it here keeps the durable record agreeing with all three instead of with
+    /// the handset's address book.
     public var recordingSourceForAttribution: CaptureRecordingSource {
         if isRecordingMic || captureSource == .phoneMic {
             if let route = activeAudioRoute() {
@@ -1400,6 +1395,11 @@ public final class CaptureManager: ObservableObject {
         captureDeviceContext(recordingSourceForAttribution).context?.identity
     }
 
+    /// A held-open Omi conversation awaiting a possible reconnect (its WAL + when the
+    /// disconnect happened, in reference-date seconds — the same clock as `lastVoicedInstant()`
+    /// so the silence-boundary check compares on one clock). Non-nil ⇒ `active` is SUSPENDED,
+    /// not ended: a reconnect before `SilenceSegmenter.defaultSilenceGap` of voiced silence
+    /// resumes it (same captureId), else `resolveReconnectGrace` ends it at the real boundary.
     private var suspendedSession: (wal: CaptureWAL, at: TimeInterval)? {
         // `didSet` rather than a push at each of the six assignment sites: the same reason
         // the gap window enumerates its close causes instead of counting call sites — a

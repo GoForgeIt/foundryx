@@ -33,6 +33,11 @@ struct ConversationFacesView: View {
     let captureId: String
     let timeRange: String
     let place: String?
+    /// WHICH DEVICE RECORDED THIS. Resolved once, by the pushing screen, from the
+    /// account-scoped capture root — never re-read inside a body pass. `nil` only until it
+    /// has been read; an unnameable recorder still produces an attribution (with a
+    /// diagnostic), because "Unknown device" on its own is a shrug.
+    var attribution: CaptureAttribution? = nil
     /// When the conversation happened — decides recent (auto-load) vs older
     /// (load on demand) transcript fetching.
     let conversationDate: Date?
@@ -337,6 +342,21 @@ struct ConversationFacesView: View {
                     background: GrainColor.surface,
                     border: GrainColor.borderFaint
                 )
+            }
+            // THE RECORDER, NAMED BESIDE ITS OWN RECORDING. This is the surface the whole
+            // device-agnostic track exists for: until it landed, the device on the row a user
+            // tapped never appeared against anything it recorded. An unnameable recorder is
+            // shown WITH its diagnostic rather than as a bare "Unknown device".
+            if let attribution {
+                metadataTag(
+                    attribution.isKnown
+                        ? attribution.deviceName
+                        : "\(attribution.deviceName) — \(attribution.diagnostic ?? "")",
+                    foreground: GrainColor.textMuted,
+                    background: GrainColor.surface,
+                    border: GrainColor.borderFaint
+                )
+                .accessibilityIdentifier("conversation-device")
             }
             Spacer(minLength: 0)
         }

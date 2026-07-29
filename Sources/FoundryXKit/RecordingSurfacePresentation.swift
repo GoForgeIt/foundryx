@@ -285,6 +285,25 @@ public enum CaptureAttributionPresentation {
                                                                             baseDir: baseDir))
     }
 
+    /// THE TIMELINE ROW'S QUIET META LINE, with the recorder appended.
+    ///
+    /// This is the function the App target calls, and it exists so the composition is a tested
+    /// value rather than string arithmetic inside a SwiftUI body. Review round 11's H2 was that
+    /// nothing in the shipped app ever showed a user which device recorded a conversation —
+    /// the bug this whole track exists to fix — while the record claimed the surface was
+    /// rendered.
+    ///
+    /// AN UNKNOWN RECORDER SAYS NOTHING HERE, deliberately. The row has no room to explain
+    /// itself, and "Unknown device" without its diagnostic is the shrug this file's own rule
+    /// forbids; the detail header carries the hedge and the reason. So the row appends only
+    /// when there is an answer.
+    public static func metaLine(_ base: String, attribution: CaptureAttribution?) -> String {
+        guard let attribution, attribution.isKnown, !attribution.deviceName.isEmpty else {
+            return base
+        }
+        return base.isEmpty ? attribution.deviceName : "\(base) · \(attribution.deviceName)"
+    }
+
     /// The label a pre-device-record conversation carries, from the shipped marker. Routed
     /// through `CaptureLiveStatus.sourceLabel` so the archive says exactly what the live
     /// surface said while it was recording.
