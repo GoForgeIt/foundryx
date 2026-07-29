@@ -45,6 +45,10 @@ final class FoundryXAppDelegate: NSObject, UIApplicationDelegate {
         let dm = DeviceManager.shared(log: log)
         // N7, on the headless path too: a gap outcome names the account it is about, or it is
         // withheld. This bootstrap already holds the one proved-owner binding.
+        // The follower first, so the scope stays current for the life of this process (the
+        // manager is a singleton that outlives this bootstrap); then the proved-owner binding
+        // this path already holds, which is the more specific answer for right now.
+        dm.followAccountScopeChanges()
         dm.setAccountScopeForGapOutcomes(binding.scope)
         let paused = preferences.omiDesiredState != .listening
         // The composition root resolves WHICH device this restoration is about to record

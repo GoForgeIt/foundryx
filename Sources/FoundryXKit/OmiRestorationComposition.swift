@@ -31,16 +31,66 @@ public enum OmiRestorationComposition {
     public static let handsetToken = "handset"
     public static let handsetDisplayName = "Phone"
 
-    /// The ACTIVE device, and why there is not one.
+    /// WHY THERE IS NO ACTIVE DEVICE — a value, not a sentence.
     ///
-    /// `noneActive` carries a reason because there are several genuinely different ways to
-    /// have no active device — nothing remembered, the one remembered device detached, the
-    /// store unreadable — and a capture that could not be attributed must be able to say
-    /// which. Collapsing them into `nil` is how "no device" and "a device we could not read"
-    /// became the same event.
+    /// There are five genuinely different ways to have no active recording device, and a
+    /// consumer has to be able to tell them apart: "this account remembers nothing" is an
+    /// onboarding state, "remembers some but none is attached" is a reconnect state, "the one
+    /// attached is one you detached" is a user decision, and "the store could not be read" is
+    /// a fault that must never be reported as any of the other four. Collapsing them into
+    /// `nil` is how "no device" and "a device we could not read" became the same event.
+    ///
+    /// IT IS A TYPE BECAUSE THE NEXT CONSUMER MUST BE ABLE TO `switch` (review round 11, M2).
+    /// This was five free-form English strings, and the record handed them to T6 as "the
+    /// substrate R3's distinction needs" — but the only way to distinguish them was to
+    /// substring-match prose, and T6 has to render three of them differently against R6's
+    /// three-minute bound. The sentence now lives beside the case it belongs to, so no caller
+    /// invents its own wording and no caller has to parse anyone else's.
+    public enum NoActiveDeviceReason: Equatable, Sendable {
+        /// No account scope is resolvable at all, so there is no account-scoped memory of
+        /// recording devices to choose from. Not a statement about devices.
+        case noAccountScope
+        /// This account has never remembered a recording device.
+        case nothingRemembered
+        /// This account remembers `count` devices and the transport has none of them attached.
+        case rememberedButNoneAttached(count: Int)
+        /// A device IS attached, and this account has explicitly detached it. A user decision,
+        /// not an absence.
+        case attachedButDetached
+        /// The account's recording devices could not be read. NOT "no devices" — reporting it
+        /// as such would silently un-pair every device the person owns.
+        case storeUnreadable(redactedError: String)
+
+        /// The sentence, kept with the case so the copy has exactly one home.
+        public var sentence: String {
+            switch self {
+            case .noAccountScope:
+                return "no account scope is resolvable, so this handset has no account-scoped "
+                    + "memory of recording devices to choose from"
+            case .nothingRemembered:
+                return "this account remembers no recording device"
+            case .rememberedButNoneAttached(let count):
+                return "this account remembers \(count) recording device(s) but none is attached"
+            case .attachedButDetached:
+                return "the attached recording device is one this account has explicitly "
+                    + "detached, so it is not active"
+            case .storeUnreadable(let error):
+                return "this account's recording devices could not be read (\(error))"
+            }
+        }
+
+        /// TRUE only for the fault. A surface that offers "connect a device" for this is
+        /// telling someone their devices are gone when they are unreadable.
+        public var isFault: Bool {
+            if case .storeUnreadable = self { return true }
+            return false
+        }
+    }
+
+    /// The ACTIVE device, and why there is not one.
     public enum ActiveDeviceResolution: Equatable, Sendable {
         case active(RecordingDeviceRecord)
-        case noneActive(reason: String)
+        case noneActive(reason: NoActiveDeviceReason)
 
         public var record: RecordingDeviceRecord? {
             if case .active(let r) = self { return r }
@@ -68,10 +118,7 @@ public enum OmiRestorationComposition {
         attached: SavedOmi?,
         defaults: UserDefaults = .standard
     ) -> ActiveDeviceResolution {
-        guard let binding else {
-            return .noneActive(reason: "no account scope is resolvable, so this handset has no "
-                + "account-scoped memory of recording devices to choose from")
-        }
+        guard let binding else { return .noneActive(reason: .noAccountScope) }
         let store = RecordingDeviceStore(root: binding.root, scope: binding.scope)
         do {
             try RecordingDeviceMigration.adoptLegacyPairing(defaults: defaults, into: store)
@@ -80,23 +127,19 @@ public enum OmiRestorationComposition {
                 [RecordingDeviceIdentity(shape: .bleStream, hardwareToken: $0.id.uuidString)]
             } ?? []
             guard let active = RecordingDeviceActivation.active(among: remembered, ready: ready) else {
-                if remembered.isEmpty {
-                    return .noneActive(reason: "this account remembers no recording device")
-                }
+                if remembered.isEmpty { return .noneActive(reason: .nothingRemembered) }
                 if ready.isEmpty {
-                    return .noneActive(reason: "this account remembers "
-                        + "\(remembered.count) recording device(s) but none is attached")
+                    return .noneActive(reason: .rememberedButNoneAttached(count: remembered.count))
                 }
-                return .noneActive(reason: "the attached recording device is one this account "
-                    + "has explicitly detached, so it is not active")
+                return .noneActive(reason: .attachedButDetached)
             }
             return .active(active)
         } catch {
             // LOUD, not empty. An unreadable store is not "no devices" — reporting it as such
             // would silently un-pair every device the person owns and then attribute their
             // conversations to nothing.
-            return .noneActive(reason: "this account's recording devices could not be read "
-                + "(\(RecordingDeviceLogRedaction.redactingAccountScopes(error.localizedDescription)))")
+            return .noneActive(reason: .storeUnreadable(redactedError:
+                RecordingDeviceLogRedaction.redactingAccountScopes(error.localizedDescription)))
         }
     }
 
@@ -130,7 +173,7 @@ public enum OmiRestorationComposition {
             // remembered device the thing that is recording.
             guard case .active(let device) = activeDevice else {
                 let reason: String
-                if case .noneActive(let why) = activeDevice { reason = why } else { reason = "" }
+                if case .noneActive(let why) = activeDevice { reason = why.sentence } else { reason = "" }
                 return .blocked(reason:
                     "an external stream is recording but no device is active for this account "
                         + "(\(reason)), so this audio could not be attributed to a device")

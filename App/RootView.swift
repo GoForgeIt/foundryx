@@ -700,7 +700,12 @@ private struct MainTabs: View {
         // after the account door has shut. Pushing the scope the window opened under is what
         // lets `GapRecoveryRendering.decide` withhold it instead of rendering one person's
         // recording history into the next person's timeline.
-        dm.setAccountScopeForGapOutcomes(accountBinding?.scope)
+        // AND IT FOLLOWS THE ACCOUNT (M3). Taking the scope once here — from a `let` captured
+        // in `init` — went stale the moment the account changed: `DeviceManager` is a process
+        // singleton that outlives this view tree, a launch while signed out pushed `nil`
+        // forever, and a sign-out tears this tree down without rebuilding it. The manager
+        // installs its own identity observer; there is nothing here to remember.
+        dm.followAccountScopeChanges()
         dm.onGapRecoveryOutcome = { report in
             switch GapRecoveryRendering.decide(
                 report, currentScope: CaptureAccountScope.currentAccountBinding()?.scope) {

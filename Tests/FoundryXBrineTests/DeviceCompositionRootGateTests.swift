@@ -63,14 +63,34 @@ final class DeviceCompositionRootGateTests: XCTestCase {
     /// a missing production wiring silent-by-design, so this is what makes it loud: both
     /// composition roots must push the scope, and the app-side one must render through the
     /// decision rather than straight from the outcome.
+    ///
+    /// WHAT THIS TEST NO LONGER CARRIES ALONE (review round 11, H3). It used to be the whole
+    /// gate on N7's production wiring, and a source-text search for
+    /// `setAccountScopeForGapOutcomes(` is satisfied by a `nil` argument — which is exactly
+    /// the state in which every gap outcome is withheld from its own account forever. The
+    /// PRODUCER is now driven behaviourally by `device-rendered-surface.feature` ("the outcome
+    /// a recording device delivers names the account its window opened under", and the two
+    /// account-change scenarios). This file holds only what `swift test` cannot compile: the
+    /// `App/` call sites. It rejects the two spellings that would satisfy it vacuously.
     func testBothCompositionRootsGiveGapOutcomesAnAccount() throws {
         for path in ["App/RootView.swift", "App/FoundryXAppDelegate.swift"] {
             let source = try String(contentsOf: Self.repoRoot.appendingPathComponent(path),
                                     encoding: .utf8)
-            XCTAssertTrue(source.contains("setAccountScopeForGapOutcomes("),
+            XCTAssertTrue(source.contains("followAccountScopeChanges("),
                           "\(path) never tells DeviceManager which account a gap window is "
                               + "about, so every gap outcome from it is withheld — silently, "
-                              + "because withholding is the fail-closed default")
+                              + "because withholding is the fail-closed default. It must use "
+                              + "`followAccountScopeChanges()`, not a one-shot push: the "
+                              + "manager is a process singleton that outlives this file's view "
+                              + "tree, and a scope taken once goes stale at the next sign-in, "
+                              + "sign-out or account switch")
+            for vacuous in ["setAccountScopeForGapOutcomes(nil)",
+                            "setAccountScopeForGapOutcomes(nil as String?)"] {
+                XCTAssertFalse(source.contains(vacuous),
+                               "\(path) hands the gap-outcome scope a literal `nil`, which "
+                                   + "withholds every outcome from its own account forever "
+                                   + "while satisfying every source-text check of this wiring")
+            }
         }
         let rootView = try String(
             contentsOf: Self.repoRoot.appendingPathComponent("App/RootView.swift"),

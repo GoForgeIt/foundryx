@@ -29,9 +29,9 @@ final class DeviceRenderedSurfaceFeatureTests: ProcessGlobalStateTestCase {
             let result = try await BrineFeatureRunner.run(
                 "device-rendered-surface",
                 registry: StepRegistry(DeviceRenderedSurfaceSteps.make(world: world)))
-            XCTAssertEqual(result.passed, 12,
-                           "device-rendered-surface must run all 12 scenarios "
-                               + "(7 plain + 3 S01 rows + 2 S02 rows)")
+            XCTAssertEqual(result.passed, 14,
+                           "device-rendered-surface must run all 14 scenarios "
+                               + "(9 plain + 3 S01 rows + 2 S02 rows)")
         } catch {
             await world.cleanup()
             throw error
@@ -148,7 +148,7 @@ final class DeviceRenderedSurfaceFeatureTests: ProcessGlobalStateTestCase {
         let binding = CaptureAccountScope.currentAccountBinding()
         let resolution = OmiRestorationComposition.resolveDeviceContext(
             binding: binding,
-            activeDevice: .noneActive(reason: "no external device is remembered"),
+            activeDevice: .noneActive(reason: .nothingRemembered),
             recording: manager.recordingSourceForAttribution)
         let context = try XCTUnwrap(resolution.context,
                                     "an audio-route recording could not be attributed at all")
@@ -159,6 +159,99 @@ final class DeviceRenderedSurfaceFeatureTests: ProcessGlobalStateTestCase {
             for: .identified(context),
             legacySourceMarker: CaptureSourceKind.phoneMic.rawValue).deviceName,
                        "Field Recorder")
+    }
+
+    /// M2 — "no active device" is FIVE different facts, and a consumer must be able to tell
+    /// them apart by `switch` rather than by substring-matching English.
+    ///
+    /// T5 handed T6 these as free-form sentences and called them "the substrate R3's
+    /// distinction needs". T6 has to render three of them differently against R6's
+    /// three-minute bound, and it cannot branch on prose. This drives the REAL resolver into
+    /// every arm it has and asserts the CASE — the sentence is checked separately, and only
+    /// for the properties a sentence owes (present, distinct, no account scope leaked).
+    @MainActor
+    func testEveryWayOfHavingNoActiveDeviceIsItsOwnValue() throws {
+        let world = try DeviceRenderedSurfaceWorld()
+        defer { Task { await world.cleanup() } }
+
+        // (a) No binding at all — a background relaunch before first unlock. Not a statement
+        // about devices, and must never be confused with one.
+        try world.freshHandset()
+        XCTAssertEqual(
+            OmiRestorationComposition.activeExternalDevice(binding: nil, attached: nil),
+            .noneActive(reason: .noAccountScope))
+
+        // (b) Signed in, nothing ever remembered.
+        try world.signIn("m2-empty")
+        let binding = try XCTUnwrap(world.binding)
+        XCTAssertEqual(
+            OmiRestorationComposition.activeExternalDevice(
+                binding: binding, attached: nil, defaults: world.legacyDefaults),
+            .noneActive(reason: .nothingRemembered))
+
+        // (c) One device remembered, the transport has nothing attached.
+        let identity = RecordingDeviceIdentity(shape: .bleStream, hardwareToken: "m2-token-1")
+        guard case .recorded = RecordingDeviceStore.recordUserPair(identity: identity,
+                                                                   displayName: "Trail Mic") else {
+            return XCTFail("the pairing was not recorded")
+        }
+        XCTAssertEqual(
+            OmiRestorationComposition.activeExternalDevice(
+                binding: binding, attached: nil, defaults: world.legacyDefaults),
+            .noneActive(reason: .rememberedButNoneAttached(count: 1)),
+            "a remembered-but-absent device reads as 'nothing remembered', which is an "
+                + "onboarding state and would send a paired user back through first run")
+
+        // (d) That device attached, and explicitly detached by this account.
+        let attached = SavedOmi(id: try XCTUnwrap(UUID(uuidString: "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0")),
+                                name: "Trail Mic", lastConnected: nil)
+        let attachedIdentity = RecordingDeviceIdentity(shape: .bleStream,
+                                                       hardwareToken: attached.id.uuidString)
+        guard case .recorded = RecordingDeviceStore.recordUserPair(identity: attachedIdentity,
+                                                                   displayName: "Trail Mic") else {
+            return XCTFail("the second pairing was not recorded")
+        }
+        // Control FIRST: while it is attached and not detached, it IS active — so (d) below is
+        // a statement about detaching and not about a resolver that never activates anything.
+        XCTAssertNotNil(
+            OmiRestorationComposition.activeExternalDevice(
+                binding: binding, attached: attached, defaults: world.legacyDefaults).record,
+            "the attached, remembered, undetached device is not active — the control failed")
+        guard case .recorded = RecordingDeviceStore.recordUserDetach(identity: attachedIdentity,
+                                                                     displayName: "Trail Mic") else {
+            return XCTFail("the detach was not recorded")
+        }
+        XCTAssertEqual(
+            OmiRestorationComposition.activeExternalDevice(
+                binding: binding, attached: attached, defaults: world.legacyDefaults),
+            .noneActive(reason: .attachedButDetached),
+            "a device the user detached reads the same as one that was never there")
+
+        // (e) The fault. It is the ONE arm `isFault` may be true for.
+        let unreadable = OmiRestorationComposition.NoActiveDeviceReason
+            .storeUnreadable(redactedError: "the file could not be decoded")
+        let all: [OmiRestorationComposition.NoActiveDeviceReason] = [
+            .noAccountScope, .nothingRemembered, .rememberedButNoneAttached(count: 1),
+            .attachedButDetached, unreadable,
+        ]
+        XCTAssertEqual(all.filter(\.isFault), [unreadable],
+                       "an unreadable store must be distinguishable from an empty one — "
+                           + "reporting it as 'no devices' silently un-pairs everything the "
+                           + "person owns")
+        // The copy still exists and still says five different things.
+        XCTAssertEqual(Set(all.map(\.sentence)).count, 5,
+                       "two of the five reasons say the same thing to a user")
+        for reason in all {
+            XCTAssertFalse(reason.sentence.isEmpty, "\(reason) has no sentence")
+            XCTAssertFalse(reason.sentence.contains("acct-"),
+                           "\(reason)'s sentence leaks an account scope")
+        }
+        // The count is CARRIED, not baked into a sentence a consumer would have to parse.
+        guard case .rememberedButNoneAttached(let count) =
+                OmiRestorationComposition.NoActiveDeviceReason.rememberedButNoneAttached(count: 3) else {
+            return XCTFail("the count is not readable from the value")
+        }
+        XCTAssertEqual(count, 3)
     }
 
     /// THE TWO SURFACES, ON THE PATH THAT MAKES THEM DISAGREE (review round 9, M2).
@@ -436,6 +529,27 @@ final class DeviceRenderedSurfaceWorld {
         // GROUND TRUTH HELD BY THE SCENARIO, not re-read from the manager at assert time —
         // an assertion that asks the manager what it thinks the answer is cannot fail.
         scopeAtGapOpen = scope
+    }
+
+    /// A producer wired the way a composition root wires it, and KEEPING IT CURRENT.
+    ///
+    /// M3 — `setAccountScopeForGapOutcomes` is a snapshot, and `RootView` took it once, in
+    /// `init`, from a `let`. `DeviceManager` is a process singleton that outlives the view
+    /// tree that built it: a launch while signed out pushes `nil` and nothing ever pushes
+    /// again, and a sign-out tears the tab tree down without rebuilding it, so the previous
+    /// owner's scope stays on the manager for the life of the process.
+    func startGapProducerThatFollowsTheAccount() {
+        let manager = DeviceManager()
+        let box = deliveredReports
+        manager.onGapRecoveryOutcome = { box.append($0) }
+        manager.followAccountScopeChanges()
+        gapManager = manager
+        scopeAtGapOpen = scope
+    }
+
+    func signOut() throws {
+        try CaptureAccountScope.signOutForTests()
+        keyMaterial.material = nil
     }
 
     func openProducerGapWindow(interrupting captureId: String) throws {
@@ -1726,6 +1840,99 @@ private func historySteps(_ w: DeviceRenderedSurfaceWorld) -> [StepDefinition] {
                 w.startGapProducer(tellingItAbout: nil)
             }
             return ctx
+        },
+
+        defineStep("a recording device that keeps track of which account it is recording for") { ctx, _, _ in
+            try await MainActor.run {
+                try w.freshHandset()
+                try w.signIn("n7-follow-a")
+                w.firstAccountScope = w.scope
+                w.startGapProducerThatFollowsTheAccount()
+            }
+            return ctx
+        },
+
+        defineStep("that account signs out and a different account signs in") { ctx, _, _ in
+            try await MainActor.run {
+                try w.signOut()
+                try w.signIn("n7-follow-b")
+                guard w.scope != w.firstAccountScope else {
+                    throw BrineStepError("the second account resolved to the same scope as the first")
+                }
+            }
+            return ctx
+        },
+
+        defineStep("that account signs out") { ctx, _, _ in
+            try await MainActor.run {
+                try w.signOut()
+                guard w.scope == CaptureAccountScope.signedOutScope else {
+                    throw BrineStepError(
+                        "signing out left the scope at \"\(w.scope)\" — nobody signed out")
+                }
+            }
+            return ctx
+        },
+
+        defineCheck("the delivered outcome names the account that is signed in now") { _, _, _ in
+            try await MainActor.run {
+                let report = try w.theOneDeliveredReport()
+                let now = w.scope
+                guard now != w.firstAccountScope else {
+                    throw BrineStepError(
+                        "the account never actually changed — this check would pass without "
+                            + "the device following anything")
+                }
+                guard let delivered = report.accountScope else {
+                    throw BrineStepError(
+                        "the recording device delivered a gap outcome carrying NO account")
+                }
+                guard delivered == now else {
+                    throw BrineStepError(
+                        "the outcome names \"\(delivered)\" and the account signed in now is "
+                            + "\"\(now)\" — the device is still answering for the previous "
+                            + "owner, so every gap outcome this handset produces from here on "
+                            + "is withheld from the person actually using it")
+                }
+            }
+        },
+
+        defineCheck("the delivered outcome does not name the account that signed out") { _, _, _ in
+            try await MainActor.run {
+                let report = try w.theOneDeliveredReport()
+                let left = try XCTUnwrapOrThrow(w.firstAccountScope, "no account ever signed in")
+                guard report.accountScope != left else {
+                    throw BrineStepError(
+                        "a window opened AFTER \"\(left)\" signed out was stamped with that "
+                            + "account anyway — the device is still answering for somebody who "
+                            + "is no longer using it")
+                }
+                // NON-VACUOUS: the same producer DOES stamp an account when there is one, so
+                // this is a statement about sign-out and not about a stamp that never happens.
+                guard report.accountScope != nil else {
+                    throw BrineStepError(
+                        "the outcome names nothing at all — signing out is not the same as "
+                            + "never having been told, and collapsing them loses the "
+                            + "signed-out container's own audio")
+                }
+            }
+        },
+
+        defineCheck("that outcome is withheld from the account that signed out") { _, _, _ in
+            try await MainActor.run {
+                let report = try w.theOneDeliveredReport()
+                let left = try XCTUnwrapOrThrow(w.firstAccountScope, "no account ever signed in")
+                guard case .withheld = GapRecoveryRendering.decide(report, currentScope: left) else {
+                    throw BrineStepError(
+                        "audio recorded after \"\(left)\" signed out would be rendered into "
+                            + "that account's timeline if they signed back in")
+                }
+                // NON-VACUOUS: it IS rendered to the scope it actually opened under.
+                guard case .show = GapRecoveryRendering.decide(
+                        report, currentScope: report.accountScope) else {
+                    throw BrineStepError("nothing is ever rendered — the withholding proves nothing")
+                }
+            }
         },
 
         defineStep("a conversation is interrupted and its gap window opens") { ctx, _, _ in

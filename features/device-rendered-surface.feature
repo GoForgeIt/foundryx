@@ -99,6 +99,21 @@ Feature: One rendered recording-device experience, and copy that tells the truth
     Then the delivered outcome names the account the window opened under
     And that outcome is withheld from the account now on screen
 
+  Scenario: the account a gap outcome answers for follows the signed-in account
+    Given a recording device that keeps track of which account it is recording for
+    And that account signs out and a different account signs in
+    And a conversation is interrupted and its gap window opens
+    When the gap window closes
+    Then the delivered outcome names the account that is signed in now
+
+  Scenario: a gap window opened after sign-out no longer answers for the account that left
+    Given a recording device that keeps track of which account it is recording for
+    And that account signs out
+    And a conversation is interrupted and its gap window opens
+    When the gap window closes
+    Then the delivered outcome does not name the account that signed out
+    And that outcome is withheld from the account that signed out
+
   Scenario: a recording device never told an account delivers an outcome that names none
     Given a recording device that was never told which account it is recording for
     And a conversation is interrupted and its gap window opens

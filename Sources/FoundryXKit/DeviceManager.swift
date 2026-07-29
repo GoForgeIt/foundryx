@@ -181,8 +181,53 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
         accountScopeLock.unlock()
     }
 
+    /// KEEP THE SNAPSHOT CURRENT — push once now, and again on every identity transition.
+    ///
+    /// WHY A ONE-SHOT PUSH IS NOT ENOUGH (review round 11, M3). `setAccountScopeForGapOutcomes`
+    /// is deliberately a snapshot, and `RootView` took it ONCE, in `init`, from a `let`. But
+    /// `DeviceManager` is a PROCESS SINGLETON that outlives the view tree that built it:
+    ///
+    ///   * a launch while signed out pushes `nil`, and nothing pushes again when the person
+    ///     signs in — so every gap outcome for the rest of the process names no account and is
+    ///     withheld from its own owner, silently, because withholding is the fail-closed
+    ///     default;
+    ///   * a sign-out tears the tab tree down WITHOUT rebuilding it, so the previous owner's
+    ///     scope stays on the manager and the next window opened — by nobody, or by the next
+    ///     person — is stamped with the account that left.
+    ///
+    /// STILL A PUSH, NOT A LOOKUP. The reason the read is a snapshot is that resolving a
+    /// binding takes a process-wide lock and consults the on-disk admission registry, and doing
+    /// that from `bleQueue` when a window opens makes the transport wait on account
+    /// bookkeeping (measured: it stalled the reconnect seam suite past its 60s bound). This
+    /// resolves on the identity notification's own thread instead, which is never `bleQueue`.
+    ///
+    /// SELF-INSTALLED, not left to the composition root. An observer a root has to remember to
+    /// install is exactly the shape of wiring this finding was about.
+    public func followAccountScopeChanges(
+        center: NotificationCenter = .default,
+        resolve: @escaping @Sendable () -> String? = {
+            CaptureAccountScope.currentAccountBinding()?.scope
+        }
+    ) {
+        accountScopeLock.lock()
+        if let existing = accountScopeObserver { center.removeObserver(existing) }
+        accountScopeObserver = center.addObserver(
+            forName: CaptureAccountScope.identityDidChangeNotification,
+            object: nil,
+            // `nil` queue: delivered synchronously on the poster's thread. The setter is
+            // lock-guarded, and hopping to main would leave a window in which the manager
+            // still answers for the account that just left.
+            queue: nil
+        ) { [weak self] _ in
+            self?.setAccountScopeForGapOutcomes(resolve())
+        }
+        accountScopeLock.unlock()
+        setAccountScopeForGapOutcomes(resolve())
+    }
+
     private let accountScopeLock = NSLock()
     private var accountScopeSnapshot: String?
+    private var accountScopeObserver: NSObjectProtocol?
 
     /// The snapshot as of now. Read on `bleQueue` when a window opens.
     var accountScopeAtGapOpen: String? {
