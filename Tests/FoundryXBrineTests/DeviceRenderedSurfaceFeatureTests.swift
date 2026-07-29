@@ -108,6 +108,59 @@ final class DeviceRenderedSurfaceFeatureTests: ProcessGlobalStateTestCase {
             CaptureLiveStatus.sourceLabel(source: .omi, isRecordingMic: false))
     }
 
+    /// A BLUETOOTH AUDIO-ROUTE RECORDER MUST NOT BE CALLED "PHONE" (T5, S01).
+    ///
+    /// It records through the phone-mic path, so from inside `CaptureManager` it is
+    /// indistinguishable from the built-in microphone — and every conversation made with one
+    /// was therefore attributed to the handset. The registry knows which route is active and
+    /// hands it in. This asserts all three arms of the seam, including the control that a
+    /// plain Record-button conversation is STILL the handset.
+    @MainActor
+    func testTheAudioRouteArmNamesTheRouteAndNotThePhone() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("foundryx-route-arm-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = CaptureManager(
+            target: DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x"),
+            baseDir: dir, source: SeamTestSource(), finalize: { _, _ in })
+
+        // (a) External stream: no route, not recording mic — the remembered device answers.
+        manager.selectCaptureSource(.omi)
+        XCTAssertEqual(manager.recordingSourceForAttribution, .externalStream)
+
+        // (b) The handset's own microphone: the phone-mic path with NO route. The control that
+        // makes (c) mean something — without it, a seam that always reported a route would
+        // pass (c) and re-introduce T4's bug in the other direction.
+        manager.selectCaptureSource(.phoneMic)
+        XCTAssertEqual(manager.recordingSourceForAttribution, .handsetMicrophone,
+                       "a plain Record-button conversation must stay the handset's own mic")
+
+        // (c) The same phone-mic path WITH a route: the device the user connected.
+        manager.activeAudioRoute = { (token: "route-uid-1", displayName: "Field Recorder") }
+        XCTAssertEqual(manager.recordingSourceForAttribution,
+                       .handsetAudioRoute(token: "route-uid-1", displayName: "Field Recorder"),
+                       "a Bluetooth audio-route recorder was attributed to the phone")
+
+        // And the composition root turns that into the ROUTE's identity and name, so the
+        // timeline says what the user connected.
+        let binding = CaptureAccountScope.currentAccountBinding()
+        let resolution = OmiRestorationComposition.resolveDeviceContext(
+            binding: binding,
+            activeDevice: .noneActive(reason: "no external device is remembered"),
+            recording: manager.recordingSourceForAttribution)
+        let context = try XCTUnwrap(resolution.context,
+                                    "an audio-route recording could not be attributed at all")
+        XCTAssertEqual(context.identity,
+                       RecordingDeviceIdentity(shape: .audioRoute, hardwareToken: "route-uid-1"))
+        XCTAssertEqual(context.displayName, "Field Recorder")
+        XCTAssertEqual(CaptureAttributionPresentation.attribution(
+            for: .identified(context),
+            legacySourceMarker: CaptureSourceKind.phoneMic.rawValue).deviceName,
+                       "Field Recorder")
+    }
+
     /// THE TWO SURFACES, ON THE PATH THAT MAKES THEM DISAGREE (review round 9, M2).
     ///
     /// The Record button calls `startMicRecording()` without touching `captureSource`, so
@@ -364,14 +417,30 @@ final class DeviceRenderedSurfaceWorld {
             finalize: { id, _ in await finalized.append(id) })
         // The SHAPE of the production wiring: the manager hands in what is recording, and the
         // composition root answers from the account-scoped store. Nothing is defaulted.
+        // THE MANAGER'S OWN ANSWER IS LOAD-BEARING. An earlier version of this closure ignored
+        // what the manager handed in and used the scenario's value, which made every S01 row
+        // pass for a reason other than the one it names: a mutation to
+        // `recordingSourceForAttribution` could not have reddened any of them. For the arms
+        // whose manager state production actually produces (an external stream), the two must
+        // AGREE, and disagreeing is a failure rather than a silent substitution.
         manager.captureDeviceContext = { [weak self] asked in
             guard let self else { return .blocked(reason: "the world went away") }
-            // The manager is the authority on what is recording; this scenario is about which
-            // shape it reports, so the scenario supplies it and the assertion below proves the
-            // manager's own answer would have been the same.
-            _ = asked
+            let effective: CaptureRecordingSource
+            if case .externalStream = recording {
+                guard asked == recording else {
+                    return .blocked(reason:
+                        "the manager says it is recording \(asked) while the scenario is driving "
+                            + "\(recording) — the seam under test was bypassed")
+                }
+                effective = asked
+            } else {
+                // The handset arms need registry state this driver does not stand up; the
+                // route seam itself is asserted directly in
+                // `testTheAudioRouteArmNamesTheRouteAndNotThePhone`.
+                effective = recording
+            }
             return OmiRestorationComposition.resolveDeviceContext(
-                binding: self.binding, activeDevice: activeDevice, recording: recording)
+                binding: self.binding, activeDevice: activeDevice, recording: effective)
         }
         // The house technique for a DOOR-FREE finalize (`CaptureFinalizeTests`): quiesce the
         // automatic drivers so only the explicit retry drives finalize, mark the segments

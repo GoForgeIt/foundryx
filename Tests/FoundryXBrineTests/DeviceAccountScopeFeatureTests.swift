@@ -20,8 +20,8 @@ final class DeviceAccountScopeFeatureTests: XCTestCase {
             let result = try await BrineFeatureRunner.run(
                 "device-account-scope",
                 registry: StepRegistry(DeviceAccountScopeSteps.make(world: world)))
-            XCTAssertEqual(result.passed, 9,
-                           "device-account-scope must run all 9 scenarios (8 + the transport round trip)")
+            XCTAssertEqual(result.passed, 10,
+                           "device-account-scope must run all 10 scenarios (9 + the first-ever pair)")
         } catch {
             world.cleanup()
             throw error
@@ -429,6 +429,24 @@ final class DeviceAccountScopeWorld: @unchecked Sendable {
         return device
     }
 
+    /// Discovery ONLY — no store record. `stagePairedTransportDevice` pre-seeds one, which
+    /// is right for the scenarios about an already-remembered device and wrong for the one
+    /// about a FIRST-EVER pair: with the record already there, a pairing gesture that failed
+    /// to create it would be invisible (measured — the mutation survived).
+    func stageDiscoveredOnly(named name: String) -> DiscoveredDevice {
+        if standardDefaultsBefore == nil {
+            var snapshot: [String: Any] = [:]
+            for key in Self.transportKeys {
+                if let value = UserDefaults.standard.object(forKey: key) { snapshot[key] = value }
+            }
+            standardDefaultsBefore = snapshot
+        }
+        let device = DiscoveredDevice(id: UUID(), name: name, rssi: -50)
+        pairedDevice = device
+        deviceManager = DeviceManager()
+        return device
+    }
+
     func restoreStandardDefaults() {
         guard let saved = standardDefaultsBefore else { return }
         for key in Self.transportKeys {
@@ -703,6 +721,52 @@ enum DeviceAccountScopeSteps {
                     throw BrineStepError("forget() did not persist the detach")
                 }
             },
+            defineStep("the device page has discovered {string} and the account remembers nothing") { ctx, p, _ in
+                _ = world.stageDiscoveredOnly(named: try p.requireString(0))
+                guard try world.store().records().isEmpty else {
+                    throw BrineStepError("the account already remembers a device")
+                }
+                return ctx
+            },
+            defineStep("I pair that device on the device page") { ctx, _, _ in
+                guard let manager = world.deviceManager, let device = world.pairedDevice else {
+                    throw BrineStepError("no transport was staged")
+                }
+                // A FIRST-EVER PAIR. Until T5 this recorded a user RECONNECT, which
+                // deliberately refuses to upsert a device the store has never seen — so an
+                // account remembered only the devices its owner had FORGOTTEN, and
+                // `RecordingDeviceActivation` had nothing to choose from. Nothing here
+                // pre-seeds the record; the pairing gesture is what creates it.
+                guard try world.store().records().isEmpty else {
+                    throw BrineStepError("the account already remembers a device — this scenario "
+                                             + "would not be testing a first-ever pair")
+                }
+                manager.connect(device)
+                try world.recomputeActive()
+                return ctx
+            },
+            defineCheck("it is the device I paired") { _, _, _ in
+                guard let device = world.pairedDevice else {
+                    throw BrineStepError("no transport was staged")
+                }
+                let identity = RecordingDeviceIdentity(shape: .bleStream,
+                                                       hardwareToken: device.id.uuidString)
+                guard let record = try world.store().records().first,
+                      record.identity == identity else {
+                    throw BrineStepError(
+                        "the account remembers \(try world.store().records().map(\.identity)), "
+                            + "not the device I just paired")
+                }
+                guard !record.userDetached else {
+                    throw BrineStepError("a freshly paired device is remembered as detached")
+                }
+                guard record.displayName == device.name else {
+                    throw BrineStepError(
+                        "the remembered device is called \"\(record.displayName)\", not "
+                            + "\"\(device.name)\" — its own reported name")
+                }
+            },
+
             defineStep("I pair the same device again on the device page") { ctx, _, _ in
                 guard let manager = world.deviceManager, let device = world.pairedDevice else {
                     throw BrineStepError("no transport was staged")

@@ -69,6 +69,15 @@ Feature: Recording devices are remembered per account, and detaches stick
     When I pair the same device again on the device page
     Then it is the active device
 
+  Scenario: pairing a device for the first time is what makes an account remember it
+    Given account "first" is signed in
+    And the device page has discovered "Trail Mic" and the account remembers nothing
+    When I pair that device on the device page
+    Then the account remembers exactly one device
+    And it is the device I paired
+    And the device is ready
+    Then it is the active device
+
   Scenario: the active device follows preference and readiness, never vendor identity
     Given account "first" is signed in
     And two remembered devices "Alpha Recorder" and "Omi" are both ready
