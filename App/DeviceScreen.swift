@@ -211,9 +211,14 @@ struct DeviceScreen: View {
     // MARK: - Metrics strip (Battery / Signal / Firmware)
 
     private var deviceMetrics: some View {
+        // `DeviceManager` does not read the Omi's Device Information Service, so no device
+        // reports a firmware version today — and the strip now says so rather than printing
+        // the prototype's hard-coded "2.4.1" next to a battery percentage it actually
+        // measures. Wire a real DIS read here when DeviceManager surfaces one.
         let metrics = DeviceMetricsPresentation.resolve(omiConnected: isOmiConnected,
                                                         batteryPercent: device.batteryLevel,
-                                                        signal: signalValue)
+                                                        signal: signalValue,
+                                                        firmware: .unavailable)
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 0) {
                 DeviceMetric(value: metrics.battery, label: DeviceMetricsPresentation.labels[0])

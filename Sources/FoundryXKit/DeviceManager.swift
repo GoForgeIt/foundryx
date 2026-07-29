@@ -120,6 +120,77 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     // AudioFrameSource — the connected device's Opus stream.
     public var onFrame: ((Data) -> Void)?
     public var onState: ((AudioSourceState) -> Void)?
+    /// Which conversation a drop interrupted, PUSHED by the owner of capture state.
+    ///
+    /// WHY A PUSHED SNAPSHOT AND NOT A CLOSURE. The first shape of this seam was a
+    /// synchronous `(() -> String?)?` read at window open. It could not be wired: the fact
+    /// lives on `CaptureManager`, which is `@MainActor`, while `beginGapSyncWindow()` runs
+    /// on `bleQueue` — so every legal implementation either needed an `await` (destroying
+    /// the tag-AT-OPEN property this seam exists for) or `assumeIsolated` from the wrong
+    /// queue (a data race). The seam compiled only because nothing had wired it yet.
+    ///
+    /// TIMING SEMANTICS. The main actor pushes a `Sendable` value whenever the answer
+    /// changes; `DeviceManager` reads the last pushed value synchronously, under a lock,
+    /// at the moment a window opens. The tag is therefore AT OPEN with respect to what the
+    /// main actor has published, and the snapshot lags the main actor by the push only —
+    /// never by a queue hop taken while the window is opening.
+    public func setInterruptedCapture(_ captureId: String?) {
+        interruptedCaptureLock.lock()
+        interruptedCaptureSnapshot = captureId
+        interruptedCaptureLock.unlock()
+    }
+
+    private let interruptedCaptureLock = NSLock()
+    private var interruptedCaptureSnapshot: String?
+
+    /// The snapshot as of now. Read on `bleQueue` when a window opens.
+    var interruptedCaptureAtOpen: String? {
+        interruptedCaptureLock.lock()
+        defer { interruptedCaptureLock.unlock() }
+        return interruptedCaptureSnapshot
+    }
+    /// Published once per gap-recovery window that followed an interrupted conversation.
+    /// T5 renders it; nothing else may invent one.
+    ///
+    /// IT CARRIES THE ACCOUNT, and that is load-bearing (hazard N7). This callback is NOT
+    /// gated by the account-exposure close while `onState` IS — both are published from the
+    /// same `didDisconnect` after the exposure has been claimed closed, and only the state is
+    /// suppressed. A consumer handed a bare outcome cannot notice, and would render one
+    /// account's recording history into whichever account is on screen. `GapRecoveryReport`
+    /// makes the scope impossible to skip; `GapRecoveryRendering.decide` is what T5 does
+    /// with it.
+    public var onGapRecoveryOutcome: ((GapRecoveryReport) -> Void)?
+
+    /// The account whose audio a gap window is about, PUSHED by the composition root — the
+    /// same shape as `setInterruptedCapture`, and for the same two reasons.
+    ///
+    /// IT IS A SNAPSHOT AND NOT A LOOKUP. A window opens on `bleQueue`, and
+    /// `CaptureAccountScope.currentAccountBinding()` takes a process-wide lock, reads the
+    /// durable container, and consults the shared admission registry on disk. Calling that
+    /// from the radio's queue makes the transport wait on account bookkeeping — measured, not
+    /// feared: doing it here stalled the reconnect seam suite past its 60s precondition bound
+    /// under concurrent load, while the same suite ran in 3.5s without it.
+    ///
+    /// AND `nil` IS FAIL-CLOSED, not a hole. An unset scope makes `GapRecoveryRendering`
+    /// WITHHOLD the outcome with a stated reason rather than render it into whatever account
+    /// is on screen. `DeviceCompositionRootGateTests` is what holds the production wiring in
+    /// place, because `App/` is compiled by no test target.
+    public func setAccountScopeForGapOutcomes(_ scope: String?) {
+        accountScopeLock.lock()
+        accountScopeSnapshot = scope
+        accountScopeLock.unlock()
+    }
+
+    private let accountScopeLock = NSLock()
+    private var accountScopeSnapshot: String?
+
+    /// The snapshot as of now. Read on `bleQueue` when a window opens.
+    var accountScopeAtGapOpen: String? {
+        accountScopeLock.lock()
+        defer { accountScopeLock.unlock() }
+        return accountScopeSnapshot
+    }
+
     /// Fired when the Omi hardware button is DOUBLE-clicked (wired to pause/resume the
     /// current recording). Detected from the Omi button-trigger characteristic — see
     /// `OmiUUID.buttonService`. Only fires if the paired firmware exposes that service.
@@ -151,8 +222,13 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
 
     private let log: DoorLog?
     private let bleQueue = DispatchQueue(label: "foundryx.device-ble")
-    private var central: CBCentralManager?
-    private var peripheral: CBPeripheral?
+    /// How the central is obtained. The app never supplies one; the S04 acceptance proof
+    /// supplies a fake that drives the SAME sink on the SAME queue, which is the only way
+    /// the discovery half of the reconnect chain is drivable at all (`CBPeripheral`,
+    /// `CBService` and `CBCharacteristic` are all `NS_UNAVAILABLE`-init).
+    private let makeCentral: BLECentralFactory
+    private var central: BLECentral?
+    private var peripheral: BLEPeripheral?
     private let headerBytes = 3   // Omi packet header [seq:2][index:1]
     private var audioNotifs = 0   // diagnostics: raw audio-char notifications seen (bleQueue only)
 
@@ -167,7 +243,7 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
 
     /// A peripheral handed back by `willRestoreState`, held until the central
     /// reports poweredOn (nothing may be issued before that). bleQueue only.
-    private var restoredPeripheral: CBPeripheral?
+    private var restoredPeripheral: BLEPeripheral?
 
     /// The last state handed to `onState` — so a late-attaching consumer (the real
     /// CaptureManager taking over from the restoration spool) can be replayed the
@@ -241,10 +317,12 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
 
     // MARK: offline-cache (ring) sync state — bleQueue only
 
-    private var audioChar: CBCharacteristic?
-    private var storageDataChar: CBCharacteristic?
-    private var storageControlChar: CBCharacteristic?
+    private var audioChar: BLECharacteristic?
+    private var storageDataChar: BLECharacteristic?
+    private var storageControlChar: BLECharacteristic?
     private var gapSync: OmiOfflineSyncEngine?
+    /// The current gap-recovery window, tagged at open (track 20260725T2306, T3). bleQueue only.
+    private var gapWindow: GapRecoveryWindow?
     /// True from connect until the storage-sync decision resolves (service absent,
     /// unsupported, finished, failed). While true, LIVE audio frames are held so
     /// recovered gap audio lands in the WAL first — recorded order.
@@ -283,12 +361,17 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     /// Consecutive failed-connect attempts (bleQueue only) → exponential retry backoff.
     private var failToConnectAttempts = 0
 
-    private static let savedKey = "foundryx.omi.peripheral-id"
-    private static let savedNameKey = "foundryx.omi.peripheral-name"
-    private static let savedDateKey = "foundryx.omi.last-connected"
+    // Internal, not private, so the account-scoped device store's LEGACY MIGRATION can
+    // name the very same keys instead of re-typing the literals and drifting from them
+    // (track 20260725T2306, T2).
+    static let savedKey = "foundryx.omi.peripheral-id"
+    static let savedNameKey = "foundryx.omi.peripheral-name"
+    static let savedDateKey = "foundryx.omi.last-connected"
 
-    public init(log: DoorLog? = nil) {
+    public init(log: DoorLog? = nil,
+                makeCentral: @escaping BLECentralFactory = CoreBluetoothCentral.make) {
         self.log = log
+        self.makeCentral = makeCentral
         super.init()
         saved = Self.loadSaved()
     }
@@ -319,7 +402,7 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
             ensureCentral()   // the connect flow resumes once the central reports .poweredOn
             return
         }
-        guard c.state == .poweredOn else { return }
+        guard c.managerState == .poweredOn else { return }
         switch connectionState {
         case .connected, .connecting: break          // already linked — nothing to do
         default: autoReconnect(userInitiated: false) // re-initiate the saved-device reconnect
@@ -333,10 +416,10 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     private func ensureCentral() {
         guard central == nil else { return }
         #if os(iOS)
-        central = CBCentralManager(delegate: self, queue: bleQueue,
-                                   options: [CBCentralManagerOptionRestoreIdentifierKey: Self.restoreIdentifier])
+        central = makeCentral(self, bleQueue, Self.restoreIdentifier)
         #else
-        central = CBCentralManager(delegate: self, queue: bleQueue)
+        // macOS has no CoreBluetooth state restoration — no restore identifier to give.
+        central = makeCentral(self, bleQueue, nil)
         #endif
     }
 
@@ -420,7 +503,7 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
         // this before anything else powered it on — start() is dormant with no saved
         // device), then scan once powered on.
         guard let c = central else { pendingUserScan = true; ensureCentral(); return }
-        guard c.state == .poweredOn else { pendingUserScan = true; return }
+        guard c.managerState == .poweredOn else { pendingUserScan = true; return }
         setDiscovered([])
         setState(.scanning)
         c.scanForPeripherals(withServices: [OmiUUID.audioService], options: nil)
@@ -450,6 +533,27 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
 
     public func connect(_ device: DiscoveredDevice) {
         autoConnect = true
+        // H1: THE RE-PAIR PATH IS THE ONE THAT MATTERS. `forget()` erases the three
+        // device-global keys, so by the time the user pairs again `reconnect()` has no saved
+        // identity to clear and `Self.loadSaved()` is nil — a re-paired device would stay
+        // permanently excluded by `RecordingDeviceActivation`. Pairing THIS device is the
+        // user gesture that revokes the earlier detach, so it is recorded here.
+        //
+        // Deliberately BEFORE the transport guard: the flag records USER INTENT, not radio
+        // state. A pairing tap while the central is not yet ready is still the intent, and
+        // leaving the store detached until the radio happens to be ready is exactly the
+        // silent staleness this fixes.
+        // T5: THE STORE GOES LIVE HERE. `recordUserReconnect` only ever cleared a detach on a
+        // record that already existed, so a first-ever pair left the account-scoped store
+        // empty — it remembered the devices a user had thrown away and none of the ones they
+        // kept, and `RecordingDeviceActivation` therefore had nothing to choose from. Pairing
+        // is the gesture that means "remember this one", so it upserts and selects.
+        logDetachOutcome(
+            RecordingDeviceStore.recordUserPair(
+                identity: RecordingDeviceIdentity(shape: .bleStream,
+                                                  hardwareToken: device.id.uuidString),
+                displayName: device.name),
+            gesture: "pair")
         guard let c = central,
               let p = c.retrievePeripherals(withIdentifiers: [device.id]).first
                   ?? discoveredPeripherals[device.id] else { return }
@@ -464,13 +568,38 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     /// fall back to a scan when there's nothing saved / it's out of range.
     public func reconnect() {
         autoConnect = true
-        guard let c = central, c.state == .poweredOn else { start(); return }
+        // One of the two USER gestures that clear an explicit detach; the other is
+        // `connect(_:)`, the re-pair path (track 20260725T2306, T2). No automatic path
+        // reaches either. This arm covers a device that is still SAVED — after `forget()`
+        // there is nothing saved here, which is why the re-pair arm exists.
+        if let saved = Self.loadSaved() {
+            logDetachOutcome(
+                RecordingDeviceStore.recordUserReconnect(
+                    identity: RecordingDeviceIdentity(shape: .bleStream,
+                                                      hardwareToken: saved.id.uuidString)),
+                gesture: "reconnect")
+        }
+        guard let c = central, c.managerState == .poweredOn else { start(); return }
         autoReconnect(userInitiated: true)
     }
 
     /// Drop the current link AND forget the saved device (user-initiated).
     public func forget() {
         autoConnect = false
+        // Persist the EXPLICIT detach into the account-scoped store BEFORE the
+        // device-global keys go, so a relaunch cannot re-arm a device the user detached
+        // (track 20260725T2306, T2). The store returns a typed outcome and it is LOGGED —
+        // `RecordingDeviceStore.current()` genuinely returns nil on the fail-closed paths
+        // (blocked deletion admission, unresolvable durable container), and an explicit
+        // user detach that could not be persisted must not vanish without a trace.
+        if let saved = Self.loadSaved() {
+            logDetachOutcome(
+                RecordingDeviceStore.recordUserDetach(
+                    identity: RecordingDeviceIdentity(shape: .bleStream,
+                                                      hardwareToken: saved.id.uuidString),
+                    displayName: saved.name),
+                gesture: "forget")
+        }
         central?.stopScan()
         if let p = peripheral { central?.cancelPeripheralConnection(p) }
         peripheral = nil
@@ -482,6 +611,28 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
         emitSourceState(.stopped)
     }
 
+    /// Report what the account-scoped device store actually did with a user gesture.
+    /// A failure here is a LOST USER DECISION, so it logs at error level; a no-op reconnect
+    /// (nothing remembered under this account) is ordinary and logs at info.
+    ///
+    /// THE SCOPE NEVER APPEARS HERE. `DoorLog` ships to a remote diagnostic sink in cleartext
+    /// (see `RecordingDeviceLogRedaction`), and `acct-<hash>` is a stable per-account
+    /// correlation token. M1's requirement is that a lost user decision be LOUD, which the
+    /// error level provides on its own; naming the account buys nothing and costs the
+    /// property `DeviceRefDerivation` was built to protect. The error arm is redacted rather
+    /// than trusted, because a Cocoa failure names the containing folder by itself.
+    private func logDetachOutcome(_ outcome: RecordingDeviceDetachOutcome, gesture: String) {
+        switch outcome {
+        case .recorded:
+            log?.info("device \(gesture): recorded")
+        case .noMatchingRecord:
+            log?.info("device \(gesture): no remembered device to update")
+        case .unavailable(let reason):
+            log?.error("device \(gesture): NOT PERSISTED — "
+                + RecordingDeviceLogRedaction.redactingAccountScopes(reason))
+        }
+    }
+
     /// Drop the current link but keep the saved device (so we auto-reconnect).
     public func disconnect() {
         if let p = peripheral { central?.cancelPeripheralConnection(p) }
@@ -490,9 +641,9 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
 
     // MARK: internals
 
-    private var discoveredPeripherals: [UUID: CBPeripheral] = [:]   // bleQueue only
+    private var discoveredPeripherals: [UUID: BLEPeripheral] = [:]   // bleQueue only
 
-    private func bind(_ p: CBPeripheral) { peripheral = p; p.delegate = self }
+    private func bind(_ p: BLEPeripheral) { peripheral = p; p.routeEventsToSink() }
 
     /// The auto-reconnect entry. `userInitiated` distinguishes an explicit "Connect"
     /// gesture (may pair-scan when nothing is saved) from the AUTOMATIC path (central
@@ -501,7 +652,7 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     private func autoReconnect(userInitiated: Bool) {
         // Already linked (or a pending connect is standing)? Leave it alone — a
         // second connect() on top of a restored pending connect is redundant.
-        if let p = peripheral, p.state == .connected || p.state == .connecting { return }
+        if let p = peripheral, p.linkState == .connected || p.linkState == .connecting { return }
         guard let c = central else { return }
         let savedId = UserDefaults.standard.string(forKey: Self.savedKey).flatMap(UUID.init(uuidString:))
         let cached = savedId.flatMap { c.retrievePeripherals(withIdentifiers: [$0]).first }
@@ -549,8 +700,8 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
 
     private func runReacquireScan() {   // bleQueue only
         reacquireScheduled = false
-        guard autoConnect, Self.hasSavedDevice, let c = central, c.state == .poweredOn else { return }
-        if let p = peripheral, p.state == .connected || p.state == .connecting { reacquireBackoff.reset(); return }
+        guard autoConnect, Self.hasSavedDevice, let c = central, c.managerState == .poweredOn else { return }
+        if let p = peripheral, p.linkState == .connected || p.linkState == .connecting { reacquireBackoff.reset(); return }
         // Handle may have appeared → prefer a direct (event-driven) pending connect.
         if let idStr = UserDefaults.standard.string(forKey: Self.savedKey),
            let id = UUID(uuidString: idStr),
@@ -566,7 +717,7 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
         let attemptAtScan = reacquireBackoff.attempt
         bleQueue.asyncAfter(deadline: .now() + reacquireScanWindow) { [weak self] in
             guard let self, self.reacquireBackoff.attempt == attemptAtScan else { return }
-            if let p = self.peripheral, p.state == .connected || p.state == .connecting { return }
+            if let p = self.peripheral, p.linkState == .connected || p.linkState == .connecting { return }
             self.central?.stopScan()
             self.setState(.idle)
             self.scheduleReacquireScan()   // back off further and retry
@@ -579,21 +730,46 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     /// connected path) BEFORE service discovery, so no live frame can slip ahead of
     /// recovered gap audio. A one-shot decision deadline releases the hold if the
     /// storage service / subscription never materializes.
-    private func beginGapSyncWindow() {
+    func beginGapSyncWindow() {
+        // The window state is bleQueue-confined. Asserting it here is what makes the test
+        // seam's queue hop load-bearing instead of decorative.
+        dispatchPrecondition(condition: .onQueue(bleQueue))
         gapSyncHolding = true
         liveHold.removeAll()
+        // Tag AT OPEN. Asking later would ask after the reconnect has already changed the
+        // capture state the question is about.
+        gapWindow = GapRecoveryWindow(interruptedCaptureId: interruptedCaptureAtOpen,
+                                      accountScopeAtOpen: accountScopeAtGapOpen)
         let generationAtStart = gapSyncGeneration
         bleQueue.asyncAfter(deadline: .now() + gapSyncDecisionTimeout) { [weak self] in
             guard let self, self.gapSyncGeneration == generationAtStart, self.gapSyncHolding,
                   self.gapSync == nil else { return }
             self.log?.warn("Omi: storage sync never started within \(Int(self.gapSyncDecisionTimeout))s — releasing live audio")
+            self.closeGapWindow(.decisionDeadlinePassed)
             self.endGapSyncWindow(flush: true)
         }
     }
 
+    /// The ONE place a gap-recovery outcome reaches anybody. Every close path calls this
+    /// with its cause; the window itself decides whether there is anything to say, so no
+    /// call site can invent an outcome and a second close is a no-op by construction.
+    func closeGapWindow(_ cause: GapRecoveryWindow.Close) {
+        guard var window = gapWindow else { return }
+        let outcome = window.close(cause)
+        gapWindow = window
+        guard let outcome else { return }
+        onGapRecoveryOutcome?(GapRecoveryReport(outcome: outcome,
+                                                accountScope: window.accountScopeAtOpen))
+    }
+
     /// Close the hold: optionally flush the held live frames (in arrival order)
     /// into the normal frame path, and drop the engine.
-    private func endGapSyncWindow(flush: Bool) {
+    func endGapSyncWindow(flush: Bool) {
+        // A teardown that reached no engine still owes the user an answer when it
+        // interrupted a conversation. If an engine already finished, its outcome was
+        // published first and this is a no-op.
+        closeGapWindow(.closedWithoutEngine(reason: "the window closed before it was collected"))
+        gapWindow = nil
         gapSyncGeneration &+= 1
         gapSync = nil
         gapSyncHolding = false
@@ -605,7 +781,7 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
 
     /// Begin the ring sync once BOTH storage characteristics are known AND the data
     /// characteristic's subscription is live. Idempotent.
-    private func maybeBeginGapSync(_ p: CBPeripheral) {
+    private func maybeBeginGapSync(_ p: BLEPeripheral) {
         guard gapSyncHolding, gapSync == nil,
               let dataChar = storageDataChar, dataChar.isNotifying,
               storageControlChar != nil else { return }
@@ -628,7 +804,7 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
         }
     }
 
-    private func executeGapSyncCommand(_ cmd: OmiOfflineSyncEngine.Command, on p: CBPeripheral) {
+    private func executeGapSyncCommand(_ cmd: OmiOfflineSyncEngine.Command, on p: BLEPeripheral) {
         switch cmd {
         case .readStatus:
             guard let ch = storageControlChar else { gapSync?.statusResult(nil); return }
@@ -646,7 +822,7 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
         }
     }
 
-    private func writeStorage(_ data: Data, to p: CBPeripheral) {
+    private func writeStorage(_ data: Data, to p: BLEPeripheral) {
         guard let ch = storageDataChar else { return }
         p.writeValue(data, for: ch, type: .withResponse)
     }
@@ -664,6 +840,7 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
         case .failed(let why):
             log?.warn("Omi: offline sync failed (\(why)) — device keeps its unread cache for next reconnect")
         }
+        closeGapWindow(.engineFinished(outcome))
         endGapSyncWindow(flush: true)
     }
 
@@ -702,6 +879,11 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     /// capture UI, whose live-tile gate (`isShowingCapture` → `sourcePresentation`) reads
     /// `device.connectionState`. Leak-gated; the symbol cannot exist in a shipping build.
     public func forceConnectionStateForTests(_ s: DeviceConnectionState) { setState(s) }
+
+    /// Test seam: run the gap-window funnel on ITS OWNING QUEUE, synchronously, so a test
+    /// drives the real functions with their real threading instead of a copy of them.
+    /// Leak-gated; the symbol cannot exist in a shipping build.
+    func runOnBleQueueForTests(_ body: () -> Void) { bleQueue.sync(execute: body) }
     #endif
     private func setDiscovered(_ d: [DiscoveredDevice]) {
         DispatchQueue.main.async {
@@ -741,22 +923,24 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     }
 }
 
-extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
+/// The BLE event sink — every one of these was a `CBCentralManagerDelegate` /
+/// `CBPeripheralDelegate` method verbatim before the seam. The bodies are unchanged; only
+/// the CoreBluetooth types they name moved behind the protocols.
+extension DeviceManager: BLEEventSink {
     /// CB state restoration: iOS relaunched us (in the background) because an event
     /// fired for this central — typically the standing pending connect completing as
     /// the Omi came back into range. Reclaim the peripheral NOW; act on it only once
     /// the central reports poweredOn (nothing may be issued before that).
-    public func centralManager(_ c: CBCentralManager, willRestoreState dict: [String: Any]) {
-        let restored = (dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral]) ?? []
+    public func bleCentral(_ c: BLECentral, willRestore restored: [BLEPeripheral]) {
         let savedId = Self.loadSaved()?.id
         guard let p = restored.first(where: { $0.identifier == savedId }) ?? restored.first else { return }
-        log?.info("Omi: willRestoreState — reclaimed \(p.name ?? "?") (state \(p.state.rawValue))")
-        p.delegate = self
+        log?.info("Omi: willRestoreState — reclaimed \(p.name ?? "?") (state \(p.linkState.rawValue))")
+        p.routeEventsToSink()
         restoredPeripheral = p
     }
 
-    public func centralManagerDidUpdateState(_ c: CBCentralManager) {
-        switch c.state {
+    public func bleCentralDidUpdateState(_ c: BLECentral) {
+        switch c.managerState {
         case .poweredOn:
             if let p = restoredPeripheral {
                 restoredPeripheral = nil
@@ -776,9 +960,9 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     /// Act on the peripheral `willRestoreState` handed back, per the pure policy.
-    private func handleRestoredPeripheral(_ p: CBPeripheral, central c: CBCentralManager) {
+    private func handleRestoredPeripheral(_ p: BLEPeripheral, central c: BLECentral) {
         let restoredState: OmiReconnectPolicy.RestoredPeripheralState
-        switch p.state {
+        switch p.linkState {
         case .connected: restoredState = .connected
         case .connecting: restoredState = .connecting
         default: restoredState = .disconnected
@@ -804,10 +988,9 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
         }
     }
 
-    public func centralManager(_ c: CBCentralManager, didDiscover p: CBPeripheral,
-                               advertisementData: [String: Any], rssi RSSI: NSNumber) {
+    public func bleCentral(_ c: BLECentral, didDiscover p: BLEPeripheral, rssi: Int) {
         discoveredPeripherals[p.identifier] = p
-        let dev = DiscoveredDevice(id: p.identifier, name: p.name ?? "Omi", rssi: RSSI.intValue)
+        let dev = DiscoveredDevice(id: p.identifier, name: p.name ?? "Omi", rssi: rssi)
         DispatchQueue.main.async {
             var list = self.discovered.filter { $0.id != dev.id }
             list.append(dev)
@@ -832,7 +1015,7 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
     /// Set the connecting state for a name (used by the scan auto-connect path).
     private func markConnectingName(_ name: String) { setState(.connecting(name)) }
 
-    public func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) {
+    public func bleCentral(_ c: BLECentral, didConnect p: BLEPeripheral) {
         // A real connection clears the retry backoffs so the NEXT outage starts from the
         // base delay, not the capped ceiling (bleQueue-only state, set here on bleQueue).
         failToConnectAttempts = 0
@@ -846,7 +1029,7 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
         p.discoverServices([OmiUUID.audioService, OmiUUID.batteryService, OmiUUID.storageService])
     }
 
-    public func centralManager(_ c: CBCentralManager, didFailToConnect p: CBPeripheral, error: Error?) {
+    public func bleCentral(_ c: BLECentral, didFailToConnect p: BLEPeripheral, error: Error?) {
         emitSourceState(.failed("connect failed: \(error?.localizedDescription ?? "?")"))
         // A failed ATTEMPT is not a dead end (previously it was: one failed handshake
         // and the Omi never came back until the app was foregrounded). Retry with
@@ -861,20 +1044,20 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
             setState(.disconnected)
             log?.warn("Omi: connect attempt failed (\(error?.localizedDescription ?? "?")) — retrying in \(Int(delay))s (attempt \(self.failToConnectAttempts))")
             bleQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
-                guard let self, self.autoConnect, let c = self.central, c.state == .poweredOn else { return }
-                guard p.state != .connected && p.state != .connecting else { return }
+                guard let self, self.autoConnect, let c = self.central, c.managerState == .poweredOn else { return }
+                guard p.linkState != .connected && p.linkState != .connecting else { return }
                 self.bind(p)
                 c.connect(p, options: nil)
             }
         }
     }
 
-    public func centralManager(_ c: CBCentralManager, didDisconnectPeripheral p: CBPeripheral, error: Error?) {
+    public func bleCentral(_ c: BLECentral, didDisconnect p: BLEPeripheral, error: Error?) {
         setBatteryLevel(nil)          // the level is stale once the link drops
         // Settle any in-flight gap sync FIRST so held live audio is released (in
         // order) into the session before `.stopped` ends it.
-        gapSync?.linkDropped()
-        endGapSyncWindow(flush: true)
+        gapSync?.linkDropped()   // settles synchronously through gapSyncFinished
+        applyLinkDrop()
         audioChar = nil; storageDataChar = nil; storageControlChar = nil
         emitSourceState(.stopped)            // ends the ambient capture session
         // A USER-suspended link (Omi toggled off) must stay down — don't fight the
@@ -895,9 +1078,9 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
         }
     }
 
-    public func peripheral(_ p: CBPeripheral, didDiscoverServices error: Error?) {
+    public func blePeripheral(_ p: BLEPeripheral, didDiscoverServices error: Error?) {
         var hasStorage = false
-        for svc in p.services ?? [] {
+        for svc in p.discoveredServices ?? [] {
             if svc.uuid == OmiUUID.audioService {
                 p.discoverCharacteristics([OmiUUID.audioDataChar, OmiUUID.codecChar], for: svc)
             } else if svc.uuid == OmiUUID.batteryService {
@@ -909,14 +1092,38 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
                 p.discoverCharacteristics([OmiUUID.storageDataChar, OmiUUID.storageControlChar], for: svc)
             }
         }
-        if !hasStorage {
-            log?.info("Omi: no storage service — offline cache sync unavailable, live only")
-            endGapSyncWindow(flush: true)
-        }
+        applyServiceDiscovery(errorDescription: error?.localizedDescription,
+                              sawStorageService: hasStorage)
     }
 
-    public func peripheral(_ p: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-        for ch in service.characteristics ?? [] {
+    /// The gap-window consequences of a service-discovery result, CB-free so the funnel is
+    /// drivable without a radio.
+    func applyServiceDiscovery(errorDescription: String?, sawStorageService: Bool) {
+        guard let cause = GapWindowTrigger.closeCause(discoveryError: errorDescription,
+                                                      sawStorageService: sawStorageService) else { return }
+        if case .deviceHasNoStorage = cause {
+            log?.info("Omi: no storage service — offline cache sync unavailable, live only")
+        } else {
+            log?.warn("Omi: service discovery failed (\(errorDescription ?? "?")) — "
+                + "offline cache unavailable this time; the device keeps it")
+        }
+        closeGapWindow(cause)
+        endGapSyncWindow(flush: true)
+    }
+
+    /// The gap-window consequences of a link drop, CB-free for the same reason.
+    ///
+    /// The caller settles the engine FIRST. `linkDropped()` publishes synchronously, so if
+    /// an engine was running the window is already closed and this close is a no-op by the
+    /// at-most-one rule; if there was no engine, the span was never requested and is still
+    /// on the device.
+    func applyLinkDrop() {
+        closeGapWindow(.linkDroppedBeforeEngine)
+        endGapSyncWindow(flush: true)
+    }
+
+    public func blePeripheral(_ p: BLEPeripheral, didDiscoverCharacteristicsFor service: BLEService, error: Error?) {
+        for ch in service.discoveredCharacteristics ?? [] {
             if ch.uuid == OmiUUID.codecChar { p.readValue(for: ch) }
             if ch.uuid == OmiUUID.batteryLevelChar {
                 p.readValue(for: ch)              // initial level
@@ -946,10 +1153,12 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
 
     /// Storage-char notify state settles here — begin the ring sync once the data
     /// characteristic is actually subscribed (writes before that are dropped by CB).
-    public func peripheral(_ p: CBPeripheral, didUpdateNotificationStateFor ch: CBCharacteristic, error: Error?) {
+    public func blePeripheral(_ p: BLEPeripheral, didUpdateNotificationStateFor ch: BLECharacteristic, error: Error?) {
         if ch.uuid == OmiUUID.storageDataChar {
             if let error {
                 log?.warn("Omi: storage subscribe failed (\(error.localizedDescription)) — skipping offline sync")
+                // The device HAS storage; we could not reach it this time, so it keeps the span.
+                closeGapWindow(.storageUnavailable(reason: error.localizedDescription))
                 endGapSyncWindow(flush: true)
                 return
             }
@@ -957,7 +1166,7 @@ extension DeviceManager: CBCentralManagerDelegate, CBPeripheralDelegate {
         }
     }
 
-    public func peripheral(_ p: CBPeripheral, didUpdateValueFor ch: CBCharacteristic, error: Error?) {
+    public func blePeripheral(_ p: BLEPeripheral, didUpdateValueFor ch: BLECharacteristic, error: Error?) {
         if let error { log?.warn("Omi: didUpdateValue error: \(error.localizedDescription)") }
         // Storage CONTROL char: the ring-status read result (or a read failure).
         if ch.uuid == OmiUUID.storageControlChar {

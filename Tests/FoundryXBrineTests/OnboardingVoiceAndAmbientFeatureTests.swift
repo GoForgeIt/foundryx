@@ -32,7 +32,8 @@ private final class OnboardingVoiceWorld: @unchecked Sendable {
         defaults = UserDefaults(suiteName: name)!
         defaults.removePersistentDomain(forName: name)
     }
-    var shouldPresent: Bool { OnboardingGate.shouldPresent(signedIn: signedIn, completed: completed) }
+    var shouldPresent: Bool { OnboardingGate.shouldPresent(signedIn: signedIn, completed: completed,
+                                                          hasRecordingHistory: false) }
     var voiceState: OwnerVoiceState { OwnerVoiceStore.state(baseDir: baseDir) }
     var ambientEnabled: Bool { defaults.bool(forKey: AmbientPrefs.enabledKey) }
 

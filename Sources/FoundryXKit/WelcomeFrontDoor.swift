@@ -109,12 +109,19 @@ public enum WelcomeFrontDoor {
     /// `enterApp()` marks the welcome seen BEFORE calling this — so a gate entry
     /// can never re-present the welcome (`welcomeSeen == true` ⇒ never
     /// `.standaloneWelcome`, and any onboarding skips its welcome step).
+    /// `hasRecordingHistory`: does this account already have voice notes? An account with
+    /// its own archive has demonstrably been onboarded, whatever its completion flag says
+    /// (see `OnboardingGate.shouldPresent`) — a restored backup or an unmigrated preference
+    /// must not walk a returning user through first-run in front of their own history.
     public static func firstRunPresentation(letStraightIn: Bool,
                                             onboardingCompleted: Bool,
-                                            welcomeSeen: Bool) -> FirstRunPresentation {
+                                            welcomeSeen: Bool,
+                                            hasRecordingHistory: Bool) -> FirstRunPresentation {
         // Honor "take me straight in" — no ceremony of any kind.
         if letStraightIn { return .none }
-        if OnboardingGate.shouldPresent(signedIn: true, completed: onboardingCompleted) {
+        if OnboardingGate.shouldPresent(signedIn: true,
+                                        completed: onboardingCompleted,
+                                        hasRecordingHistory: hasRecordingHistory) {
             return .onboarding(skipWelcome: welcomeSeen)
         }
         if WelcomeGate.shouldPresent(signedIn: true,
@@ -136,6 +143,10 @@ public enum WelcomeFrontDoor {
             onboardingCompleted: AccountPreferences.value(
                 AccountPreferenceCatalog.onboardingCompleted,
                 default: false),
-            welcomeSeen: WelcomePrefs.seen())
+            welcomeSeen: WelcomePrefs.seen(),
+            // The account-scoped captures root IS this account's archive, so a signed-in
+            // owner is measured against their own history and never another account's.
+            hasRecordingHistory: !CaptureLibrary.isEmpty(
+                baseDir: CaptureWAL.documentsCaptures()))
     }
 }

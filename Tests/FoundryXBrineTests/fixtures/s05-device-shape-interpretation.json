@@ -1,0 +1,43 @@
+{
+  "_about": [
+    "T5 owns this artifact (plan.md, task T5). S05's Given says 'device A is the shape the",
+    "shipped source ordering ranks last and device B is the shape it ranks first'. The frozen",
+    "spec does not say ranks last AMONG WHAT, and the answer changes the scenario: taken over",
+    "every CaptureSourceCategory the last is phoneMic, which is the handset's own microphone",
+    "and not a device that can be remembered, substituted for, or handed off to at all.",
+    "",
+    "The reading recorded here is 'last among the REMEMBERABLE EXTERNAL devices'. It is",
+    "written down rather than argued in a comment so the scenario FAILS if the shipped",
+    "ordering changes underneath it, instead of quietly testing a different pair of shapes."
+  ],
+  "orderingSource": "CaptureSourceCategory.activePriority",
+  "rememberableOrder": {
+    "omi": 0,
+    "appleWatch": 1,
+    "bluetoothMic": 2
+  },
+  "notRememberable": {
+    "phoneMic": {
+      "activePriority": 3,
+      "why": [
+        "The handset's own built-in microphone. It is not discovered, not paired, not",
+        "detachable, and cannot be the subject of 'another device substitutes' — every",
+        "handset has exactly one and it is always present. Reading S05's 'ranks last' as",
+        "phoneMic would make device A the phone, and the scenario would prove nothing about",
+        "substitution between recording devices."
+      ]
+    }
+  },
+  "s05": {
+    "deviceA": {
+      "category": "bluetoothMic",
+      "shape": "audioRoute",
+      "why": "last among the rememberable external devices"
+    },
+    "deviceB": {
+      "category": "omi",
+      "shape": "bleStream",
+      "why": "first — and the vendor-shaped one, which is the point: it must not win"
+    }
+  }
+}

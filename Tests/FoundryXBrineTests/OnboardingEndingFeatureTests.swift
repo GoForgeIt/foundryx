@@ -334,7 +334,8 @@ private enum OnboardingEndingSteps {
             },
             defineStep("the app launches") { ctx, _, _ in return ctx },
             defineCheck("the onboarding flow is not presented") { _, _, _ in
-                guard !OnboardingGate.shouldPresent(signedIn: true, completed: w.completed) else {
+                guard !OnboardingGate.shouldPresent(signedIn: true, completed: w.completed,
+                                                 hasRecordingHistory: false) else {
                     throw BrineStepError("the finished flow was presented again")
                 }
             },

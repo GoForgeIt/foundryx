@@ -72,11 +72,11 @@ final class OnboardingVoiceTests: XCTestCase {
 
     // Scenario: onboarding appears once after first sign-in / never re-prompted
     func testGatePresentsExactlyOnceAfterSignIn() {
-        XCTAssertFalse(OnboardingGate.shouldPresent(signedIn: false, completed: false),
+        XCTAssertFalse(OnboardingGate.shouldPresent(signedIn: false, completed: false, hasRecordingHistory: false),
                        "never before sign-in")
-        XCTAssertTrue(OnboardingGate.shouldPresent(signedIn: true, completed: false),
+        XCTAssertTrue(OnboardingGate.shouldPresent(signedIn: true, completed: false, hasRecordingHistory: false),
                       "first signed-in launch presents")
-        XCTAssertFalse(OnboardingGate.shouldPresent(signedIn: true, completed: true),
+        XCTAssertFalse(OnboardingGate.shouldPresent(signedIn: true, completed: true, hasRecordingHistory: false),
                        "completed or dismissed → never again")
     }
 }

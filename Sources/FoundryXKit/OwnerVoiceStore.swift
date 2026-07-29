@@ -99,7 +99,23 @@ public enum OwnerVoiceStore {
 /// The pure first-run rule for the onboarding flow (mirrors RootGate's style):
 /// present exactly once, only after sign-in, never again once completed/dismissed.
 public enum OnboardingGate {
-    public static func shouldPresent(signedIn: Bool, completed: Bool) -> Bool {
-        signedIn && !completed
+    /// AN ACCOUNT THAT ALREADY HAS RECORDING HISTORY HAS BEEN ONBOARDED (track
+    /// 20260725T2306, T5 / spec R5, S07).
+    ///
+    /// The completion flag is a per-account preference. An account whose archive is full of
+    /// conversations but whose flag reads its default — a fresh install restored from a
+    /// backup, a preference that never migrated, a sign-in on a second handset — would be
+    /// walked through device onboarding again, in front of its own history. Recording history
+    /// is the durable evidence that this account has already connected something and used it,
+    /// and it is stronger evidence than the flag because it is what the user can see.
+    ///
+    /// HISTORY OF EVERY ERA COUNTS THE SAME. A user whose conversations were all recorded
+    /// AFTER device-agnostic support shipped is not a new user, and neither is one whose
+    /// conversations all predate it. Discriminating by era here is precisely how S07's user
+    /// would get re-onboarded.
+    public static func shouldPresent(signedIn: Bool,
+                                     completed: Bool,
+                                     hasRecordingHistory: Bool) -> Bool {
+        signedIn && !completed && !hasRecordingHistory
     }
 }

@@ -79,7 +79,8 @@ private final class WelcomeFrontDoorWorld: @unchecked Sendable {
         firstRun = WelcomeFrontDoor.firstRunPresentation(
             letStraightIn: WelcomePrefs.letStraightIn(defaults: defaults),
             onboardingCompleted: onboardingCompleted,
-            welcomeSeen: WelcomePrefs.seen(defaults: defaults))
+            welcomeSeen: WelcomePrefs.seen(defaults: defaults),
+            hasRecordingHistory: false)
         destination = RootGate.destination(
             signedIn: signedIn,
             splashElapsed: entered,

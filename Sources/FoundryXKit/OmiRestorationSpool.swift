@@ -21,6 +21,22 @@ public final class OmiRestorationSpool: @unchecked Sendable {
     private let log: DoorLog?
     private let silenceGap: TimeInterval
     private let isPaused: () -> Bool
+    /// WHICH device this spool is recording from, resolved by the composition root
+    /// (`OmiRestorationComposition`). The spool never discovers it: during a background
+    /// relaunch there may be no resolvable account scope and no remembered device, and a
+    /// type that discovers its own identity cannot say "I could not" -- it can only guess.
+    ///
+    /// THREE STATES, AND THE DIFFERENCE MATTERS.
+    ///   * `nil`      — this spool was not built by the restoration composition and was
+    ///                  never offered a context. Behaves exactly as shipped: it records,
+    ///                  and writes no device record. The plan scopes the refusal below to
+    ///                  "during background restoration"; a directly-constructed spool is
+    ///                  not that, and silently making it stop recording would be a
+    ///                  behaviour change nobody asked for.
+    ///   * `.resolved`— record, and write the device record.
+    ///   * `.blocked` — somebody who DID look could not name the device or the owning
+    ///                  account. That is the case the plan says to defer.
+    private let deviceContext: CaptureDeviceContextResolution?
     private var wal: CaptureWAL?          // io queue only
     private var framesSpooled = 0         // io queue only
     private var accountExposureClosed = false // io queue only
@@ -32,7 +48,8 @@ public final class OmiRestorationSpool: @unchecked Sendable {
                 silenceGap: TimeInterval = CaptureSettings.silenceGapSeconds,
                 paused: @escaping () -> Bool = { true },
                 binding: CaptureAccountScope.AccountBinding? = nil,
-                executor: DispatchQueue? = nil) {
+                executor: DispatchQueue? = nil,
+                deviceContext: CaptureDeviceContextResolution? = nil) {
         let queue = DispatchQueue(
             label: "foundryx.omi-restoration-spool",
             target: executor)
@@ -42,6 +59,7 @@ public final class OmiRestorationSpool: @unchecked Sendable {
         self.log = log
         self.silenceGap = silenceGap
         self.isPaused = paused
+        self.deviceContext = deviceContext
         queue.setSpecific(key: ioKey, value: true)
     }
 
@@ -52,7 +70,8 @@ public final class OmiRestorationSpool: @unchecked Sendable {
         executor: DispatchQueue,
         log: DoorLog? = nil,
         silenceGap: TimeInterval = CaptureSettings.silenceGapSeconds,
-        paused: @escaping () -> Bool = { true }
+        paused: @escaping () -> Bool = { true },
+        deviceContext: CaptureDeviceContextResolution? = nil
     ) {
         self.init(
             baseDir: root,
@@ -60,7 +79,8 @@ public final class OmiRestorationSpool: @unchecked Sendable {
             silenceGap: silenceGap,
             paused: paused,
             binding: binding,
-            executor: executor)
+            executor: executor,
+            deviceContext: deviceContext)
     }
 
     /// Wire this spool as the source's sink. The later CaptureManager takeover
@@ -192,9 +212,24 @@ public final class OmiRestorationSpool: @unchecked Sendable {
             log?.info("omi-restore: capture is user-paused — holding the link, not recording")
             return
         }
+        // DEFER RATHER THAN GUESS. The composition root LOOKED and could not say which
+        // device — or whose account — this stream belongs to. Recording it anyway would
+        // write bytes into an archive with no honest way to attribute them, and worse,
+        // with no resolvable owner it could land in the wrong account's container. A
+        // placeholder record is indistinguishable from a real one for the rest of the
+        // capture's life. The link stays up; nothing is written.
+        if case .blocked(let reason) = deviceContext {
+            log?.error("omi-restore: NOT recording -- \(reason)")
+            return
+        }
+        let context = deviceContext?.context
         // Resume the conversation the disconnect interrupted when we're inside the
-        // silence gap (the SAME rule + code CaptureManager uses); else mint fresh.
-        let resumed = CaptureManager.resumableCaptureId(baseDir: baseDir, silenceGap: silenceGap)
+        // silence gap (the SAME rule + code CaptureManager uses); else mint fresh. The
+        // device identity narrows it: this spool may only continue ITS OWN device's
+        // conversation.
+        let resumed = CaptureManager.resumableCaptureId(baseDir: baseDir,
+                                                        silenceGap: silenceGap,
+                                                        resumingDevice: context?.identity)
         let id = resumed ?? CaptureManager.newCaptureId()
         // Spool-only WAL: placeholder target (it never uploads — CaptureManager's
         // drain owns sync after handover).
@@ -213,6 +248,12 @@ public final class OmiRestorationSpool: @unchecked Sendable {
             _ = ConversationCardStore.recordStart(captureId: id, baseDir: baseDir, startedAt: startSecs)
             try? Data(CaptureSourceKind.omi.rawValue.utf8)
                 .write(to: CaptureManager.sourceMarkerURL(id, baseDir: baseDir), options: [.atomic])
+            // The SECOND capture-creation site. Both sites write the device record, or a
+            // conversation's attribution would depend on which of them happened to open it.
+            if let context,
+               !CaptureDeviceSidecar.write(context, captureId: id, baseDir: baseDir) {
+                log?.error("omi-restore: capture \(id) opened but its device record could not be written")
+            }
             CaptureEventLog.append(.captureStarted, captureId: id,
                                    payload: ["source": CaptureSourceKind.omi.rawValue,
                                              "mode": "background-restoration"], baseDir: baseDir)

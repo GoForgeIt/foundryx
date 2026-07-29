@@ -673,6 +673,43 @@ private struct MainTabs: View {
         // compiled out of a plain Release build entirely.
         StressChurn.installIfRequested(manager: mgr)
         #endif
+        // WHICH DEVICE this manager records from. Resolved HERE, at the composition root,
+        // by the same Kit factory the background-restoration bootstrap uses — so both
+        // capture-creation sites write the same device record and neither is asked to
+        // discover an identity it does not possess. A blocked resolution writes no record
+        // at all rather than a placeholder.
+        // ASK WHAT IS RECORDING, not what is remembered. A phone-mic conversation made while
+        // an Omi is paired is a HANDSET recording; attributing it to the Omi writes a false
+        // recorder into the archive permanently. The manager HANDS IN what is recording (it
+        // is the authority on that), so this closure has nothing to reach back for and
+        // nothing to default — see `CaptureManager.captureDeviceContext`.
+        mgr.captureDeviceContext = { recording in
+            let binding = CaptureAccountScope.currentAccountBinding()
+            return OmiRestorationComposition.resolveDeviceContext(
+                binding: binding,
+                // The ACCOUNT-SCOPED store answers which device is active, chosen only among
+                // what the transport currently has attached (T5, S05). The legacy
+                // device-global pairing is now an input to that store's migration, not the
+                // answer itself.
+                activeDevice: OmiRestorationComposition.activeExternalDevice(
+                    binding: binding, attached: dm.saved),
+                recording: recording)
+        }
+        // N7: WHICH ACCOUNT a gap-recovery outcome belongs to. `onGapRecoveryOutcome` is NOT
+        // gated by the account-exposure close while `onState` IS, so an outcome can arrive
+        // after the account door has shut. Pushing the scope the window opened under is what
+        // lets `GapRecoveryRendering.decide` withhold it instead of rendering one person's
+        // recording history into the next person's timeline.
+        dm.setAccountScopeForGapOutcomes(accountBinding?.scope)
+        dm.onGapRecoveryOutcome = { report in
+            switch GapRecoveryRendering.decide(
+                report, currentScope: CaptureAccountScope.currentAccountBinding()?.scope) {
+            case .show(let line):
+                log.info("gap recovery: \(line)")
+            case .withheld(let reason):
+                log.info("gap recovery: withheld — \(reason)")
+            }
+        }
         // Omi hardware button: a DOUBLE-click pauses/resumes the current recording — the
         // same action as the on-screen Pause. Fires only if the paired Omi firmware exposes
         // the button service (see DeviceManager.OmiUUID.buttonService).
@@ -821,6 +858,19 @@ private struct MainTabs: View {
         // auto-reconnect (truly leaves the capture surface); on ⇒ resume the connect flow.
         reg.onSourceEnabledChanged = { [weak dm] category, on in
             if category == .omi { dm?.setEnabled(on) }
+        }
+        // WHICH ROUTE, when the phone-mic path is really a Bluetooth recorder (T5, S01). The
+        // registry owns the active source and is only built here, so the wiring lives here
+        // rather than beside the rest of the capture composition. Without it, every
+        // conversation made with a Bluetooth audio-route recorder is attributed to "Phone" —
+        // the device the user connected never appears against its own recordings.
+        mgr.activeAudioRoute = { [weak reg] in
+            guard let reg,
+                  let active = reg.activeSourceId,
+                  let source = reg.sources.first(where: { $0.id == active }),
+                  source.category == .bluetoothMic,
+                  let uid = source.routeUID else { return nil }
+            return (token: uid, displayName: source.displayName)
         }
         _sources = StateObject(wrappedValue: reg)
         if let accountBinding {

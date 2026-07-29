@@ -1,0 +1,11 @@
+Pinned copies of the frozen track artifacts for track
+20260725T2306_device_agnostic_recording_source (foundryx-hearth).
+
+Source repo:  ~/Development/foundryx-hearth
+Source path:  tracks/20260725T2306_device_agnostic_recording_source/
+spec.md is the R6 frozen spec; plan.md is the R13 satisfied plan.
+Copied at:    2026-07-28 (T0 of the implementation)
+
+sha256:
+dfb33ad307f7c2a098f01615b63696afc06dcc6d908dab32556baf2f2a25ec49  spec.md
+96256fb5bbcb7734f88e453dd6356dfc5b5928e27b569b000578ae72dc194cf8  plan.md

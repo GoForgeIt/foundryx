@@ -1341,12 +1341,82 @@ public final class CaptureManager: ObservableObject {
     /// so the silence-boundary check compares on one clock). Non-nil ⇒ `active` is SUSPENDED,
     /// not ended: a reconnect before `SilenceSegmenter.defaultSilenceGap` of voiced silence
     /// resumes it (same captureId), else `resolveReconnectGrace` ends it at the real boundary.
-    private var suspendedSession: (wal: CaptureWAL, at: TimeInterval)?
+    /// WHICH device this manager is recording from, supplied by the composition root.
+    ///
+    /// Read at each capture-creation site and at each resume decision. Defaulted to
+    /// `blocked` so every existing construction keeps its exact shipped behaviour: no
+    /// device record is written and resume falls through to the legacy source-marker arm.
+    /// The app sets it (`App/RootView.swift`); nothing inside `CaptureManager` discovers it.
+    ///
+    /// WHAT IS RECORDING IS A PARAMETER, NOT SOMETHING THE CLOSURE FETCHES (review round 9,
+    /// L4). The first shape of this closure took nothing and the composition root reached
+    /// back into the manager for `recordingSourceForAttribution` — through a `weak` capture,
+    /// because the closure is stored ON the manager. That forced the call site to supply a
+    /// fallback for "the manager is gone", i.e. to give a DEFAULT to the one parameter
+    /// `resolveDeviceContext` deliberately declares without one, whose fallback value
+    /// (`.externalStream`) is exactly the wrong answer for the bug that parameter exists to
+    /// prevent. Handing the source IN removes the question: the manager is the authority on
+    /// what is recording, so the manager is what says it, and no call site has anything left
+    /// to default.
+    public var captureDeviceContext: (CaptureRecordingSource) -> CaptureDeviceContextResolution = { _ in
+        .blocked(reason: "no device context was supplied to this capture manager")
+    }
+
+    /// WHAT IS ACTUALLY RECORDING right now, for the composition root to attribute by.
+    ///
+    /// This is the question the archive needs answered. `isRecordingMic` is the manager's own
+    /// authority on it — it is what the phone-mic arm of `onSourceState` keys off, what the
+    /// live surface's "Phone" label keys off, and what `endSession`'s usage token keys off —
+    /// so reading it here keeps the durable record agreeing with all three instead of with
+    /// the handset's address book.
+    /// The Bluetooth audio INPUT ROUTE the handset is recording THROUGH, when it is one.
+    ///
+    /// WHY THIS SEAM EXISTS (T5, S01). A Bluetooth audio-route recorder records through the
+    /// handset's phone-mic path — `captureSource == .phoneMic`, `isRecordingMic == true` —
+    /// which is indistinguishable, from inside `CaptureManager`, from the handset's own
+    /// built-in microphone. So every conversation made with a Field Recorder was attributed
+    /// to "Phone": the device the user connected, whose name is on the row they tapped, never
+    /// appeared against its own recordings. The registry is what knows which route is active,
+    /// and the registry lives outside this type, so the composition root hands it in.
+    ///
+    /// `nil` means the handset's OWN microphone, which is the honest default: a manager that
+    /// guessed a route here would attribute a plain Record-button conversation to whatever
+    /// happened to be paired, which is the bug T4 paid for.
+    public var activeAudioRoute: () -> (token: String, displayName: String)? = { nil }
+
+    public var recordingSourceForAttribution: CaptureRecordingSource {
+        if isRecordingMic || captureSource == .phoneMic {
+            if let route = activeAudioRoute() {
+                return .handsetAudioRoute(token: route.token, displayName: route.displayName)
+            }
+            return .handsetMicrophone
+        }
+        return .externalStream
+    }
+
+    /// The identity to narrow a resume by, or nil when the composition root could not
+    /// resolve one (in which case the shipped, un-narrowed rule applies).
+    private var resumingDeviceIdentity: RecordingDeviceIdentity? {
+        captureDeviceContext(recordingSourceForAttribution).context?.identity
+    }
+
+    private var suspendedSession: (wal: CaptureWAL, at: TimeInterval)? {
+        // `didSet` rather than a push at each of the six assignment sites: the same reason
+        // the gap window enumerates its close causes instead of counting call sites — a
+        // seventh assignment must not be able to skip the notification.
+        didSet { onInterruptedCaptureChanged?(suspendedSession?.wal.captureId) }
+    }
+
+    /// Pushed whenever the conversation a device drop interrupted changes. `DeviceManager`
+    /// holds the value as a snapshot it can read on its own queue; this side is
+    /// `@MainActor`, so it must PUSH rather than be read (track 20260725T2306, T3).
+    public var onInterruptedCaptureChanged: (@Sendable (String?) -> Void)?
 
     /// True while an Omi conversation is being HELD open awaiting a possible reconnect (a
     /// transient BLE drop inside the grace window). The capture surface can surface a
     /// "reconnecting…" state; a reconnect within the window resumes the same conversation.
     public var isAwaitingReconnect: Bool { suspendedSession != nil }
+
 
     /// Resolve a pending Omi reconnect-grace hold: end the held conversation only when a REAL
     /// conversation boundary has been reached — `SilenceSegmenter.defaultSilenceGap` of voiced
@@ -2800,8 +2870,10 @@ public final class CaptureManager: ObservableObject {
                 // >grace link gap used to fragment one meeting into many. Ambient Omi only;
                 // the `isRecordingMic` branch above owns the phone-mic path (unchanged).
                 if captureSource == .omi,
-                   let resumeId = CaptureManager.resumableCaptureId(baseDir: baseDir,
-                                                                    silenceGap: silenceGapSeconds),
+                   let resumeId = CaptureManager.resumableCaptureId(
+                       baseDir: baseDir,
+                       silenceGap: silenceGapSeconds,
+                       resumingDevice: resumingDeviceIdentity),
                    resumeSession(captureId: resumeId) {
                     // resumed the same conversation — no new id minted
                 } else if isPaused {
@@ -3919,6 +3991,14 @@ public final class CaptureManager: ObservableObject {
         // recording (they share the `omi-` id prefix). Atomic; best-effort.
         try? Data(captureSource.rawValue.utf8)
             .write(to: Self.sourceMarkerURL(id, baseDir: baseDir), options: [.atomic])
+        // WHICH device, not just which kind. The FIRST of the two capture-creation sites
+        // (the other is OmiRestorationSpool's background open); both write it, or a
+        // conversation's attribution would depend on which one happened to open it.
+        // A blocked context writes NOTHING — never a placeholder.
+        if let deviceContext = captureDeviceContext(recordingSourceForAttribution).context,
+           !CaptureDeviceSidecar.write(deviceContext, captureId: id, baseDir: baseDir) {
+            log?.error("capture \(id): opened but its device record could not be written")
+        }
         ConversationCardStore.recordStart(captureId: id, baseDir: baseDir, startedAt: startSecs)
         invalidateSidecar(id)   // card.json may have just been created (cardExists)
         // Append-only event log (track 20260705T1100, decision #3): the durable
@@ -5228,9 +5308,15 @@ public final class CaptureManager: ObservableObject {
     /// absent, never a deliberate boundary. New builds tag the source + deliberate-end on
     /// disk; a legacy untagged capture is treated conservatively—resumable only if it never
     /// got any end (`endedAt == nil`).
+    /// `resumingDevice` narrows the answer to captures THIS device recorded. It applies
+    /// only where the answer is known — a capture carrying a device record that names a
+    /// different device is skipped; one with no record is judged by the shipped rules
+    /// below, unchanged. See `CaptureDeviceSidecar.mayContinue` for why the widening is
+    /// gated on the record existing rather than on the device being supplied.
     public nonisolated static func resumableCaptureId(baseDir: URL,
                                                       now: Date = Date(),
-                                                      silenceGap: TimeInterval) -> String? {
+                                                      silenceGap: TimeInterval,
+                                                      resumingDevice: RecordingDeviceIdentity? = nil) -> String? {
         let fm = FileManager.default
         // Enumerate NAMES once (no property prefetch), newest-first by the id's embedded
         // start time (prefix-agnostic; ties fall back to name) — mirrors seedWarmListRows.
@@ -5268,6 +5354,12 @@ public final class CaptureManager: ObservableObject {
             if TranscriptCacheStore.isConfirmedInLore(captureId: id, baseDir: baseDir) { continue }
             let marks = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
             if marks.contains(where: { $0.hasPrefix(".folding-") }) { continue }
+            // Device gate: a capture that RECORDS which device made it may only be
+            // continued by that device. Without this, a second remembered device
+            // reconnecting inside the silence gap would append its audio to the first
+            // device's conversation and the archive's attribution would be a lie.
+            if !CaptureDeviceSidecar.mayContinue(captureId: id, baseDir: baseDir,
+                                                 device: resumingDevice) { continue }
             // Source gate: only an AMBIENT/Omi capture may be resumed by an Omi reconnect.
             let tag = capturedSourceOnDisk(id, baseDir: baseDir)
             if let tag, tag != CaptureSourceKind.omi.rawValue { continue }

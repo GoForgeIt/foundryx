@@ -1,0 +1,268 @@
+{
+  "_about": [
+    "T0 artifact of track 20260725T2306_device_agnostic_recording_source.",
+    "Keyed by EXACT normalized scenario name -> EXACT normalized Then / post-Then And text.",
+    "`required` repeats the plan ledger's Required-Then column; `owner`/`deps` repeat its",
+    "Sole-owner and Required-dependencies columns. ThenCapabilityMapTests re-derives all three",
+    "from the pinned spec.md / plan.md and fails if this file and those artifacts disagree in",
+    "either direction. Normalization = trim + collapse internal whitespace runs to one space."
+  ],
+  "_tasks_about": [
+    "L2. `taskCapabilities` and `taskAssertions` are transcribed from the plan's own",
+    "capability-check script (plan.md, task T0). They are declared INDEPENDENTLY of the",
+    "per-scenario `owner` column on purpose: deriving `taskAssertions` from `owner` would",
+    "make the ownership check a tautology, and a reviewer mutation that reassigned S08's",
+    "owner consistently in BOTH the ledger and this map survived green without them."
+  ],
+  "taskCapabilities": {
+    "T1": ["rendered-list", "rendered-refusal", "rendered-capabilities", "device-availability", "reconnect"],
+    "T2": ["pairing-migration", "account-isolation", "active-selection", "preference-handoff", "detach-persistence", "account-correlation-resistance"],
+    "T3": ["gap-copy", "resume-same-capture"],
+    "T4": ["capture-finalize", "capture-integrity", "archive-attribution"],
+    "T5": ["rendered-list", "rendered-refusal", "rendered-capabilities", "rendered-history", "onboarding-suppression", "both-status-surfaces"],
+    "T6": ["bounded-liveness", "active-device-liveness", "last-heard-age", "malformed-evidence-recovery"],
+    "T7": ["privacy-status-handoff"],
+    "T8": ["zero-agent-actions", "zero-notifications", "zero-live-activity", "zero-widget", "source-switch-silence", "authorized-agent-action", "cause-complete-agent-actions"]
+  },
+  "taskAssertions": {
+    "T2": ["S08"],
+    "T4": ["S04"],
+    "T5": ["S01", "S02", "S03", "S05", "S06", "S07"],
+    "T6": ["S09", "S10", "S11", "S12", "S13"],
+    "T7": ["S14"],
+    "T8": ["S15", "S16", "S17", "P01", "P02"]
+  },
+  "scenarios": [
+    {
+      "id": "S01",
+      "name": "each device shape connects through the one experience",
+      "owner": "T5",
+      "deps": ["T1", "T4"],
+      "required": ["rendered-list", "capture-finalize", "archive-attribution"],
+      "thens": {
+        "the rendered app has exactly one recording-device connection affordance": ["rendered-list"],
+        "all devices are visible together without a vendor or family choice": ["rendered-list"],
+        "no reachable list control hides any device by family": ["rendered-list"],
+        "the production capture path finalizes the conversation": ["capture-finalize"],
+        "the timeline attributes it to \"<name>\"": ["archive-attribution"],
+        "generic device copy names no vendor": ["rendered-list"]
+      }
+    },
+    {
+      "id": "S02",
+      "name": "unusable audio is refused without corrupting capture",
+      "owner": "T5",
+      "deps": ["T1", "T4"],
+      "required": ["rendered-refusal", "capture-integrity", "device-availability"],
+      "thens": {
+        "the device is refused with an actionable reason": ["rendered-refusal"],
+        "no unusable audio is persisted": ["capture-integrity"],
+        "any previously valid audio finalizes normally": ["capture-integrity"],
+        "other eligible devices remain available to connect": ["device-availability"]
+      }
+    },
+    {
+      "id": "S03",
+      "name": "absent capabilities are not invented",
+      "owner": "T5",
+      "deps": ["T1", "T3"],
+      "required": ["rendered-capabilities", "gap-copy"],
+      "thens": {
+        "the device surface shows both capabilities as unavailable": ["rendered-capabilities"],
+        "it shows no fabricated firmware value": ["rendered-capabilities"],
+        "the surface says that the gap audio was not recoverable": ["gap-copy"]
+      }
+    },
+    {
+      "id": "S04",
+      "name": "system reconnect preserves continuity while user detach stays detached",
+      "owner": "T4",
+      "deps": ["T1", "T2", "T3"],
+      "required": ["reconnect", "resume-same-capture", "detach-persistence"],
+      "thens": {
+        "the device reconnects without reopening the app": ["reconnect"],
+        "capture resumes the same conversation": ["resume-same-capture"],
+        "it remains detached until I reconnect it": ["detach-persistence"]
+      }
+    },
+    {
+      "id": "S05",
+      "name": "another device substitutes without vendor priority",
+      "owner": "T5",
+      "deps": ["T1", "T2", "T4"],
+      "required": ["active-selection", "preference-handoff", "archive-attribution"],
+      "thens": {
+        "device A stays active while both devices are ready": ["active-selection"],
+        "at most one device remains active": ["active-selection"],
+        "any hand-off follows preference and readiness rather than vendor identity": ["preference-handoff"],
+        "new audio is attributed to device B": ["archive-attribution"],
+        "archived audio remains attributed to device A": ["archive-attribution"]
+      }
+    },
+    {
+      "id": "S06",
+      "name": "legacy pairing and history survive an account-scoped upgrade",
+      "owner": "T5",
+      "deps": ["T2", "T4"],
+      "required": ["pairing-migration", "rendered-history", "account-isolation"],
+      "thens": {
+        "the device remains paired and active without a physical re-pair": ["pairing-migration"],
+        "the legacy history remains visible without onboarding": ["rendered-history"],
+        "it cannot see or activate the first account's device": ["account-isolation"]
+      }
+    },
+    {
+      "id": "S07",
+      "name": "device-agnostic history does not trigger onboarding",
+      "owner": "T5",
+      "deps": ["T2", "T4"],
+      "required": ["rendered-history", "onboarding-suppression"],
+      "thens": {
+        "its recording history remains visible": ["rendered-history"],
+        "device onboarding does not run": ["onboarding-suppression"]
+      }
+    },
+    {
+      "id": "S08",
+      "name": "signed-out upgrade does not leak or discard legacy pairing",
+      "owner": "T2",
+      "deps": [],
+      "required": ["pairing-migration", "account-isolation"],
+      "thens": {
+        "the device is retained without assignment to an account": ["pairing-migration", "account-isolation"],
+        "the device is restored without a physical re-pair": ["pairing-migration"]
+      }
+    },
+    {
+      "id": "S09",
+      "name": "active-device failure is visible within the bound",
+      "owner": "T6",
+      "deps": ["T5"],
+      "required": ["bounded-liveness", "both-status-surfaces", "last-heard-age"],
+      "thens": {
+        "within three minutes the FoundryX device surface shows \"<state>\"": ["bounded-liveness", "both-status-surfaces"],
+        "within three minutes the ambient-status surface shows \"<state>\"": ["bounded-liveness", "both-status-surfaces"],
+        "both surfaces show how long since usable audio was last heard": ["last-heard-age"]
+      }
+    },
+    {
+      "id": "S10",
+      "name": "a device that has never delivered usable audio is never healthy",
+      "owner": "T6",
+      "deps": ["T5"],
+      "required": ["bounded-liveness", "both-status-surfaces", "last-heard-age"],
+      "thens": {
+        "neither status surface shows healthy for as long as that remains true": ["both-status-surfaces"],
+        "within three minutes both status surfaces show stale": ["bounded-liveness", "both-status-surfaces"],
+        "the last-heard age both surfaces show runs from that attach": ["last-heard-age"],
+        "both status surfaces show healthy within three minutes": ["bounded-liveness", "both-status-surfaces"]
+      }
+    },
+    {
+      "id": "S11",
+      "name": "an idle remembered device cannot answer for the active device",
+      "owner": "T6",
+      "deps": ["T2", "T5"],
+      "required": ["active-device-liveness", "both-status-surfaces"],
+      "thens": {
+        "device A remains healthy at both status surfaces": ["active-device-liveness", "both-status-surfaces"],
+        "both status surfaces report device A stale within three minutes": ["active-device-liveness", "both-status-surfaces"],
+        "device A remains active and healthy at both status surfaces": ["active-device-liveness", "both-status-surfaces"]
+      }
+    },
+    {
+      "id": "S12",
+      "name": "no device and no active device remain distinct",
+      "owner": "T6",
+      "deps": ["T2", "T5"],
+      "required": ["bounded-liveness", "both-status-surfaces"],
+      "thens": {
+        "within three minutes both status surfaces show devices remembered but none active": ["bounded-liveness", "both-status-surfaces"],
+        "within three minutes both status surfaces show no device": ["bounded-liveness", "both-status-surfaces"]
+      }
+    },
+    {
+      "id": "S13",
+      "name": "later valid activity recovers from bad status evidence",
+      "owner": "T6",
+      "deps": ["T5"],
+      "required": ["malformed-evidence-recovery", "both-status-surfaces"],
+      "thens": {
+        "neither status surface shows healthy": ["malformed-evidence-recovery", "both-status-surfaces"],
+        "both status surfaces show healthy within three minutes": ["malformed-evidence-recovery", "both-status-surfaces"]
+      }
+    },
+    {
+      "id": "S14",
+      "name": "personal device identity does not cross the handset boundary",
+      "owner": "T7",
+      "deps": ["T2"],
+      "required": ["privacy-status-handoff", "account-correlation-resistance"],
+      "thens": {
+        "the outbound observation contains no display name": ["privacy-status-handoff"],
+        "it contains no raw hardware identifier or diagnostic free text": ["privacy-status-handoff"],
+        "another account cannot correlate the device to its own device status": ["account-correlation-resistance"]
+      }
+    },
+    {
+      "id": "S15",
+      "name": "a device transition alone makes nothing speak unprompted",
+      "owner": "T8",
+      "deps": ["T6"],
+      "required": ["zero-agent-actions", "zero-notifications", "zero-live-activity", "zero-widget"],
+      "thens": {
+        "the production agent-dispatch seam receives zero agent actions": ["zero-agent-actions"],
+        "the production notification-posting seam receives zero posts": ["zero-notifications"],
+        "the production live-activity seam receives no creation, update, or alert for that transition": ["zero-live-activity"],
+        "no widget announcement of device or liveness state is emitted": ["zero-widget"]
+      }
+    },
+    {
+      "id": "S16",
+      "name": "only an allowed ambient trigger causes agent action",
+      "owner": "T8",
+      "deps": [],
+      "required": ["authorized-agent-action"],
+      "thens": {
+        "the production agent-dispatch seam receives only \"<action>\"": ["authorized-agent-action"]
+      }
+    },
+    {
+      "id": "S17",
+      "name": "every emitted agent action has an allowed cause",
+      "owner": "T8",
+      "deps": [],
+      "required": ["cause-complete-agent-actions"],
+      "thens": {
+        "every emitted action is caused by a registered playbook match or explicit @-mention": ["cause-complete-agent-actions"],
+        "no unrelated event emits an agent action": ["cause-complete-agent-actions"]
+      }
+    },
+    {
+      "id": "P01",
+      "name": "in-flight user capture stays silent across device/liveness transition and source switch",
+      "owner": "T8",
+      "deps": ["T4", "T6"],
+      "required": ["zero-notifications", "zero-live-activity", "capture-integrity", "source-switch-silence"],
+      "thens": {
+        "no alert is posted": ["zero-notifications"],
+        "no Live Activity is created": ["zero-live-activity"],
+        "the existing capture identity remains": ["capture-integrity"],
+        "the source switch is status-only unless a registered playbook or explicit mention authorizes action": ["source-switch-silence"]
+      }
+    },
+    {
+      "id": "P02",
+      "name": "surface-open device transition does not create or alert any posting seam",
+      "owner": "T8",
+      "deps": ["T6"],
+      "required": ["zero-agent-actions", "zero-notifications", "zero-live-activity", "zero-widget"],
+      "thens": {
+        "the agent-dispatch seam receives zero actions": ["zero-agent-actions"],
+        "the notification posting seam receives zero create, update, or alert posts on account of that device or liveness transition": ["zero-notifications"],
+        "the live-activity posting seam receives zero create, update, or alert posts on account of that device or liveness transition": ["zero-live-activity"],
+        "the widget posting seam receives zero create, update, or alert posts on account of that device or liveness transition": ["zero-widget"]
+      }
+    }
+  ]
+}

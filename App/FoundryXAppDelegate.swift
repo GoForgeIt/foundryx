@@ -43,15 +43,30 @@ final class FoundryXAppDelegate: NSObject, UIApplicationDelegate {
             RemoteConfig.fromBundle()?.gatewayHTTPURL
                 .appendingPathComponent("diag/log"))
         let dm = DeviceManager.shared(log: log)
+        // N7, on the headless path too: a gap outcome names the account it is about, or it is
+        // withheld. This bootstrap already holds the one proved-owner binding.
+        dm.setAccountScopeForGapOutcomes(binding.scope)
         let paused = preferences.omiDesiredState != .listening
-        let spool = OmiRestorationSpool(
+        // The composition root resolves WHICH device this restoration is about to record
+        // from and hands it in. It lives in the Kit (`OmiRestorationComposition`) rather
+        // than here because `App/` is compiled by no test target — a boundary that cannot
+        // be executed cannot be falsified, and this is the boundary where a device identity
+        // enters a user's archive.
+        let spool = OmiRestorationComposition.makeRestorationSpool(
             binding: binding,
             root: binding.root,
             executor: DispatchQueue(
                 label: "foundryx.omi-restoration-owner"),
             log: log,
             silenceGap: preferences.silenceGapSeconds,
-            paused: { paused })
+            paused: { paused },
+            // A bluetooth-restoration relaunch exists BECAUSE an external stream reconnected;
+            // the handset's microphone is not involved in this path at all.
+            deviceContext: OmiRestorationComposition.resolveDeviceContext(
+                binding: binding,
+                activeDevice: OmiRestorationComposition.activeExternalDevice(
+                    binding: binding, attached: dm.saved),
+                recording: .externalStream))
         let exposure = AccountExposureRegistration(
             participantID: "omi-restoration-spool",
             kind: .live,

@@ -84,19 +84,29 @@ public struct DeviceMetricsPresentation: Equatable, Sendable {
     /// Column labels, in prototype order.
     public static let labels = ["Battery", "Signal", "Firmware"]
 
-    /// NEW (spec §8): DeviceManager does not yet read the Omi's Device
-    /// Information Service, so no real firmware version is available over BLE.
-    /// This is the spec's hard-coded value, clearly labeled as such — swap for
-    /// a real DIS read when DeviceManager surfaces one.
-    public static let firmwareFallback = "2.4.1"
+    /// Shown for anything the device has not reported. Never a plausible-looking value.
+    public static let unavailableValue = "N/A"
 
+    /// THE FABRICATED FIRMWARE IS GONE (track 20260725T2306, T5 / spec R3, S03).
+    ///
+    /// This column used to read `"2.4.1"` for every connected device — a hard-coded string,
+    /// carried over from the prototype, presented in the same type as the battery percentage
+    /// the app actually measures. `DeviceManager` still does not read the Device Information
+    /// Service, so the honest answer for every device today is that the firmware version is
+    /// unavailable; the spec's rule is that a capability the device does not provide is shown
+    /// as unavailable, never as a plausible default, and a version number a user might quote
+    /// to support is the most plausible default in the strip.
+    ///
+    /// `firmware` is a DECLARED capability state, not a string, so the only way to put a
+    /// version here is for a device to have reported one.
     public static func resolve(omiConnected: Bool,
                                batteryPercent: Int?,
-                               signal: String) -> DeviceMetricsPresentation {
+                               signal: String,
+                               firmware: RecordingDeviceCapabilityState) -> DeviceMetricsPresentation {
         DeviceMetricsPresentation(
-            battery: batteryPercent.map { "\($0)%" } ?? "N/A",
+            battery: batteryPercent.map { "\($0)%" } ?? unavailableValue,
             signal: signal,
-            firmware: omiConnected ? firmwareFallback : "N/A")
+            firmware: firmware.reportedValue ?? unavailableValue)
     }
 }
 
