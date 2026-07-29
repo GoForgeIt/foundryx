@@ -29,9 +29,9 @@ final class DeviceRenderedSurfaceFeatureTests: ProcessGlobalStateTestCase {
             let result = try await BrineFeatureRunner.run(
                 "device-rendered-surface",
                 registry: StepRegistry(DeviceRenderedSurfaceSteps.make(world: world)))
-            XCTAssertEqual(result.passed, 10,
-                           "device-rendered-surface must run all 10 scenarios "
-                               + "(5 plain + 3 S01 rows + 2 S02 rows)")
+            XCTAssertEqual(result.passed, 12,
+                           "device-rendered-surface must run all 12 scenarios "
+                               + "(7 plain + 3 S01 rows + 2 S02 rows)")
         } catch {
             await world.cleanup()
             throw error
@@ -241,6 +241,13 @@ final class DeviceRenderedSurfaceWorld {
     var gapReport: GapRecoveryReport?
     var gapDecision: GapRecoveryRenderDecision?
 
+    /// N7, PRODUCER SIDE — a real `DeviceManager` and what it actually delivered.
+    var gapManager: DeviceManager?
+    var deliveredReports = GapReportBox()
+    /// The account the window was opened under, remembered by the SCENARIO so the assertion
+    /// compares against something the manager was never handed at close time.
+    var scopeAtGapOpen: String?
+
     var baseDir: URL!
     private var managers: [CaptureManager] = []
     private let keyMaterial = MutableKeyMaterial()
@@ -308,6 +315,9 @@ final class DeviceRenderedSurfaceWorld {
         firstRun = nil
         gapReport = nil
         gapDecision = nil
+        gapManager = nil
+        deliveredReports = GapReportBox()
+        scopeAtGapOpen = nil
 
         baseDir = sandbox.appendingPathComponent("captures-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
@@ -401,6 +411,59 @@ final class DeviceRenderedSurfaceWorld {
             RecordingSourceCatalog.merge(discovered))
     }
 
+    // MARK: The gap-outcome PRODUCER, driven through the real DeviceManager (N7)
+    //
+    // WHY THIS EXISTS. Everything else N7 asserts drives `GapRecoveryRendering.decide` over a
+    // report the SCENARIO hand-built. That proves the decision and nothing upstream of it —
+    // and `DeviceManager.closeGapWindow` is the one place a gap outcome reaches anybody in
+    // production. Review round 11 stamped every delivered report `accountScope: nil` — the
+    // state in which EVERY gap outcome from a real device is withheld from its own account
+    // forever, silently, because withholding is the fail-closed default — and the mutation
+    // SURVIVED the whole 69-test `Device|Gap` population: no test in the repo read
+    // `accountScope` off a manager-produced report, and the composition gate held the wiring
+    // with a source-text search that a `nil` argument satisfies. These drive the real producer.
+
+    /// Stand up the real producer and capture everything it delivers.
+    ///
+    /// `DeviceManager()` builds no `CBCentralManager` (only `start()` does), so this is
+    /// hermetic; `runOnBleQueueForTests` is the same seam the gap-recovery funnel tests use.
+    func startGapProducer(tellingItAbout scope: String?) {
+        let manager = DeviceManager()
+        let box = deliveredReports
+        manager.onGapRecoveryOutcome = { box.append($0) }
+        if let scope { manager.setAccountScopeForGapOutcomes(scope) }
+        gapManager = manager
+        // GROUND TRUTH HELD BY THE SCENARIO, not re-read from the manager at assert time —
+        // an assertion that asks the manager what it thinks the answer is cannot fail.
+        scopeAtGapOpen = scope
+    }
+
+    func openProducerGapWindow(interrupting captureId: String) throws {
+        guard let manager = gapManager else {
+            throw BrineStepError("no recording device was stood up")
+        }
+        manager.setInterruptedCapture(captureId)
+        manager.runOnBleQueueForTests { manager.beginGapSyncWindow() }
+    }
+
+    func closeProducerGapWindow() throws {
+        guard let manager = gapManager else {
+            throw BrineStepError("no recording device was stood up")
+        }
+        manager.runOnBleQueueForTests {
+            manager.closeGapWindow(.engineFinished(.synced(records: 1, frames: 60)))
+        }
+    }
+
+    func theOneDeliveredReport() throws -> GapRecoveryReport {
+        let all = deliveredReports.all
+        guard all.count == 1 else {
+            throw BrineStepError(
+                "the recording device delivered \(all.count) gap reports, not 1: \(all)")
+        }
+        return all[0]
+    }
+
     // MARK: Recording, through the real CaptureManager
 
     /// Record and FINALIZE a conversation through the real capture path, with the production
@@ -410,11 +473,34 @@ final class DeviceRenderedSurfaceWorld {
                            activeDevice: OmiRestorationComposition.ActiveDeviceResolution) async throws -> String {
         let source = SeamTestSource()
         let finalized = FinalizedBox()
+        // THE ONE LINE THAT MAKES THIS DRIVER REACH THE REAL FINALIZE — and the answer to the
+        // open item T5 recorded as unexplained (review round 11 §4 cracked it; this is its
+        // fix). `CaptureSettings.omiCaptureDesiredState` is an ACCOUNT preference, and a fresh
+        // account's snapshot carries no value for it, which the accessor maps `.absent →
+        // .paused`. `CaptureManager.init` does `isPaused = (omiCaptureDesiredState == .paused)`,
+        // so UNDER AN ACCOUNT BINDING THE MANAGER IS BORN PAUSED. A paused manager skips the
+        // whole `if !isPaused { … sessionVoicedFrames += 1 }` block, so `sessionVoicedFrames`
+        // stays 0 however many voiced Opus packets are fed in, `hasUploadSubstance(voicedFrames: 0)`
+        // is false, and the capture is stamped `.discarded` — "below min-substance bar: 0 voiced
+        // frame(s)". Without a binding the same read resolves `.listening`, which is why
+        // `CaptureFinalizeTests` (door-free, unbound) never saw it. The difference was never
+        // about the finalize lane at all.
+        //
+        // This is a stated INTENT, not a bypass: production's own gesture for "start listening"
+        // writes exactly this preference (`CaptureManager` sets it `.listening` on resume), and
+        // a user who has not asked to listen has nothing to finalize.
+        CaptureSettings.omiCaptureDesiredState = .listening
         let manager = CaptureManager(
             target: DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x"),
             baseDir: baseDir,
             source: source,
             finalize: { id, _ in await finalized.append(id) })
+        guard !manager.isPaused else {
+            throw BrineStepError(
+                "the manager was born PAUSED under this account binding, so no frame it is fed "
+                    + "will ever be counted as voiced and the capture will be discarded before "
+                    + "finalize — the desired-state preference did not take")
+        }
         // The SHAPE of the production wiring: the manager hands in what is recording, and the
         // composition root answers from the account-scoped store. Nothing is defaulted.
         // THE MANAGER'S OWN ANSWER IS LOAD-BEARING. An earlier version of this closure ignored
@@ -475,21 +561,12 @@ final class DeviceRenderedSurfaceWorld {
         }
         Self.ackAllSegments(id, in: baseDir)
         await manager.retryPendingFinalizes()
-        // WHAT THIS ASSERTS, AND WHAT IT DOES NOT — stated here because the difference is
-        // exactly the kind a green suite hides.
-        //
-        // The conversation reached a DURABLE, DELIBERATE CLOSE through the production path:
-        // the manager opened it on a real speech onset, wrote its device record, took real
-        // voiced Opus frames, wrote a segment, and stamped `.ended-deliberately`. That is the
-        // capture half.
-        //
-        // The finalize POST itself is NOT driven here. Production gates finalize on the
-        // segments being durably on the desktop, and the substance gate DISCARDS a capture
-        // whose voiced-frame count is under the ~60s bar — under an account binding this
-        // driver could not get a synthetic session past that bar (measured: `.discarded` is
-        // stamped with one segment on disk). `CaptureFinalizeTests` owns the finalize lane
-        // and drives it door-free; this suite owns what the lane is handed. Recorded as an
-        // open item rather than papered over.
+        // WHAT THIS ASSERTS. The conversation went through the production path end to end: the
+        // manager opened it on a real speech onset, wrote its device record, took real voiced
+        // Opus frames, wrote a segment, stamped `.ended-deliberately`, passed production's OWN
+        // substance gate, and REACHED THE FINALIZE. Nothing here is bypassed — the finalize
+        // gate ("audio durably on the desktop") is satisfied by writing the `.ack` siblings the
+        // WAL itself writes, which is the house door-free technique `CaptureFinalizeTests` uses.
         let closed = baseDir.appendingPathComponent(id, isDirectory: true)
         guard FileManager.default.fileExists(
                 atPath: closed.appendingPathComponent(".ended-deliberately").path) else {
@@ -501,7 +578,23 @@ final class DeviceRenderedSurfaceWorld {
             .contains(where: { $0.hasSuffix(".opus") }) == true else {
             throw BrineStepError("the closed conversation carries no audio at all")
         }
-        finalizedConversations.append(contentsOf: await finalized.all)
+        // THE HALF T5 COULD NOT PREVIOUSLY DISCHARGE. A discarded capture is not a finalized
+        // one, and the reason is printed rather than left for the next reader to re-derive.
+        let discardMarker = closed.appendingPathComponent(".discarded")
+        if FileManager.default.fileExists(atPath: discardMarker.path) {
+            let why = (try? String(contentsOf: discardMarker, encoding: .utf8)) ?? "(no reason written)"
+            throw BrineStepError(
+                "the conversation was DISCARDED before finalize — \"\(why)\". A capture the "
+                    + "substance gate throws away is never handed to the finalize lane, so "
+                    + "nothing downstream ever attributes it")
+        }
+        let posted = await finalized.all
+        guard posted.contains(id) else {
+            throw BrineStepError(
+                "the production capture path did not finalize this conversation: it finalized "
+                    + "\(posted.isEmpty ? "nothing" : posted.description)")
+        }
+        finalizedConversations.append(contentsOf: posted)
         return id
     }
 
@@ -729,17 +822,22 @@ enum DeviceRenderedSurfaceSteps {
             },
 
             defineCheck("the production capture path finalizes the conversation") { _, _, _ in
-                // THE HONEST SPLIT, stated where a later reader meets it. This scenario drives
-                // the real `CaptureManager` from speech onset to a deliberate conversation
-                // close: the conversation exists, carries real Opus audio, is stamped
-                // `.ended-deliberately`, and its segments are ACK'd — the state in which
-                // production OWES a finalize. The finalize POST is gated on the substance
-                // rule, which discards a synthetic session under the ~60s voiced bar, and
-                // `CaptureFinalizeTests` owns that lane door-free. This check asserts the half
-                // T5 can drive and says so rather than passing for a reason it does not name.
+                // THIS NOW REACHES THE FINALIZE, and the clause is discharged on its own
+                // rather than jointly with `CaptureFinalizeTests`. T5 recorded the reason it
+                // could not as unexplained; review round 11 cracked it (the manager was born
+                // PAUSED under an account binding, so no frame was ever counted as voiced and
+                // production's substance gate discarded the capture) and `recordAndFinalize`
+                // now sets the account's desired state the way the production resume gesture
+                // does. See the comment there.
                 let (id, baseDir) = try await MainActor.run {
                     (try XCTUnwrapOrThrow(w.connectedConversation, "no conversation was opened"),
                      w.baseDir!)
+                }
+                let finalized = await MainActor.run { w.finalizedConversations }
+                guard finalized.contains(id) else {
+                    throw BrineStepError(
+                        "the conversation was never handed to the finalize lane — finalized: "
+                            + "\(finalized.isEmpty ? "nothing" : finalized.description)")
                 }
                 let dir = baseDir.appendingPathComponent(id, isDirectory: true)
                 guard FileManager.default.fileExists(atPath: dir.path) else {
@@ -1607,7 +1705,150 @@ private func historySteps(_ w: DeviceRenderedSurfaceWorld) -> [StepDefinition] {
                     "an outcome carrying no account was rendered into whatever was current")
             }
         },
+
+        // MARK: N7 — the PRODUCER side: what a real DeviceManager actually delivers
+
+        defineStep("a recording device that has been told which account it is recording for") { ctx, _, _ in
+            try await MainActor.run {
+                try w.freshHandset()
+                try w.signIn("n7-producer-a")
+                w.firstAccountScope = w.scope
+                w.startGapProducer(tellingItAbout: w.scope)
+            }
+            return ctx
+        },
+
+        defineStep("a recording device that was never told which account it is recording for") { ctx, _, _ in
+            try await MainActor.run {
+                try w.freshHandset()
+                try w.signIn("n7-producer-untold")
+                w.firstAccountScope = w.scope
+                w.startGapProducer(tellingItAbout: nil)
+            }
+            return ctx
+        },
+
+        defineStep("a conversation is interrupted and its gap window opens") { ctx, _, _ in
+            try await MainActor.run {
+                try w.openProducerGapWindow(interrupting: "cap-n7-producer")
+            }
+            return ctx
+        },
+
+        defineStep("the account this handset records for changes before the window closes") { ctx, _, _ in
+            try await MainActor.run {
+                try w.signIn("n7-producer-b")
+                guard w.scope != w.firstAccountScope else {
+                    throw BrineStepError("the second account resolved to the same scope as the first")
+                }
+                // What production does on an account change (M3). The window is ALREADY OPEN
+                // and was tagged at open, so this must not change what the outcome is about —
+                // otherwise a device that changes hands mid-window would hand the new owner
+                // the previous owner's recording history.
+                w.gapManager?.setAccountScopeForGapOutcomes(w.scope)
+            }
+            return ctx
+        },
+
+        defineStep("the gap window closes") { ctx, _, _ in
+            try await MainActor.run { try w.closeProducerGapWindow() }
+            return ctx
+        },
+
+        defineCheck("the delivered outcome names the account the window opened under") { _, _, _ in
+            try await MainActor.run {
+                let report = try w.theOneDeliveredReport()
+                let expected = try XCTUnwrapOrThrow(
+                    w.scopeAtGapOpen, "the scenario never recorded which account it told the device about")
+                guard let delivered = report.accountScope else {
+                    throw BrineStepError(
+                        "the recording device delivered a gap outcome carrying NO account. "
+                            + "Every outcome it produces is therefore withheld from the account "
+                            + "whose audio it is about — forever, and silently, because "
+                            + "withholding is the fail-closed default")
+                }
+                guard delivered == expected else {
+                    throw BrineStepError(
+                        "the outcome names account \"\(delivered)\" and the window opened under "
+                            + "\"\(expected)\" — a gap window answers for the account it opened "
+                            + "under, not for whoever is on screen when it closes")
+                }
+            }
+        },
+
+        defineCheck("that outcome is withheld from the account now on screen") { _, _, _ in
+            try await MainActor.run {
+                let report = try w.theOneDeliveredReport()
+                let current = w.scope
+                guard current != report.accountScope else {
+                    throw BrineStepError(
+                        "the account on screen is still the one the window opened under — this "
+                            + "check would pass without deciding anything")
+                }
+                guard case .withheld(let reason) = GapRecoveryRendering.decide(
+                        report, currentScope: current) else {
+                    throw BrineStepError(
+                        "one account's recording history was rendered into the next account's "
+                            + "timeline")
+                }
+                guard !reason.isEmpty else {
+                    throw BrineStepError("the outcome vanished without a reason")
+                }
+                // NON-VACUOUS: the same report IS rendered to its own account, so the
+                // withholding above is a decision about the account and not a renderer that
+                // never shows anything.
+                guard case .show = GapRecoveryRendering.decide(
+                        report, currentScope: report.accountScope) else {
+                    throw BrineStepError(
+                        "the outcome is withheld even from its own account — nothing is ever "
+                            + "rendered, so the withholding above proves nothing")
+                }
+            }
+        },
+
+        defineCheck("the delivered outcome names no account") { _, _, _ in
+            try await MainActor.run {
+                let report = try w.theOneDeliveredReport()
+                guard report.accountScope == nil else {
+                    throw BrineStepError(
+                        "a device nobody told which account it was recording for delivered an "
+                            + "outcome stamped \"\(report.accountScope!)\" — it invented one")
+                }
+            }
+        },
+
+        defineCheck("that outcome is withheld with a reason rather than rendered into the account on screen") { _, _, _ in
+            try await MainActor.run {
+                let report = try w.theOneDeliveredReport()
+                let current = w.scope
+                guard current != CaptureAccountScope.signedOutScope else {
+                    throw BrineStepError(
+                        "there is no account on screen at all — the check has nothing to withhold from")
+                }
+                guard case .withheld(let reason) = GapRecoveryRendering.decide(
+                        report, currentScope: current) else {
+                    throw BrineStepError(
+                        "an outcome that names no account was rendered into whatever account "
+                            + "happened to be on screen")
+                }
+                guard !reason.isEmpty else {
+                    throw BrineStepError("the outcome vanished without a reason")
+                }
+            }
+        },
     ]
+}
+
+/// Thread-safe collector: `DeviceManager` publishes gap reports on its BLE queue.
+final class GapReportBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [GapRecoveryReport] = []
+    func append(_ report: GapRecoveryReport) {
+        lock.lock(); storage.append(report); lock.unlock()
+    }
+    var all: [GapRecoveryReport] {
+        lock.lock(); defer { lock.unlock() }; return storage
+    }
 }
 
 // MARK: - Shared checks

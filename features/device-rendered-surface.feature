@@ -90,3 +90,18 @@ Feature: One rendered recording-device experience, and copy that tells the truth
     Then the outcome is withheld with a reason rather than rendered
     When the outcome arrives while its own account is still exposed
     Then the outcome is rendered
+
+  Scenario: the outcome a recording device delivers names the account its window opened under
+    Given a recording device that has been told which account it is recording for
+    And a conversation is interrupted and its gap window opens
+    When the account this handset records for changes before the window closes
+    And the gap window closes
+    Then the delivered outcome names the account the window opened under
+    And that outcome is withheld from the account now on screen
+
+  Scenario: a recording device never told an account delivers an outcome that names none
+    Given a recording device that was never told which account it is recording for
+    And a conversation is interrupted and its gap window opens
+    When the gap window closes
+    Then the delivered outcome names no account
+    And that outcome is withheld with a reason rather than rendered into the account on screen
