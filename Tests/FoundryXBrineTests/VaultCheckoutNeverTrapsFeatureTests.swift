@@ -73,8 +73,21 @@ private final class VaultTrapWorld: @unchecked Sendable {
         defaults = fixture.defaults
     }
 
+    /// A stable subject so every scenario re-enters the SAME account scope.
+    let subject = "vault-trap-owner"
+
     @MainActor
     func makeModel() {
+        // RE-ACTIVATE the account scope per scenario, not once at world construction.
+        //
+        // `CellStore.pair` refuses without a scoped preference root, and the scope is
+        // PROCESS-GLOBAL: any other suite calling `resetTestEnvironment()` between this
+        // world being built and a scenario running clears it. On macOS the ordering
+        // happened to leave a scope active and the happy path passed; on the iOS runtime
+        // the order differs, pairing refused, and "a confirmed payment still lands my
+        // Vault" failed with `settingUp` — a defect in THIS test, not in the funnel, and
+        // exactly the order-dependence class this repo has been bitten by before.
+        try? fixture.activateOther(subject: subject)
         attempts = VaultCheckoutAttemptStore(defaults: defaults)
         let box = self
         model = VaultFunnelModel(
@@ -274,8 +287,27 @@ private enum VaultTrapSteps {
             },
             defineCheck("my Vault is live") { _, _, _ in
                 let state = await MainActor.run { w.model.state }
-                guard case .live = state else {
-                    throw BrineStepError("a ready Vault did not go live: \(state)")
+                // The iOS unit-test bundle is deliberately HOSTLESS (project.yml), so it
+                // carries no keychain entitlement and `CellStore.pair` cannot store the
+                // cell secret. The funnel's documented response to that is to hold
+                // `settingUp` rather than claim a Vault that would not work — refusing to
+                // lie is the correct behaviour, so on such a host that IS the pass.
+                //
+                // Only this one assertion is host-aware; the other nine scenarios (token
+                // refresh, 401 handling, terminal states, abandoning) touch no keychain and
+                // run identically everywhere. Skipping the whole feature on iOS — the older
+                // pattern in VaultFunnelTests — would have surrendered all of them.
+                if AccountDataIsolationFeatureTests.keychainUsable {
+                    guard case .live = state else {
+                        throw BrineStepError("a ready Vault did not go live: \(state)")
+                    }
+                } else {
+                    guard case .settingUp = state else {
+                        throw BrineStepError(
+                            "without a keychain the funnel must HOLD setting-up so reconcile "
+                            + "can retry — it must never fall back to waiting or failure, "
+                            + "and never claim a Vault it could not store: \(state)")
+                    }
                 }
             },
             defineCheck("I am no longer waiting on my payment") { _, _, _ in
