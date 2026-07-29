@@ -705,7 +705,13 @@ private struct MainTabs: View {
         // singleton that outlives this view tree, a launch while signed out pushed `nil`
         // forever, and a sign-out tears this tree down without rebuilding it. The manager
         // installs its own identity observer; there is nothing here to remember.
-        dm.followAccountScopeChanges()
+        // THE BINDING IS HANDED OVER, NOT RE-RESOLVED (review round 12, L12-3). This `init`
+        // runs on every body pass of the view that builds `MainTabs`, and it already resolved
+        // `accountBinding` above — a process-wide lock, an on-disk admission-registry read and
+        // a cross-process widget publish. Passing what we have keeps that at one per pass.
+        // `nil` here is not a claim that there is no account: it means we have nothing to hand
+        // over, and the manager resolves it itself.
+        dm.followAccountScopeChanges(startingFrom: accountBinding?.scope)
         dm.onGapRecoveryOutcome = { report in
             switch GapRecoveryRendering.decide(
                 report, currentScope: CaptureAccountScope.currentAccountBinding()?.scope) {

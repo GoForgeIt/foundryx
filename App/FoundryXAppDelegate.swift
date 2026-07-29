@@ -45,11 +45,20 @@ final class FoundryXAppDelegate: NSObject, UIApplicationDelegate {
         let dm = DeviceManager.shared(log: log)
         // N7, on the headless path too: a gap outcome names the account it is about, or it is
         // withheld. This bootstrap already holds the one proved-owner binding.
-        // The follower first, so the scope stays current for the life of this process (the
-        // manager is a singleton that outlives this bootstrap); then the proved-owner binding
-        // this path already holds, which is the more specific answer for right now.
-        dm.followAccountScopeChanges()
-        dm.setAccountScopeForGapOutcomes(binding.scope)
+        // ONE CALL, NOT TWO (review round 12, M12-1). This used to install the follower and
+        // then push `binding.scope` separately — and that second, hand-written push is what a
+        // mutation walked through: `setAccountScopeForGapOutcomes(String?.none)` here makes
+        // every gap outcome on the headless path nameless while the follower call still
+        // satisfies every search for this wiring. The scope is now HANDED OVER as the
+        // follower's first value, so nothing under `App/` sets it by hand and the gate can
+        // ban that call outright instead of guessing at spellings of `nil`.
+        //
+        // WHY THE PROVED-OWNER BINDING AND NOT THE RESOLVER. This is a background BLE
+        // relaunch: `CaptureAccountScope.currentAccountBinding()` may not resolve at all here,
+        // while this bootstrap has already proved which account owns the restoration. Handing
+        // it over is the more specific answer; every LATER push comes from the identity
+        // notification and is freshly resolved.
+        dm.followAccountScopeChanges(startingFrom: binding.scope)
         let paused = preferences.omiDesiredState != .listening
         // The composition root resolves WHICH device this restoration is about to record
         // from and hands it in. It lives in the Kit (`OmiRestorationComposition`) rather

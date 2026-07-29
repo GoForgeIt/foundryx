@@ -71,7 +71,31 @@ final class DeviceCompositionRootGateTests: XCTestCase {
     /// PRODUCER is now driven behaviourally by `device-rendered-surface.feature` ("the outcome
     /// a recording device delivers names the account its window opened under", and the two
     /// account-change scenarios). This file holds only what `swift test` cannot compile: the
-    /// `App/` call sites. It rejects the two spellings that would satisfy it vacuously.
+    /// `App/` call sites.
+    ///
+    /// WHY IT NO LONGER ENUMERATES SPELLINGS OF `nil` (review round 12, M12-1). It used to
+    /// reject exactly two strings — `setAccountScopeForGapOutcomes(nil)` and
+    /// `…(nil as String?)` — which is completeness-by-enumeration over an open set, and two
+    /// mutations walked straight past it: `followAccountScopeChanges(resolve: { nil })` and
+    /// `setAccountScopeForGapOutcomes(String?.none)`. Both left every gap outcome nameless
+    /// and both SURVIVED. What is asserted now is the property instead, in three parts, and
+    /// what each part EXCLUDES is stated:
+    ///
+    ///   1. **The manager resolves; the app may not supply a resolver.** The declaration
+    ///      carries no `resolve:`/`center:` parameter at all, so there is nothing for a call
+    ///      site to override — `resolve: { nil }` is a compile error, not a survival. That is
+    ///      held below (`testTheScopeFollowerTakesNoResolverToOverride`) so re-adding the
+    ///      parameter reds here rather than quietly reopening the hole.
+    ///   2. **Nothing under `App/` sets the scope by hand.** Not "not these two spellings of
+    ///      nil" — the call itself is banned, which excludes every argument that could ever
+    ///      be written into it. The composition roots ask the manager to FOLLOW; the only
+    ///      value they may contribute is the first one, handed over as `startingFrom:`, and
+    ///      `nil` there falls through to the real resolver rather than becoming a claim.
+    ///   3. **A root that already holds a resolved binding hands THAT over.** This is the one
+    ///      part that names an expression rather than a shape, and its limit is exactly that:
+    ///      it holds that the binding each root resolved is the value it passes. It cannot
+    ///      hold that the binding itself is the right one — the N7/M3 scenarios in
+    ///      `device-rendered-surface.feature`, which drive the real producer, hold that.
     func testBothCompositionRootsGiveGapOutcomesAnAccount() throws {
         for path in ["App/RootView.swift", "App/FoundryXAppDelegate.swift"] {
             let source = try String(contentsOf: Self.repoRoot.appendingPathComponent(path),
@@ -84,14 +108,43 @@ final class DeviceCompositionRootGateTests: XCTestCase {
                               + "manager is a process singleton that outlives this file's view "
                               + "tree, and a scope taken once goes stale at the next sign-in, "
                               + "sign-out or account switch")
-            for vacuous in ["setAccountScopeForGapOutcomes(nil)",
-                            "setAccountScopeForGapOutcomes(nil as String?)"] {
-                XCTAssertFalse(source.contains(vacuous),
-                               "\(path) hands the gap-outcome scope a literal `nil`, which "
-                                   + "withholds every outcome from its own account forever "
-                                   + "while satisfying every source-text check of this wiring")
-            }
         }
+
+        // (2) The whole call, banned, everywhere under App/ — recursively, because a future
+        // subdirectory is not a place this rule stops applying.
+        let handSetters = try AppSourceTree.filesContaining("setAccountScopeForGapOutcomes(")
+        XCTAssertEqual(
+            handSetters, [],
+            "\(handSetters.joined(separator: ", ")) sets the gap-outcome scope BY HAND. No "
+                + "composition root may: the value is whatever was written last, so any "
+                + "spelling of an empty one — `nil`, `nil as String?`, `String?.none`, a "
+                + "stale local — withholds every outcome from its own account forever while "
+                + "still satisfying every search for `followAccountScopeChanges(`. Ask the "
+                + "manager to FOLLOW, and hand over the first value with `startingFrom:` if "
+                + "you already have it")
+
+        // (3) Each root hands over the binding it already resolved.
+        let rootViewSource = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent("App/RootView.swift"),
+            encoding: .utf8)
+        XCTAssertTrue(
+            rootViewSource.contains("followAccountScopeChanges(startingFrom: accountBinding?.scope)"),
+            "App/RootView.swift resolves `accountBinding` in the same `init` and then makes "
+                + "the manager resolve it a second time. That init runs on every body pass of "
+                + "the view that builds MainTabs, and each resolution is a process-wide lock, "
+                + "an on-disk admission-registry read and a cross-process widget publish — on "
+                + "main. Hand over what you already have")
+        let delegateSource = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent("App/FoundryXAppDelegate.swift"),
+            encoding: .utf8)
+        XCTAssertTrue(
+            delegateSource.contains("followAccountScopeChanges(startingFrom: binding.scope)"),
+            "App/FoundryXAppDelegate.swift is the HEADLESS BLE-restoration path — the one "
+                + "where gap windows actually open — and it holds a PROVED-OWNER binding that "
+                + "`CaptureAccountScope.currentAccountBinding()` may not be able to resolve at "
+                + "all during a background relaunch. It must hand that binding's scope over as "
+                + "the follower's first value; passing nothing falls back to a resolver that "
+                + "can answer `nil` here, and a nil scope withholds every outcome")
         let rootView = try String(
             contentsOf: Self.repoRoot.appendingPathComponent("App/RootView.swift"),
             encoding: .utf8)
@@ -101,6 +154,73 @@ final class DeviceCompositionRootGateTests: XCTestCase {
         XCTAssertFalse(rootView.contains("GapRecoveryCopy.line(for:"),
                        "a gap sentence was built directly from the outcome, bypassing the "
                            + "account decision that is the whole point of N7")
+    }
+
+    /// PART (1) OF THE PROPERTY ABOVE, held where it is decided: the follower has no seam a
+    /// composition root can use to answer "which account" for it.
+    ///
+    /// `followAccountScopeChanges(resolve: { nil })` in `App/RootView.swift` made every gap
+    /// outcome nameless and SURVIVED the whole suite (review round 12, MUT-R12-A) — the gate
+    /// searched for `followAccountScopeChanges(`, and a vacuous resolver contains it. The fix
+    /// was to delete the parameter: no caller in the repo, production or test, ever supplied
+    /// one, and a parameter nobody needs is a hole with a default on it. Now that mutation
+    /// does not compile, which `scripts/ci-gates.sh compile` is what runs — and this test is
+    /// what stops the parameter quietly coming back and reopening it.
+    func testTheScopeFollowerTakesNoResolverToOverride() throws {
+        let manager = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent(
+                "Sources/FoundryXKit/DeviceManager.swift"),
+            encoding: .utf8)
+        XCTAssertTrue(
+            manager.contains("public func followAccountScopeChanges(startingFrom handedOver: String? = nil)"),
+            "`followAccountScopeChanges` no longer has the signature the composition-root "
+                + "gate is written against — re-read it before changing this line")
+        for reopened in ["resolve: @escaping @Sendable () -> String?"] {
+            XCTAssertFalse(
+                manager.contains(reopened),
+                "`followAccountScopeChanges` has been given back an injectable resolver or "
+                    + "notification centre. Nothing in this repo passes one, and while it "
+                    + "existed a composition root could answer \"which account\" with "
+                    + "`{ nil }` — withholding every gap outcome from its own owner forever "
+                    + "while still containing `followAccountScopeChanges(`. If a test truly "
+                    + "needs to inject, give it a seam that is named as one; do not put a "
+                    + "default on the production path")
+        }
+    }
+
+    // MARK: - H12-1: the list does not read the archive off disk per row per body pass
+
+    /// `NavigationLink`'s `destination:` is a `@ViewBuilder` evaluated WITH the link, so an
+    /// unwrapped destination is constructed on every body pass of the screen carrying the
+    /// link — once per row. `conversationDetail(_:)` evaluates
+    /// `CaptureAttributionPresentation.attribution(captureId:baseDir:)` as an eager argument,
+    /// which is an uncached `fileExists` + two `Data(contentsOf:)` + a JSON decode, on the
+    /// MAIN ACTOR (review round 12, H12-1). `ResidualMainActorWorkTests` is the suite this
+    /// pathology belongs to and it cannot see this instance of it: it instruments the Kit,
+    /// and `swift test` cannot compile `App/`. So it is held here, where the other
+    /// uncompilable App facts are.
+    ///
+    /// WHAT THIS EXCLUDES: it holds that the conversation row's destination is deferred, not
+    /// that every expensive destination in the app is. `LazyView` is the repo's own answer
+    /// (declared in `App/RootView.swift` with the rationale, used for `StatsView`).
+    func testTheConversationRowDefersBuildingItsDetail() throws {
+        let captureScreen = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent("App/CaptureScreen.swift"),
+            encoding: .utf8)
+        let code = AppSourceTree.withoutComments(of: captureScreen)
+
+        // Non-vacuity: the row must still push the detail at all.
+        XCTAssertTrue(code.contains("conversationDetail(wal)"),
+                      "the conversation row no longer opens the three-face detail — this gate "
+                          + "is checking a navigation that no longer exists")
+        XCTAssertTrue(
+            code.contains("LazyView { conversationDetail(wal) }"),
+            "App/CaptureScreen.swift builds the conversation detail EAGERLY inside its "
+                + "`NavigationLink`. The destination is a @ViewBuilder evaluated with the "
+                + "link, so `conversationDetail(_:)` — which reads the device record and the "
+                + "legacy source marker off disk as an eager argument, uncached — runs once "
+                + "per row on every body pass of the list, on the main actor. Wrap it: "
+                + "`LazyView { conversationDetail(wal) }`")
     }
 
     /// The same boundary from the other side: no production or test call site may omit

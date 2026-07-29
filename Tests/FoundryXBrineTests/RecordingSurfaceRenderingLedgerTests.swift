@@ -81,6 +81,63 @@ final class RecordingSurfaceRenderingLedgerTests: XCTestCase {
                 + "ledger entry makes the counts below meaningless")
         XCTAssertTrue(Self.drawnByTheApp.isDisjoint(with: Self.notYetDrawn),
                       "a type is on both sides of the ledger")
+
+        // A NESTED public type is covered by the entry for the type it lives in — but only
+        // if that outer type is itself classified, and only if we can name it at all.
+        let nested = try Self.publicTypeDeclarations(in: Self.presentationFile)
+            .filter { $0.nestedIn != nil }
+        for declaration in nested.sorted(by: { $0.name < $1.name }) {
+            guard let outer = declaration.nestedIn else { continue }
+            XCTAssertTrue(
+                classified.contains(outer),
+                "`\(outer).\(declaration.name)` is a public type whose enclosing type is not "
+                    + "classified, so nothing on either side of the ledger accounts for it")
+        }
+    }
+
+    /// The completeness predicate itself, held against the shapes it used to miss.
+    ///
+    /// The claim §4.3 makes is *"a new type cannot be added without being classified"*. That
+    /// is a claim about `publicTypeDeclarations`, and a regex that matched one cell of
+    /// (keyword × attribute placement × nesting) made it false four ways (review round 12,
+    /// M12-2). This is the matrix, as a fixture: every cell must be seen.
+    func testTheCompletenessPredicateSeesEveryDeclarationShape() throws {
+        let fixture = """
+        public struct PlainStruct {}
+        public final class FinalClass {}
+        public enum PlainEnum {
+            public struct NestedInsideAnEnum {}
+        }
+        public actor PlainActor {}
+        public protocol AProtocol {}
+        public typealias AnAlias = PlainStruct
+        @available(iOS 17, *) public struct AttributedOnTheSameLine {}
+        @frozen
+        public struct AttributedOnItsOwnLine {}
+        internal struct NotPublic {}
+        // public struct InAComment {}
+        /* public struct InABlockComment {} */
+        public extension PlainStruct {
+            struct NotItselfPublic {}
+        }
+        """
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ledger-predicate-fixture-\(UUID().uuidString).swift")
+        try fixture.write(to: url, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let declarations = try Self.publicTypeDeclarations(inFileAt: url)
+        XCTAssertEqual(
+            Set(declarations.filter { $0.nestedIn == nil }.map(\.name)),
+            ["PlainStruct", "FinalClass", "PlainEnum", "PlainActor", "AProtocol", "AnAlias",
+             "AttributedOnTheSameLine", "AttributedOnItsOwnLine"],
+            "the completeness predicate misses a declaration shape — every one it misses is a "
+                + "public type that can be added to the presentation file without the ledger "
+                + "noticing, which is exactly the claim this file makes about itself")
+        XCTAssertEqual(
+            Set(declarations.filter { $0.nestedIn != nil }),
+            Set([Self.PublicTypeDeclaration(name: "NestedInsideAnEnum", nestedIn: "PlainEnum")]),
+            "a nested public type must be seen AND attributed to the type it lives in")
     }
 
     // MARK: - the two directions
@@ -118,7 +175,9 @@ final class RecordingSurfaceRenderingLedgerTests: XCTestCase {
     /// ever showed a user which device recorded a conversation. This holds the two call sites
     /// by name, because `swift test` cannot compile `App/` and a deleted view compiles fine.
     func testTheAppNamesTheRecordingDeviceAgainstItsOwnRecordings() throws {
-        let list = try Self.source("App/CaptureScreen.swift")
+        // CODE, not prose. These are `contains` checks and the file's own comments name every
+        // symbol below — a doc block would satisfy them all (review round 12, L12-1).
+        let list = AppSourceTree.withoutComments(of: try Self.source("App/CaptureScreen.swift"))
         XCTAssertTrue(list.contains("CaptureAttributionPresentation.attribution(captureId:"),
                       "the conversation list no longer reads which device recorded each "
                           + "conversation — the row is back to saying nothing about its recorder")
@@ -137,7 +196,7 @@ final class RecordingSurfaceRenderingLedgerTests: XCTestCase {
         XCTAssertTrue(list.contains("attribution: attribution)"),
                       "the loaded attribution never reaches the composed meta line")
 
-        let detail = try Self.source("App/ConversationFacesView.swift")
+        let detail = AppSourceTree.withoutComments(of: try Self.source("App/ConversationFacesView.swift"))
         XCTAssertTrue(detail.contains("attribution.deviceName"),
                       "the conversation detail header no longer names the recorder")
         XCTAssertTrue(detail.contains("\"conversation-device\""),
@@ -155,40 +214,87 @@ final class RecordingSurfaceRenderingLedgerTests: XCTestCase {
         try String(contentsOf: repoRoot.appendingPathComponent(path), encoding: .utf8)
     }
 
-    /// Public type declarations in a Swift file, by name.
-    static func publicTypeNames(in path: String) throws -> Set<String> {
-        let text = try source(path)
-        let pattern = #"(?m)^public\s+(?:final\s+)?(?:struct|enum|class|actor)\s+([A-Za-z_][A-Za-z0-9_]*)"#
-        let regex = try NSRegularExpression(pattern: pattern)
-        let ns = text as NSString
-        var names: Set<String> = []
-        for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
-            names.insert(ns.substring(with: match.range(at: 1)))
-        }
-        return names
+    /// A public type declaration: its name, and the top-level type it is nested inside (nil
+    /// when it IS top-level).
+    struct PublicTypeDeclaration: Hashable {
+        let name: String
+        let nestedIn: String?
     }
 
-    /// Files under `App/` that mention a type by whole word.
-    static func appReferences(to type: String) throws -> [String] {
-        let appDir = repoRoot.appendingPathComponent("App", isDirectory: true)
-        let files = try FileManager.default.contentsOfDirectory(at: appDir,
-                                                                includingPropertiesForKeys: nil)
-        let regex = try NSRegularExpression(pattern: "\\b\(NSRegularExpression.escapedPattern(for: type))\\b")
-        var hits: [String] = []
-        for file in files where file.pathExtension == "swift" {
-            guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
-            // Comments name types constantly; a mention in prose is not a rendering.
-            let code = text.split(separator: "\n", omittingEmptySubsequences: false)
-                .map { line -> Substring in
-                    let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
-                    return trimmed.hasPrefix("//") ? "" : line
-                }
-                .joined(separator: "\n")
-            let ns = code as NSString
-            if regex.firstMatch(in: code, range: NSRange(location: 0, length: ns.length)) != nil {
-                hits.append(file.lastPathComponent)
+    /// EVERY public type declaration in a Swift file — the property the ledger's completeness
+    /// claim rests on, so its predicate is what has to be complete.
+    ///
+    /// WHAT THE OLD PREDICATE EXCLUDED, AND WHY THAT MATTERED (review round 12, M12-2). It
+    /// was `^public\s+(?:final\s+)?(?:struct|enum|class|actor)\s+…`, which silently skipped
+    /// four whole cells of the (keyword × attribute placement × nesting) matrix:
+    /// `protocol` and `typealias`; any declaration whose attribute sits on the same line
+    /// (`@available(iOS 17, *) public struct X`); and anything indented — i.e. every nested
+    /// public type, of which the file already had one. Appending a `public protocol` to the
+    /// presentation file therefore added an unclassified public type and the completeness
+    /// test SURVIVED (MUT-R12-H). "Complete by construction" was a claim about a regex that
+    /// matched one cell.
+    ///
+    /// The predicate is widened rather than documented-around: all six declaration keywords,
+    /// attributes in either position, and nesting tracked rather than dropped. Its remaining
+    /// exclusions, stated: `public extension` declares no type (types declared INSIDE one are
+    /// attributed to the extended type); and this is a line lexer, not a parser, so a public
+    /// type declared inside a function body would be attributed to the enclosing type.
+    /// Neither shape exists in the file this gate reads, and both would be strange places to
+    /// put a presentation value.
+    static func publicTypeDeclarations(in path: String) throws -> Set<PublicTypeDeclaration> {
+        try publicTypeDeclarations(inFileAt: repoRoot.appendingPathComponent(path))
+    }
+
+    static func publicTypeDeclarations(inFileAt url: URL) throws -> Set<PublicTypeDeclaration> {
+        let code = AppSourceTree.code(of: try String(contentsOf: url, encoding: .utf8))
+        // Optional attributes (`@available(iOS 17, *)`, `@frozen`, …) may precede `public` on
+        // the same line; `final`/`indirect`/`open` may follow it.
+        let pattern = #"^([ \t]*)(?:@[A-Za-z_][A-Za-z0-9_]*(?:\([^\n]*?\))?[ \t]+)*"#
+            + #"public[ \t]+(?:final[ \t]+|indirect[ \t]+|open[ \t]+)*"#
+            + #"(?:struct|enum|class|actor|protocol|typealias)[ \t]+([A-Za-z_][A-Za-z0-9_]*)"#
+        let regex = try NSRegularExpression(pattern: pattern)
+        var declarations: Set<PublicTypeDeclaration> = []
+        var currentTopLevel: String?
+        for line in code.split(separator: "\n", omittingEmptySubsequences: false) {
+            let text = String(line)
+            let ns = text as NSString
+            let full = NSRange(location: 0, length: ns.length)
+            // A top-level `extension Foo` / `public extension Foo` opens Foo's scope too:
+            // anything public declared inside it belongs to Foo, which is already classified.
+            if text.hasPrefix("extension ") || text.hasPrefix("public extension ") {
+                currentTopLevel = text.split(separator: " ")
+                    .dropFirst(text.hasPrefix("public ") ? 2 : 1).first
+                    .map { $0.split(separator: ":").first.map(String.init) ?? String($0) }
+                continue
+            }
+            guard let match = regex.firstMatch(in: text, range: full) else { continue }
+            let indent = ns.substring(with: match.range(at: 1))
+            let name = ns.substring(with: match.range(at: 2))
+            if indent.isEmpty {
+                currentTopLevel = name
+                declarations.insert(PublicTypeDeclaration(name: name, nestedIn: nil))
+            } else {
+                declarations.insert(PublicTypeDeclaration(name: name, nestedIn: currentTopLevel))
             }
         }
-        return hits.sorted()
+        return declarations
+    }
+
+    /// The top-level public type names — what the ledger classifies. A nested public type is
+    /// covered by the entry for the type it lives in (asserted separately).
+    static func publicTypeNames(in path: String) throws -> Set<String> {
+        Set(try publicTypeDeclarations(in: path).filter { $0.nestedIn == nil }.map(\.name))
+    }
+
+    /// App-side files that mention a type by whole word, in CODE.
+    ///
+    /// RECURSIVE, AND OVER ALL THREE APP-SIDE TREES (review round 12, L12-1). This used to be
+    /// a flat `contentsOfDirectory` on `App/` while the finding it answers had counted
+    /// references under `App/`, `Widget/` AND `UITests/` — so a T6 wiring in `Widget/`, or in
+    /// any `App/` subdirectory anyone ever adds, would have left the not-drawn side green.
+    /// Comment stripping is now honest too (trailing and block comments included, and string
+    /// literals blanked): see `AppSourceTree`.
+    static func appReferences(to type: String) throws -> [String] {
+        try AppSourceTree.filesReferencing(type)
     }
 }

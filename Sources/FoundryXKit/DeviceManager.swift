@@ -203,12 +203,31 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     ///
     /// SELF-INSTALLED, not left to the composition root. An observer a root has to remember to
     /// install is exactly the shape of wiring this finding was about.
-    public func followAccountScopeChanges(
-        center: NotificationCenter = .default,
-        resolve: @escaping @Sendable () -> String? = {
-            CaptureAccountScope.currentAccountBinding()?.scope
-        }
-    ) {
+    ///
+    /// IT TAKES NO RESOLVER, AND THAT IS THE POINT (review round 12, M12-1). This used to
+    /// carry `resolve:` and `center:` defaults that no caller in the repo — production or
+    /// test — ever supplied. A parameter nobody needs is a hole a regression walks through:
+    /// `followAccountScopeChanges(resolve: { nil })` in the composition root satisfies every
+    /// source-text search for this wiring while making every gap outcome nameless, and it
+    /// SURVIVED the whole suite. There is now nothing to pass, so that mutation does not
+    /// compile — which is the same enforcement `resolveDeviceContext(recording:)` uses, and
+    /// the compile phase of `scripts/ci-gates.sh` is what runs it. Tests drive the real
+    /// resolver through `CaptureAccountScope`'s own test seams, which is what the N7/M3
+    /// scenarios in `device-rendered-surface.feature` already do.
+    ///
+    /// `startingFrom` IS A HANDOVER, NOT A CLAIM (review round 12, L12-3).
+    /// `CaptureAccountScope.currentAccountBinding()` takes a process-wide lock, reads the
+    /// durable container, consults the on-disk admission registry AND publishes the widget
+    /// owner across processes. `MainTabs.init` — which runs on every body pass of the view
+    /// that builds it, not once — had already paid for exactly that answer one `let` earlier
+    /// and then made this method pay for it again. A caller that has the answer hands it
+    /// over; a caller that does not passes nothing and this resolves it. `nil` therefore
+    /// means "I have nothing for you", never "there is no account": it falls through to the
+    /// real resolver, so no call site can make the scope vacuous by omission. Only the FIRST
+    /// push can be handed over — every later one comes from the notification, on its own
+    /// thread, freshly resolved.
+    public func followAccountScopeChanges(startingFrom handedOver: String? = nil) {
+        let center = NotificationCenter.default
         accountScopeLock.lock()
         if let existing = accountScopeObserver { center.removeObserver(existing) }
         accountScopeObserver = center.addObserver(
@@ -219,11 +238,32 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
             // still answers for the account that just left.
             queue: nil
         ) { [weak self] _ in
-            self?.setAccountScopeForGapOutcomes(resolve())
+            self?.setAccountScopeForGapOutcomes(Self.resolveAccountScope())
         }
         accountScopeLock.unlock()
-        setAccountScopeForGapOutcomes(resolve())
+        setAccountScopeForGapOutcomes(handedOver ?? Self.resolveAccountScope())
     }
+
+    /// The one resolution of "which account is this", used for the first push and every
+    /// notification-driven one after it.
+    private static func resolveAccountScope() -> String? {
+        CaptureAccountScope.currentAccountBinding()?.scope
+    }
+
+    /// Stop following. A `DeviceManager` is a process singleton in production, so this never
+    /// runs there — but every test that constructs one used to leave a live block registered
+    /// on `NotificationCenter.default` for the life of the test process (review round 12,
+    /// L12-3). Harmless per block and unbounded in aggregate; a manager that is gone should
+    /// not still be listening.
+    private func stopFollowingAccountScopeChanges() {
+        accountScopeLock.lock()
+        let observer = accountScopeObserver
+        accountScopeObserver = nil
+        accountScopeLock.unlock()
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+    }
+
+    deinit { stopFollowingAccountScopeChanges() }
 
     private let accountScopeLock = NSLock()
     private var accountScopeSnapshot: String?

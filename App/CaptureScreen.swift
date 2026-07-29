@@ -861,7 +861,19 @@ struct CaptureScreen: View {
     /// selects this row. `simultaneousGesture` keeps the tap-to-open behavior intact.
     private func navigableConversationRow(_ wal: CaptureWAL) -> some View {
         NavigationLink {
-            conversationDetail(wal)
+            // LAZY DESTINATION, and here it is not hygiene (review round 12, H12-1).
+            // `NavigationLink`'s `destination:` is a @ViewBuilder evaluated WITH the link, so
+            // an unwrapped `conversationDetail(wal)` is constructed on every body pass of THIS
+            // screen, once per row — and `conversationDetail` now evaluates
+            // `CaptureAttributionPresentation.attribution(captureId:baseDir:)` as an eager
+            // argument, which is an uncached `fileExists` + two `Data(contentsOf:)` + a JSON
+            // decode on the MAIN ACTOR. That is precisely the "a decode and a `fileExists` PER
+            // ROW PER RENDER" pathology `ResidualMainActorWorkTests` exists for, and it cannot
+            // see this one because `swift test` cannot compile `App/`. `LazyView` (declared in
+            // `App/RootView.swift`, with the full rationale) defers construction to the first
+            // render of the destination itself — so the read happens once, when the row is
+            // actually pushed.
+            LazyView { conversationDetail(wal) }
         } label: {
             conversationCard(wal)
         }
@@ -958,7 +970,17 @@ struct CaptureScreen: View {
                 .map { CaptureCardPresentation.timeRangeString(meta: $0, fallback: wal.status.startedAt) }
                 ?? CaptureCardPresentation.timeRangeString(meta: nil, fallback: wal.status.startedAt),
             place: manager.conversationMeta(for: wal.captureId)?.location?.label,
-            // Read ONCE, at push time — not per body pass — from the ACCOUNT-SCOPED root.
+            // Read from the ACCOUNT-SCOPED root — never `CaptureWAL.documentsCaptures()`,
+            // which would attribute from the wrong account's archive.
+            //
+            // THIS IS AN EAGER ARGUMENT AND IT TOUCHES DISK. An earlier comment here claimed
+            // it was "read ONCE, at push time — not per body pass"; that was false, and
+            // review round 12 (H12-1) measured the difference. It is read whenever
+            // `conversationDetail(_:)` is CALLED, and the row's `NavigationLink` calls it —
+            // so the honest way to make the claim true is the `LazyView` at the call site,
+            // which is what defers this to the push. Keep them together: unwrap that
+            // `LazyView` and this becomes an uncached main-actor disk read per row per body
+            // pass.
             attribution: CaptureAttributionPresentation.attribution(captureId: wal.captureId,
                                                                      baseDir: manager.baseDir),
             conversationDate: manager.conversationMeta(for: wal.captureId)
