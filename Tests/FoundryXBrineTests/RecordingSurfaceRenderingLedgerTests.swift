@@ -118,9 +118,16 @@ final class RecordingSurfaceRenderingLedgerTests: XCTestCase {
         // public struct InAComment {}
         /* public struct InABlockComment {} */
         public extension PlainStruct {
-            struct NotItselfPublic {}
+            struct PublicByVirtueOfItsExtension {}
         }
         """
+        // THE LAST CASE IS A KNOWN MISS, NAMED HONESTLY (review round 13, L13-2). A member of
+        // a `public extension` IS public in Swift, so `PublicByVirtueOfItsExtension` is a
+        // public type this predicate does not see — it was once called `NotItselfPublic`, and
+        // both that name and the doc's "public extension declares no type" read as if it were
+        // a non-case. It is a case, and it is accepted: the extension opens the scope of an
+        // already-classified type, so nothing here goes unaccounted for, and the presentation
+        // file declares nothing this shape.
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("ledger-predicate-fixture-\(UUID().uuidString).swift")
         try fixture.write(to: url, atomically: true, encoding: .utf8)
@@ -397,9 +404,10 @@ final class RecordingSurfaceRenderingLedgerTests: XCTestCase {
     ///
     /// The predicate is widened rather than documented-around: all six declaration keywords,
     /// attributes in either position, and nesting tracked rather than dropped. Its remaining
-    /// exclusions, stated: `public extension` declares no type (types declared INSIDE one are
-    /// attributed to the extended type); and this is a line lexer, not a parser, so a public
-    /// type declared inside a function body would be attributed to the enclosing type.
+    /// exclusions, stated: the `extension` line itself declares no type, and a member of a
+    /// `public extension` — which IS public in Swift, without carrying the keyword (review
+    /// round 13, L13-2) — is therefore MISSED; and this is a line lexer, not a parser, so a
+    /// public type declared inside a function body would be attributed to the enclosing type.
     /// Neither shape exists in the file this gate reads, and both would be strange places to
     /// put a presentation value.
     static func publicTypeDeclarations(in path: String) throws -> Set<PublicTypeDeclaration> {

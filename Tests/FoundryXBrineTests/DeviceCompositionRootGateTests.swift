@@ -97,6 +97,15 @@ final class DeviceCompositionRootGateTests: XCTestCase {
     ///      it holds that the binding each root resolved is the value it passes. It cannot
     ///      hold that the binding itself is the right one — the N7/M3 scenarios in
     ///      `device-rendered-surface.feature`, which drive the real producer, hold that.
+    ///
+    /// ACCEPTED RESIDUAL (review round 13, L13-1). Part (3) pins the two EXISTING roots'
+    /// expressions, so a THIRD composition root calling
+    /// `followAccountScopeChanges(startingFrom: "")` is unconstrained and withholds every gap
+    /// outcome from the first push (MUT-R13-P3, SURVIVED). It is materially weaker than the
+    /// hole M12-1 closed and it self-heals: only the first push carries the vacuous scope, and
+    /// the next identity notification pushes a freshly-resolved one. Named here rather than
+    /// mechanised — a rule that enumerated permitted `startingFrom:` expressions would be
+    /// completeness-by-enumeration over an open set again.
     func testBothCompositionRootsGiveGapOutcomesAnAccount() throws {
         for path in ["App/RootView.swift", "App/FoundryXAppDelegate.swift"] {
             let source = try String(contentsOf: Self.repoRoot.appendingPathComponent(path),
