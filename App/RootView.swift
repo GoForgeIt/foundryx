@@ -1295,13 +1295,8 @@ private extension CaptureIndicatorTint {
     }
 }
 
-/// Defers building a destination view until SwiftUI actually renders it. `NavigationLink`'s
-/// `destination:` is an autoclosure-free @ViewBuilder evaluated WITH the link, so an
-/// expensive destination is constructed on every body pass of the screen carrying the link
-/// (track `residual_on_main_actor_work`). Wrapping it moves that construction to first
-/// render of the destination itself.
-struct LazyView<Content: View>: View {
-    private let build: () -> Content
-    init(@ViewBuilder _ build: @escaping () -> Content) { self.build = build }
-    var body: some View { build() }
-}
+// `LazyView` — the deferred destination wrapper both this file's Stats link and the
+// conversation row's detail push depend on — now lives in `Sources/FoundryXKit/LazyView.swift`,
+// which the app target compiles into this same module. It moved so that a test can CONSTRUCT
+// it and prove it defers, instead of a gate searching this file for the string "LazyView"
+// (review round 13, M13-2: an eager impostor of the same name survived every gate).

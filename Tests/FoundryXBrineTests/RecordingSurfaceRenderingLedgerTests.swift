@@ -222,6 +222,15 @@ final class RecordingSurfaceRenderingLedgerTests: XCTestCase {
     ///
     /// This also pins the seed the proof reads. `DemoSeed` must write a device record, and
     /// the detail capsule must keep the identifier the proof looks it up by.
+    ///
+    /// WHY THE WIRING HALF READS THE EXECUTED COMMAND (review round 13, M13-1). It used to be
+    /// a `contains` over the WHOLE script, which asks whether the string is somewhere in the
+    /// file — not whether it is on the command the file runs. Moving the `-only-testing:` line
+    /// into a shell comment two lines above the invocation left this test GREEN with the proof
+    /// never executed (MUT-R13-P2), while DELETING the same line reds it: the gate was
+    /// falsifiable against deletion and not against disabling, which is the likelier death.
+    /// It now parses the `-only-testing:` arguments of `phase_uiproof`'s own body, with the
+    /// comments removed the way the shell removes them (`ShellSource`).
     func testTheRenderedAttributionProofExistsAndIsActuallyRun() throws {
         let proof = try Self.source("UITests/RecordingDeviceProofUITests.swift")
         XCTAssertTrue(
@@ -230,14 +239,26 @@ final class RecordingSurfaceRenderingLedgerTests: XCTestCase {
                 + "detail header are back to being held by source-text searches that a "
                 + "deleted rendering satisfies")
 
-        let gates = try Self.source("scripts/ci-gates.sh")
+        let uiproof = try Self.uiproofPhaseBody()
+        // Non-vacuity: the phase must still RUN something, or an empty body would satisfy
+        // every set assertion below by having nothing to disagree with.
+        XCTAssertTrue(uiproof.contains("xcodebuild test"),
+                      "`phase_uiproof` no longer runs `xcodebuild test` — this gate is reading "
+                          + "a function that executes no proof at all")
+        let executed = ShellSource.onlyTestingArguments(in: uiproof)
+        XCTAssertFalse(executed.isEmpty,
+                       "`phase_uiproof` names no `-only-testing:` case, so it either runs the "
+                           + "whole UITest bundle or nothing — either way this gate can no "
+                           + "longer tell whether the attribution proof is among them")
         XCTAssertTrue(
-            gates.contains(
-                "-only-testing:FoundryXUITests/RecordingDeviceProofUITests/"
+            executed.contains(
+                "FoundryXUITests/RecordingDeviceProofUITests/"
                     + "testTheRecorderIsNamedOnTheConversationRowAndInItsDetail"),
-            "`phase_uiproof` does not run RecordingDeviceProofUITests. It executes an explicit "
-                + "`-only-testing:` list, so a proof that is not on it never runs — and an "
-                + "unrun proof is documentation, not a gate")
+            "`phase_uiproof` does not RUN RecordingDeviceProofUITests — it executes "
+                + "\(executed.sorted().joined(separator: ", ")). It runs an explicit "
+                + "`-only-testing:` list, so a proof that is not on the executed command never "
+                + "runs — whether it was deleted or commented out — and an unrun proof is "
+                + "documentation, not a gate")
 
         let seed = AppSourceTree.withoutComments(of: try Self.source("App/DemoSeed.swift"))
         XCTAssertTrue(
@@ -253,10 +274,105 @@ final class RecordingSurfaceRenderingLedgerTests: XCTestCase {
                 + "by — the proof would red, but for the wrong reason")
     }
 
+    /// THE PROOF MUST READ WHAT THIS RUN SEEDED (review round 13, H13-1).
+    ///
+    /// `DemoSeed`'s demo path is additive and the simulator's app container survives between
+    /// runs — this lane runs on persistent native macOS workers whose simulators are never
+    /// erased. So deleting `CaptureDeviceSidecar.write(…)` from the seed left the proof
+    /// PASSING on the previous run's leftovers (MUT-R13-P6, SURVIVED on a warm container,
+    /// RED on a clean one). Its ability to fail had become a property of the machine.
+    ///
+    /// Two things now hold it, and this is the one `swift test` can see: the phase uninstalls
+    /// the app before it runs, and it does so BEFORE the invocation rather than anywhere in
+    /// the function. (The other is `DemoSeed` removing every demo capture's device record
+    /// before it seeds its own, so a direct `xcodebuild test` is honest too.)
+    func testTheUiProofStartsFromAContainerThisRunCreated() throws {
+        let uiproof = try Self.uiproofPhaseBody()
+        guard let uninstall = uiproof.range(of: "simctl uninstall") else {
+            return XCTFail(
+                "`phase_uiproof` never uninstalls the app. Its proofs assert on a library "
+                    + "`DemoSeed` writes into the app container on launch, and that container "
+                    + "survives between runs on this lane's persistent workers — so a seed that "
+                    + "is broken or deleted keeps passing on the last green run's leftovers. "
+                    + "The proof has to read a container this run created")
+        }
+        guard let invocation = uiproof.range(of: "xcodebuild test") else {
+            return XCTFail("`phase_uiproof` no longer runs `xcodebuild test` — this gate is "
+                               + "reading a function that executes no proof at all")
+        }
+        XCTAssertTrue(uninstall.lowerBound < invocation.lowerBound,
+                      "`phase_uiproof` uninstalls the app AFTER running the proof, so the run "
+                          + "still reads whatever the previous one left behind")
+    }
+
+    // MARK: - the script lexer this file's wiring gate depends on
+
+    /// The gate above is only as good as the comment stripping under it, so the stripping is
+    /// held against the shapes it has to survive: the disabling form that beat the old gate
+    /// (MUT-R13-P2), and the `#`s that are NOT comments and must not be eaten.
+    func testTheShellLexerSeesWhatTheShellWouldExecute() throws {
+        let fixture = """
+        phase_example() {
+          # -only-testing:Suite/Commented/WholeLine
+          echo "a # inside double quotes is not a comment"
+          echo 'b # inside single quotes is not a comment'
+          echo "there are ${#items[@]} of them"
+          if xcodebuild test \\
+               -only-testing:Suite/Executed/Case \\
+               -only-testing:Suite/Also/Executed >"$out" 2>&1; then   # -only-testing:Suite/Trailing/Comment
+            echo ok
+          fi
+        }
+        phase_other() {
+          -only-testing:Suite/In/AnotherFunction
+        }
+        """
+        let stripped = ShellSource.withoutComments(of: fixture)
+        XCTAssertFalse(stripped.contains("Suite/Commented/WholeLine"),
+                       "a whole-line `#` comment survived stripping — the exact way an "
+                           + "`-only-testing:` case is disabled rather than deleted")
+        XCTAssertFalse(stripped.contains("Suite/Trailing/Comment"),
+                       "a trailing `#` comment survived stripping")
+        XCTAssertTrue(stripped.contains("a # inside double quotes is not a comment"),
+                      "a `#` inside a double-quoted string was treated as a comment opener")
+        XCTAssertTrue(stripped.contains("b # inside single quotes is not a comment"),
+                      "a `#` inside a single-quoted string was treated as a comment opener")
+        XCTAssertTrue(stripped.contains("${#items[@]}"),
+                      "`${#…}` was treated as a comment — `#` opens one only at the start of a "
+                          + "line or after whitespace")
+
+        guard let body = ShellSource.functionBody("phase_example", in: stripped) else {
+            return XCTFail("the function-body scanner cannot find a `name() { … }` it is "
+                               + "looking straight at")
+        }
+        XCTAssertEqual(
+            ShellSource.onlyTestingArguments(in: body),
+            ["Suite/Executed/Case", "Suite/Also/Executed"],
+            "the executed set must be exactly the cases on this function's own invocation — "
+                + "not the commented ones, and not another function's")
+        XCTAssertNil(ShellSource.functionBody("phase_missing", in: stripped),
+                     "a missing function must be `nil` — a scanner that guesses turns a rename "
+                         + "into a vacuous pass")
+    }
+
     // MARK: - helpers
 
     private static func source(_ path: String) throws -> String {
         try String(contentsOf: repoRoot.appendingPathComponent(path), encoding: .utf8)
+    }
+
+    /// `phase_uiproof`'s body, comments removed — i.e. what that function actually executes.
+    private static func uiproofPhaseBody() throws -> String {
+        let script = ShellSource.withoutComments(of: try source("scripts/ci-gates.sh"))
+        guard let body = ShellSource.functionBody("phase_uiproof", in: script) else {
+            throw NSError(
+                domain: "RecordingSurfaceRenderingLedgerTests", code: 1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "scripts/ci-gates.sh has no `phase_uiproof() { … }` function — the phase "
+                        + "that runs the rendered-attribution proof was renamed or removed, and "
+                        + "the gates that read it must follow it rather than pass on absence"])
+        }
+        return body
     }
 
     /// A public type declaration: its name, and the top-level type it is nested inside (nil

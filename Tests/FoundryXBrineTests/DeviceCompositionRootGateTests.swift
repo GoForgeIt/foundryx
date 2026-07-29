@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import SwiftUI
 @testable import FoundryXKit
 
 /// Structural gates T5 owns for the two boundaries T4 left standing
@@ -202,7 +203,14 @@ final class DeviceCompositionRootGateTests: XCTestCase {
     ///
     /// WHAT THIS EXCLUDES: it holds that the conversation row's destination is deferred, not
     /// that every expensive destination in the app is. `LazyView` is the repo's own answer
-    /// (declared in `App/RootView.swift` with the rationale, used for `StatsView`).
+    /// (declared in `Sources/FoundryXKit/LazyView.swift` with the rationale, used for
+    /// `StatsView` too).
+    ///
+    /// AND IT HOLDS A SPELLING, NOT A BEHAVIOUR (review round 13, M13-2). `code.contains(…)`
+    /// asks what the call site is NAMED. An eager type wearing the same name passed it — and
+    /// through the shared `StatsView` call site, restored the pathology more broadly than
+    /// before. What `LazyView` IS is now held next door, by construction and invocation, in
+    /// `testLazyViewDoesNotBuildItsContentUntilItsBodyIsAsked`; the two together are the gate.
     func testTheConversationRowDefersBuildingItsDetail() throws {
         let captureScreen = try String(
             contentsOf: Self.repoRoot.appendingPathComponent("App/CaptureScreen.swift"),
@@ -221,6 +229,54 @@ final class DeviceCompositionRootGateTests: XCTestCase {
                 + "legacy source marker off disk as an eager argument, uncached — runs once "
                 + "per row on every body pass of the list, on the main actor. Wrap it: "
                 + "`LazyView { conversationDetail(wal) }`")
+
+        // The name at the call site must be THE deferring type — not a second declaration
+        // under `App/` shadowing it. Same module, so this is also a compile error; the check
+        // is here because `swift test` is what runs on every commit.
+        let declarations = try AppSourceTree.filesContaining("struct LazyView")
+        XCTAssertEqual(
+            declarations, [],
+            "\(declarations.joined(separator: ", ")) declares its own `LazyView`. The type the "
+                + "call site above names must be the one `testLazyViewDoesNotBuildItsContentUntilItsBodyIsAsked` "
+                + "constructs — otherwise the deferral is held by a name again")
+    }
+
+    /// WHAT `LazyView` IS, held by construction rather than by spelling (review round 13,
+    /// M13-2).
+    ///
+    /// The gate above searches `App/` for `LazyView { conversationDetail(wal) }`. An eager
+    /// type of the same name —
+    /// `init(@ViewBuilder _ build: @escaping () -> Content) { self.built = build() }` —
+    /// satisfies it exactly, at both of the type's call sites, and reinstates the per-row
+    /// main-actor disk read H12-1 was about while every gate stays green (MUT-R13-P5).
+    ///
+    /// This is the property, driven: a closure that records its own invocations must not be
+    /// invoked by `init`, and must be invoked when `body` is asked for. The type is in the Kit
+    /// precisely so this test can exist — `swift test` cannot compile `App/`, so while it was
+    /// declared there, nothing could name it.
+    @MainActor
+    func testLazyViewDoesNotBuildItsContentUntilItsBodyIsAsked() {
+        final class Invocations { var count = 0 }
+        let invocations = Invocations()
+
+        let view = LazyView { () -> Text in
+            invocations.count += 1
+            return Text("the destination")
+        }
+        XCTAssertEqual(
+            invocations.count, 0,
+            "`LazyView` built its content at INIT. That is the eager impostor: the wrapper is "
+                + "constructed with the `NavigationLink` on every body pass of the screen "
+                + "carrying it, so building at init means the conversation row reads each "
+                + "capture's device record off disk, uncached, on the main actor, once per row "
+                + "per pass — the pathology the wrapper exists to prevent")
+
+        _ = view.body
+        XCTAssertEqual(
+            invocations.count, 1,
+            "`LazyView.body` did not build its content — a destination that is never "
+                + "constructed renders nothing, so a wrapper that defers forever is not "
+                + "deferral either")
     }
 
     /// The same boundary from the other side: no production or test call site may omit

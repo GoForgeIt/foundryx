@@ -489,6 +489,23 @@ phase_uiproof() {
     return
   fi
   xcrun simctl boot "$udid" >/dev/null 2>&1 || true
+  # ------------------------------------------------ the proof must read state THIS run seeded
+  # (review round 13, H13-1.) These proofs assert on a library `DemoSeed` writes into the app's
+  # own container on launch, and that container SURVIVES between runs — this lane runs on
+  # persistent native macOS workers whose simulators are never erased. Deleting the seed
+  # outright therefore left the recorder-attribution proof PASSING on the previous run's
+  # leftovers: the reviewer removed `CaptureDeviceSidecar.write(…)` from `DemoSeed` and the
+  # case still passed in 8.5s, and only red once the app was uninstalled by hand. A proof whose
+  # ability to fail is a property of the machine is not a gate. So: every run starts from a
+  # container this run created. `simctl uninstall` is a no-op (rc=0) when nothing is installed,
+  # so the outcome is CHECKED rather than assumed — a container that survives the uninstall is
+  # a loud failure, not a quiet return to the state this exists to prevent.
+  xcrun simctl uninstall "$udid" com.goforgeit.foundryx >/dev/null 2>&1 || true
+  if xcrun simctl get_app_container "$udid" com.goforgeit.foundryx >/dev/null 2>&1; then
+    echo "  the app is STILL INSTALLED after uninstall — this run would read the last run's seeded library"
+    fail "uiproof-stale-app-container"
+    return
+  fi
   local out="build/ci-gates-uiproof.log"
   mkdir -p build
   if xcodebuild test -project FoundryX.xcodeproj -scheme FoundryXUIProof \

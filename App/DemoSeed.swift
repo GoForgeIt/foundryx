@@ -192,6 +192,21 @@ enum DemoSeed {
         // confirmed. Dev-harness only (never runs outside -MainPreview); clears the whole
         // queue so each launch is a clean slate for the local-first proof.
         try? FileManager.default.removeItem(at: base.appendingPathComponent("speaker-confirms.jsonl"))
+        // SELF-CLEANING, for exactly the reason `seedStressIfRequested` self-cleans (review
+        // round 13, H13-1). This seeder is purely ADDITIVE and the simulator's app container
+        // SURVIVES between runs, so a `.capture-device.json` written by an earlier launch is
+        // still readable by this one. `RecordingDeviceProofUITests` therefore passed with the
+        // `CaptureDeviceSidecar.write(…)` below deleted outright — it was reading the PREVIOUS
+        // run's device record, and the proof's ability to fail had become a property of the
+        // machine rather than of the code. Every demo capture's device record is removed before
+        // this launch seeds its own, so what the proof reads is what this launch wrote. Only
+        // ever touches the `omi-demo-*` ids this seeder owns; real captures are untouched.
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: base.path)) ?? []
+        where name.hasPrefix("omi-demo-") {
+            try? FileManager.default.removeItem(
+                at: base.appendingPathComponent(name, isDirectory: true)
+                    .appendingPathComponent(CaptureDeviceSidecar.fileName))
+        }
         let now = Int(Date().timeIntervalSince1970)
         // (id, title, summary, stage, startOffsetSeconds, durationSeconds)
         let demos: [(String, String, String, String, Int, Int)] = [
