@@ -45,6 +45,22 @@ struct AccountDeletionView: View {
                         .grainTextStyle(.caption).foregroundStyle(GrainColor.dangerRed)
                 }
             }
+            // An auth failure is NOT a connection failure. Both used to render the
+            // sentence above, which sent the user to fix the one thing that was working.
+            // The route does not exist server-side. Retrying is futile, and the local
+            // scopes still work — say both, rather than "check your connection".
+            if case .notAvailableYet(let scope) = model.phase {
+                Section {
+                    Text("“\(scope.title)” isn't available yet — the server can't complete it, and retrying won't help. Nothing was deleted. “Erase this account's local data” works now and clears everything on this iPhone.")
+                        .grainTextStyle(.caption).foregroundStyle(GrainColor.dangerRed)
+                }
+            }
+            if case .signInExpired(let scope) = model.phase {
+                Section {
+                    Text("Couldn't complete “\(scope.title).” Your sign-in expired — sign out and back in, then try again. Nothing was deleted.")
+                        .grainTextStyle(.caption).foregroundStyle(GrainColor.dangerRed)
+                }
+            }
             if case .blocked(let scope) = model.phase {
                 Section {
                     Text("Deletion is pending. This account stays closed until cleanup finishes.")
@@ -109,9 +125,18 @@ extension AccountDeletionModel {
                 try await localDeletion.eraseVerifiedCurrentOwner()
             },
             deleteRemote: { scope, idToken in
-                guard let token = idToken,
-                      let base = RemoteConfig.fromBundle()?.gatewayHTTPURL else {
+                guard let base = RemoteConfig.fromBundle()?.gatewayHTTPURL else {
                     throw AccountDeletionError.server   // fail loud — no silent no-op
+                }
+                // REFRESH at request time. `idToken` here is `remote.idToken`, a snapshot
+                // taken at the last session resolve — nil whenever that refresh failed,
+                // and stale after an hour. Deleting an account is a rare, deliberate act
+                // that can easily happen long after the last resolve, so signing it with
+                // the snapshot meant the request never left the phone and the user was
+                // told to check a connection that was fine.
+                let token = (try? await FoundryAuth().currentIdToken()) ?? idToken
+                guard let token, !token.isEmpty else {
+                    throw AccountDeletionError.signInExpired
                 }
                 try await AccountClient(baseURL: base).deleteAccount(scope: scope, idToken: token)
             })

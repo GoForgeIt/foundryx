@@ -672,6 +672,9 @@ public final class VaultFunnelModel: ObservableObject {
             // id_token cannot fix itself by waiting, and the old code retried it silently
             // on every foreground forever.
             state = .failed(.signInExpired)
+            // Tell the SESSION, not just this screen: a rejected bearer means the whole
+            // app is signed out, and the remedy is the front door.
+            AuthExpiryRouter.shared.authRejected(generation: generation)
         } catch {
             // A genuine network blip: keep the durable waiting state and retry next
             // foreground. This is the ONLY error class that should be invisible.

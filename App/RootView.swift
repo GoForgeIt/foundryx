@@ -284,9 +284,18 @@ struct RootView: View {
             }
         }
         .task {
+            // ONE place turns a rejected sign-in into a signed-out app. Every surface used
+            // to discover 401s locally and render its own message while the app carried on
+            // as if signed in — so a dead session looked like a different bug on whichever
+            // screen you were standing on.
+            AuthExpiryRouter.shared.onExpired = {
+                remote.signOut()
+                enteredApp = false          // back through the front door, not into the tabs
+            }
             identityCoordinator.bind(
                 onIdentityTransition: { _ in
                     resetAccountDerivedState()
+                    AuthExpiryRouter.shared.identityChanged()
                 },
                 onRestoreCompleted: { _ in },
                 onTokenAvailable: { token in

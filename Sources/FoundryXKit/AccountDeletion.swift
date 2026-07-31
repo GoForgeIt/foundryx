@@ -63,6 +63,22 @@ public enum AccountDeletionError: Error, Equatable, Sendable {
     case server
     case ownerUnproven
     case cleanupPending
+    /// The server has no deletion route (404/501) — the feature is not available yet.
+    ///
+    /// This is NOT a connection problem and NOT the user's fault. The gateway serves only
+    /// `/account/signup`, `/account/waitlist` and `/account/waitlist-web`; everything else
+    /// falls through to `404 Not Found`. Deletion is Apple-required and the button exists,
+    /// so saying "check your connection" sent the owner to re-check a working connection,
+    /// twice, for something no amount of retrying could fix.
+    case notAvailableYet
+    /// The sign-in could not be refreshed, or the server rejected it (401/403).
+    ///
+    /// Distinct from `.server` because the remedy is different and the UI used to
+    /// conflate them: a missing token, an expired one, and a dropped connection all
+    /// rendered as "Check your connection and try again." Nick hit this with a working
+    /// connection and a healthy gateway — the request never left the phone, because the
+    /// cached id_token snapshot was nil and the guard threw before any HTTP call.
+    case signInExpired
 }
 
 // MARK: - Seam (network + local)
@@ -91,6 +107,12 @@ public final class AccountDeletionModel: ObservableObject {
         case deleting(AccountDeletionScope)
         case done(AccountDeletionScope)
         case failed(AccountDeletionScope)
+        /// The sign-in expired or was rejected — a DIFFERENT remedy from `.failed`, which
+        /// tells the user to check a connection that is very likely fine.
+        case signInExpired(AccountDeletionScope)
+        /// The server cannot do this yet. Distinct so the UI stops telling the user to
+        /// retry something that can never succeed.
+        case notAvailableYet(AccountDeletionScope)
         case blocked(AccountDeletionScope)
     }
 
@@ -115,6 +137,14 @@ public final class AccountDeletionModel: ObservableObject {
             phase = .done(scope)
         } catch AccountDeletionError.cleanupPending {
             phase = .blocked(scope)
+        } catch AccountDeletionError.notAvailableYet {
+            phase = .notAvailableYet(scope)
+        } catch AccountDeletionError.signInExpired {
+            AuthExpiryRouter.shared.authRejected(
+                generation: CaptureAccountScope.identityGeneration)
+            // NOT `.failed`: nothing about the connection is wrong, and telling the user
+            // to check it sends them to fix the one thing that is working.
+            phase = .signInExpired(scope)
         } catch {
             phase = .failed(scope)
         }

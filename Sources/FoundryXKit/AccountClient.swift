@@ -68,7 +68,18 @@ public struct AccountClient: Sendable {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["scope": scope.rawValue])
         let (_, resp) = try await session.data(for: req)
-        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+        guard let http = resp as? HTTPURLResponse else { throw AccountDeletionError.server }
+        // A rejected bearer is an AUTH failure, not a transport one. Collapsing it into
+        // `.server` is what made an expired sign-in read as "check your connection".
+        if http.statusCode == 401 || http.statusCode == 403 {
+            throw AccountDeletionError.signInExpired
+        }
+        // 404/501 = the route does not exist. Retrying cannot help, so say so rather
+        // than blaming the network.
+        if http.statusCode == 404 || http.statusCode == 501 {
+            throw AccountDeletionError.notAvailableYet
+        }
+        guard (200..<300).contains(http.statusCode) else {
             throw AccountDeletionError.server
         }
     }
