@@ -29,9 +29,9 @@ final class DeviceRenderedSurfaceFeatureTests: ProcessGlobalStateTestCase {
             let result = try await BrineFeatureRunner.run(
                 "device-rendered-surface",
                 registry: StepRegistry(DeviceRenderedSurfaceSteps.make(world: world)))
-            XCTAssertEqual(result.passed, 14,
-                           "device-rendered-surface must run all 14 scenarios "
-                               + "(9 plain + 3 S01 rows + 2 S02 rows)")
+            XCTAssertEqual(result.passed, 15,
+                           "device-rendered-surface must run all 15 scenarios "
+                               + "(10 plain + 3 S01 rows + 2 S02 rows)")
         } catch {
             await world.cleanup()
             throw error
@@ -68,30 +68,81 @@ final class DeviceRenderedSurfaceFeatureTests: ProcessGlobalStateTestCase {
         }
     }
 
-    /// Every rendered attribution answer, including the two that mean "I cannot tell you".
-    /// The two unknown answers must carry a diagnostic: "Unknown device" on its own is a
-    /// shrug, and the user can do nothing with it.
-    func testEveryProvenanceAnswerRendersAndTheUnknownOnesExplainThemselves() {
+    /// The base a conversation row composes its recorder into — the same shape
+    /// `App/CaptureScreen.swift` hands `metaLine`.
+    private static let rowBase = "3:04 – 3:21 PM · 17 min"
+
+    /// EVERY RENDERED ANSWER, OVER PROVENANCE × WHAT THE DISK CAN NAME — and the one property
+    /// that decides which of them may be printed with nothing beside it.
+    ///
+    /// THE POPULATION USED TO EXCLUDE THE MARKER BEING ABSENT, and that is where the bug
+    /// lived: every case below paired a pre-record provenance with a READABLE
+    /// `.capture-source` marker, so the arm that runs when nothing on disk names a source —
+    /// the oldest part of every upgrading archive, and every capture too damaged to date —
+    /// was never evaluated here at all.
+    ///
+    /// THE PROPERTY. A name may stand alone exactly when the classifier warrants it standing
+    /// alone: a device it identified, or an era it could establish. Every other answer must
+    /// arrive with the reason the app can say no more, and the conversation row — which has
+    /// no room for a reason — must print nothing for it. `metaLine` IS that row, so "stands
+    /// alone" is measured through what the row does rather than through a flag that claims it.
+    func testOnlyAnAnswerTheClassifierWarrantsIsPrintedWithNothingBesideIt() {
         let context = CaptureDeviceContext(
             identity: RecordingDeviceIdentity(shape: .audioRoute, hardwareToken: "route-1"),
             displayName: "Field Recorder", accountScope: "acct-x")
+        let unreadableMarker = "a-source-kind-this-build-has-no-meaning-for"
+        // (provenance, what `.capture-source` says, may this name stand alone)
         let cases: [(CaptureDeviceProvenance, String?, Bool)] = [
-            (.identified(context), "phoneMic", false),
-            (.legacyPreMigration, CaptureSourceKind.omi.rawValue, false),
-            (.legacyPreMigration, CaptureSourceKind.phoneMic.rawValue, false),
-            (.undatable(diagnostic: "no durable start"), CaptureSourceKind.omi.rawValue, false),
-            (.unknownPostMigration(diagnostic: "the record failed to write"), "omi", true),
-            (.unreadableRecord(diagnostic: "the record could not be understood"), "omi", true),
+            (.identified(context), "phoneMic", true),
+            (.legacyPreMigration, CaptureSourceKind.omi.rawValue, true),
+            (.legacyPreMigration, CaptureSourceKind.phoneMic.rawValue, true),
+            // The era is ESTABLISHED — a durable start before the epoch — so saying it is an
+            // answer even though nothing names a source.
+            (.legacyPreMigration, nil, true),
+            (.legacyPreMigration, unreadableMarker, true),
+            // The era is NOT establishable. Neither arm may be printed bare.
+            (.undatable(diagnostic: "no durable start and no dated id"),
+             CaptureSourceKind.omi.rawValue, false),
+            (.undatable(diagnostic: "no durable start and no dated id"), nil, false),
+            (.unknownPostMigration(diagnostic: "the record failed to write"), "omi", false),
+            (.unreadableRecord(diagnostic: "the record could not be understood"), "omi", false),
         ]
-        for (provenance, marker, expectUnknown) in cases {
+        XCTAssertEqual(Set(cases.map(\.2)).count, 2, "the fixture itself is degenerate")
+
+        // What a recording the classifier COULD place before device tracking is called. Any
+        // other cell rendering this same name is claiming that era without having established
+        // it — the failure mode this matrix exists to catch, held without pinning the copy.
+        let establishedEra = CaptureAttributionPresentation.attribution(
+            for: .legacyPreMigration, legacySourceMarker: nil).deviceName
+
+        for (provenance, marker, mayStandAlone) in cases {
+            let disk = marker ?? "no marker"
             let rendered = CaptureAttributionPresentation.attribution(for: provenance,
                                                                       legacySourceMarker: marker)
-            XCTAssertFalse(rendered.deviceName.isEmpty, "\(provenance) rendered no name")
-            XCTAssertEqual(rendered.deviceName == CaptureAttributionPresentation.unknownDeviceName,
-                           expectUnknown, "\(provenance) rendered \(rendered.deviceName)")
-            XCTAssertEqual(rendered.diagnostic != nil, expectUnknown,
-                           "\(provenance): a name the app cannot stand behind must say why, and "
-                               + "one it can must not be hedged")
+            XCTAssertFalse(rendered.deviceName.isEmpty, "\(provenance)/\(disk) rendered no name")
+
+            let row = CaptureAttributionPresentation.metaLine(Self.rowBase, attribution: rendered)
+            XCTAssertEqual(row != Self.rowBase, mayStandAlone,
+                           "\(provenance)/\(disk) renders \"\(rendered.deviceName)\" and the "
+                               + "conversation row says \"\(row)\" — a row prints a name exactly "
+                               + "when that name is an answer on its own")
+            if mayStandAlone {
+                XCTAssertTrue(row.contains(rendered.deviceName),
+                              "\(provenance)/\(disk): the row appended something other than the "
+                                  + "name it was given")
+            } else {
+                XCTAssertFalse(rendered.diagnostic?.isEmpty ?? true,
+                               "\(provenance)/\(disk) renders \"\(rendered.deviceName)\" with no "
+                                   + "reason beside it — a name the app cannot stand behind, "
+                                   + "standing on its own, is the shrug a reader can do nothing "
+                                   + "with")
+                if case .legacyPreMigration = provenance {} else {
+                    XCTAssertNotEqual(rendered.deviceName, establishedEra,
+                                      "\(provenance)/\(disk) is described exactly as a recording "
+                                          + "the classifier COULD place before device tracking, "
+                                          + "which is a claim about an era it could not establish")
+                }
+            }
         }
 
         // A LEGACY OMI RECORDING STILL RENDERS "Omi" (review round 8, L3 — asserted at the
@@ -106,6 +157,105 @@ final class DeviceRenderedSurfaceFeatureTests: ProcessGlobalStateTestCase {
         XCTAssertEqual(
             CaptureAttributionPresentation.legacyDisplayName(forMarker: CaptureSourceKind.omi.rawValue),
             CaptureLiveStatus.sourceLabel(source: .omi, isRecordingMic: false))
+    }
+
+    // MARK: unit — the recording that cannot be placed in an era, from both sides
+
+    /// DIRECTION ONE: THE ERA IS NEVER ASSERTED WITHOUT WARRANT.
+    ///
+    /// `.undatable` is the classifier saying, in its own words, that *whether this recording
+    /// predates device records is not knowable*. Reading it as pre-upgrade is the conservative
+    /// INTERNAL choice — it is why a capture with no record is never accused of losing one —
+    /// and it is not a licence to tell the reader an era as a fact. This reds if an undatable
+    /// recording is described the way an established one is, and it reds if the conversation
+    /// row — which has no room for the hedge — prints anything for it at all.
+    func testAnUndatableRecordingIsNeverGivenAnEraTheClassifierCouldNotEstablish() {
+        let established = CaptureAttributionPresentation.attribution(for: .legacyPreMigration,
+                                                                     legacySourceMarker: nil)
+        for marker in [nil, CaptureSourceKind.omi.rawValue, CaptureSourceKind.phoneMic.rawValue]
+                as [String?] {
+            let rendered = CaptureAttributionPresentation.attribution(
+                for: .undatable(diagnostic: "no durable start and no dated id"),
+                legacySourceMarker: marker)
+            XCTAssertNotEqual(
+                rendered.deviceName, established.deviceName,
+                "an undatable recording (\(marker ?? "no marker")) is described exactly as one "
+                    + "the classifier could place before device tracking — the era is the one "
+                    + "thing it said it could not know")
+            XCTAssertEqual(
+                CaptureAttributionPresentation.metaLine(Self.rowBase, attribution: rendered),
+                Self.rowBase,
+                "the conversation row prints \"\(rendered.deviceName)\" for a recording the "
+                    + "classifier could not place, with no room for the hedge that would make "
+                    + "it honest")
+        }
+
+        // NON-VACUOUS, BOTH WAYS. An era the classifier DID establish is still said out loud,
+        // and it is not the unknown-device shrug — otherwise "never says the era" would be
+        // satisfiable by a surface that says nothing anywhere, which is the silence the shrug
+        // was standing in for.
+        XCTAssertNotEqual(
+            CaptureAttributionPresentation.metaLine(Self.rowBase, attribution: established),
+            Self.rowBase,
+            "a recording the classifier placed before device tracking says nothing on its own "
+                + "row, so the assertions above hold a surface that has simply gone quiet")
+        XCTAssertNotEqual(established.deviceName,
+                          CaptureAttributionPresentation.unknownDeviceName,
+                          "a recording from an era that kept no device identity is reported as a "
+                              + "device the app cannot name — nothing about it went missing")
+    }
+
+    /// DIRECTION TWO: WHAT IS RENDERED INSTEAD IS NOT A SHRUG.
+    ///
+    /// The classifier writes the sentence that says why this recording cannot be placed, and
+    /// the arm that renders it used to pattern-match `.undatable` together with
+    /// `.legacyPreMigration` and bind nothing — so the payload was built and dropped one call
+    /// before the only surface that could show it. This reds if that sentence stops reaching
+    /// the reader, and it reds if the answer goes back to being a bare name.
+    func testAnUndatableRecordingCarriesTheClassifiersOwnReasonRatherThanShrugging() {
+        let built = "this recording carries no durable start and no dated id, so whether it "
+            + "predates device records is not knowable; it is read as pre-upgrade"
+        for marker in [nil, CaptureSourceKind.omi.rawValue] as [String?] {
+            let rendered = CaptureAttributionPresentation.attribution(
+                for: .undatable(diagnostic: built), legacySourceMarker: marker)
+            XCTAssertEqual(
+                rendered.diagnostic, built,
+                "the classifier explained itself and the surface rendered "
+                    + "\(rendered.diagnostic.map { "\"\($0)\"" } ?? "no reason at all") beside "
+                    + "\"\(rendered.deviceName)\" (\(marker ?? "no marker")) — a reader who "
+                    + "wants to know why nothing is named has nowhere to go")
+            XCTAssertFalse(
+                rendered.isKnown,
+                "an undatable recording is presented as an answer the app can stand behind")
+            XCTAssertFalse(rendered.deviceName.isEmpty,
+                           "the hedged answer has no name to hedge (\(marker ?? "no marker"))")
+        }
+
+        // THE REAL SENTENCE, FROM THE REAL CLASSIFIER, THROUGH THE PRODUCTION READ PATH — so
+        // this cannot pass on a diagnostic that only a test constructs.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("foundryx-undatable-\(UUID().uuidString)", isDirectory: true)
+        let captureId = "mic-restored-with-no-stamp"
+        do {
+            try FileManager.default.createDirectory(
+                at: dir.appendingPathComponent(captureId, isDirectory: true),
+                withIntermediateDirectories: true)
+        } catch {
+            return XCTFail("could not stage an undatable capture: \(error)")
+        }
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        guard case .undatable(let classifiersReason) = CaptureDeviceSidecar.provenance(
+                captureId: captureId, baseDir: dir) else {
+            return XCTFail("the staged capture is datable after all, so this check never "
+                               + "reaches the arm it is about")
+        }
+        let rendered = CaptureAttributionPresentation.attribution(captureId: captureId,
+                                                                  baseDir: dir)
+        XCTAssertEqual(rendered.diagnostic, classifiersReason,
+                       "the production read path renders "
+                           + "\(rendered.diagnostic.map { "\"\($0)\"" } ?? "no reason") for a "
+                           + "capture the classifier described as \"\(classifiersReason)\"")
     }
 
     /// A BLUETOOTH AUDIO-ROUTE RECORDER MUST NOT BE CALLED "PHONE" (T5, S01).
@@ -809,6 +959,26 @@ final class DeviceRenderedSurfaceWorld {
 // MARK: - Steps
 
 enum DeviceRenderedSurfaceSteps {
+
+    /// S08's two recordings, and the only difference between them: one carries a durable
+    /// start the classifier can place before device tracking, the other carries no durable
+    /// start and no stamp in its id. NEITHER has a device record or a `.capture-source`
+    /// marker, so nothing on disk names a source for either — which is the population the
+    /// rendered answer used to shrug at.
+    static let s08DatableId = "mic-20240101-000000-LEGACY01"
+    static let s08UndatableId = "mic-restored-with-no-stamp"
+
+    /// One of S08's recordings, taken out of the history the launch step BUILT rather than
+    /// recomputed here — so these checks are about what the rendered list says.
+    @MainActor
+    static func s08Row(_ w: DeviceRenderedSurfaceWorld, _ id: String) throws -> CaptureAttribution {
+        guard let row = w.historyRows.first(where: { $0.captureId == id }) else {
+            throw BrineStepError(
+                "the rendered history does not contain \(id) at all "
+                    + "(\(w.historyRows.map(\.captureId)))")
+        }
+        return row.attribution
+    }
 
     static func make(world w: DeviceRenderedSurfaceWorld) -> [StepDefinition] {
         [
@@ -1791,6 +1961,165 @@ private func historySteps(_ w: DeviceRenderedSurfaceWorld) -> [StepDefinition] {
                 hasRecordingHistory: false)
             guard case .onboarding = fresh else {
                 throw BrineStepError("onboarding never presents at all — the check is unfailable")
+            }
+        },
+
+        // MARK: S08 — an era the app can establish, and one it cannot
+        //
+        // THE POPULATION. Every conversation an upgrading user already owns predates the
+        // device record, and the oldest of them predate the `.capture-source` marker too, so
+        // nothing on disk names a source for them. Alongside those sits a different animal:
+        // a capture with no durable start and no stamp in its id, which the classifier
+        // itself says it CANNOT place in an era. The two look identical on disk — no record,
+        // no marker — and they are not the same answer, so they must not be given the same
+        // sentence. The first is a fact; the second would be a guess wearing a fact's clothes.
+
+        defineStep("an account's history contains a recording from before device tracking with nothing on disk naming its source") { ctx, _, _ in
+            try await MainActor.run {
+                try w.freshHandset()
+                try w.signIn("s08-owner")
+                // No device record AND no source marker. `seedConversation` stamps a durable
+                // start of NOW, which is before the migration epoch, so the REAL classifier
+                // answers `.legacyPreMigration` — the era is established, not assumed.
+                try w.seedConversation(id: DeviceRenderedSurfaceSteps.s08DatableId,
+                                       device: nil, sourceTag: nil)
+                guard case .legacyPreMigration = CaptureDeviceSidecar.provenance(
+                        captureId: DeviceRenderedSurfaceSteps.s08DatableId, baseDir: w.baseDir) else {
+                    throw BrineStepError(
+                        "the seeded recording is not classified pre-migration, so this scenario "
+                            + "never reaches the arm it is about")
+                }
+                guard CaptureManager.capturedSourceOnDisk(DeviceRenderedSurfaceSteps.s08DatableId,
+                                                          baseDir: w.baseDir) == nil else {
+                    throw BrineStepError(
+                        "the seeded recording still names a source on disk — the case under "
+                            + "test (nothing on disk to name it by) is not set up")
+                }
+            }
+            return ctx
+        },
+
+        defineStep("it also contains a recording nothing on disk can date") { ctx, _, _ in
+            try await MainActor.run {
+                // Made the way a restored capture is: a note directory with no durable start
+                // metadata and an id carrying no parseable stamp. Filesystem dates are
+                // forbidden to the classifier, so there is nothing left to date it by.
+                let dir = w.baseDir.appendingPathComponent(
+                    DeviceRenderedSurfaceSteps.s08UndatableId, isDirectory: true)
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                try Data([1, 2, 3, 4]).write(
+                    to: dir.appendingPathComponent("seg-000000000000.opus"))
+                guard case .undatable = CaptureDeviceSidecar.provenance(
+                        captureId: DeviceRenderedSurfaceSteps.s08UndatableId, baseDir: w.baseDir) else {
+                    throw BrineStepError(
+                        "the sibling recording is datable after all, so the undatable arm is "
+                            + "never reached")
+                }
+            }
+            return ctx
+        },
+
+        defineCheck("the datable older recording is described as recorded before device tracking rather than as an unknown device") { _, _, _ in
+            let attribution = try await MainActor.run {
+                try DeviceRenderedSurfaceSteps.s08Row(w, DeviceRenderedSurfaceSteps.s08DatableId)
+            }
+            guard attribution.deviceName != CaptureAttributionPresentation.unknownDeviceName else {
+                throw BrineStepError(
+                    "a recording made before device tracking is reported as a device the app "
+                        + "cannot name — nothing about it went missing, and that shrug stands "
+                        + "in front of every conversation a legacy user owns")
+            }
+            guard attribution.deviceName.range(of: "before device",
+                                               options: .caseInsensitive) != nil else {
+                throw BrineStepError(
+                    "it is described as \"\(attribution.deviceName)\", which says nothing about "
+                        + "the era that IS the answer for it")
+            }
+            // NON-VACUOUS: a legacy recording whose shipped marker DOES name a source keeps
+            // that name, so this is a statement about the unnameable ones.
+            let named = CaptureAttributionPresentation.attribution(
+                for: .legacyPreMigration, legacySourceMarker: CaptureSourceKind.omi.rawValue)
+            guard named.deviceName == "Omi" else {
+                throw BrineStepError(
+                    "every legacy recording now renders the era sentence, including the ones "
+                        + "whose shipped marker is an answer — this check is vacuous")
+            }
+        },
+
+        defineCheck("its conversation row carries that description") { _, _, _ in
+            let attribution = try await MainActor.run {
+                try DeviceRenderedSurfaceSteps.s08Row(w, DeviceRenderedSurfaceSteps.s08DatableId)
+            }
+            // The exact composition `App/CaptureScreen.swift` puts on the conversation card.
+            let base = "3:04 – 3:21 PM · 17 min"
+            let row = CaptureAttributionPresentation.metaLine(base, attribution: attribution)
+            guard row.contains(attribution.deviceName) else {
+                throw BrineStepError(
+                    "the conversation row says \"\(row)\" — a legacy user's whole timeline goes "
+                        + "back to saying nothing at all about where its recordings came from")
+            }
+        },
+
+        defineCheck("the undatable recording is not described as belonging to that era") { _, _, _ in
+            let (datable, undatable) = try await MainActor.run {
+                () -> (CaptureAttribution, CaptureAttribution) in
+                (try DeviceRenderedSurfaceSteps.s08Row(w, DeviceRenderedSurfaceSteps.s08DatableId),
+                 try DeviceRenderedSurfaceSteps.s08Row(w, DeviceRenderedSurfaceSteps.s08UndatableId))
+            }
+            guard undatable.deviceName != datable.deviceName else {
+                throw BrineStepError(
+                    "a recording the app cannot date is described exactly as one it CAN place "
+                        + "before device tracking (\"\(undatable.deviceName)\") — the era is the "
+                        + "one thing the classifier said was not knowable about it")
+            }
+            guard undatable.deviceName.range(of: "before device",
+                                             options: .caseInsensitive) == nil else {
+                throw BrineStepError(
+                    "it claims an era in its own words: \"\(undatable.deviceName)\"")
+            }
+        },
+
+        defineCheck("the undatable recording carries the reason it cannot be placed in an era") { _, _, _ in
+            let (provenance, rendered) = try await MainActor.run {
+                () -> (CaptureDeviceProvenance, CaptureAttribution) in
+                (CaptureDeviceSidecar.provenance(captureId: DeviceRenderedSurfaceSteps.s08UndatableId,
+                                                 baseDir: w.baseDir),
+                 try DeviceRenderedSurfaceSteps.s08Row(w, DeviceRenderedSurfaceSteps.s08UndatableId))
+            }
+            guard case .undatable(let built) = provenance else {
+                throw BrineStepError("the undatable recording is classified \(provenance)")
+            }
+            // THE PAYLOAD THE COMBINED ARM THREW AWAY. The classifier writes the sentence
+            // explaining why this recording cannot be placed; the surface must render THAT
+            // one — not a generic substitute, and not nothing.
+            guard rendered.diagnostic == built else {
+                throw BrineStepError(
+                    "the classifier explained itself — \"\(built)\" — and the surface rendered "
+                        + "\(rendered.diagnostic.map { "\"\($0)\"" } ?? "no reason at all") "
+                        + "beside \"\(rendered.deviceName)\"")
+            }
+        },
+
+        defineCheck("no conversation row speaks for the undatable recording") { _, _, _ in
+            let (undatable, datable) = try await MainActor.run {
+                () -> (CaptureAttribution, CaptureAttribution) in
+                (try DeviceRenderedSurfaceSteps.s08Row(w, DeviceRenderedSurfaceSteps.s08UndatableId),
+                 try DeviceRenderedSurfaceSteps.s08Row(w, DeviceRenderedSurfaceSteps.s08DatableId))
+            }
+            let base = "3:04 – 3:21 PM · 17 min"
+            let row = CaptureAttributionPresentation.metaLine(base, attribution: undatable)
+            guard row == base else {
+                throw BrineStepError(
+                    "the conversation row says \"\(row)\" for a recording the classifier could "
+                        + "not place — the row has no room for the hedge that would make that "
+                        + "honest, so it may say nothing at all")
+            }
+            // NON-VACUOUS: the row DOES speak for the recording whose era is established, so
+            // this is a statement about the undatable one and not about a row that has gone
+            // silent for everything.
+            guard CaptureAttributionPresentation.metaLine(base, attribution: datable) != base else {
+                throw BrineStepError("no row says anything about any recording — the check above "
+                                         + "cannot fail")
             }
         },
 
