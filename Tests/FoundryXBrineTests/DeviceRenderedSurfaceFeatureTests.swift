@@ -155,7 +155,7 @@ final class DeviceRenderedSurfaceFeatureTests: ProcessGlobalStateTestCase {
         // And it is the SAME label the live surface used while it was recording, by
         // construction rather than by agreement.
         XCTAssertEqual(
-            CaptureAttributionPresentation.legacyDisplayName(forMarker: CaptureSourceKind.omi.rawValue),
+            CaptureAttributionPresentation.legacySourceLabel(forMarker: CaptureSourceKind.omi.rawValue),
             CaptureLiveStatus.sourceLabel(source: .omi, isRecordingMic: false))
     }
 
