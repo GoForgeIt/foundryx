@@ -15,6 +15,13 @@ Feature: One recording-device experience, and copy that tells the truth
   ready — so a substitution changes what NEW audio is attributed to and changes nothing
   about what is already archived.
 
+  AND WHEN NO DEVICE CAN BE NAMED, WHAT IS SAID IS WHAT IS KNOWN. A recording the app can
+  place before device tracking is described as exactly that — a fact about an era, complete
+  on its own, and never as a device that went missing. A recording nothing on disk can date
+  is not given that description, because whether it belongs to that era is precisely what
+  cannot be known; it carries the reason it cannot be placed instead, and no surface with
+  room only for a name speaks for it at all.
+
   WHAT IS DRAWN TODAY, AND WHAT IS ONLY DEFINED. The App target draws the recorder's name
   beside its own recordings (the conversation row's meta line and the detail header capsule)
   and the device metrics strip. The one device list, its capability lines and the gap sentence
@@ -92,6 +99,16 @@ Feature: One recording-device experience, and copy that tells the truth
     When that account launches the upgraded app
     Then its recording history keeps its attribution
     And device onboarding does not run
+
+  Scenario: an era the app can establish is said out loud, and one it cannot is not guessed
+    Given an account's history contains a recording from before device tracking with nothing on disk naming its source
+    And it also contains a recording nothing on disk can date
+    When that account launches the upgraded app
+    Then the datable older recording is described as recorded before device tracking rather than as an unknown device
+    And its conversation row carries that description
+    And the undatable recording is not described as belonging to that era
+    And the undatable recording carries the reason it cannot be placed in an era
+    And no conversation row speaks for the undatable recording
 
   Scenario: a gap outcome is rendered into the account whose audio it is about
     Given a gap-recovery outcome was produced while one account was exposed

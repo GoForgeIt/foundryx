@@ -22,10 +22,14 @@
 //      family" is a property of a value a test can evaluate rather than a claim about a
 //      screenshot.
 //   3. GUESS WHAT RECORDED A CONVERSATION. Attribution is total over
-//      `CaptureDeviceProvenance`. Each of its five answers gets its own sentence, including
-//      the two that mean "I cannot tell you" — and those two carry their diagnostic, because
+//      `CaptureDeviceProvenance`. Each of its five answers gets its own sentence, and every
+//      answer that is not one the classifier can stand behind carries its diagnostic, because
 //      a surface that renders "Unknown device" with nothing else has told the user a fact
-//      they can do nothing with.
+//      they can do nothing with. Nor is every failure to name a device the same failure: a
+//      recording the classifier PLACED before device records is not an unknown device, it is
+//      a recording from an era that kept none, and it says so — while a recording it could
+//      not place is given neither that era nor the shrug, because "which era is this" is the
+//      precise thing it reported it could not know.
 //   4. CALL A RECOVERABLE GAP UNRECOVERABLE. `.nothingToRecover` means the device still holds
 //      that audio for the next reconnect. Rendering it as loss is the failure the whole gap
 //      window exists to prevent, and `GapRecoveryCopy` is asserted never to emit the loss
@@ -205,27 +209,59 @@ public enum RecordingDeviceConnectPresentation {
 public struct CaptureAttribution: Equatable, Sendable {
     /// The name shown against the conversation.
     public let deviceName: String
-    /// Non-nil when the name is NOT an answer — something the user can act on instead of a
-    /// bare "Unknown device".
+    /// Non-nil when the name is NOT a device this app can name — something the user can act
+    /// on instead of a bare "Unknown device".
     public let diagnostic: String?
     /// True when the two on-disk surfaces disagree about this capture — see
     /// `CaptureAttributionPresentation`'s note on the Record button.
     public let surfacesDisagree: Bool
+    /// True when `deviceName` is a complete statement on its own and needs no diagnostic
+    /// beside it to be honest — an ERA the classifier ESTABLISHED, not a hedged device name.
+    ///
+    /// THE WORD "ESTABLISHED" IS THE WHOLE CONTENT OF THIS FLAG. It may be set only where the
+    /// classifier proved the era from something durable that travels with the data. Setting
+    /// it for `.undatable` — which is the classifier saying in its own words that the era is
+    /// NOT knowable — puts an era claim on the one surface that has no room for the hedge
+    /// that would qualify it, which is trading a wrong shrug for a wrong claim.
+    public let standsAlone: Bool
 
+    /// The app can name the device that made this recording.
     public var isKnown: Bool { diagnostic == nil }
 
-    public init(deviceName: String, diagnostic: String? = nil, surfacesDisagree: Bool = false) {
+    /// May a cramped surface — the conversation row's meta line — print this name with
+    /// nothing beside it?
+    public var isRenderableWithoutDiagnostic: Bool { isKnown || standsAlone }
+
+    public init(deviceName: String, diagnostic: String? = nil, surfacesDisagree: Bool = false,
+                standsAlone: Bool = false) {
         self.deviceName = deviceName
         self.diagnostic = diagnostic
         self.surfacesDisagree = surfacesDisagree
+        self.standsAlone = standsAlone
     }
 }
 
 public enum CaptureAttributionPresentation {
 
-    /// Shown when the app genuinely cannot name the recorder. Always accompanied by a
-    /// diagnostic — "Unknown device" on its own is a shrug.
+    /// Shown when the app genuinely cannot name the recorder — something recorded this and it
+    /// cannot say what. Always accompanied by a diagnostic; on its own it is a shrug.
     public static let unknownDeviceName = "Unknown device"
+
+    /// Shown for a recording the classifier PLACED before device records shipped, when
+    /// nothing on disk names a source for it either.
+    ///
+    /// It is not the unknown-device answer and must never be rendered as one: "Unknown
+    /// device" means a device made this and we cannot say which, and for these there was no
+    /// device identity to keep in the first place. Nothing went missing, which is the
+    /// accusation the whole era distinction exists to avoid making — in front of every
+    /// conversation an upgrading user already owns.
+    public static let preDeviceTrackingName = "Recorded before device tracking"
+
+    /// Why a recording from that era carries no device name. It is not a hedge on the era —
+    /// the era is the answer — it is what a reader gets when they ask why nothing more
+    /// specific is there.
+    public static let preDeviceTrackingDiagnostic =
+        "no device identity was kept when this was recorded, so nothing about it is missing"
 
     /// THE TWO SURFACES, AND WHICH ONE WINS (review round 9, M2).
     ///
@@ -261,14 +297,46 @@ public enum CaptureAttributionPresentation {
                 diagnostic: nil,
                 surfacesDisagree: legacySourceMarker != nil && legacySourceMarker != expected)
 
-        case .legacyPreMigration, .undatable:
+        case .legacyPreMigration:
             // THE LEGACY ARM, RENDERED. A conversation recorded before device records shipped
             // is not missing anything: its `.capture-source` marker is a complete answer for
             // what it is, and it renders through the SAME label function the live surface uses
             // so the archive and the app cannot drift apart. (Round 8, L3: this clause is what
             // "a legacy Omi recording still renders 'Omi'" actually means — the rendered
             // label, not the marker bytes.)
-            return CaptureAttribution(deviceName: legacyDisplayName(forMarker: legacySourceMarker))
+            //
+            // WITHOUT A MARKER, THE ERA IS THE ANSWER. Recordings old enough predate the
+            // marker too, and those rendered `unknownDeviceName` with no diagnostic at all —
+            // the bare shrug this file's own rule forbids, on the row AND in the detail
+            // header, in front of a whole archive. The era is a fact the classifier
+            // ESTABLISHED here (a durable start before the epoch), it is short enough for the
+            // row, and it arrives with the reason there is nothing more precise to say.
+            if let named = legacySourceLabel(forMarker: legacySourceMarker) {
+                return CaptureAttribution(deviceName: named)
+            }
+            return CaptureAttribution(deviceName: preDeviceTrackingName,
+                                      diagnostic: preDeviceTrackingDiagnostic,
+                                      standsAlone: true)
+
+        case .undatable(let diagnostic):
+            // THE PAYLOAD THIS ARM USED TO THROW AWAY. `.undatable` was matched together with
+            // `.legacyPreMigration` and bound nothing, so the sentence the classifier had
+            // already written — why this recording cannot be placed in an era — was built and
+            // discarded one call before the only surface that could show it.
+            //
+            // AND IT IS NOT THE LEGACY ANSWER. Reading an undatable capture as pre-upgrade is
+            // the conservative INTERNAL choice: it is why such a capture is never accused of
+            // losing a device record it may never have been owed. It is not a licence to tell
+            // the reader an era as a fact, and the marker cannot be promoted to an answer
+            // either — the marker names the SELECTED source, which equals the recorder only
+            // in the era this recording cannot be shown to belong to (see the Record-button
+            // note above). So whatever is true is rendered, the classifier's own sentence
+            // goes with it, and nothing here stands alone: the conversation row prints
+            // nothing rather than a claim it cannot qualify.
+            return CaptureAttribution(
+                deviceName: legacySourceLabel(forMarker: legacySourceMarker) ?? unknownDeviceName,
+                diagnostic: diagnostic,
+                standsAlone: false)
 
         case .unknownPostMigration(let diagnostic):
             return CaptureAttribution(deviceName: unknownDeviceName, diagnostic: diagnostic)
@@ -296,23 +364,28 @@ public enum CaptureAttributionPresentation {
     /// AN UNKNOWN RECORDER SAYS NOTHING HERE, deliberately. The row has no room to explain
     /// itself, and "Unknown device" without its diagnostic is the shrug this file's own rule
     /// forbids; the detail header carries the hedge and the reason. So the row appends only
-    /// when there is an answer.
+    /// when the name it would print is honest ON ITS OWN — a device the app can name, or an
+    /// era it established. The second is why this is not simply `isKnown`: a legacy archive
+    /// would otherwise say nothing whatever about where any of its recordings came from,
+    /// which is the silence the shrug was standing in for.
     public static func metaLine(_ base: String, attribution: CaptureAttribution?) -> String {
-        guard let attribution, attribution.isKnown, !attribution.deviceName.isEmpty else {
+        guard let attribution, attribution.isRenderableWithoutDiagnostic,
+              !attribution.deviceName.isEmpty else {
             return base
         }
         return base.isEmpty ? attribution.deviceName : "\(base) · \(attribution.deviceName)"
     }
 
-    /// The label a pre-device-record conversation carries, from the shipped marker. Routed
-    /// through `CaptureLiveStatus.sourceLabel` so the archive says exactly what the live
-    /// surface said while it was recording.
-    public static func legacyDisplayName(forMarker marker: String?) -> String {
-        guard let marker, let kind = CaptureSourceKind(rawValue: marker) else {
-            // No marker at all: an era we cannot name a source for either. Still not a
-            // fabricated device name.
-            return unknownDeviceName
-        }
+    /// The source label the shipped `.capture-source` marker names, or nil when nothing on
+    /// disk names one. Routed through `CaptureLiveStatus.sourceLabel` so the archive says
+    /// exactly what the live surface said while it was recording.
+    ///
+    /// OPTIONAL, BECAUSE ITS TWO CALLERS ANSWER "NOTHING NAMES A SOURCE" DIFFERENTLY: an era
+    /// the classifier established says the era, and one it could not says it cannot say.
+    /// Folding that decision in here — as the old `legacyDisplayName` did, by returning the
+    /// unknown-device name — is what gave both of them the same wrong answer.
+    public static func legacySourceLabel(forMarker marker: String?) -> String? {
+        guard let marker, let kind = CaptureSourceKind(rawValue: marker) else { return nil }
         return CaptureLiveStatus.sourceLabel(source: kind, isRecordingMic: false)
     }
 }
