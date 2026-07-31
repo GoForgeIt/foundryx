@@ -31,13 +31,16 @@ final class DeletionChoiceProofUITests: XCTestCase {
         app.launchArguments = ["-Screen", "deletionChoice"]
         app.launch()
 
-        let now = app.staticTexts["Delete everything now"]
+        // The choice titles are Button labels, so they surface as buttons — asserting
+        // them as staticTexts silently matched nothing and the proof failed while the
+        // screen was correct.
+        let now = app.buttons["Delete everything now"]
         XCTAssertTrue(now.waitForExistence(timeout: 10),
                       "the choice to delete now is not on screen")
-        XCTAssertTrue(app.staticTexts["Delete when my subscription ends"].exists,
+        XCTAssertTrue(app.buttons["Delete when my subscription ends"].exists,
                       "the choice to delete at period end is not on screen — someone who "
                       + "wants the period they paid for has no way to say so")
-        XCTAssertTrue(app.staticTexts["Cancel my subscription, keep my notes"].exists,
+        XCTAssertTrue(app.buttons["Cancel my subscription, keep my notes"].exists,
                       "the choice to keep the data is not on screen")
 
         shoot(app, "deletion-choice-three-outcomes")
@@ -63,7 +66,7 @@ final class DeletionChoiceProofUITests: XCTestCase {
         app.launchArguments = ["-Screen", "deletionChoice"]
         app.launch()
 
-        XCTAssertTrue(app.staticTexts["Delete everything now"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Delete everything now"].waitForExistence(timeout: 10))
         let cancel = app.buttons["Cancel"]
         XCTAssertTrue(cancel.exists, "there is no way out of the deletion choice without picking one")
         shoot(app, "deletion-choice-has-an-exit")
