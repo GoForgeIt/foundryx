@@ -41,10 +41,12 @@ Feature: Deleting my account tells me the truth about why it failed
     Then the account is deleted on the server
     And this account's local data is erased
 
-  Scenario: a deletion the server cannot do says so, and does not blame my connection
-    Given the server has no deletion route
+  Scenario: a deletion the server isn't serving says so, and does not blame my connection
+    The route exists now, so a 404 means this app is pointed somewhere that is not
+    serving it. That is still not something retrying or a better signal will fix.
+    Given the server is not serving the deletion route
     When I delete my account everywhere
-    Then I am told it isn't available yet
+    Then I am told the server isn't offering deletion at this address
     And I am not told to check my connection
     And nothing was deleted
 

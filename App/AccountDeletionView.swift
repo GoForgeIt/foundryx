@@ -52,11 +52,12 @@ struct AccountDeletionView: View {
             }
             // An auth failure is NOT a connection failure. Both used to render the
             // sentence above, which sent the user to fix the one thing that was working.
-            // The route does not exist server-side. Retrying is futile, and the local
-            // scopes still work — say both, rather than "check your connection".
-            if case .notAvailableYet(let scope) = model.phase {
+            // A 404 is not a connection failure. The route exists server-side now,
+            // so this means the app is pointed somewhere that isn't serving it —
+            // still not something the person can fix by retrying.
+            if case .routeMissing(let scope) = model.phase {
                 Section {
-                    Text("“\(scope.title)” isn't available yet — the server can't complete it, and retrying won't help. Nothing was deleted. “Erase this account's local data” works now and clears everything on this iPhone.")
+                    Text("Couldn't complete “\(scope.title).” The server isn't offering deletion at the address this app is using, so retrying won't help and your connection is fine. Nothing was deleted. “Erase this account's local data” still works and clears everything on this iPhone.")
                         .grainTextStyle(.caption).foregroundStyle(GrainColor.dangerRed)
                 }
             }
@@ -111,7 +112,14 @@ struct AccountDeletionView: View {
     }
 }
 
+/// The deployed foundry-signup service — the owner of tenants, cells and Stripe,
+/// and so of deletion. File-level rather than a member of the main-actor-isolated
+/// model, so the `deleteRemote` closure can read it off the main actor.
+private let signupServiceBase =
+    URL(string: "https://foundry-signup-449450484577.us-central1.run.app")!
+
 extension AccountDeletionModel {
+
     /// The production deletion model: wipes the on-device library locally, and calls the relay
     /// control plane (AccountClient → /account/delete) for the hosted-Vault / everywhere scopes.
     @MainActor static func live() -> AccountDeletionModel {
@@ -130,9 +138,11 @@ extension AccountDeletionModel {
                 try await localDeletion.eraseVerifiedCurrentOwner()
             },
             deleteRemote: { scope, idToken in
-                guard let base = RemoteConfig.fromBundle()?.gatewayHTTPURL else {
-                    throw AccountDeletionError.server   // fail loud — no silent no-op
-                }
+                // The SIGNUP service, not the relay: it owns the tenants, cells and
+                // Stripe that deletion destroys. It is also a compiled-in constant
+                // rather than bundle config, so a missing RemoteConfig no longer
+                // makes deletion impossible.
+                let base = signupServiceBase
                 // REFRESH at request time. `idToken` here is `remote.idToken`, a snapshot
                 // taken at the last session resolve — nil whenever that refresh failed,
                 // and stale after an hour. Deleting an account is a rare, deliberate act

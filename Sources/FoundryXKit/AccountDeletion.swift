@@ -37,6 +37,21 @@ public enum AccountDeletionScope: String, CaseIterable, Equatable, Sendable {
         }
     }
 
+    /// The wire value the signup service expects. The app's scopes say WHAT to
+    /// delete; the server's also encode WHEN billing stops, so the two vocabularies
+    /// are deliberately mapped here rather than assumed identical.
+    ///
+    /// `.thisPhone` never reaches the server — it is a purely local erase — so it
+    /// maps to the same full deletion as `.everywhere` only as a defensive default
+    /// that is never sent.
+    public var wireScope: String {
+        switch self {
+        case .thisPhone:   return "delete_now"
+        case .hostedVault: return "vault_only"
+        case .everywhere:  return "delete_now"
+        }
+    }
+
     public var subtitle: String {
         switch self {
         case .thisPhone:
@@ -70,7 +85,6 @@ public enum AccountDeletionError: Error, Equatable, Sendable {
     /// falls through to `404 Not Found`. Deletion is Apple-required and the button exists,
     /// so saying "check your connection" sent the owner to re-check a working connection,
     /// twice, for something no amount of retrying could fix.
-    case notAvailableYet
     /// The sign-in could not be refreshed, or the server rejected it (401/403).
     ///
     /// Distinct from `.server` because the remedy is different and the UI used to
@@ -78,6 +92,11 @@ public enum AccountDeletionError: Error, Equatable, Sendable {
     /// rendered as "Check your connection and try again." Nick hit this with a working
     /// connection and a healthy gateway — the request never left the phone, because the
     /// cached id_token snapshot was nil and the guard threw before any HTTP call.
+    /// The server answered 404/501 for the deletion route. Before the route
+    /// existed this meant "not built yet"; now it means the app is pointed
+    /// somewhere wrong, or the service is not serving it. Either way retrying
+    /// changes nothing and the connection is NOT the problem.
+    case routeMissing
     case signInExpired
 }
 
@@ -109,10 +128,10 @@ public final class AccountDeletionModel: ObservableObject {
         case failed(AccountDeletionScope)
         /// The sign-in expired or was rejected — a DIFFERENT remedy from `.failed`, which
         /// tells the user to check a connection that is very likely fine.
+        case routeMissing(AccountDeletionScope)
         case signInExpired(AccountDeletionScope)
         /// The server cannot do this yet. Distinct so the UI stops telling the user to
         /// retry something that can never succeed.
-        case notAvailableYet(AccountDeletionScope)
         case blocked(AccountDeletionScope)
     }
 
@@ -137,8 +156,8 @@ public final class AccountDeletionModel: ObservableObject {
             phase = .done(scope)
         } catch AccountDeletionError.cleanupPending {
             phase = .blocked(scope)
-        } catch AccountDeletionError.notAvailableYet {
-            phase = .notAvailableYet(scope)
+        } catch AccountDeletionError.routeMissing {
+            phase = .routeMissing(scope)
         } catch AccountDeletionError.signInExpired {
             AuthExpiryRouter.shared.authRejected(
                 generation: CaptureAccountScope.identityGeneration)

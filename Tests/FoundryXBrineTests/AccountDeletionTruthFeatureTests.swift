@@ -59,7 +59,7 @@ private final class DeletionTruthWorld: @unchecked Sendable {
                 case .accepts:      box.deletedOnServer = true
                 case .rejectsAuth:  throw AccountDeletionError.signInExpired
                 case .unreachable:  throw AccountDeletionError.server
-                case .noRoute:      throw AccountDeletionError.notAvailableYet
+                case .noRoute:      throw AccountDeletionError.routeMissing
                 }
             })
         model = AccountDeletionModel(service: service)
@@ -147,15 +147,15 @@ private enum DeletionTruthSteps {
                                          + "got \(phase)")
                 }
             },
-            defineStep("the server has no deletion route") { ctx, _, _ in
+            defineStep("the server is not serving the deletion route") { ctx, _, _ in
                 await MainActor.run { w.makeModel() }
                 w.refreshed = "fresh-token"
                 w.server = .noRoute
                 return ctx
             },
-            defineCheck("I am told it isn't available yet") { _, _, _ in
+            defineCheck("I am told the server isn't offering deletion at this address") { _, _, _ in
                 let phase = await MainActor.run { w.model.phase }
-                guard case .notAvailableYet = phase else {
+                guard case .routeMissing = phase else {
                     throw BrineStepError("expected a not-available stop, got \(phase)")
                 }
             },

@@ -56,17 +56,24 @@ public struct AccountClient: Sendable {
         return await post("account/waitlist", idToken: idToken, name: nil)
     }
 
-    /// POST /account/delete — the Apple-required in-app account deletion (track T-STOREFRONT).
-    /// `scope` is one of "hostedVault" (tear down the cell, keep the account) or "everywhere"
-    /// (delete the account + every Vault). The relay verifies the id_token and derives the
-    /// account from it; the body carries only the scope. Throws on a non-2xx so the deletion
-    /// model can surface a retryable failure rather than a silent no-op.
+    /// POST /signup/account/delete — the Apple-required in-app account deletion.
+    ///
+    /// This talks to the SIGNUP service, not the relay. The relay has the auth
+    /// middleware but owns none of what deletion destroys — tenants, cells and
+    /// Stripe all live in foundry-signup — and proxying a destructive operation
+    /// would mean two services must independently agree on who the caller is,
+    /// where a mismatch deletes the wrong tenant.
+    ///
+    /// The server derives the account from the verified token and ignores any
+    /// client-supplied identity, so this carries only the scope. Throws on a
+    /// non-2xx so the deletion model surfaces a real failure rather than a
+    /// silent no-op.
     public func deleteAccount(scope: AccountDeletionScope, idToken: String) async throws {
-        var req = URLRequest(url: baseURL.appendingPathComponent("account/delete"))
+        var req = URLRequest(url: baseURL.appendingPathComponent("signup/account/delete"))
         req.httpMethod = "POST"
         req.setValue("Bearer \(idToken)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: ["scope": scope.rawValue])
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["scope": scope.wireScope])
         let (_, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw AccountDeletionError.server }
         // A rejected bearer is an AUTH failure, not a transport one. Collapsing it into
@@ -74,10 +81,11 @@ public struct AccountClient: Sendable {
         if http.statusCode == 401 || http.statusCode == 403 {
             throw AccountDeletionError.signInExpired
         }
-        // 404/501 = the route does not exist. Retrying cannot help, so say so rather
-        // than blaming the network.
+        // 404/501 = the deletion route is not being served where this app is
+        // pointed. Retrying cannot help and the network is fine, so this must NOT
+        // collapse into the generic "check your connection".
         if http.statusCode == 404 || http.statusCode == 501 {
-            throw AccountDeletionError.notAvailableYet
+            throw AccountDeletionError.routeMissing
         }
         guard (200..<300).contains(http.statusCode) else {
             throw AccountDeletionError.server
