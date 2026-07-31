@@ -100,6 +100,69 @@ public enum AccountDeletionError: Error, Equatable, Sendable {
     case signInExpired
 }
 
+/// What should happen to the subscription when someone deletes their account.
+///
+/// A separate axis from `AccountDeletionScope`: that says WHAT is deleted, this
+/// says what becomes of the money and when. Leaving, economising and pausing are
+/// different intentions, and the app used to assume the first.
+public enum DeletionOutcomeChoice: String, CaseIterable, Equatable, Sendable {
+    /// Destroy the data and cancel the subscription today.
+    case deleteNow
+    /// Stop renewing; destroy the data when the paid period ends.
+    case deleteAtPeriodEnd
+    /// Cancel the subscription, keep the data and the account.
+    case cancelOnly
+
+    /// The wire value the signup service expects.
+    public var wireScope: String {
+        switch self {
+        case .deleteNow:         return "delete_now"
+        case .deleteAtPeriodEnd: return "delete_at_period_end"
+        case .cancelOnly:        return "cancel_only"
+        }
+    }
+
+    public var title: String {
+        switch self {
+        case .deleteNow:         return "Delete everything now"
+        case .deleteAtPeriodEnd: return "Delete when my subscription ends"
+        case .cancelOnly:        return "Cancel my subscription, keep my notes"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .deleteNow:
+            return "Your notes and your hosted Vault are destroyed today, and your subscription is cancelled today. You won't get the rest of the period you've paid for back. This can't be undone."
+        case .deleteAtPeriodEnd:
+            return "Your subscription stops renewing but runs to the end of the period you've paid for. On that date your notes and your hosted Vault are destroyed. This can't be undone once the date passes."
+        case .cancelOnly:
+            return "Your subscription is cancelled, and everything you've written stays exactly where it is. You keep your account and can start paying again later."
+        }
+    }
+
+    /// Whether this choice destroys data at some point. Saying "this can't be
+    /// undone" about `cancelOnly` would simply be false, and the old single
+    /// confirmation said it about every path.
+    public var isIrreversible: Bool { self != .cancelOnly }
+
+    /// Whether choosing this forfeits time already paid for. Shown BEFORE the
+    /// confirm — telling someone afterwards is just an apology.
+    public var forfeitsPaidPeriod: Bool { self == .deleteNow }
+}
+
+/// What the server did, so the app can say something specific instead of a
+/// generic "deleted".
+public struct DeletionOutcome: Equatable, Sendable {
+    public let status: String
+    /// Set only for a scheduled deletion — the date to show the person.
+    public let deleteAt: Date?
+    public init(status: String, deleteAt: Date? = nil) {
+        self.status = status
+        self.deleteAt = deleteAt
+    }
+}
+
 // MARK: - Seam (network + local)
 
 /// The account-deletion seam. Live impl (LiveAccountDeletionService) wipes the on-device
@@ -109,8 +172,11 @@ public protocol AccountDeletionService: Sendable {
     func eraseThisPhone() async throws
     /// Delete the hosted Vault (isolated cell + data); keep the account. Bearer id_token.
     func deleteHostedVault(idToken: String?) async throws
-    /// Delete the account + every Vault everywhere (implies erasing this phone). Bearer id_token.
-    func deleteAccountEverywhere(idToken: String?) async throws
+    /// Act on the account + every Vault everywhere. `choice` decides what happens to the
+    /// subscription and WHEN the data goes; only `deleteNow` erases this phone immediately.
+    /// Returns what the server actually did, so the app says something specific.
+    @discardableResult
+    func deleteAccountEverywhere(choice: DeletionOutcomeChoice, idToken: String?) async throws -> DeletionOutcome
 }
 
 // MARK: - The deletion model
@@ -125,6 +191,10 @@ public final class AccountDeletionModel: ObservableObject {
         case idle
         case deleting(AccountDeletionScope)
         case done(AccountDeletionScope)
+        /// The deletion is SCHEDULED, not done — nothing is destroyed until this date.
+        case scheduled(Date)
+        /// The subscription is cancelled and everything written is still there.
+        case subscriptionCancelled
         case failed(AccountDeletionScope)
         /// The sign-in expired or was rejected — a DIFFERENT remedy from `.failed`, which
         /// tells the user to check a connection that is very likely fine.
@@ -138,12 +208,61 @@ public final class AccountDeletionModel: ObservableObject {
     @Published public private(set) var phase: Phase = .idle
 
     private let service: AccountDeletionService
-    public init(service: AccountDeletionService) { self.service = service }
+
+    /// Where a deletion attempt is recorded. Deletion is rare, irreversible and
+    /// remote, so "did this actually happen?" can only be answered from a record —
+    /// and the local store is exactly what a deletion destroys, so the record must
+    /// leave the device. Injected rather than reached for so the seams can assert
+    /// it and the pure module stays transport-free.
+    ///
+    /// Carries the SCOPE and the OUTCOME only. Never the email, never a note.
+    private let record: @Sendable (_ event: String, _ detail: String) -> Void
+
+    public init(service: AccountDeletionService,
+                record: @escaping @Sendable (_ event: String, _ detail: String) -> Void = { _, _ in }) {
+        self.service = service
+        self.record = record
+    }
+
+    /// Run a deletion of the whole account with an explicit subscription outcome.
+    public func delete(scope: AccountDeletionScope,
+                       choice: DeletionOutcomeChoice,
+                       idToken: String?) async {
+        phase = .deleting(scope)
+        record("account.delete.requested", choice.wireScope)
+        do {
+            let outcome = try await service.deleteAccountEverywhere(choice: choice, idToken: idToken)
+            switch choice {
+            case .deleteNow:
+                phase = .done(scope)
+                record("account.delete.completed", choice.wireScope)
+            case .deleteAtPeriodEnd:
+                // A date the server did not give us is not a date to show. Falling
+                // back to "deleted" would claim something that has not happened.
+                phase = .scheduled(outcome.deleteAt ?? Date())
+                record("account.delete.scheduled", choice.wireScope)
+            case .cancelOnly:
+                phase = .subscriptionCancelled
+                record("account.delete.completed", choice.wireScope)
+            }
+        } catch AccountDeletionError.cleanupPending {
+            phase = .blocked(scope); record("account.delete.blocked", choice.wireScope)
+        } catch AccountDeletionError.routeMissing {
+            phase = .routeMissing(scope); record("account.delete.failed", "\(choice.wireScope) route_missing")
+        } catch AccountDeletionError.signInExpired {
+            AuthExpiryRouter.shared.authRejected(
+                generation: CaptureAccountScope.identityGeneration)
+            phase = .signInExpired(scope); record("account.delete.failed", "\(choice.wireScope) sign_in_expired")
+        } catch {
+            phase = .failed(scope); record("account.delete.failed", "\(choice.wireScope) server")
+        }
+    }
 
     /// Execute a deletion for the chosen scope by routing to the matching seam. Idempotent
     /// per call; on failure the phase records which scope failed so the UI can retry.
     public func delete(scope: AccountDeletionScope, idToken: String?) async {
         phase = .deleting(scope)
+        record("account.delete.requested", scope.wireScope)
         do {
             switch scope {
             case .thisPhone:
@@ -151,21 +270,26 @@ public final class AccountDeletionModel: ObservableObject {
             case .hostedVault:
                 try await service.deleteHostedVault(idToken: idToken)
             case .everywhere:
-                try await service.deleteAccountEverywhere(idToken: idToken)
+                try await service.deleteAccountEverywhere(choice: .deleteNow, idToken: idToken)
             }
             phase = .done(scope)
+            record("account.delete.completed", scope.wireScope)
         } catch AccountDeletionError.cleanupPending {
             phase = .blocked(scope)
+            record("account.delete.blocked", scope.wireScope)
         } catch AccountDeletionError.routeMissing {
             phase = .routeMissing(scope)
+            record("account.delete.failed", "\(scope.wireScope) route_missing")
         } catch AccountDeletionError.signInExpired {
             AuthExpiryRouter.shared.authRejected(
                 generation: CaptureAccountScope.identityGeneration)
             // NOT `.failed`: nothing about the connection is wrong, and telling the user
             // to check it sends them to fix the one thing that is working.
             phase = .signInExpired(scope)
+            record("account.delete.failed", "\(scope.wireScope) sign_in_expired")
         } catch {
             phase = .failed(scope)
+            record("account.delete.failed", "\(scope.wireScope) server")
         }
     }
 }
@@ -179,9 +303,12 @@ public final class AccountDeletionModel: ObservableObject {
 public struct LiveAccountDeletionService: AccountDeletionService {
     private let eraseLocal: @Sendable () async throws -> Void
     private let deleteRemote: @Sendable (_ scope: AccountDeletionScope, _ idToken: String?) async throws -> Void
+    private let deleteRemoteChoice: (@Sendable (_ choice: DeletionOutcomeChoice, _ idToken: String?) async throws -> DeletionOutcome)?
 
     public init(eraseLocal: @escaping @Sendable () async throws -> Void,
-                deleteRemote: @escaping @Sendable (_ scope: AccountDeletionScope, _ idToken: String?) async throws -> Void) {
+                deleteRemote: @escaping @Sendable (_ scope: AccountDeletionScope, _ idToken: String?) async throws -> Void,
+                deleteRemoteChoice: (@Sendable (_ choice: DeletionOutcomeChoice, _ idToken: String?) async throws -> DeletionOutcome)? = nil) {
+        self.deleteRemoteChoice = deleteRemoteChoice
         self.eraseLocal = eraseLocal
         self.deleteRemote = deleteRemote
     }
@@ -194,9 +321,22 @@ public struct LiveAccountDeletionService: AccountDeletionService {
         try await deleteRemote(.hostedVault, idToken)
     }
 
-    public func deleteAccountEverywhere(idToken: String?) async throws {
-        try await deleteRemote(.everywhere, idToken)
-        try await eraseLocal()
+    @discardableResult
+    public func deleteAccountEverywhere(choice: DeletionOutcomeChoice, idToken: String?) async throws -> DeletionOutcome {
+        let outcome: DeletionOutcome
+        if let choiceCall = deleteRemoteChoice {
+            outcome = try await choiceCall(choice, idToken)
+        } else {
+            try await deleteRemote(.everywhere, idToken)
+            outcome = DeletionOutcome(status: "deleted")
+        }
+        // ONLY an immediate deletion erases this phone. A scheduled deletion has
+        // destroyed nothing yet, and a cancel keeps everything — wiping the device
+        // for either would delete notes the person explicitly chose to keep.
+        if choice == .deleteNow {
+            try await eraseLocal()
+        }
+        return outcome
     }
 }
 

@@ -43,7 +43,8 @@ struct RootView: View {
     /// call to route to the trigger (Vault off) or straight through (Vault live).
     @StateObject private var vaultFunnel = VaultFunnelModel.live()
     /// In-app account deletion (track T-STOREFRONT) — Apple-required, three scopes.
-    @StateObject private var accountDeletion = AccountDeletionModel.live()
+    @StateObject private var accountDeletion = AccountDeletionModel.live(
+        record: DeletionRecorder.shared.record)
     @Environment(\.scenePhase) private var scenePhase
 
     private var brains: BrainStore { accountStores.brains }
@@ -161,6 +162,15 @@ struct RootView: View {
            ProcessInfo.processInfo.arguments.contains("waiting") {
             return AnyView(WaitingExperienceProof(
                 kind: WaitingExperienceProof.kind(from: ProcessInfo.processInfo.arguments)))
+        }
+        // DEV-only: `-Screen deletionChoice` mounts the three-way deletion choice for
+        // screenshot verification. Reached in the real app only from Settings →
+        // Delete account → "Delete your account everywhere", which needs a signed-in
+        // session the simulator has no way to produce — so the screen is mounted
+        // directly rather than adding an auth-bypass seam to reach it.
+        if ProcessInfo.processInfo.arguments.contains("-Screen"),
+           ProcessInfo.processInfo.arguments.contains("deletionChoice") {
+            return AnyView(DeletionOutcomeChoiceView(onPick: { _ in }, onCancel: {}))
         }
         #endif
         // The welcome front door leads until the user enters (enterApp); an
@@ -517,6 +527,11 @@ private struct MainTabs: View {
         // Ship the phone's BLE/audio/capture/chat log to the relay diag sink so
         // it's observable server-side (no copying logs off the device).
         log.setRemoteSink(RemoteConfig.fromBundle()?.gatewayHTTPURL.appendingPathComponent("diag/log"))
+        // Same sink, own transport: deletion records ship IMMEDIATELY, because a
+        // successful "delete everywhere" erases the library and signs the person
+        // out — a batched line can die in that gap.
+        DeletionRecorder.shared.setEndpoint(
+            RemoteConfig.fromBundle()?.gatewayHTTPURL.appendingPathComponent("diag/log"))
         // The SHARED DeviceManager: a background bluetooth-restoration launch may
         // already own the BLE link (FoundryXAppDelegate) — two centrals with one
         // restore identifier are undefined, so the UI adopts the same instance. Any

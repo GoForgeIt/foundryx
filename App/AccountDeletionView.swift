@@ -18,6 +18,9 @@ struct AccountDeletionView: View {
     var onDeleted: (AccountDeletionScope) -> Void
 
     @State private var confirming: AccountDeletionScope?
+    /// Presented for `.everywhere` INSTEAD of a straight confirmation: that scope is
+    /// the only one with a billing dimension, so it is the only one that asks.
+    @State private var choosingOutcome = false
 
     var body: some View {
         List {
@@ -32,7 +35,11 @@ struct AccountDeletionView: View {
                     // an irreversible action — you could fire it while reading the sentence
                     // telling you what it does. Guidance belongs in the footer; the hint
                     // keeps it on the button for VoiceOver, which reads label then hint.
-                    Button(role: .destructive) { confirming = scope } label: {
+                    Button(role: .destructive) {
+                        // "Everywhere" is the only scope with a subscription to decide
+                        // about, so it asks instead of assuming "destroy it all today".
+                        if scope == .everywhere { choosingOutcome = true } else { confirming = scope }
+                    } label: {
                         Text(scope.title).grainTextStyle(.body)
                             .foregroundStyle(GrainColor.dangerRed)
                     }
@@ -42,6 +49,18 @@ struct AccountDeletionView: View {
                     Text(scope.subtitle)
                         .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if case .scheduled(let when) = model.phase {
+                Section {
+                    Text("Your subscription won't renew, and everything you've written will be deleted on \(Self.dayFormatter.string(from: when)). Nothing has been deleted yet.")
+                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
+                }
+            }
+            if case .subscriptionCancelled = model.phase {
+                Section {
+                    Text("Your subscription is cancelled. Every note you've written is still here, and you can start paying again whenever you want.")
+                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
                 }
             }
             if case .failed(let scope) = model.phase {
@@ -83,6 +102,14 @@ struct AccountDeletionView: View {
         .navigationTitle("Delete account")
         .navigationBarTitleDisplayMode(.inline)
         .overlay { if isBusy { ProgressView().scaleEffect(1.3) } }
+        .sheet(isPresented: $choosingOutcome) {
+            DeletionOutcomeChoiceView(
+                onPick: { choice in
+                    choosingOutcome = false
+                    Task { await runChoice(choice) }
+                },
+                onCancel: { choosingOutcome = false })
+        }
         .confirmationDialog(
             confirming.map(\.title) ?? "",
             isPresented: Binding(get: { confirming != nil },
@@ -106,6 +133,21 @@ struct AccountDeletionView: View {
         return false
     }
 
+    /// Day-precision because the person is being told a DATE, not an instant.
+    static let dayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .long
+        f.timeStyle = .none
+        return f
+    }()
+
+    private func runChoice(_ choice: DeletionOutcomeChoice) async {
+        await model.delete(scope: .everywhere, choice: choice, idToken: idToken())
+        // ONLY an immediate deletion signs the person out — after a schedule or a
+        // cancel their account still exists and their notes are still here.
+        if case .done(let s) = model.phase { onDeleted(s) }
+    }
+
     private func run(_ scope: AccountDeletionScope) async {
         await model.delete(scope: scope, idToken: idToken())
         if case .done(let s) = model.phase { onDeleted(s) }
@@ -122,7 +164,16 @@ extension AccountDeletionModel {
 
     /// The production deletion model: wipes the on-device library locally, and calls the relay
     /// control plane (AccountClient → /account/delete) for the hosted-Vault / everywhere scopes.
-    @MainActor static func live() -> AccountDeletionModel {
+    /// `record` receives every deletion attempt and outcome. Wired to the DoorLog
+    /// (which ships to the relay's /diag/log → Cloud Logging) so the record LEAVES
+    /// the device — the local store is exactly what a deletion destroys, so a record
+    /// kept there would vanish with the thing it documents.
+    ///
+    /// The success case is also recorded SERVER-side before anything is destroyed
+    /// (fail-closed audit), so what this covers is the attempts that never reach the
+    /// server at all: an expired sign-in, a missing route, a dead network. Those are
+    /// exactly the cases where nothing is erased and the 15s diag flush still runs.
+    @MainActor static func live(record: @escaping @Sendable (String, String) -> Void = { _, _ in }) -> AccountDeletionModel {
         let auth = FoundryAuth()
         let localDeletion = CurrentOwnerSelectiveDeletionRunner(
             containerProvider: { CaptureAccountScope.container() },
@@ -154,7 +205,91 @@ extension AccountDeletionModel {
                     throw AccountDeletionError.signInExpired
                 }
                 try await AccountClient(baseURL: base).deleteAccount(scope: scope, idToken: token)
+            },
+            deleteRemoteChoice: { choice, idToken in
+                let token = (try? await FoundryAuth().currentIdToken()) ?? nil
+                guard let token, !token.isEmpty else {
+                    throw AccountDeletionError.signInExpired
+                }
+                return try await AccountClient(baseURL: signupServiceBase)
+                    .deleteAccount(choice: choice, idToken: token)
             })
-        return AccountDeletionModel(service: service)
+        return AccountDeletionModel(service: service, record: record)
+    }
+}
+
+/// The three-way choice for "delete my account everywhere".
+///
+/// This screen exists because the app used to offer exactly one way to leave —
+/// destroy everything today — and someone who wanted to stop paying but keep
+/// their notes, or to use the period they'd already paid for, had no way to say
+/// so. The irreversibility warning is per-choice: saying "this can't be undone"
+/// about cancelling a subscription would simply be false.
+struct DeletionOutcomeChoiceView: View {
+    var onPick: (DeletionOutcomeChoice) -> Void
+    var onCancel: () -> Void
+
+    @State private var confirming: DeletionOutcomeChoice?
+
+    /// Extracted so the type-checker isn't asked to solve the whole List at once.
+    @ViewBuilder
+    private func choiceButton(_ choice: DeletionOutcomeChoice) -> some View {
+        let tint: Color = choice.isIrreversible ? GrainColor.dangerRed : GrainColor.textMain
+        Button(role: choice.isIrreversible ? ButtonRole.destructive : nil) {
+            confirming = choice
+        } label: {
+            Text(choice.title)
+                .grainTextStyle(.body)
+                .foregroundStyle(tint)
+        }
+        .accessibilityHint(choice.detail)
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Text("What should happen to your subscription and your notes?")
+                        .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
+                }
+                ForEach(DeletionOutcomeChoice.allCases, id: \.self) { choice in
+                    Section {
+                        // Same discipline as the scope list: only the title is the
+                        // tap target, so the sentence explaining an irreversible
+                        // action can't itself trigger it.
+                        choiceButton(choice)
+                    } footer: {
+                        Text(choice.detail)
+                            .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .grainBackground()
+            .navigationTitle("Delete your account")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { onCancel() }
+                }
+            }
+            .confirmationDialog(
+                confirming?.title ?? "",
+                isPresented: Binding(get: { confirming != nil },
+                                     set: { if !$0 { confirming = nil } }),
+                titleVisibility: .visible
+            ) {
+                if let choice = confirming {
+                    Button(choice.title, role: choice.isIrreversible ? .destructive : nil) {
+                        let picked = choice
+                        confirming = nil
+                        onPick(picked)
+                    }
+                    Button("Back", role: .cancel) { confirming = nil }
+                }
+            } message: {
+                if let choice = confirming { Text(choice.detail) }
+            }
+        }
     }
 }

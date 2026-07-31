@@ -92,6 +92,41 @@ public struct AccountClient: Sendable {
         }
     }
 
+    /// POST /signup/account/delete carrying an explicit subscription outcome, and
+    /// return what the server actually did.
+    ///
+    /// Separate from the scope-only call because a scheduled deletion answers with a
+    /// DATE the app has to show, and a cancel answers that the notes are still there —
+    /// rendering either as a generic "deleted" would tell the person something false.
+    public func deleteAccount(choice: DeletionOutcomeChoice, idToken: String) async throws -> DeletionOutcome {
+        var req = URLRequest(url: baseURL.appendingPathComponent("signup/account/delete"))
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(idToken)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["scope": choice.wireScope])
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw AccountDeletionError.server }
+        if http.statusCode == 401 || http.statusCode == 403 {
+            throw AccountDeletionError.signInExpired
+        }
+        if http.statusCode == 404 || http.statusCode == 501 {
+            throw AccountDeletionError.routeMissing
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw AccountDeletionError.server
+        }
+        let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        let status = body["status"] as? String ?? "deleted"
+        // ISO-8601 with fractional seconds is what chrono's serde emits.
+        var when: Date?
+        if let raw = body["delete_at"] as? String {
+            let iso = ISO8601DateFormatter()
+            iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            when = iso.date(from: raw) ?? ISO8601DateFormatter().date(from: raw)
+        }
+        return DeletionOutcome(status: status, deleteAt: when)
+    }
+
     private func post(_ path: String, idToken: String, name: String?) async -> Bool {
         var req = URLRequest(url: baseURL.appendingPathComponent(path))
         req.httpMethod = "POST"

@@ -110,7 +110,7 @@ final class VaultStorefrontTests: XCTestCase {
             })
 
         do {
-            try await service.deleteAccountEverywhere(idToken: "id-token")
+            try await service.deleteAccountEverywhere(choice: .deleteNow, idToken: "id-token")
             XCTFail("expected remote account deletion to fail")
         } catch {}
 
@@ -159,7 +159,11 @@ final class StubDeletionService: AccountDeletionService, @unchecked Sendable {
     private(set) var calls: [AccountDeletionScope] = []
     func eraseThisPhone() async throws { calls.append(.thisPhone) }
     func deleteHostedVault(idToken: String?) async throws { calls.append(.hostedVault) }
-    func deleteAccountEverywhere(idToken: String?) async throws { calls.append(.everywhere) }
+    @discardableResult
+    func deleteAccountEverywhere(choice: DeletionOutcomeChoice, idToken: String?) async throws -> DeletionOutcome {
+        calls.append(.everywhere)
+        return DeletionOutcome(status: "deleted")
+    }
 }
 
 final class PendingDeletionService:
@@ -169,7 +173,8 @@ final class PendingDeletionService:
         throw AccountDeletionError.cleanupPending
     }
     func deleteHostedVault(idToken: String?) async throws {}
-    func deleteAccountEverywhere(idToken: String?) async throws {
+    @discardableResult
+    func deleteAccountEverywhere(choice: DeletionOutcomeChoice, idToken: String?) async throws -> DeletionOutcome {
         throw AccountDeletionError.cleanupPending
     }
 }
