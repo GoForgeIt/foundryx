@@ -86,28 +86,51 @@ final class DeviceRenderedSurfaceFeatureTests: ProcessGlobalStateTestCase {
     /// arrive with the reason the app can say no more, and the conversation row — which has
     /// no room for a reason — must print nothing for it. `metaLine` IS that row, so "stands
     /// alone" is measured through what the row does rather than through a flag that claims it.
+    ///
+    /// AND WHAT EACH CELL IS ACTUALLY CALLED, plus whether a reason travels with it. Holding
+    /// only "may it stand alone" left three of this table's own rows with no check anywhere in
+    /// the package that could go red (review round 14): the era could quietly lose its reason
+    /// and become a bare claim the app presents as a device it can name; the reason could go
+    /// empty and render a dangling "— " in the detail header; and an undatable capture whose
+    /// disk DOES name a source could drop that label for "Unknown device" — each a rendered
+    /// change no assertion noticed. A row's name and its reason are behaviour, so they are
+    /// pinned here beside the property that decides where they may be printed.
     func testOnlyAnAnswerTheClassifierWarrantsIsPrintedWithNothingBesideIt() {
         let context = CaptureDeviceContext(
             identity: RecordingDeviceIdentity(shape: .audioRoute, hardwareToken: "route-1"),
             displayName: "Field Recorder", accountScope: "acct-x")
         let unreadableMarker = "a-source-kind-this-build-has-no-meaning-for"
-        // (provenance, what `.capture-source` says, may this name stand alone)
-        let cases: [(CaptureDeviceProvenance, String?, Bool)] = [
-            (.identified(context), "phoneMic", true),
-            (.legacyPreMigration, CaptureSourceKind.omi.rawValue, true),
-            (.legacyPreMigration, CaptureSourceKind.phoneMic.rawValue, true),
+        let cases: [(provenance: CaptureDeviceProvenance, marker: String?, name: String,
+                     mayStandAlone: Bool, carriesAReason: Bool)] = [
+            (.identified(context), "phoneMic", "Field Recorder", true, false),
+            (.legacyPreMigration, CaptureSourceKind.omi.rawValue, "Omi", true, false),
+            (.legacyPreMigration, CaptureSourceKind.phoneMic.rawValue, "Phone", true, false),
             // The era is ESTABLISHED — a durable start before the epoch — so saying it is an
-            // answer even though nothing names a source.
-            (.legacyPreMigration, nil, true),
-            (.legacyPreMigration, unreadableMarker, true),
-            // The era is NOT establishable. Neither arm may be printed bare.
+            // answer even though nothing names a source. It is still not a device the app can
+            // name, so the reason there is nothing more precise travels with it.
+            (.legacyPreMigration, nil,
+             CaptureAttributionPresentation.preDeviceTrackingName, true, true),
+            (.legacyPreMigration, unreadableMarker,
+             CaptureAttributionPresentation.preDeviceTrackingName, true, true),
+            // The era is NOT establishable. Neither arm may be printed bare — and what IS
+            // rendered is whatever the disk can still support: the selected source's own
+            // label where the marker names one, the unknown-device answer where it does not.
             (.undatable(diagnostic: "no durable start and no dated id"),
-             CaptureSourceKind.omi.rawValue, false),
-            (.undatable(diagnostic: "no durable start and no dated id"), nil, false),
-            (.unknownPostMigration(diagnostic: "the record failed to write"), "omi", false),
-            (.unreadableRecord(diagnostic: "the record could not be understood"), "omi", false),
+             CaptureSourceKind.omi.rawValue, "Omi", false, true),
+            (.undatable(diagnostic: "no durable start and no dated id"), nil,
+             CaptureAttributionPresentation.unknownDeviceName, false, true),
+            (.unknownPostMigration(diagnostic: "the record failed to write"), "omi",
+             CaptureAttributionPresentation.unknownDeviceName, false, true),
+            (.unreadableRecord(diagnostic: "the record could not be understood"), "omi",
+             CaptureAttributionPresentation.unknownDeviceName, false, true),
         ]
-        XCTAssertEqual(Set(cases.map(\.2)).count, 2, "the fixture itself is degenerate")
+        XCTAssertEqual(Set(cases.map(\.mayStandAlone)).count, 2,
+                       "the fixture itself is degenerate")
+        XCTAssertEqual(Set(cases.map(\.carriesAReason)).count, 2,
+                       "the fixture itself is degenerate about reasons")
+        XCTAssertGreaterThan(Set(cases.map(\.name)).count, 2,
+                             "the fixture expects nearly the same name everywhere, so pinning "
+                                 + "names here proves almost nothing")
 
         // What a recording the classifier COULD place before device tracking is called. Any
         // other cell rendering this same name is claiming that era without having established
@@ -115,11 +138,30 @@ final class DeviceRenderedSurfaceFeatureTests: ProcessGlobalStateTestCase {
         let establishedEra = CaptureAttributionPresentation.attribution(
             for: .legacyPreMigration, legacySourceMarker: nil).deviceName
 
-        for (provenance, marker, mayStandAlone) in cases {
+        for (provenance, marker, expectedName, mayStandAlone, carriesAReason) in cases {
             let disk = marker ?? "no marker"
             let rendered = CaptureAttributionPresentation.attribution(for: provenance,
                                                                       legacySourceMarker: marker)
             XCTAssertFalse(rendered.deviceName.isEmpty, "\(provenance)/\(disk) rendered no name")
+            XCTAssertEqual(rendered.deviceName, expectedName,
+                           "\(provenance)/\(disk) is rendered \"\(rendered.deviceName)\" — this "
+                               + "is the name a reader sees against the conversation, and the "
+                               + "table above is what the app undertook to call it")
+
+            // A REASON IS ATTACHED EXACTLY WHERE THE NAME IS NOT A DEVICE THE APP CAN NAME.
+            // `isKnown` IS "no reason attached", so dropping the reason does not merely remove
+            // an explanation — it promotes the answer to one the app claims to stand behind.
+            let claim = rendered.isKnown ? "presents it as a device it can name"
+                                         : "hedges it with a reason"
+            XCTAssertEqual(rendered.isKnown, !carriesAReason,
+                           "\(provenance)/\(disk) renders \"\(rendered.deviceName)\" and the app "
+                               + claim + " — which is not what this answer is")
+            if carriesAReason {
+                XCTAssertFalse(rendered.diagnostic?.isEmpty ?? true,
+                               "\(provenance)/\(disk) renders \"\(rendered.deviceName)\" with an "
+                                   + "empty reason, which reaches the detail header as a name "
+                                   + "followed by a dangling \"— \" and tells a reader nothing")
+            }
 
             let row = CaptureAttributionPresentation.metaLine(Self.rowBase, attribution: rendered)
             XCTAssertEqual(row != Self.rowBase, mayStandAlone,
