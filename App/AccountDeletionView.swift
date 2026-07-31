@@ -27,16 +27,21 @@ struct AccountDeletionView: View {
             }
             ForEach(AccountDeletionScope.allCases, id: \.self) { scope in
                 Section {
+                    // ONLY the title is tappable. The explanation used to sit INSIDE this
+                    // destructive button, making the whole five-line card a tap target for
+                    // an irreversible action — you could fire it while reading the sentence
+                    // telling you what it does. Guidance belongs in the footer; the hint
+                    // keeps it on the button for VoiceOver, which reads label then hint.
                     Button(role: .destructive) { confirming = scope } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(scope.title).grainTextStyle(.body)
-                                .foregroundStyle(GrainColor.dangerRed)
-                            Text(scope.subtitle)
-                                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
+                        Text(scope.title).grainTextStyle(.body)
+                            .foregroundStyle(GrainColor.dangerRed)
                     }
                     .disabled(isBusy)
+                    .accessibilityHint(scope.subtitle)
+                } footer: {
+                    Text(scope.subtitle)
+                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             if case .failed(let scope) = model.phase {
