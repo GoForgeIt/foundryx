@@ -139,7 +139,7 @@ struct SignInView: View {
         switch remote.status {
         case .connected: return GrainColor.sage
         case .resolving: return GrainColor.amber
-        case .noHost, .error: return GrainColor.amber
+        case .noHost, .error, .deletionCleanupPending: return GrainColor.amber
         case .signedOut, .unconfigured: return GrainColor.inkTertiary
         }
     }
@@ -153,6 +153,12 @@ struct SignInView: View {
         // runs entirely on-device; a computer is an optional upgrade in Settings.
         case .noHost: return "You're all set — everything runs on your phone. Add your computer anytime in Settings → Brain."
         case .error(let e): return e
+        // Named plainly on the screen the person is actually looking at. This used
+        // to fall through to nothing, so a deleted account read as a tap that did
+        // not register.
+        case .deletionCleanupPending:
+            return "Deleting this account never finished on this iPhone. "
+                + "Finish it to use this account again." 
         }
     }
 }

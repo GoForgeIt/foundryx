@@ -10,6 +10,11 @@ public enum CaptureAccountScopeError: Error, LocalizedError {
     case missingStableIdentity
     case activationAlreadyPending
     case activationState(String)
+    /// This identity has a deletion that never finished, so returning would hand
+    /// back half-erased data. DISTINCT from `activationState` because it is the one
+    /// refusal the person can resolve themselves — and because collapsing it into a
+    /// generic activation error is what made it a silent, permanent lockout.
+    case deletionCleanupPending(ownerScope: String)
     case durableContainer(String)
     case ownershipMarker(String)
     case legacyEnumeration(String)
@@ -20,6 +25,9 @@ public enum CaptureAccountScopeError: Error, LocalizedError {
         switch self {
         case .missingStableIdentity:
             return "The provider did not return a stable account subject or email."
+        case .deletionCleanupPending:
+            return "Deleting this account never finished on this iPhone, so it can't "
+                + "be signed back in until the cleanup completes."
         case .activationAlreadyPending:
             return "A different account still owns an unfinished local-data activation."
         case .activationState(let detail):
@@ -2010,8 +2018,14 @@ public enum CaptureAccountScope {
         case .record:
             installResolution(
                 .blocked, widgetOwner: nil, identityTransition: true)
-            throw CaptureAccountScopeError.activationState(
-                "account deletion cleanup is still pending")
+            // A TYPED refusal, not a generic activation error. Signing in is the
+            // only screen this person can reach — their server account is already
+            // gone and "Retry deletion" lives behind the sign-in this refuses — so
+            // the caller has to be able to recognise this case and offer the way out.
+            DeletionRecorder.shared.emit(
+                "account.signin.refused", "deletion_cleanup_pending")
+            throw CaptureAccountScopeError.deletionCleanupPending(
+                ownerScope: ownerScope)
         case .blocked(let reason):
             installResolution(
                 .blocked, widgetOwner: nil, identityTransition: true)

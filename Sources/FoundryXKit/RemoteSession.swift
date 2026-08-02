@@ -10,16 +10,23 @@ import SwiftUI
 // NOT YET COMPILE-VERIFIED in CI — validate in Xcode.
 @MainActor
 public final class RemoteSession: ObservableObject {
-    public enum Status: Equatable {
+    public enum Status: Equatable, Sendable {
         case unconfigured          // this build has no remote/OAuth config
         case signedOut
         case resolving
         case connected(host: String)
         case noHost                // signed in but no desktop designated as host
         case error(String)
+        /// This identity has an unfinished deletion. Separate from `.error` so the
+        /// sign-in screen can offer the ONE action that resolves it — the person
+        /// cannot reach Settings, which is where "Retry deletion" lives.
+        case deletionCleanupPending(ownerScope: String)
     }
 
-    @Published public private(set) var status: Status = .signedOut
+    // `internal(set)` rather than `private(set)`: the seams need to drive a status
+    // the app can only reach through a real refused sign-in. Still read-only to
+    // every consumer outside this module.
+    @Published public internal(set) var status: Status = .signedOut
     /// Authentication state is independent of email. Apple commonly returns email
     /// only on the first authorization, while its stable subject remains signed in.
     @Published public private(set) var isSignedIn = false
@@ -142,11 +149,58 @@ public final class RemoteSession: ObservableObject {
             await resolve()
         } catch AuthError.cancelled {
             note("signIn cancelled")
+        } catch let e as CaptureAccountScopeError {
+            isSignedIn = FoundryAuth.hasPersistedSignIn
+            identityRevision = CaptureAccountScope.identityGeneration
+            if case .deletionCleanupPending(let scope) = e {
+                // NOT `.error`: a generic message with no action is what stranded
+                // someone on the login screen with a deleted server account and no
+                // way forward.
+                status = .deletionCleanupPending(ownerScope: scope)
+                note("signIn refused — deletion cleanup pending for \(scope)")
+            } else {
+                status = .error(e.localizedDescription)
+                note("signIn FAILED: \(e.localizedDescription)")
+            }
         } catch {
             isSignedIn = FoundryAuth.hasPersistedSignIn
             identityRevision = CaptureAccountScope.identityGeneration
             status = .error(error.localizedDescription)
             note("signIn FAILED: \(error.localizedDescription)")
+        }
+    }
+
+    /// Finish a deletion that never completed, from the LOGIN screen.
+    ///
+    /// The catch-22 this exists for: a `cleanupPending` record refuses sign-in, and
+    /// the only other way to clear it — "Retry deletion" in Settings — is behind
+    /// that same sign-in. Someone whose server account is already gone had no way
+    /// forward at all. This runs the same owner-proving local cleanup, using the
+    /// identity from the sign-in that was just refused, so no data can be erased
+    /// for anyone but its proven owner.
+    ///
+    /// Returns true when the pending record is resolved and signing in is worth
+    /// retrying.
+    @discardableResult
+    public func finishInterruptedDeletion(
+        eraseLocal: @Sendable () async throws -> Void
+    ) async -> Bool {
+        guard case .deletionCleanupPending = status else { return false }
+        DeletionRecorder.shared.emit("account.signin.recover", "start")
+        do {
+            try await eraseLocal()
+            DeletionRecorder.shared.emit("account.signin.recover", "ok")
+            status = remote == nil ? .unconfigured : .signedOut
+            identityRevision = CaptureAccountScope.identityGeneration
+            return true
+        } catch {
+            // Still stuck, but now it SAYS so instead of bouncing silently.
+            DeletionRecorder.shared.emit(
+                "account.signin.recover", "failed \(error)")
+            status = .error(
+                "Couldn't finish deleting this account on this iPhone. "
+                + "Reinstalling the app will clear it.")
+            return false
         }
     }
 

@@ -22,6 +22,12 @@ public struct DoorFailureMessage: Equatable, Sendable {
     ///     resort when the session status explains nothing.
     public static func make(status: RemoteSession.Status, underlying: String?) -> DoorFailureMessage {
         switch status {
+        case .deletionCleanupPending:
+            // An account-state problem, never a transport one — saying "check your
+            // connection" here would be the same lie this whole area exists to stop.
+            return DoorFailureMessage(
+                text: "Deleting this account never finished on this iPhone.",
+                action: "Finish deleting it to use this account again.")
         case .signedOut:
             // Post-2026-07-23 this should be unreachable from inside the app (RootGate now
             // requires sign-in), but it stays honest rather than falling through to a

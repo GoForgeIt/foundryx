@@ -68,6 +68,10 @@ public enum WelcomeFrontDoor {
     public static func connectStatus(_ status: RemoteSession.Status,
                                      email: String?) -> WelcomeConnectStatus? {
         switch status {
+        case .deletionCleanupPending:
+            // No connection pill: this is not a connection state, and a hopeful
+            // "Connecting…" would paper over a refusal the person must act on.
+            return nil
         case .resolving:
             return WelcomeConnectStatus(text: "Connecting to your computer…", settled: false)
         case .connected:
@@ -89,6 +93,12 @@ public enum WelcomeFrontDoor {
         case .unconfigured: return "Sign-in isn't available in this build."
         case .resolving: return "Signing in…"
         case .error(let message): return message
+        // THE line the person actually reads after a refused sign-in. Returning
+        // nil here is what made a deleted account look like nothing happened: they
+        // tapped Google, came back, and landed on the same screen with no words.
+        case .deletionCleanupPending:
+            return "Deleting this account never finished on this iPhone. "
+                + "Finish it to use this account again."
         case .signedOut, .connected, .noHost: return nil
         }
     }
