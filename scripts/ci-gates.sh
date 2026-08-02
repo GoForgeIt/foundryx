@@ -250,10 +250,45 @@ leak_ungated_reads() {
   ' "$@"
 }
 
+# ---- ATS: the encryption floor must stay ON for everything but the named relay.
+# `NSAllowsArbitraryLoads: true` removed it from EVERY request the app makes. It was
+# a one-line entry that read like a scoped exception and was not one, and it sat next
+# to a comment explaining why it had to be the only key — which is exactly how it
+# survived. This asserts the BUILT plist, because project.yml is not what ships.
+ats_gate() {
+  local plist="$1" label="$2"
+  if [ ! -f "$plist" ]; then
+    echo "  [ats] no Info.plist at $plist"
+    fail "ats-no-plist"
+    return
+  fi
+  if plutil -extract NSAppTransportSecurity.NSAllowsArbitraryLoads raw -o - "$plist" >/dev/null 2>&1; then
+    echo "  [ats] $label: NSAllowsArbitraryLoads IS PRESENT — the encryption floor is"
+    echo "        removed for EVERY endpoint, not just the relay. Scope it to the one"
+    echo "        host that needs plaintext (NSExceptionDomains) instead."
+    fail "ats-arbitrary-loads"
+    return
+  fi
+  # The relay exception is expected TODAY (it has no hostname or certificate and does
+  # not answer TLS). This prints it so it stays visible rather than becoming permanent
+  # by being forgotten.
+  local hosts
+  hosts=$(plutil -extract NSAppTransportSecurity.NSExceptionDomains xml1 -o - "$plist" 2>/dev/null \
+          | grep -oE "<key>[^<]+</key>" | sed "s/<[^>]*>//g" | grep -E "^[0-9]+\." || true)
+  if [ -n "$hosts" ]; then
+    echo "  [ats] $label: plaintext still permitted for: $(echo "$hosts" | tr "\n" " ")"
+    echo "        (tracked: relay needs a hostname + certificate; the id_token crosses"
+    echo "        this leg in the clear until then)"
+  fi
+  echo "  [ats] $label: no app-wide arbitrary loads ✓"
+}
+
 phase_leak() {
   mkdir -p build
   local rel; rel="$DD/Build/Products/Release-iphonesimulator/FoundryX.app/FoundryX"
   local perf; perf="$DD/Build/Products/PerfRelease-iphonesimulator/FoundryX.app/FoundryX"
+
+  ats_gate "$DD/Build/Products/Release-iphonesimulator/FoundryX.app/Info.plist" "Release"
 
   # ---- S10: inspect a binary THIS run produced, never a stale one on disk.
   if ! built Release; then

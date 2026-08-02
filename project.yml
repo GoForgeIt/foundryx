@@ -80,13 +80,24 @@ targets:
           - bluetooth-central
           - audio
         NSAppTransportSecurity:
-          # NOTE: NSAllowsArbitraryLoads MUST be the only key here — iOS 10+ IGNORES
-          # it if NSAllowsLocalNetworking (or other granular keys) is also present.
-          # The app is remote-only (relay), so LAN-networking allowance isn't needed.
-          # The hosted relay/gateway is a raw-IP http/ws endpoint (no domain/cert
-          # yet); door traffic is already E2E-encrypted by the Noise tunnel. TODO:
-          # domain + TLS (wss/https) on the relay, then scope to a per-host exception.
-          NSAllowsArbitraryLoads: true
+          # SCOPED, not app-wide. `NSAllowsArbitraryLoads: true` removed the
+          # encryption floor from EVERY request the app makes — not just the one
+          # endpoint that needs it — so no other call was protected and no future
+          # call could be. The relay is still a raw-IP http/ws endpoint (no domain
+          # or certificate yet: it does not answer TLS at all, verified
+          # 2026-08-02), so that ONE host keeps an explicit exception and
+          # everything else regains the default floor.
+          #
+          # This does NOT make the relay leg safe — the sign-in id_token still
+          # crosses it in plaintext. It removes the blast radius from every other
+          # endpoint while the relay gets a hostname + certificate.
+          #
+          # NSAllowsArbitraryLoads is deliberately ABSENT: iOS ignores granular
+          # keys when it is present, so leaving it would silently defeat this.
+          NSExceptionDomains:
+            "34.57.104.157":
+              NSExceptionAllowsInsecureHTTPLoads: true
+              NSIncludesSubdomains: false
         # M5 R1b remote sign-in (Google/Microsoft) → designated desktop host.
         # Google = the iOS-type OAuth client (PKCE, no secret); Microsoft = Entra
         # app b0b93eb1 with the mobile redirect msauth.<bundle>://auth. Both work
