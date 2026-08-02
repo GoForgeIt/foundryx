@@ -404,10 +404,18 @@ final class CurrentOwnerSelectiveDeletionRunner: @unchecked Sendable {
             },
             legacyEnumerationObserver: { _ in })
 
+        // Which PATH this took, recorded before it can be flattened. Several
+        // distinct failures — a stale binding, an unproven owner, a cleanup group
+        // that threw — all collapse into one `cleanupPending`, and the person is
+        // shown a single "deletion is pending" with no way to tell which. On
+        // 2026-08-02 that cost a round trip: the remote teardown had SUCCEEDED and
+        // the local erase was blocked, and nothing on the device said why.
         do {
             switch lifecycle.record(ownerScope: ownerScope) {
             case .record(let record) where record.phase == .cleanupPending:
+                DeletionRecorder.shared.emit("account.delete.local", "recover pending")
                 _ = try await lifecycle.recover(ownerScope: ownerScope)
+                DeletionRecorder.shared.emit("account.delete.local", "recover ok")
             case .missing, .record:
                 guard let binding =
                         CaptureAccountScope.currentAccountBinding(),
@@ -416,15 +424,22 @@ final class CurrentOwnerSelectiveDeletionRunner: @unchecked Sendable {
                         .standardizedFileURL
                         == container.standardizedFileURL,
                       CaptureAccountScope.isCurrent(binding) else {
+                    DeletionRecorder.shared.emit("account.delete.local", "owner_unproven")
                     throw AccountDeletionError.ownerUnproven
                 }
+                DeletionRecorder.shared.emit("account.delete.local", "begin")
                 _ = try await lifecycle.begin(binding: binding)
-            case .blocked:
+                DeletionRecorder.shared.emit("account.delete.local", "begin ok")
+            case .blocked(let reason):
+                DeletionRecorder.shared.emit(
+                    "account.delete.local", "store_blocked \(reason)")
                 throw AccountDeletionError.cleanupPending
             }
         } catch AccountDeletionError.cleanupPending {
             throw AccountDeletionError.cleanupPending
         } catch {
+            // The CAUSE, before it is flattened to `cleanupPending`.
+            DeletionRecorder.shared.emit("account.delete.local", "failed \(error)")
             switch lifecycle.record(ownerScope: ownerScope) {
             case .record(let record) where record.phase == .cleanupPending:
                 throw AccountDeletionError.cleanupPending
