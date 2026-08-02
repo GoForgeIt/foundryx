@@ -81,12 +81,14 @@ targets:
           - audio
         NSAppTransportSecurity:
           # SCOPED, not app-wide. `NSAllowsArbitraryLoads: true` removed the
-          # encryption floor from EVERY request the app makes — not just the one
-          # endpoint that needs it — so no other call was protected and no future
-          # call could be. The relay is still a raw-IP http/ws endpoint (no domain
-          # or certificate yet: it does not answer TLS at all, verified
-          # 2026-08-02), so that ONE host keeps an explicit exception and
-          # everything else regains the default floor.
+          # encryption floor from EVERY request the app makes, so no other call
+          # was protected and no future one could be.
+          #
+          # The exception now covers ONLY the raw Noise relay on :8787. The
+          # gateway — the leg that carried the sign-in id_token — moved to
+          # https://gateway.goforgeit.com, so the credential no longer crosses
+          # the wire in the clear. :8787 carries no token and its payload is
+          # already E2E-encrypted by Noise.
           #
           # This does NOT make the relay leg safe — the sign-in id_token still
           # crosses it in plaintext. It removes the blast radius from every other
@@ -106,7 +108,16 @@ targets:
           GoogleIOSClientID: "449450484577-vvrkjs9hkbp5t5rgju6td29r1762hoei.apps.googleusercontent.com"
           MicrosoftClientID: "b0b93eb1-413e-41e5-8a90-5e991e113b62"
           MicrosoftTenant: organizations
-          GatewayHTTPURL: "http://34.57.104.157:8788"
+          # TLS via a Cloudflare tunnel to the relay VM (2026-08-02). This is the
+          # leg that carried the sign-in id_token in the clear — `HostResolver`
+          # sends `Authorization: Bearer <id_token>` here, so anyone sharing a
+          # network could lift it. The origin is now loopback-only behind the
+          # tunnel; there is no bare-IP endpoint to intercept.
+          GatewayHTTPURL: "https://gateway.goforgeit.com"
+          # STILL PLAINTEXT, deliberately and narrowly: :8787 speaks a raw Noise
+          # protocol, not HTTP, so it cannot ride the tunnel. It carries no
+          # id_token and its payload is already E2E-encrypted by Noise — the
+          # exposure is metadata, not the credential. Tracked, not forgotten.
           RelayWSURL: "ws://34.57.104.157:8787"
         CFBundleURLTypes:
           - CFBundleURLSchemes:

@@ -34,7 +34,7 @@
 	<key>FoundryXOAuth</key>
 	<dict>
 		<key>GatewayHTTPURL</key>
-		<string>http://34.57.104.157:8788</string>
+		<string>https://gateway.goforgeit.com</string>
 		<key>GoogleIOSClientID</key>
 		<string>449450484577-vvrkjs9hkbp5t5rgju6td29r1762hoei.apps.googleusercontent.com</string>
 		<key>MicrosoftClientID</key>
