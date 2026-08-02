@@ -385,10 +385,19 @@ final class CurrentOwnerSelectiveDeletionRunner: @unchecked Sendable {
     }
 
     func eraseVerifiedCurrentOwner() async throws {
+        // Recorded HERE, not after the container is resolved: this is the EARLIEST
+        // and most likely refusal — no verified identity at all — and it returns
+        // before any of the instrumentation below, so it used to leave no trace
+        // whatsoever. A gate that refuses silently is indistinguishable from one
+        // that was never reached.
         guard let identity = identityProvider(),
               let ownerScope = try? CaptureAccountScope.key(for: identity),
               AccountDeletionLifecycleStore.isValidOwnerScope(ownerScope)
         else {
+            DeletionRecorder.shared.emit(
+                "account.delete.local",
+                identityProvider() == nil ? "owner_unproven no_identity"
+                                          : "owner_unproven bad_scope")
             throw AccountDeletionError.ownerUnproven
         }
         let container = containerProvider()

@@ -1850,7 +1850,7 @@ private final class DeletionFaultControl: @unchecked Sendable {
 
 private final class DeletionRegistrationOwner: @unchecked Sendable {}
 
-private final class DeletionCompletionFlag: @unchecked Sendable {
+final class DeletionCompletionFlag: @unchecked Sendable {
     private let lock = NSLock()
     private var finished = false
     var isFinished: Bool { lock.withLock { finished } }
@@ -2336,7 +2336,7 @@ private final class DeletionMetadataObservation: @unchecked Sendable {
     }
 }
 
-private final class SelectiveDeletionIntegrationFixture:
+final class SelectiveDeletionIntegrationFixture:
     @unchecked Sendable
 {
     enum LegacyProof: Equatable {
@@ -2814,7 +2814,7 @@ private final class SelectiveDeletionIntegrationFixture:
     }
 }
 
-private final class DeletionTypedSecretStore:
+final class DeletionTypedSecretStore:
     PairingSecretStore, @unchecked Sendable
 {
     private struct Key: Hashable {
