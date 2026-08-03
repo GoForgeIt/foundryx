@@ -70,6 +70,33 @@ public struct DoorFailureMessage: Equatable, Sendable {
             action: "Open Foundry on your Mac and make sure it's awake.")
     }
 
+    /// For a failed read of Kiln's SHARED conversation library.
+    ///
+    /// The door deliberately distinguishes "I hold no kiln-session URL at all" (503) from "I
+    /// could not reach the session" (502), and NEITHER is ever degraded to an empty list —
+    /// because an empty list reads on the phone as "you have no conversations" when the truth
+    /// is "the door could not ask". That distinction survives all the way to the sentence the
+    /// user reads: a stopped Kiln is a different, differently-fixable thing from a sleeping
+    /// Mac. No status code, no NSError domain, and above all no "no conversations" ever
+    /// appears in any of these.
+    public static func make(kilnLibraryFailure: KilnLibraryError) -> DoorFailureMessage {
+        switch kilnLibraryFailure {
+        case .noSession:
+            // The door answered — so the Mac IS reachable. What is missing is Kiln itself.
+            return DoorFailureMessage(
+                text: "Kiln isn't running on your computer right now.",
+                action: "Open Foundry on your Mac and start Kiln.")
+        case .unreachable, .http:
+            return DoorFailureMessage(
+                text: "Your computer couldn't reach Kiln right now.",
+                action: "Open Foundry on your Mac and make sure it's awake.")
+        case .unauthorized:
+            return DoorFailureMessage(
+                text: "You're signed out.",
+                action: "Sign in to reach your computer.")
+        }
+    }
+
     /// The single line a compact surface renders (text + action joined).
     public var line: String { action.map { "\(text) \($0)" } ?? text }
 }

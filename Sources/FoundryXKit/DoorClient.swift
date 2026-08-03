@@ -1288,4 +1288,174 @@ public final class DoorClient: @unchecked Sendable {
         // tolerate them by dropping, never by surfacing an un-bindable row.
         return raw.filter { !$0.entityId.isEmpty && !$0.displayName.isEmpty }
     }
+
+    // ── Kiln's SHARED conversation library ────────────────────────────────────
+    //
+    // These four are the phone's ONLY way to see a conversation it did not itself create.
+    // Every one is a pure relay onto the attached kiln-session.
+    //
+    // THEY DO NOT SHARE THE "404 → empty" DEGRADATION the search read uses. That degradation
+    // is right for search (an old door without the endpoint should fall back to local-only)
+    // and WRONG here: a library that answers `[]` when the door could not ask tells the user
+    // they have no conversations. The door goes out of its way to answer 503 (no session
+    // URL at all) and 502 (session unreachable or refusing) rather than an empty list, and
+    // `KilnLibraryError` is how that distinction survives into the UI.
+
+    /// One page of the library: `GET /foundryx/chats?limit=&offset=&q=`.
+    ///
+    /// `limit` is clamped by the door to 1…200 (default 50), so asking for more is not an
+    /// error — it is quietly bounded upstream.
+    ///
+    /// LIMITATION: `LibraryPage.snapshot` decodes, but the door's `chats_library_url` builds
+    /// only `limit`/`offset`/`q` — there is no `snapshot` parameter to echo back. Until the
+    /// door forwards one, deep OFFSET paging can shift under a library still being written.
+    /// Shallow reads (the phone's) are unaffected. Not worked around here; a client-side
+    /// workaround would only hide it.
+    public func kilnLibrary(limit: Int = 50, offset: Int = 0, query: String = "")
+        async throws -> LibraryPage {
+        try await PerfHook.timed("door-kiln-library") {
+            try await self.kilnLibraryUncounted(limit: limit, offset: offset, query: query)
+        }
+    }
+
+    private func kilnLibraryUncounted(limit: Int, offset: Int, query: String) async throws -> LibraryPage {
+        var path = "/foundryx/chats?limit=\(limit)&offset=\(offset)"
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            // Encoded as a query VALUE with an alphanumerics-only allow-set (the same rule
+            // `searchConversations` uses): the door percent-DECODES `q` and then allow-lists
+            // the decoded term, so spaces must arrive as %20 and nothing structural survives.
+            let q = trimmed.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+            path += "&q=\(q)"
+        }
+        let data = try await kilnGET(path: path, name: "library")
+        do { return try JSONDecoder().decode(LibraryPage.self, from: data) }
+        catch { throw KilnLibraryError.unreachable }
+    }
+
+    /// The manual-organization document: `GET /foundryx/chat-org?org=<scope>`.
+    ///
+    /// `doc` is DOUBLE-ENCODED — a JSON string holding the document — and `null` means it was
+    /// never persisted. A 404 (an older door that predates the route) resolves the SAME way:
+    /// both are genuinely "this workspace has no groups", which is a success. 502/503 still
+    /// throw, because those are "we could not ask" and must never read as "nothing is filed".
+    public func kilnChatOrg(org: String = "") async throws -> OrgState {
+        try await PerfHook.timed("door-kiln-chat-org") { try await self.kilnChatOrgUncounted(org: org) }
+    }
+
+    private func kilnChatOrgUncounted(org: String) async throws -> OrgState {
+        var path = "/foundryx/chat-org"
+        let trimmed = org.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            let scope = trimmed.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+            path += "?org=\(scope)"
+        }
+        do {
+            let data = try await kilnGET(path: path, name: "chat-org")
+            let env = try? JSONDecoder().decode(ChatOrgEnvelope.self, from: data)
+            return KilnChatOrg.parseOrg(env?.doc)
+        } catch KilnLibraryError.http(404) {
+            return KilnChatOrg.empty
+        }
+    }
+
+    /// One conversation's transcript: `GET /foundryx/chats/<chat_id>/messages`.
+    public func kilnChatMessages(chatId: String) async throws -> [KilnMessage] {
+        try await PerfHook.timed("door-kiln-messages") {
+            let data = try await self.kilnGET(
+                path: "/foundryx/chats/\(DoorClient.kilnChatPathSegment(chatId))/messages",
+                name: "messages")
+            guard let page = try? JSONDecoder().decode(KilnMessagePage.self, from: data) else {
+                throw KilnLibraryError.unreachable
+            }
+            return page.messages
+        }
+    }
+
+    /// Pick an imported conversation up: `POST /foundryx/chats/<chat_id>/continue` (no body).
+    ///
+    /// RESUME-IN-PLACE. The upstream keeps the ORIGINAL id — same row, same transcript, same
+    /// provenance; no fork and no copy. A reply naming a DIFFERENT id is a contract violation
+    /// and is surfaced as `.unreachable` rather than quietly navigating somewhere else.
+    public func kilnContinueChat(chatId: String) async throws -> KilnContinueResult {
+        try await PerfHook.timed("door-kiln-continue") {
+            let data = try await self.kilnRequest(
+                path: "/foundryx/chats/\(DoorClient.kilnChatPathSegment(chatId))/continue",
+                method: "POST", name: "continue")
+            guard let result = try? JSONDecoder().decode(KilnContinueResult.self, from: data),
+                  result.sessionId == chatId
+            else { throw KilnLibraryError.unreachable }
+            return result
+        }
+    }
+
+    /// A chat id, ready to sit in a URL path.
+    ///
+    /// AN IMPORTED CONVERSATION'S ID IS STRUCTURED AND CONTAINS COLONS —
+    /// `import:claude-code:workflows:wf_ae593755-e61:abbdae8d72a12b0fc`. Colons are legal
+    /// path characters (RFC 3986 `pchar`), the door's `is_safe_chat_id` admits them and
+    /// admits no `%` at all, so percent-encoding one would 404 the request. Encoding the
+    /// colons away — or adding a client-side id validator that rejects them — would make
+    /// EVERY imported conversation unreachable from the phone, which is the exact defect
+    /// these routes exist to close. So: `/` is encoded (it would change the route), and
+    /// everything the door's allow-list accepts is passed through untouched.
+    static func kilnChatPathSegment(_ chatId: String) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/")
+        return chatId.addingPercentEncoding(withAllowedCharacters: allowed) ?? chatId
+    }
+
+    private func kilnGET(path: String, name: String) async throws -> Data {
+        try await kilnRequest(path: path, method: "GET", name: name)
+    }
+
+    /// The ONE status-mapping seam for every library route, dual-path (relay + LAN) like the
+    /// other user-facing reads. 401 → `.unauthorized`; 503 → `.noSession`; 502 →
+    /// `.unreachable`; a transport throw → `.unreachable`; any other non-200 → `.http(code)`.
+    /// No arm of this ever returns an empty page.
+    private func kilnRequest(path: String, method: String, name: String) async throws -> Data {
+        if let relay = target.relay?.interactive() {
+            let resp: RelayHTTP.Response
+            do {
+                resp = try await RelayHTTP.roundTrip(
+                    relay: relay, bearer: target.bearer, method: method,
+                    path: path, session: session, log: log, useMux: target.useMux)
+            } catch {
+                throw KilnLibraryError.unreachable
+            }
+            try DoorClient.throwKilnStatus(resp.status)
+            return resp.body
+        }
+        let s = target.baseURL.absoluteString
+        let base = s.hasSuffix("/") ? String(s.dropLast()) : s
+        guard let url = URL(string: "\(base)\(path)") else {
+            throw KilnLibraryError.unreachable
+        }
+        var r = URLRequest(url: url)
+        r.httpMethod = method
+        r.setValue("Bearer \(target.bearer)", forHTTPHeaderField: "Authorization")
+        r.timeoutInterval = method == "POST" ? 60 : 30
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: r)
+        } catch {
+            throw KilnLibraryError.unreachable
+        }
+        guard let http = response as? HTTPURLResponse else { throw KilnLibraryError.unreachable }
+        try DoorClient.throwKilnStatus(http.statusCode)
+        return data
+    }
+
+    /// Map an HTTP status onto the library's error vocabulary. Extracted so the relay and LAN
+    /// paths can never drift apart on the one thing that must not drift.
+    static func throwKilnStatus(_ status: Int) throws {
+        switch status {
+        case 200: return
+        case 401: throw KilnLibraryError.unauthorized
+        case 502: throw KilnLibraryError.unreachable
+        case 503: throw KilnLibraryError.noSession
+        default: throw KilnLibraryError.http(status)
+        }
+    }
 }
