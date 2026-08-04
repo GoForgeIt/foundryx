@@ -30,6 +30,10 @@ struct ChatScreen: View {
     @State private var sessionId = ""
     @State private var streaming = false
     @State private var showingChats = false
+    /// Kiln's SHARED library — every chat on the Mac, including ones this phone never
+    /// created. A SHEET off this tab, deliberately not a fifth tab: `app-shell.feature`
+    /// asserts exactly four, and there is a recorded product decision against adding one.
+    @State private var showingKilnLibrary = false
     /// A run artifact the user tapped to view (sheet with the in-app viewers).
     @State private var viewingArtifact: ChatViewModel.RunArtifact?
     // Seed the picker synchronously from the warm cache so the dropdown paints the full
@@ -120,6 +124,15 @@ struct ChatScreen: View {
         .sheet(isPresented: $showingChats) {
             ChatListSheet(store: store) { showingChats = false }
         }
+        .sheet(isPresented: $showingKilnLibrary) {
+            // `computerConnected: true` is a fact here, not an assumption: this screen only
+            // exists on the door-backed tier — the phone-only tier renders LocalChatScreen
+            // instead and never dials a door at all.
+            KilnLibraryView(
+                target: target, log: log, accountBinding: accountBinding,
+                computerConnected: true,
+                onDismiss: { showingKilnLibrary = false })
+        }
         .sheet(item: $viewingArtifact) { artifact in
             NavigationStack {
                 ArtifactPane(
@@ -191,6 +204,11 @@ struct ChatScreen: View {
         HStack(spacing: GrainSpacing.x2) {
             GrainButton("Chats", variant: .text, size: .sm) { showingChats = true }
                 .accessibilityIdentifier("open-chats")
+
+            // The way in to everything on the Mac — Kiln's own chats and every imported
+            // Claude Code / Codex transcript, not just what this phone started.
+            GrainButton("All", variant: .text, size: .sm) { showingKilnLibrary = true }
+                .accessibilityIdentifier("open-kiln-library")
 
             Spacer(minLength: 0)
 

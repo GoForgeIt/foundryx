@@ -500,7 +500,11 @@ public enum KilnLibraryCopy {
     }
 
     /// A GENUINELY empty library. Never shown for a failure — see `DoorFailureMessage`.
-    public static let emptyTitle = "No conversations yet"
+    ///
+    /// Says "chats", not "conversations": `features/voice-notes-language.feature` retired the
+    /// latter from user-facing copy (it made the capture library read as a surveillance tool),
+    /// and the app's existing chat surface already says "Chats".
+    public static let emptyTitle = "No chats yet"
     public static let emptyMessage =
-        "Conversations you have in Kiln, Claude Code or Codex will show up here."
+        "Chats you have in Kiln, Claude Code or Codex will show up here."
 }
