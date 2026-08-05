@@ -63,8 +63,12 @@ platform :ios do
     #
     # So take the max of what the repo says and what TestFlight ALREADY HAS, then add one. That is
     # monotonic by construction, survives a re-run of an unchanged commit, and cannot collide.
-    # If ASC cannot be reached we fall back to the commit count rather than blocking the ship —
-    # a wrong-but-increasing guess still uploads; a hard failure here strands the release.
+    # If ASC cannot be reached, FAIL LOUDLY. The previous version fell back to the commit count,
+    # reasoning that a wrong-but-increasing guess still uploads. It does not: build 100 uploaded
+    # 388, then build 101 read ASC unsuccessfully, fell back to a commit count that had also
+    # reached 388, and Apple rejected the duplicate after a full build+sign+notarize cycle
+    # (2026-08-05). A silent fallback to a colliding number is strictly worse than refusing —
+    # it burns a release cycle and reports a confusing Apple error instead of the real cause.
     build_number = ENV["BUILD_NUMBER"] || begin
       commits = sh("cd .. && git rev-list --count HEAD").strip.to_i
       latest = begin
@@ -74,9 +78,12 @@ platform :ios do
           initial_build_number: 0,
         ).to_i
       rescue => e
-        UI.important("could not read the latest TestFlight build (#{e.class}); " \
-                     "falling back to commit count #{commits}")
-        0
+        UI.user_error!(
+          "cannot determine the next build number: reading the latest TestFlight build failed " \
+          "(#{e.class}: #{e.message}). Refusing to guess — a guessed number collided with an " \
+          "already-uploaded build on 2026-08-05 and wasted a full build. Fix ASC access, or set " \
+          "BUILD_NUMBER=<n> explicitly (must exceed the highest build already on TestFlight)."
+        )
       end
       next_number = [commits, latest + 1].max
       UI.message("build number #{next_number} (commits=#{commits}, testflight=#{latest})")
