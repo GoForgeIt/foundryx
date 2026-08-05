@@ -33,7 +33,23 @@ struct ChatScreen: View {
     /// Kiln's SHARED library — every chat on the Mac, including ones this phone never
     /// created. A SHEET off this tab, deliberately not a fifth tab: `app-shell.feature`
     /// asserts exactly four, and there is a recorded product decision against adding one.
-    @State private var showingKilnLibrary = false
+    ///
+    /// Owned by the SHELL rather than this screen so it is part of the durable place: an
+    /// open sheet is somewhere you were, and coming back should not close it
+    /// (features/app-place-restore.feature).
+    @Binding var showingKilnLibrary: Bool
+
+    init(target: DoorTarget,
+         store: ChatConversationStore,
+         accountBinding: CaptureAccountScope.AccountBinding,
+         log: DoorLog,
+         showingKilnLibrary: Binding<Bool> = .constant(false)) {
+        self.target = target
+        self.store = store
+        self.accountBinding = accountBinding
+        self.log = log
+        _showingKilnLibrary = showingKilnLibrary
+    }
     /// A run artifact the user tapped to view (sheet with the in-app viewers).
     @State private var viewingArtifact: ChatViewModel.RunArtifact?
     // Seed the picker synchronously from the warm cache so the dropdown paints the full

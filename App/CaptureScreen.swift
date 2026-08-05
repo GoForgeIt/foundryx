@@ -155,6 +155,14 @@ struct CaptureScreen: View {
     let target: DoorTarget
     /// Phone-only tier: labels stay on-device ("Saved on phone", not "…to computer").
     var local: Bool = false
+    /// The transcript to REOPEN, from the durable place the shell restored
+    /// (features/app-place-restore.feature). Drives one programmatic push; cleared when
+    /// that detail is dismissed, or by the shell if the person moves off this tab first.
+    @Binding var reopenCaptureId: String?
+    /// The transcript that is open RIGHT NOW, reported UP so the shell can write it down.
+    /// Reported by the detail itself, so a tap on a row's `NavigationLink` and a
+    /// programmatic push are both seen — there is one place a detail appears.
+    @Binding var openCaptureId: String?
     @State private var pendingDeleteId: String?
     // Multi-select MERGE (Nick's decision): a long-press on a conversation row enters
     // multi-select and selects it; tapping more rows toggles them; a "Merge N" action folds
@@ -165,6 +173,10 @@ struct CaptureScreen: View {
     /// After a merge lands, the primary conversation to OPEN so you see it all together
     /// (drives a programmatic push into its detail). Cleared when the detail is dismissed.
     @State private var justMergedId: String?
+    /// The RESOLVED target of the one programmatic push — a merged conversation or a
+    /// restored place's transcript, whichever is pending, once the library actually holds
+    /// it. Resolved by `resolvePendingDetailPush()`, never by the render path.
+    @State private var pushedDetail: CaptureWAL?
     #if DEBUG || PERF_HARNESS
     @State private var deepDetail = false      // screen-proof: `-Screen detail`
     @State private var deepRecording = false   // screen-proof: `-Screen recording`
@@ -207,18 +219,39 @@ struct CaptureScreen: View {
     private let tagger = makeSystemCategoryTagger()
 
     init(device: DeviceManager, manager: CaptureManager, sources: CaptureSourceRegistry,
-         target: DoorTarget, local: Bool = false) {
+         target: DoorTarget, local: Bool = false,
+         reopenCaptureId: Binding<String?> = .constant(nil),
+         openCaptureId: Binding<String?> = .constant(nil)) {
         self.device = device
         self.manager = manager
         self.sources = sources
         self.target = target
         self.local = local
+        _reopenCaptureId = reopenCaptureId
+        _openCaptureId = openCaptureId
         _categories = StateObject(wrappedValue: manager.makeCategoryStore())
     }
 
     /// Whether the Omi is still an enabled capture source (device-page toggle). When off,
     /// the capture page neither auto-starts nor shows the Omi scan affordance.
     private var omiEnabled: Bool { sources.isEnabled(CaptureSourceDescriptor.omiId) }
+
+    /// Resolve a pending programmatic push (a just-merged conversation, or a restored
+    /// place's transcript) against the library — ONCE per library change, never per body
+    /// pass. The `navigationDestination` binding then reads `pushedDetail` in O(1).
+    ///
+    /// Doing the `first(where:)` inside the binding's `get` instead would be an O(N) scan
+    /// on every render for the entire time the detail is presented — the exact per-render
+    /// main-actor cost `ResidualMainActorWorkTests` exists to keep out.
+    private func resolvePendingDetailPush() {
+        guard pushedDetail == nil, let id = justMergedId ?? reopenCaptureId else { return }
+        // Not found yet is not "gone": the library hydrates off-main after mount. Nothing
+        // is pushed until the conversation is actually loadable, so a restore can never
+        // land on an empty shell — and a conversation that is truly gone simply never
+        // arrives, leaving the list, which is the honest answer.
+        guard let wal = manager.captures.first(where: { $0.captureId == id }) else { return }
+        pushedDetail = wal
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -278,17 +311,27 @@ struct CaptureScreen: View {
             if selectionMode { mergeActionBar.transition(.move(edge: .bottom)) }
         }
         .animation(.easeOut(duration: 0.2), value: selectionMode)
-        // After a merge lands, push straight into the merged conversation so you see it all
-        // together (iOS-16 programmatic push; coexists with the rows' own NavigationLinks).
+        // The ONE programmatic push into a conversation's detail, with two callers: a merge
+        // that just landed (open the merged conversation so you see it all together) and a
+        // restored place reopening the transcript you were reading. Deliberately one
+        // modifier, not two — SwiftUI honours a single `navigationDestination(isPresented:)`
+        // per stack, so a second one silently wins over the first.
+        //
+        // `isPresented` is true only once the conversation is actually LOADABLE. A restore
+        // fires at mount, before the library has hydrated, and pushing on the id alone
+        // renders the empty shell this whole change exists to avoid; waiting means the push
+        // lands a moment later, or — if the conversation is genuinely gone — never, leaving
+        // you on the list, which is the honest answer.
         .navigationDestination(isPresented: Binding(
-            get: { justMergedId != nil },
-            set: { if !$0 { justMergedId = nil } }
+            get: { pushedDetail != nil },
+            set: { if !$0 { pushedDetail = nil; justMergedId = nil; reopenCaptureId = nil } }
         )) {
-            if let id = justMergedId,
-               let wal = manager.captures.first(where: { $0.captureId == id }) {
-                conversationDetail(wal)
-            }
+            if let wal = pushedDetail { conversationDetail(wal) }
         }
+        // Re-attempt the pending push whenever the library changes size — which is how a
+        // restore issued at mount lands once hydration reaches its conversation. Runs on
+        // appear too, so an already-warm library pushes immediately.
+        .task(id: manager.captures.count) { resolvePendingDetailPush() }
         #if DEBUG || PERF_HARNESS
         // DEV screen-proof deep-links (real manager + target; PERF_HARNESS too, so the
         // sim-perf deep-nav phase can surveil the detail/speaker surfaces under the
@@ -992,6 +1035,12 @@ struct CaptureScreen: View {
                 .map { Date(timeIntervalSince1970: TimeInterval($0.startedAt)) }
                 ?? wal.status.startedAt
         )
+        // THE ONE PLACE A TRANSCRIPT REPORTS ITSELF. Every route into a conversation's
+        // detail — a tapped row's `NavigationLink`, a merge, a restored place — calls this
+        // builder, so reporting here means the shell knows what is open without any of
+        // those call sites having to remember to say so (features/app-place-restore.feature).
+        .onAppear { openCaptureId = wal.captureId }
+        .onDisappear { if openCaptureId == wal.captureId { openCaptureId = nil } }
     }
 
     /// The Grain selection badge shown on a row in multi-select: a filled Forge-Blue check
@@ -1049,6 +1098,11 @@ struct CaptureScreen: View {
                     // as it arrives). No-op merge (nil) leaves you on the list.
                     if let primaryId = await manager.merge(captureIds: ids) {
                         justMergedId = primaryId
+                        // The merged conversation exists NOW, so resolve the push straight
+                        // away rather than waiting for the next library-size change (a merge
+                        // shrinks the library, so that would fire — but not depending on it
+                        // keeps "open what I merged" immediate).
+                        resolvePendingDetailPush()
                     }
                 }
             }

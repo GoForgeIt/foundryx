@@ -216,8 +216,19 @@ struct RootView: View {
                         // A resolved-host change OR a refreshed bearer (after a token-expiry
                         // re-auth) rebuilds the tabs (+ their clients) so every door request
                         // uses the fresh id_token — never a stale, expired one.
-                        .id((target.relay?.tunnelId ?? "remote") + "#"
-                            + target.bearer.suffix(12) + "#acct-\(remote.identityRevision)")
+                        //
+                        // AND THAT REBUILD IS WHY THE PLACE IS WRITTEN DOWN. This `.id` change
+                        // destroys every `@StateObject` under it, `TabRouter` included, so a
+                        // token refresh on return lands you on the launch tab with no suspend
+                        // and no termination involved. `MainTabs` restores from
+                        // `AppPlacementStore` on mount, which covers this path and the cold
+                        // launch with the same mechanism. The key is composed by
+                        // `MainTabsIdentity` so a test can assert that a refreshed bearer really
+                        // does change it (features/app-place-restore.feature).
+                        .id(MainTabsIdentity.computerKey(
+                            tunnelId: target.relay?.tunnelId,
+                            bearer: target.bearer,
+                            generation: remote.identityRevision))
                         // Point the content-free usage sink at THIS resolved door (base +
                         // fresh bearer) so product-usage reaches POST /foundryx/telemetry/usage.
                         // The `.id` above re-mounts on a bearer refresh, so this re-fires with
@@ -242,8 +253,8 @@ struct RootView: View {
                              onboardingSkipsWelcome: onboardingSkipsWelcome)
                         // A re-pair (new URL/grant) or a refreshed id_token rebuilds
                         // the tabs so every door request uses the fresh bearer.
-                        .id("cell#" + cfg.url + "#" + target.bearer.suffix(12)
-                            + "#acct-\(remote.identityRevision)")
+                        .id(MainTabsIdentity.cellKey(url: cfg.url, bearer: target.bearer,
+                                                     generation: remote.identityRevision))
                         .sheet(isPresented: $showingAccount) {
                             SignInView(remote: remote) { showingAccount = false }
                         }
@@ -256,7 +267,7 @@ struct RootView: View {
                          vaultFunnel: vaultFunnel, accountDeletion: accountDeletion, showingAccount: $showingAccount,
                              showingOnboarding: $showingOnboarding,
                              onboardingSkipsWelcome: onboardingSkipsWelcome)
-                    .id("local-brain#acct-\(remote.identityRevision)")
+                    .id(MainTabsIdentity.phoneKey(generation: remote.identityRevision))
                     .sheet(isPresented: $showingAccount) {
                         SignInView(remote: remote) { showingAccount = false }
                     }
@@ -502,6 +513,30 @@ private struct MainTabs: View {
     /// retire the just-installed replacement before it receives PCM.
     @State private var liveTranscriptionWasBackgrounded = false
 
+    // MARK: keeping the person's place (features/app-place-restore.feature)
+
+    /// The transcript this tab tree was asked to REOPEN on mount, from the durable place.
+    /// Drives one programmatic push into the Capture tab's detail; cleared when that
+    /// detail is dismissed. Deliberately separate from `openCaptureId` below — a single
+    /// piece of state doing both jobs makes the rows' own `NavigationLink` re-trigger the
+    /// programmatic push and double-stack the detail.
+    @State private var restoreCaptureId: String?
+    /// The transcript that is open RIGHT NOW, reported by the detail itself as it appears
+    /// and disappears. This is what gets written down.
+    @State private var openCaptureId: String?
+    /// Whether the "on your Mac" library sheet is open over the Chat tab — restored on
+    /// mount, and reported back so it is written down.
+    @State private var macLibraryOpen: Bool
+    /// What the person is told when their place could NOT be kept as saved (deleted
+    /// conversation, unreachable computer, a different account). `nil` when it was kept.
+    @State private var placementNotice: String?
+    /// Set once the restored place has been applied, so the persist hooks below can never
+    /// overwrite a saved place with the launch tab during the first frames of the mount.
+    @State private var placementRestored = false
+    /// The chat the saved place named, kept so `.onAppear` can ask the LIVE chat store
+    /// whether it still exists (free) instead of re-reading the chat file at init.
+    private let savedChatId: String?
+
     init(target: DoorTarget, remote: RemoteSession, brains: BrainStore, local: Bool,
          vaultFunnel: VaultFunnelModel, accountDeletion: AccountDeletionModel,
          showingAccount: Binding<Bool>,
@@ -523,6 +558,36 @@ private struct MainTabs: View {
                 ChatConversationStore.storageURL(inAccountRoot: $0.root)
             },
             binding: accountBinding))
+        // WHERE THE PERSON WAS (features/app-place-restore.feature). Resolved HERE, in the
+        // one place that runs again for every way the place can be lost: a cold launch after
+        // iOS reclaimed the app, and the `.id`-driven rebuild of this whole tree when the
+        // door bearer refreshes. Both end in this init, so both are covered by reading it.
+        //
+        // The existence check is a `fileExists` against the account root, NOT the in-memory
+        // library — that list has not hydrated yet at init, and asking it would report every
+        // conversation as deleted for the first second of every launch. The chat's existence
+        // is checked in `.onAppear` against the live store instead, so init stays at one
+        // memoised read plus (at most) one stat.
+        let savedPlacement = accountBinding.flatMap {
+            AppPlacementStore.load(inAccountRoot: $0.root)
+        }
+        let restored = AppPlacementRestore.resolve(
+            saved: savedPlacement,
+            generation: accountBinding?.generation ?? CaptureAccountScope.identityGeneration,
+            doorTier: !local,
+            // This tree is only mounted on the door tier once the door RESOLVED (RootView's
+            // `hostResolved` gate), so being here on the door tier is the connection fact.
+            doorConnected: !local,
+            captureExists: { id in
+                guard let root = accountBinding?.root else { return false }
+                return AppPlacementStore.captureExists(id, inAccountRoot: root)
+            },
+            // Deferred to `.onAppear`, where the live chat store answers for free.
+            chatExists: { _ in true })
+        self.savedChatId = restored.placement.openChatId
+        _restoreCaptureId = State(initialValue: restored.placement.openCaptureId)
+        _macLibraryOpen = State(initialValue: restored.placement.macLibraryOpen)
+        _placementNotice = State(initialValue: restored.notice)
         let log = DoorLog()
         // Ship the phone's BLE/audio/capture/chat log to the relay diag sink so
         // it's observable server-side (no copying logs off the device).
@@ -838,6 +903,10 @@ private struct MainTabs: View {
         // Wire the interactive Live Activity buttons (App Intents) to this live manager.
         // The intent's perform() runs in the app process and routes through this broker.
         let router = TabRouter()
+        // Land on the tab the person left, not the launch tab. Set BEFORE the router
+        // becomes a `@StateObject`, so this is the tree's first selection rather than a
+        // visible jump from Capture to wherever they were.
+        router.selected = restored.placement.tab
         #if DEBUG
         // Screen-proof: `-Tab <capture|activity|chat|device>` selects the initial tab so
         // each screen can be screenshot without a tap (simctl can't tap the tab bar).
@@ -929,7 +998,10 @@ private struct MainTabs: View {
                     if local, let text = brainStatus.bannerText {
                         brainSetupBanner(text)
                     }
-                    CaptureScreen(device: device, manager: manager, sources: sources, target: target, local: local)
+                    CaptureScreen(device: device, manager: manager, sources: sources,
+                                  target: target, local: local,
+                                  reopenCaptureId: $restoreCaptureId,
+                                  openCaptureId: $openCaptureId)
                 }
                 // The screen renders its OWN "Capture" header (title + status + search),
                 // matching the prototype — so the nav bar carries no second large
@@ -994,7 +1066,8 @@ private struct MainTabs: View {
                                 target: target,
                                 store: chats,
                                 accountBinding: accountBinding,
-                                log: log)
+                                log: log,
+                                showingKilnLibrary: $macLibraryOpen)
                         } else {
                             Color.clear
                         }
@@ -1081,10 +1154,24 @@ private struct MainTabs: View {
                 liveTranscriptionWasBackgrounded = false
                 manager.restoreLiveTranscriptionAfterForeground()
             }
+            // Leaving the app is the last honest moment to write the place down. Every
+            // individual change is written as it happens (below) — this is the backstop for
+            // anything that changed inside a surface we do not observe.
+            if phase != .active { savePlacement() }
         }
         // CONTENT-FREE usage: which surface the user is on. The tab's rawValue is already
         // a safe enum token (capture/activity/chat/settings) — never any content.
-        .onChange(of: router.selected) { tab in UsageHook.page(tab.rawValue) }
+        .onChange(of: router.selected) { tab in
+            UsageHook.page(tab.rawValue)
+            // A deliberate move off the Capture tab abandons a restore that has not landed
+            // yet (the push waits for the library to hydrate); nobody wants a transcript
+            // arriving under them a second after they walked away from it.
+            if tab != .capture { restoreCaptureId = nil }
+            savePlacement()
+        }
+        .onChange(of: openCaptureId) { _ in savePlacement() }
+        .onChange(of: macLibraryOpen) { _ in savePlacement() }
+        .onChange(of: chats.activeId) { _ in savePlacement() }
         // Land on the chat tab whenever the card broker carries a seed (an accepted
         // card's [Run]) OR a composer prefill (the Actions face's "Act on it in
         // chat"). Driven off the PUBLISHED values against the live @StateObject
@@ -1121,6 +1208,17 @@ private struct MainTabs: View {
             AmbientCardBroker.shared.isChatAlive = { [weak chats] id in
                 chats?.conversation(id) != nil
             }
+            // The last half of the place resolution: the chat the saved place named. Asked
+            // of the LIVE store (already loaded by now) rather than the file, so init did
+            // not have to read the chat list a second time. `ChatConversationStore` re-points
+            // `activeId` off a deleted chat by itself — this exists so we SAY so instead of
+            // silently landing somewhere else.
+            if placementNotice == nil, let savedChatId, chats.conversation(savedChatId) == nil {
+                placementNotice = AppPlacementFallback.chatGone.notice
+            }
+            // From here on, changes are the person's, so they are safe to write down.
+            placementRestored = true
+            savePlacement()
             #if DEBUG
             // Screen-proof: land on the Settings tab on launch so it can be screenshot.
             if ProcessInfo.processInfo.arguments.contains("-OpenSettings") { router.selected = .settings }
@@ -1171,6 +1269,10 @@ private struct MainTabs: View {
                     router.selected = .capture
                 }
             }
+        }
+        // Why your place is not the place you left, when it isn't.
+        .overlay(alignment: .top) {
+            if let placementNotice { placementNoticeBanner(placementNotice) }
         }
         // The opt-in performance overlay (track 20260717T0600 T3): perf-span/hang pills,
         // gated behind Settings → DIAGNOSTICS (DEFAULT OFF); renders nothing when off and
@@ -1228,6 +1330,49 @@ private struct MainTabs: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(brainStatus.isFailed ? "brain-setup-banner-failed"
                                                       : "brain-setup-banner-preparing")
+    }
+
+    /// Write down where the person is, so coming back continues instead of restarting.
+    ///
+    /// Account-scoped and generation-stamped: a place is written only under the binding
+    /// this tab tree started with, and only while that binding is still the current one —
+    /// so a write racing an account switch can never leave one person's place in another's
+    /// folder. Unchanged places are dropped by the store, so the frequent publishers wired
+    /// to this cost nothing.
+    private func savePlacement() {
+        guard placementRestored,
+              let accountBinding, accountBinding.isCurrent else { return }
+        AppPlacementStore.save(
+            AppPlacement(tab: router.selected,
+                         openCaptureId: openCaptureId,
+                         openChatId: chats.activeId.isEmpty ? nil : chats.activeId,
+                         macLibraryOpen: macLibraryOpen,
+                         generation: accountBinding.generation,
+                         doorTier: !local),
+            inAccountRoot: accountBinding.root)
+    }
+
+    /// The one line the person gets when their place could NOT be kept — the conversation
+    /// was deleted, the computer is unreachable, this is a different account. It names what
+    /// is gone instead of quietly landing them somewhere and letting them wonder. Dismissed
+    /// by tapping, and by itself after a few seconds.
+    @ViewBuilder private func placementNoticeBanner(_ text: String) -> some View {
+        Text(text)
+            .grainTextStyle(.caption)
+            .foregroundStyle(GrainColor.textMain)
+            .padding(.horizontal, GrainSpacing.x3)
+            .padding(.vertical, GrainSpacing.x2)
+            .background(Capsule().fill(GrainColor.surfaceElevated))
+            .overlay(Capsule().strokeBorder(GrainColor.border, lineWidth: 1))
+            .padding(.top, GrainSpacing.x1)
+            .padding(.horizontal, GrainSpacing.x4)
+            .accessibilityIdentifier("placement-notice")
+            .onTapGesture { placementNotice = nil }
+            .task {
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
+                placementNotice = nil
+            }
+            .transition(.move(edge: .top).combined(with: .opacity))
     }
 
     /// Mirror the live BLE connection state onto the registry's Omi row.

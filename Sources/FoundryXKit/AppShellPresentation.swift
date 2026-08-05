@@ -12,7 +12,10 @@
 import Foundation
 
 /// The bottom tab bar, in declaration = render order.
-public enum AppTab: String, CaseIterable, Hashable, Sendable {
+/// `Codable` because the tab is half of the durable place we keep for the person
+/// (`AppPlacement`) — a raw-value round trip, so an unknown tab from an older or newer
+/// build fails to decode and falls back to the launch tab rather than crashing.
+public enum AppTab: String, CaseIterable, Hashable, Sendable, Codable {
     // Three daily surfaces + Settings (Nick 2026-07-15): Settings is the 4th
     // bottom-nav tab. Device management still lives INSIDE Settings — no competing
     // Device tab.
