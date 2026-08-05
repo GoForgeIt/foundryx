@@ -175,7 +175,7 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
     public func signIn(_ provider: AuthProvider) async throws -> AuthIdentity {
         if provider == .apple {
             let id = try await AppleSignInCoordinator().run()
-            try AuthStore.save(id)
+            try await saveRecoveringInterruptedDeletion(id)
             return id
         }
         guard let clientID = config.clientID(for: provider) else {
@@ -196,8 +196,52 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
             throw AuthError.providerError(Self.queryValue(callback, "error") ?? "no authorization code")
         }
         let token = try await exchange(provider, clientID: clientID, code: code, verifier: verifier, redirect: redirect)
-        try AuthStore.save(token)
+        try await saveRecoveringInterruptedDeletion(token)
         return token
+    }
+
+    private func saveRecoveringInterruptedDeletion(
+        _ identity: AuthIdentity
+    ) async throws {
+        let runner = CurrentOwnerSelectiveDeletionRunner(
+            containerProvider: { CaptureAccountScope.container() },
+            defaults: .standard,
+            secretStore: SystemPairingSecretStore(),
+            pairingServices: (
+                cell: "com.goforgeit.foundryx.cell",
+                door: DoorConfigStore.service),
+            exposureCoordinator: .process,
+            identityProvider: { identity })
+        try await Self.persistAfterRecoveringInterruptedDeletion(
+            identity: identity,
+            persist: { try AuthStore.save($0) },
+            recover: { try await runner.eraseVerifiedCurrentOwner() })
+    }
+
+    static func persistAfterRecoveringInterruptedDeletion(
+        identity: AuthIdentity,
+        persist: @Sendable (AuthIdentity) throws -> Void,
+        recover: @Sendable () async throws -> Void
+    ) async throws {
+        do {
+            try persist(identity)
+        } catch let error as CaptureAccountScopeError {
+            guard case .deletionCleanupPending = error else { throw error }
+            do {
+                try await recover()
+                DeletionRecorder.shared.emit(
+                    "account.signin.cleanup_completed", "ok")
+                try persist(identity)
+            } catch let recoveryError as CaptureAccountScopeError {
+                throw recoveryError
+            } catch {
+                DeletionRecorder.shared.emit(
+                    "account.signin.refused", "cleanup_failed \(error)")
+                throw CaptureAccountScopeError.deletionCleanupPending(
+                    ownerScope: (try? CaptureAccountScope.key(for: identity))
+                        ?? "unknown")
+            }
+        }
     }
 
     /// A currently-valid id_token for the signed-in account, refreshing via the
