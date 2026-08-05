@@ -328,10 +328,16 @@ public enum KilnLibrary {
         importHarnessLabels[origin] != nil
     }
 
-    /// RESUME-IN-PLACE — true when a conversation may NOT be typed into: imported foreign
-    /// history that has not been continued yet.
+    /// RESUME-IN-PLACE — true when a conversation has to be RESUMED before its next turn can
+    /// go out: imported foreign history that has not been continued yet.
     ///
-    /// Continuing an imported conversation flips THIS SAME ROW from read-only to live
+    /// It does NOT mean "may not be typed into". It once did, and that reading is what put a
+    /// button where the composer belongs: the phone withheld the composer until the reader
+    /// pressed something the desktop never asks anyone to press. The resume is now what the
+    /// FIRST SEND does (`KilnConversationPresentation.SendPlan`), so this predicate answers
+    /// when, not whether.
+    ///
+    /// Continuing an imported conversation flips THIS SAME ROW from unresumed to live
     /// (`resumed: true`) — it keeps its id, its `origin`, its transcript and its provenance;
     /// nothing is copied and no second chat is minted. So writability is a two-field question
     /// and `resumed` must never be folded into `isImportedOrigin`: doing that would strip the
@@ -422,7 +428,8 @@ public struct KilnConversationNotice: Equatable, Sendable {
     public let imported: Bool
     /// RESUME-IN-PLACE — this row has been continued and is live in Kiln.
     public let resumed: Bool
-    /// No composer is offered: imported foreign history that has not been picked up yet.
+    /// Has to be resumed before its next turn goes out: imported foreign history that has not
+    /// been picked up yet. The composer is offered either way — see `isReadOnlyChat`.
     public let readOnly: Bool
     /// "Claude Code" | "Codex" | the native source label.
     public let originLabel: String
@@ -488,15 +495,23 @@ public enum KilnLibraryCopy {
         return "Has subagent work · open on your Mac to see it"
     }
 
-    /// The pick-up button and the sentence beside it.
+    /// The label a pick-up BUTTON would carry.
     ///
-    /// The surrounding copy has to say RESUME-IN-PLACE out loud, because the alternative
-    /// people expect — "continue" meaning "make me a copy to work in" — is the wrong mental
-    /// model and would make the same id showing up on the Mac look like a bug.
+    /// There is no such button any more — typing into a chat is what carries it on, the way
+    /// it always was on the desktop, and the button used to sit where the composer belongs.
+    /// The label is kept so the gate that forbids the button coming back has something to
+    /// name (see features/chat-scope-choice.feature).
     public static let pickUpAction = "Pick up here"
+
+    /// The sentence that says RESUME-IN-PLACE out loud, shown on a chat brought over from
+    /// another tool that has not been picked up yet.
+    ///
+    /// It has to be said, because the alternative people expect — "carry on" meaning "make
+    /// me a copy to work in" — is the wrong mental model, and would make the same id showing
+    /// up on the Mac look like a bug.
     public static func pickUpBlurb(_ notice: KilnConversationNotice) -> String {
-        "Picks this same conversation back up — same conversation, same history, "
-        + "now live in Kiln. Nothing is copied and no second chat is made."
+        "Typing here carries this same chat on — same chat, same history, now live in Kiln. "
+        + "Nothing is copied and no second chat is made."
     }
 
     /// A GENUINELY empty library. Never shown for a failure — see `DoorFailureMessage`.

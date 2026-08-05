@@ -47,5 +47,5 @@ Feature: I can find the chats that live on my Mac
   Scenario: an imported chat still shows me how to pick it back up
     Given Kiln's library holds a chat imported from Claude Code that I have not picked up
     Then that chat is marked as one I can pick up
-    And opening it offers to pick it back up where it left off
+    And opening it lets me carry on by typing, with nothing to press first
     And a chat I already picked up is not offered again

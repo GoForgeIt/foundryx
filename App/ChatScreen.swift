@@ -58,30 +58,34 @@ struct ChatScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            ScrollView {
-                ChatView(model: model,
-                         onApprove: { answer($0, "always") },
-                         onReject: { answer($0, "reject") },
-                         // A file the agent wrote this turn — view it in place
-                         // (fetched from the desktop over the door, track 20260713T1500).
-                         onOpenArtifact: { viewingArtifact = $0 })
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                // A FINISHED tool-using turn reads as a Finding card — the run's
-                // steps (older ones folded), the finding, and what it consulted —
-                // never a bare "DONE" row (track 20260714T1800 §7).
-                if AgentRunFinding.make(from: model) != nil {
-                    AgentRunCard(model: model,
-                                 title: lastUserMessage,
-                                 onFollowUp: { text in input = text; send() })
-                        .padding(.horizontal, GrainSpacing.x4)
-                        .padding(.bottom, GrainSpacing.x2)
-                }
-            }
-            .scrollDismissesKeyboard(.interactively)
-            .contentShape(Rectangle())
-            .onTapGesture { hideKeyboard() }
-            GrainComposer(ChatCopy.composerPlaceholder, text: $input, isSending: streaming, onSend: send)
+            // THE chat surface — the same one a chat from the Mac renders through
+            // (`KilnConversationView`). The scroller, the landing-on-the-newest-turn and the
+            // composer live in `ChatSurface`; this screen only says what goes in it. There
+            // was once a second rendering of a chat for the Mac's chats, and every one of
+            // its four defects came from being a second one.
+            ChatSurface(
+                model: model,
+                input: $input,
+                placeholder: ChatCopy.composerPlaceholder,
+                isSending: streaming,
+                onSend: send,
+                onApprove: { answer($0, "always") },
+                onReject: { answer($0, "reject") },
+                // A file the agent wrote this turn — view it in place
+                // (fetched from the desktop over the door, track 20260713T1500).
+                onOpenArtifact: { viewingArtifact = $0 },
+                accessory: {
+                    // A FINISHED tool-using turn reads as a Finding card — the run's
+                    // steps (older ones folded), the finding, and what it consulted —
+                    // never a bare "DONE" row (track 20260714T1800 §7).
+                    if AgentRunFinding.make(from: model) != nil {
+                        AgentRunCard(model: model,
+                                     title: lastUserMessage,
+                                     onFollowUp: { text in input = text; send() })
+                            .padding(.horizontal, GrainSpacing.x4)
+                            .padding(.bottom, GrainSpacing.x2)
+                    }
+                })
         }
         .grainBackground()
         .onAppear {
@@ -416,12 +420,6 @@ struct ChatScreen: View {
         } catch {
             log.warn("model list fetch failed: \(error.localizedDescription)")
         }
-    }
-
-    private func hideKeyboard() {
-        #if canImport(UIKit)
-        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-        #endif
     }
 
     /// What the run was asked to do — the Finding card's task line.

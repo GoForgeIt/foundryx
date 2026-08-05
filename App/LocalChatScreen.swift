@@ -12,7 +12,10 @@ struct LocalChatScreen: View {
     /// Waitlist tap → one-tap upgrade-intent flag on the signed-in account.
     @ObservedObject var remote: RemoteSession
 
-    @State private var messages: [(role: String, text: String)] = []
+    /// The SAME chat state every other chat in the app is rendered from. This screen used to
+    /// keep its own `[(role, text)]` and draw plain paragraphs, which meant the free tier's
+    /// chat looked like neither of the other two.
+    @StateObject private var model = ChatViewModel()
     @State private var input = ""
     @State private var thinking = false
     /// The outcome-log seed of a pending Actions-face prefill — logged as a
@@ -34,23 +37,14 @@ struct LocalChatScreen: View {
             if engine == nil {
                 upgradePrompt
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: GrainSpacing.x3) {
-                        ForEach(Array(messages.enumerated()), id: \.offset) { _, m in
-                            Text(m.text)
-                                .grainTextStyle(.body)
-                                .foregroundStyle(m.role == "user" ? GrainColor.textMuted : GrainColor.ink)
-                                .frame(maxWidth: .infinity, alignment: m.role == "user" ? .trailing : .leading)
-                        }
-                        if thinking {
-                            Text("Thinking on-device…")
-                                .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-                        }
-                    }
-                    .padding(GrainSpacing.x4)
-                }
-                GrainComposer("Ask across your voice notes…", text: $input,
-                              isSending: thinking, onSend: send)
+                // THE chat surface — the same one the phone's own chats and the chats on the
+                // Mac render through. `showsAgentSignals: false` because this tier has no
+                // tools and no door: same bubbles and same composer, minus two claims it is
+                // not entitled to make. The honesty banner above already says on-device.
+                ChatSurface(model: model, input: $input,
+                            placeholder: "Ask across your voice notes…",
+                            isSending: thinking, onSend: send,
+                            showsAgentSignals: false)
             }
         }
         .grainBackground()
@@ -114,15 +108,18 @@ struct LocalChatScreen: View {
             prefillSeed = nil
         }
         input = ""
-        messages.append(("user", q))
+        model.beginUserTurn(q)
         thinking = true
         Task {
             defer { thinking = false }
             do {
                 let (text, _) = try await engine.answer(q)
-                messages.append(("assistant", text))
+                model.apply(.assistantDelta(text: text))
+                model.apply(.done(reason: "stop"))
             } catch {
-                messages.append(("assistant", "Couldn't answer on-device: \(error.localizedDescription)"))
+                model.apply(.error(code: "", reason:
+                    "Couldn't answer on-device: \(error.localizedDescription)"))
+                model.apply(.done(reason: "error"))
             }
         }
     }

@@ -22,21 +22,34 @@ public struct ChatView: View {
     /// Opens a file the agent wrote this turn (the host screen presents the
     /// viewer; nil = artifact rows still render, tap does nothing).
     public var onOpenArtifact: ((ChatViewModel.RunArtifact) -> Void)?
+    /// Whether to show the two signals that only mean something when there is an AGENT and a
+    /// DOOR behind this chat: "it can read files and run commands, and asks first", and the
+    /// transport status dot.
+    ///
+    /// The on-device tier has neither — no tools, no door — so on that surface both would be
+    /// untrue. Same bubbles, same composer, same scroll; two claims it is not entitled to
+    /// make. This is a parameter rather than a second view for exactly the reason this file's
+    /// header gives.
+    public var showsAgentSignals: Bool
 
     public init(model: ChatViewModel,
                 onApprove: @escaping (String) -> Void = { _ in },
                 onReject: @escaping (String) -> Void = { _ in },
-                onOpenArtifact: ((ChatViewModel.RunArtifact) -> Void)? = nil) {
+                onOpenArtifact: ((ChatViewModel.RunArtifact) -> Void)? = nil,
+                showsAgentSignals: Bool = true) {
         self.model = model
         self.onApprove = onApprove
         self.onReject = onReject
         self.onOpenArtifact = onOpenArtifact
+        self.showsAgentSignals = showsAgentSignals
     }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x3) {
-            connectionStatusRow
-            agenticAffordance
+            if showsAgentSignals {
+                connectionStatusRow
+                agenticAffordance
+            }
 
             ForEach(model.messages) { msg in
                 if msg.role == "assistant" {

@@ -361,22 +361,37 @@ private enum ChatScopeChoiceSteps {
                 }
             },
 
-            defineCheck("opening it offers to pick it back up where it left off") { _, _, _ in
-                let detail = try w.source(ChatScopeChoiceWorld.conversationView)
-                let action = try ChatScopeChoiceWorld.lines(
-                    in: detail, matching: #"GrainButton\(KilnLibraryCopy\.pickUpAction"#)
-                guard !action.isEmpty else {
-                    throw BrineStepError(
-                        "the chat detail has no pick-up button — the affordance is a chip on "
-                            + "the row and nothing else")
+            // The pick-up used to be a BUTTON on this screen, and this check used to assert
+            // that button's presence. It is now what SENDING does: an imported chat that has
+            // never been picked up is resumed in place on its first turn, so the reader types
+            // and carries on. That is a stronger claim than "a button exists" — it names the
+            // wire behaviour — and it is asserted end to end in features/mac-chat-in-place.
+            defineCheck("opening it lets me carry on by typing, with nothing to press first") { _, _, _ in
+                guard let row = w.imported else {
+                    throw BrineStepError("no imported chat was seeded")
                 }
+                let opened = KilnConversationPresentation.open(row, turns: [])
+                guard opened.sendPlan == .resumeInPlaceThenSend else {
+                    throw BrineStepError(
+                        "an unresumed Claude Code import does not resume on its first turn — "
+                            + "so typing would not carry it on (plan: \(opened.sendPlan))")
+                }
+                let detail = try w.source(ChatScopeChoiceWorld.conversationView)
+                guard detail.contains("ChatSurface(") else {
+                    throw BrineStepError(
+                        "the chat detail does not render the shared chat surface, so it has "
+                            + "no composer to type into")
+                }
+                guard !detail.contains("KilnLibraryCopy.pickUpAction") else {
+                    throw BrineStepError(
+                        "the chat detail still puts a pick-up button where the composer "
+                            + "belongs — that ceremony is exactly what is being removed")
+                }
+                // Removing the button must not remove the FACT it carried.
                 guard detail.contains("KilnLibraryCopy.pickUpBlurb") else {
                     throw BrineStepError(
-                        "nothing says the pick-up resumes this same chat rather than copying it")
-                }
-                guard !KilnLibraryCopy.pickUpAction.trimmingCharacters(
-                    in: .whitespacesAndNewlines).isEmpty else {
-                    throw BrineStepError("the pick-up button has no label")
+                        "nothing says that carrying on resumes this same chat rather than "
+                            + "copying it")
                 }
             },
 
