@@ -164,14 +164,25 @@ final class ActionsProofUITests: XCTestCase {
 
         // 4. Continue lands on the chat tab, on the linked conversation.
         let chatTab = app.buttons["Chat"].firstMatch
-        XCTAssertTrue(app.buttons["open-chats"].firstMatch.waitForExistence(timeout: 10),
+        // ONE header control chooses the corpus now ("Chats ⌄"); "On this phone" and
+        // "On your Mac" are the choices inside it. The two sibling text buttons it replaced
+        // read as a filter pair, which is how the Mac library came to look unshipped.
+        let scopePicker = app.buttons["chat-scope-picker"].firstMatch
+        XCTAssertTrue(scopePicker.waitForExistence(timeout: 10),
                       "landed on the chat surface")
         _ = chatTab
         shoot(app, "08-linked-chat")
 
         // 5. The chat list organizes by provenance + groups under the source.
-        app.buttons["open-chats"].firstMatch.tap()
-        let fromPill = app.buttons["chat-filter-From conversations"].firstMatch
+        scopePicker.tap()
+        let thisPhone = app.buttons["open-chats"].firstMatch
+        XCTAssertTrue(thisPhone.waitForExistence(timeout: 5),
+                      "the scope menu offers this phone's own chats")
+        thisPhone.tap()
+        // The pill labels are `ChatListOrganizer.Provenance` rawValues — "From voice notes"
+        // since the voice-notes language change. This assertion named the retired label and
+        // could not have passed on any recent build.
+        let fromPill = app.buttons["chat-filter-From voice notes"].firstMatch
         XCTAssertTrue(fromPill.waitForExistence(timeout: 5), "provenance pills render")
         fromPill.tap()
         XCTAssertTrue(app.staticTexts["Launch deck and relay numbers"].firstMatch

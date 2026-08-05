@@ -198,17 +198,46 @@ struct ChatScreen: View {
         hydrateActive()
     }
 
-    // MARK: header — chats drawer · model picker · new chat
+    // MARK: header — which chats · privacy · model picker · new chat
 
     private var header: some View {
         HStack(spacing: GrainSpacing.x2) {
-            GrainButton("Chats", variant: .text, size: .sm) { showingChats = true }
-                .accessibilityIdentifier("open-chats")
-
-            // The way in to everything on the Mac — Kiln's own chats and every imported
-            // Claude Code / Codex transcript, not just what this phone started.
-            GrainButton("All", variant: .text, size: .sm) { showingKilnLibrary = true }
-                .accessibilityIdentifier("open-kiln-library")
+            // ONE way in, not two lookalike siblings.
+            //
+            // This was "Chats" and "All" side by side. Two short quantifier-shaped labels
+            // read as a filter PAIR over one list rather than as doors onto two different
+            // corpora — and the sheet behind "Chats" has its own `All` provenance chip, so
+            // the same word meant two unrelated things on one screen. Someone looking for
+            // their desktop chats opened the obvious one, saw what this phone had started,
+            // and concluded the Mac library had not shipped.
+            //
+            // The menu is driven from `ChatScope.allCases` and renders the KIT's words: each
+            // choice names a PLACE and says what is behind it (for the Mac: Kiln, Claude Code
+            // and Codex) at the point of choice, before anything is committed to. Same idiom
+            // as the privacy and model pickers beside it — no new UI primitive.
+            Menu {
+                ForEach(ChatScope.allCases, id: \.self) { scope in
+                    Section {
+                        Button { open(scope) } label: {
+                            Label(scope.title, systemImage: scope.symbol)
+                        }
+                        .accessibilityIdentifier(scope.accessibilityIdentifier)
+                    } header: {
+                        Text(scope.caption)
+                    }
+                }
+            } label: {
+                HStack(spacing: GrainSpacing.x1) {
+                    Text(ChatScopeCopy.controlLabel).grainTextStyle(.caption)
+                    Image(systemName: "chevron.down").font(.system(size: 9))
+                }
+                .foregroundStyle(GrainColor.textMuted)
+                .padding(.vertical, GrainSpacing.x1)
+                .contentShape(Rectangle())
+            }
+            .accessibilityIdentifier(ChatScopeCopy.controlAccessibilityIdentifier)
+            .accessibilityLabel(ChatScopeCopy.controlAccessibilityLabel)
+            .accessibilityHint(ChatScopeCopy.controlAccessibilityHint)
 
             Spacer(minLength: 0)
 
@@ -263,6 +292,14 @@ struct ChatScreen: View {
     }
 
     // MARK: actions
+
+    /// Open the corpus the reader chose. The scope decides WHICH; the sheets are unchanged.
+    private func open(_ scope: ChatScope) {
+        switch scope {
+        case .thisPhone: showingChats = true
+        case .onYourMac: showingKilnLibrary = true
+        }
+    }
 
     private func setModel(_ id: String?) {
         guard let active = store.active else { return }

@@ -129,7 +129,10 @@ struct KilnLibraryView: View {
     var body: some View {
         NavigationStack {
             content
-                .navigationTitle("All chats")
+                // The destination confirms the door that was chosen. "All chats" was another
+                // bare quantifier — it neither said whose chats these are nor distinguished
+                // this sheet from the phone-local one.
+                .navigationTitle(ChatScope.onYourMac.title)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
