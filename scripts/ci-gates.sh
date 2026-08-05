@@ -546,6 +546,7 @@ phase_uiproof() {
   if xcodebuild test -project FoundryX.xcodeproj -scheme FoundryXUIProof \
        -configuration Debug -destination "platform=iOS Simulator,id=$udid" \
        -derivedDataPath "$DD" \
+       -only-testing:FoundryXUITests/ActionsProofUITests \
        -only-testing:FoundryXUITests/DeletionChoiceProofUITests \
        -only-testing:FoundryXUITests/RecordingProofUITests/testPhoneMicRecordingTimerAndSurface \
        -only-testing:FoundryXUITests/AmbientRecordingProofUITests/testAmbientSpeechOpensATappableRecordingConversation \

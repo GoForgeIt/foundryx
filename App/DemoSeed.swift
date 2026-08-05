@@ -172,6 +172,16 @@ enum DemoSeed {
     /// mutable stores + the chat list so every proof run starts from the same
     /// state regardless of what an earlier test in the same install did. Runs
     /// BEFORE any store is constructed (app init). No effect in normal launches.
+    ///
+    /// THE PLACE IS PART OF THAT STATE. `app-placement.json` is durable and lives in the
+    /// same account root, and the simulator's app container survives between tests in a
+    /// lane — so a proof that launches after `PlaceRestoreProofUITests` used to be RESTORED
+    /// into whatever place that suite left behind, instead of landing on the conversation
+    /// list it asserts about. That is how `RecordingDeviceProofUITests` came to fail with
+    /// "the demo conversation card never appeared" in the `uiproof` lane while passing in
+    /// 10s on its own: not flakiness, and not a product defect — an order dependence on
+    /// state a neighbour wrote. A proof must establish its own preconditions, so this
+    /// forgets the place too.
     static func resetActionStateIfRequested() {
         guard ProcessInfo.processInfo.arguments.contains("-FreshActionState") else { return }
         let base = CaptureWAL.documentsCaptures()
@@ -180,6 +190,9 @@ enum DemoSeed {
             try? FileManager.default.removeItem(at: base.appendingPathComponent(name))
         }
         try? FileManager.default.removeItem(at: ChatConversationStore.defaultStorageURL())
+        // `clear` drops the memoised read as well as the file, so nothing that already
+        // looked can answer from cache.
+        AppPlacementStore.clear(inAccountRoot: base)
     }
 
     static func seedIfRequested() {
