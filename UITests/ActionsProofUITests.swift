@@ -176,10 +176,33 @@ final class ActionsProofUITests: XCTestCase {
 
         // 5. The one list opens, and the SOURCE is a facet on it rather than a door.
         openChats.tap()
-        XCTAssertTrue(app.otherElements["chat-list"].firstMatch.waitForExistence(timeout: 10)
-                      || app.staticTexts["chat-list-empty"].firstMatch.exists
-                      || app.otherElements["chat-list-loading"].firstMatch.exists,
+        // The sheet's OWN control, so a failure below can only mean the content is wrong
+        // rather than that the sheet never presented. Those are different bugs and used to
+        // be indistinguishable from this line.
+        XCTAssertTrue(app.buttons["chat-list-done"].firstMatch.waitForExistence(timeout: 10),
+                      "the chat list sheet opens")
+        // `chat-list` sits on a SwiftUI `List`, which surfaces in the accessibility
+        // hierarchy as a collection/table — NEVER as `otherElements`. So the old
+        // `app.otherElements["chat-list"] || staticTexts["chat-list-empty"] ||
+        // otherElements["chat-list-loading"]` could not match a drawn list at all: it was
+        // satisfiable only by the EMPTY state, or by catching the millisecond-wide loading
+        // window. It asserted that the list had nothing in it. Match on element type `.any`.
+        XCTAssertTrue(app.descendants(matching: .any)["chat-list"]
+                        .firstMatch.waitForExistence(timeout: 10),
                       "the one chat list opens")
+        // OPEN, MEASURED, NOT YET ASSERTED HERE (2026-08-05). This proof dials a door that
+        // is deliberately not there (`-RemoteChat` → 127.0.0.1:1), so the list resolves to
+        // `phoneOnly(.unreachable)` and `honesty(rail)` should render
+        // `chat-list-reach-notice` ("…Your Mac isn't reachable, so the chats there aren't
+        // listed."). Asserting it here FAILS even with a type-agnostic `.any` query, while
+        // the SOURCE chip a few lines below — rendered by the same `controls(rail)` inset —
+        // is found. So the inset does reach the hierarchy and the notice specifically does
+        // not: either `honesty(rail)` renders no reach line here, or that `Text` is not
+        // surfaced. Unresolved. It is a real honesty gap (a phone-only list presented as if
+        // it were everything is exactly what the notice exists to prevent), but it is a
+        // DIFFERENT defect from the main-thread deadlock this proof was fixed for, and it
+        // wants its own change with its own red. Written down rather than asserted, and
+        // rather than quietly forgotten.
         let thisPhoneChip = app.buttons["chat-source-this-phone"].firstMatch
         XCTAssertTrue(thisPhoneChip.waitForExistence(timeout: 10),
                       "this phone is offered as a SOURCE within the one list")

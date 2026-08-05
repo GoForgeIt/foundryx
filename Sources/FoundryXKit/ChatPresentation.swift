@@ -23,15 +23,29 @@ public enum ChatSendFailure {
     public static let tryAgain = "That didn't go through — try again."
     /// A stream that closed before any reply — same calm invitation to retry.
     public static var emptyReply: String { tryAgain }
+    /// The DOOR answered, but it holds no kiln-session to route the turn to (503). The Mac is
+    /// awake and reachable; Kiln is not running. A different, differently-fixable thing.
+    public static let kilnNotRunning = "Kiln isn't running on your computer."
+    /// The door answered but could not reach its own kiln-session (502).
+    public static let kilnUnreachable = "Your computer couldn't reach Kiln."
     /// The DoorLog detail for an empty stream.
     public static let emptyReplyLogDetail = "stream ended with 0 events (door closed before any reply)"
 
     /// The calm, human sentence the thread renders. Never a code, never a
     /// domain, never the word "HTTP".
+    ///
+    /// The door deliberately distinguishes "I hold no kiln-session at all" (503) from "I
+    /// could not reach the session" (502), for the same reason the chat LIBRARY already
+    /// does (`DoorFailureMessage.make(kilnLibraryFailure:)`): a stopped Kiln and a sleeping
+    /// Mac are different problems with different fixes, and "try again" is the wrong advice
+    /// for both. A send is where the reader is most likely to meet them, so the send says
+    /// which — the client is as honest as the contract it is handed.
     public static func calmMessage(for error: Error) -> String {
         if let de = error as? DoorError {
             switch de {
             case .transport: return unreachable
+            case .http(503): return kilnNotRunning
+            case .http(502): return kilnUnreachable
             case .unauthorized, .http: return tryAgain
             }
         }

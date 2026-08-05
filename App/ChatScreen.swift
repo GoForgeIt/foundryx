@@ -348,56 +348,23 @@ struct ChatScreen: View {
         // the field reliably empties after every send (button OR return key).
         DispatchQueue.main.async { self.input = "" }
         let chatId = active.id
-        model.beginUserTurn(text)
-        model.setConnection(.connecting)
         log.info("send tapped → \(target.baseURL.absoluteString) chat=\(chatId.prefix(8)) model=\(active.modelTargetId ?? "auto")")
-        let req = store.chatRequest(text: text, for: chatId)
+        // `beginUserTurn` / `setConnection(.connecting)` are NOT called here: opening the
+        // turn belongs to the turn, and `PhoneChatTurn.run` does it. Doing it in both places
+        // appends the user's message to the thread twice.
+        // The turn itself — stream, render, and record the finished thread — lives in
+        // FoundryXKit so a scenario can drive it (features/chat-turn-always-ends.feature).
+        // Every touch of the model and of the durable list is gated on `accountBinding`
+        // still being current, inside `PhoneChatTurn`.
         Task {
-            var sawEvent = false
-            do {
-                for try await ev in client.events(for: req) {
-                    guard CaptureAccountScope.perform(
-                        as: accountBinding,
-                        { _ in
-                            if !sawEvent {
-                                sawEvent = true
-                                model.setConnection(.streaming)
-                            }
-                            if case .session(let sid) = ev { sessionId = sid }
-                            if case .done(let reason) = ev {
-                                model.setConnection(.completed(reason: reason))
-                            }
-                            model.apply(ev)
-                            return true
-                        }) == true else { return }
-                }
-                if !sawEvent {
-                    // The thread stays calm; the engineering truth goes to the log.
-                    log.warn(ChatSendFailure.emptyReplyLogDetail)
-                    await MainActor.run {
-                        model.setConnection(.error(detail: ChatSendFailure.emptyReply))
-                        model.apply(.error(code: "", reason: ChatSendFailure.emptyReply))
-                    }
-                }
-            } catch {
-                // Calm human copy in the thread; the code/domain detail is DoorLog-only.
-                let calm = ChatSendFailure.calmMessage(for: error)
-                log.error("turn failed: \(ChatSendFailure.logDetail(for: error))")
-                await MainActor.run {
-                    model.setConnection(.error(detail: calm))
-                    model.apply(.error(code: "", reason: calm))
-                }
-            }
-            // Snapshot the rendered turn back into the durable store (only if we're still
-            // on the same conversation — the user may have switched away mid-stream).
-            await MainActor.run {
-                CaptureAccountScope.perform(as: accountBinding) { _ in
-                    if store.activeId == chatId {
-                        store.setMessages(model.snapshot(), for: chatId)
-                    }
-                    streaming = false
-                }
-            }
+            await PhoneChatTurn.run(
+                text: text, chatId: chatId, store: store, model: model,
+                client: client, as: accountBinding, log: log,
+                onEvent: { if case .session(let sid) = $0 { sessionId = sid } })
+            // The composer comes back UNCONDITIONALLY. It is screen state, not account
+            // state: gating it on the account still being current is how a turn whose
+            // account moved on used to leave the composer spinning with no way out.
+            streaming = false
         }
     }
 

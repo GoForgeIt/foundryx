@@ -292,7 +292,33 @@ public enum CaptureAccountScope {
     public static let identityDidChangeNotification =
         Notification.Name("foundryx.capture-account-identity-did-change")
 
-    private static let stateLock = NSLock()
+    // RECURSIVE, and it has to be. `perform(as:)` is the one place this lock is held across
+    // CALLER code, and account-scoped work routinely does account-scoped work: the chat
+    // screen records a finished turn under the account that started it, and recording it
+    // persists the conversation list, which is itself account-scoped. With a plain `NSLock`
+    // that second acquire was the same thread taking a lock it already held — a hard
+    // deadlock, on the MAIN thread, at the end of every chat turn. The app did not crash and
+    // did not spin; it simply stopped answering, including the accessibility hierarchy, which
+    // is how `ActionsProofUITests.testExtensionFlows` found it (2026-08-05: `sample` showed
+    // ChatScreen.send → perform → setMessages → persist → perform → __psynch_mutexwait).
+    //
+    // Recursion changes NOTHING for a thread that takes this lock once — every existing
+    // execution is unaffected. What it fixes is a whole class, not one site: `perform`
+    // nested in `perform` (App/ChatScreen.swift's end-of-turn record and AmbientCardBroker's
+    // `[Run]` path both do it), and every read that takes this lock — `currentAccountBinding`,
+    // `currentRoot`, `privateURL(for:)`, `binding(forExplicitRoot:)`, the store `init`s that
+    // call them — which would hang the same way the moment it appeared inside a closure.
+    //
+    // The safety property is intact. A nested acquire can only happen on the thread that
+    // already holds the lock, and while that thread is inside `perform` NO other thread can
+    // transition identity — so the nested call re-validates against exactly the state the
+    // outer call admitted. "Work cannot pass a check for A and then mutate after B has become
+    // current" is still true, because B cannot become current in between. Reentry that must
+    // still be REFUSED is refused on its own terms rather than by hanging: the preference
+    // lifecycle gate rejects it on `preferenceMutationDepthKey`
+    // (`beginPreferenceStoreMutation`), which is the guard its doc comment always claimed and
+    // which was unreachable while the hang happened one frame earlier.
+    private static let stateLock = NSRecursiveLock()
     // Serializes the concrete preference store with identity-generation changes.
     // No caller-owned callback or protocol method runs while this lock is held.
     private static let preferenceMutationLock = NSLock()

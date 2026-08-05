@@ -31,13 +31,33 @@ final class ChatAnswerRealignmentTests: XCTestCase {
     }
 
     // "And a rejected send says 'That didn't go through — try again.'"
+    //
+    // 502 used to stand in for "some HTTP failure" here. It no longer can: the door
+    // deliberately means something specific by 502 and 503 — it could not reach its
+    // kiln-session, versus it holds none at all — and the send now says WHICH, because
+    // "try again" is the wrong advice for a Kiln that isn't running
+    // (features/chat-turn-always-ends.feature owns that distinction, with a scenario each).
+    // A genuinely unclassified server failure is what this scenario is about, so it is
+    // asserted on one: 500. The mapping's force is unchanged.
     func testRejectedSendReadsAsTryAgain() {
-        XCTAssertEqual(ChatSendFailure.calmMessage(for: DoorError.http(502)),
+        XCTAssertEqual(ChatSendFailure.calmMessage(for: DoorError.http(500)),
                        "That didn't go through — try again.")
         XCTAssertEqual(ChatSendFailure.calmMessage(for: DoorError.unauthorized),
                        "That didn't go through — try again.")
         XCTAssertEqual(ChatSendFailure.emptyReply,
                        "That didn't go through — try again.")
+    }
+
+    // The two the door is specific about, asserted here as well as in the feature that owns
+    // them — this file is where a future edit to `calmMessage` is most likely to be made, and
+    // it should not be possible to collapse them back into "try again" without a red here.
+    func testTheDoorsTwoKilnStatesReadDifferently() {
+        XCTAssertEqual(ChatSendFailure.calmMessage(for: DoorError.http(503)),
+                       "Kiln isn't running on your computer.")
+        XCTAssertEqual(ChatSendFailure.calmMessage(for: DoorError.http(502)),
+                       "Your computer couldn't reach Kiln.")
+        XCTAssertNotEqual(ChatSendFailure.calmMessage(for: DoorError.http(503)),
+                          ChatSendFailure.calmMessage(for: DoorError.http(502)))
     }
 
     // "And the thread never shows 'DoorError', 'HTTP', or a bracketed code"
