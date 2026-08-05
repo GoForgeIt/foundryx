@@ -2,9 +2,11 @@ import XCTest
 import Foundation
 import BrineSwiftCore
 @testable import FoundryXKit
-#if canImport(SwiftUI) && canImport(AppKit)
 import SwiftUI
+#if canImport(AppKit)
 import AppKit
+#elseif canImport(UIKit)
+import UIKit
 #endif
 
 /// Brine driver for features/mac-chat-in-place.feature.
@@ -597,28 +599,57 @@ private func decodeTurn(_ body: Data) throws -> WireTurn {
 private func renderBoth(mac: [ChatConversationStore.StoredMessage],
                         phone: [ChatConversationStore.StoredMessage],
                         into w: MacChatWorld) throws {
-    #if canImport(SwiftUI) && canImport(AppKit)
     for (label, stored) in [("mac", mac), ("phone", phone)] {
         var lines: [String] = []
         var laidOut = false
         DispatchQueue.main.sync {
-            let model = ChatViewModel()
-            model.load(from: stored)
-            lines = model.messages.map { "\($0.role): \($0.text)" }
-            var input = ""
-            let binding = Binding(get: { input }, set: { input = $0 })
-            let host = NSHostingView(rootView: ChatSurface(
-                model: model, input: binding,
-                placeholder: KilnChatCopy.composerPlaceholder,
-                isSending: false, onSend: {}))
-            host.frame = NSRect(x: 0, y: 0, width: 390, height: 700)
-            host.layoutSubtreeIfNeeded()
-            laidOut = host.fittingSize.width > 0
+            // Everything here builds and hosts a real view, so it must be main-actor isolated;
+            // `DispatchQueue.main.sync` guarantees that at runtime but not to the compiler.
+            MainActor.assumeIsolated {
+                let model = ChatViewModel()
+                model.load(from: stored)
+                lines = model.messages.map { "\($0.role): \($0.text)" }
+                var input = ""
+                let binding = Binding(get: { input }, set: { input = $0 })
+                laidOut = layOutChatSurface(ChatSurface(
+                    model: model, input: binding,
+                    placeholder: KilnChatCopy.composerPlaceholder,
+                    isSending: false, onSend: {}))
+            }
         }
         w.rendered[label] = lines
         w.hosted[label] = laidOut
     }
-    #else
-    throw BrineStepError("SwiftUI/AppKit unavailable — the chat surface cannot be hosted here")
-    #endif
 }
+
+/// Host the surface in the platform's real view hierarchy and lay it out, answering whether it
+/// produced a real size.
+///
+/// This suite runs in TWO lanes: `swift test` on macOS, and the iOS-simulator lane the publish
+/// pipeline gates on (`xcodebuild test -scheme FoundryX`). It used to host through `NSHostingView`
+/// under `#if canImport(AppKit)` and, on anything else, THROW "SwiftUI/AppKit unavailable". iOS has
+/// no AppKit, so the scenario that proves the Mac's chats and the phone's chats are one surface
+/// could never pass in the lane that runs on the phone's own runtime — it reported a product
+/// failure that was really a missing host, and it held every publish from `da3eaf7` onward.
+///
+/// So each platform hosts through its own container, and there is deliberately NO fallback branch:
+/// a platform that cannot host this must fail to COMPILE. A test that quietly reports "cannot be
+/// checked here" is the defect class this file exists to prevent.
+#if canImport(AppKit)
+@MainActor
+private func layOutChatSurface<V: View>(_ view: V) -> Bool {
+    let host = NSHostingView(rootView: view)
+    host.frame = NSRect(x: 0, y: 0, width: 390, height: 700)
+    host.layoutSubtreeIfNeeded()
+    return host.fittingSize.width > 0
+}
+#elseif canImport(UIKit)
+@MainActor
+private func layOutChatSurface<V: View>(_ view: V) -> Bool {
+    let host = UIHostingController(rootView: view)
+    host.view.frame = CGRect(x: 0, y: 0, width: 390, height: 700)
+    host.view.setNeedsLayout()
+    host.view.layoutIfNeeded()
+    return host.sizeThatFits(in: CGSize(width: 390, height: 700)).width > 0
+}
+#endif
