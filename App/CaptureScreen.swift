@@ -954,6 +954,11 @@ struct CaptureScreen: View {
                     guard let baseDir = manager?.baseDir else { return nil }
                     return CaptureAttributionPresentation.attribution(captureId: wal.captureId,
                                                                        baseDir: baseDir)
+                },
+                canRecover: manager.canManuallyRecover(wal.captureId),
+                recoveryInProgress: manager.isManualRecoveryInProgress(wal.captureId),
+                onRecover: { [weak manager] in
+                    Task { await manager?.recoverIncompleteCapture(wal.captureId) }
                 }
             )
         }
@@ -1486,6 +1491,9 @@ private struct CaptureCard: View {
     /// computed property is re-evaluated on every body pass inside a LazyVStack.
     var loadAttribution: (@Sendable () -> CaptureAttribution?)? = nil
     @State private var attribution: CaptureAttribution?
+    var canRecover = false
+    var recoveryInProgress = false
+    var onRecover: (() -> Void)?
 
     /// EVERYTHING the card shows, as pure tested data (track 20260714T1800): title,
     /// summary, one human status word, the quiet meta line, the category pill. The
@@ -1504,26 +1512,35 @@ private struct CaptureCard: View {
             local: local,
             categoryName: categoryName,
             categoryAutoFiled: categoryAutoFiled,
-            waveform: waveform)
+            waveform: waveform,
+            manualRecoveryInProgress: recoveryInProgress)
     }
 
     var body: some View {
         let p = presentation
-        GrainConversationCard(
-            title: p.title,
-            categoryLabel: p.categoryLabel,
-            summaryLine: p.summaryLine,
-            // The device that RECORDED this conversation, named on the row. Composed in the
-            // Kit so the copy is a tested value and not string arithmetic in a view body.
-            meta: CaptureAttributionPresentation.metaLine(p.metaLine, attribution: attribution),
-            statusWord: p.statusWord,
-            status: statusTone(for: p),
-            waveform: p.waveform,
-            // Animate only in-progress cards (recording / transcribing); a finished card
-            // is static-but-varied (T1 AC4).
-            waveformAnimated: isInProgress(p),
-            onTap: nil
-        )
+        VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+            GrainConversationCard(
+                title: p.title,
+                categoryLabel: p.categoryLabel,
+                summaryLine: p.summaryLine,
+                // The device that RECORDED this conversation, named on the row. Composed in the
+                // Kit so the copy is a tested value and not string arithmetic in a view body.
+                meta: CaptureAttributionPresentation.metaLine(p.metaLine, attribution: attribution),
+                statusWord: p.statusWord,
+                status: statusTone(for: p),
+                waveform: p.waveform,
+                // Animate only in-progress cards (recording / transcribing); a finished card
+                // is static-but-varied (T1 AC4).
+                waveformAnimated: isInProgress(p),
+                onTap: nil
+            )
+            if canRecover || recoveryInProgress {
+                Button(CaptureCardPresentation.manualRecoveryActionTitle) { onRecover?() }
+                    .disabled(recoveryInProgress)
+                    .grainTextStyle(.body)
+                    .accessibilityHint("Retries sending this recording's audio to your computer")
+            }
+        }
         // Drive the door→Lore status poll while the card is on screen; stop when it
         // scrolls off (the poller itself also stops at a terminal stage, F11). Also
         // cache a recent conversation's transcript on sight (offline/instant later).

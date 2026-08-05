@@ -52,7 +52,8 @@ public struct CaptureCardPresentation: Equatable, Sendable {
                             local: Bool,
                             categoryName: String?,
                             categoryAutoFiled: Bool,
-                            waveform: [Double]) -> CaptureCardPresentation {
+                            waveform: [Double],
+                            manualRecoveryInProgress: Bool = false) -> CaptureCardPresentation {
         let progress = ConversationProgress.resolve(
             wal: status.stage,
             streaming: status.streaming,
@@ -74,12 +75,17 @@ public struct CaptureCardPresentation: Equatable, Sendable {
         return CaptureCardPresentation(
             title: title(card: card, pollerTitle: pollerTitle, start: start),
             summaryLine: summary(card: card, pollerTitle: pollerTitle, pollerSummary: pollerSummary),
-            statusWord: statusWord(progress: progress, droppedReason: droppedReason, local: local),
+            statusWord: manualRecoveryInProgress ? "Sending to computer…" :
+                statusWord(progress: progress, droppedReason: droppedReason, local: local,
+                           syncError: status.lastSyncError),
             metaLine: metaLine,
             categoryLabel: label,
             waveform: waveform,
             progress: progress)
     }
+
+    /// Explicitly names the destination and intent; this is never a vague "Retry".
+    public static let manualRecoveryActionTitle = "Send to computer"
 
     // MARK: title — content first, never an identifier
 
@@ -128,7 +134,10 @@ public struct CaptureCardPresentation: Equatable, Sendable {
     /// The single human status word. A sync problem (pending segments, transport
     /// errors) reads as "Waiting for computer" — the raw error NEVER reaches a card.
     static func statusWord(progress: ConversationProgress, droppedReason: String?,
-                           local: Bool) -> String {
+                           local: Bool, syncError: String? = nil) -> String {
+        if syncError?.hasPrefix("incomplete:") == true {
+            return "Incomplete — audio kept on this phone"
+        }
         switch progress {
         case .recording:
             return "Taking a note"

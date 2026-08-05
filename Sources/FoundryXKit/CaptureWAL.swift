@@ -800,7 +800,8 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         s.bytes = byteCount
         s.streaming = streaming
         s.stage = stage
-        s.lastSyncError = lastError
+        let incomplete = dir.appendingPathComponent(".incomplete")
+        s.lastSyncError = (try? String(contentsOf: incomplete, encoding: .utf8)) ?? lastError
         return s
     }
 

@@ -951,6 +951,9 @@ public final class CaptureManager: ObservableObject {
     /// the desktop (segment upload, finalize retry, or delete retry). The sync banner
     /// uses this instead of equating "unsynced bytes exist" with "a drain is in flight".
     @Published public private(set) var drainActive = false
+    /// User-initiated recovery lanes. Kept separate from the automatic drain so an
+    /// expired capture can be retried without allowing two syncs of the same WAL.
+    @Published public private(set) var manuallyRecoveringCaptureIds: Set<String> = []
 
     /// Number of bars in the meter window (~4s at the 12 Hz sample tick).
     public static let meterBarCount = 48
@@ -1158,6 +1161,10 @@ public final class CaptureManager: ObservableObject {
     /// until every segment is uploaded and it can finalize. The ONLY auto-retire is
     /// genuine permanent poison (see `shouldAbandonCapture`), and even then audio is kept.
     public nonisolated static let retryMaxDelay: TimeInterval = 5 * 60        // 5-minute ceiling — retry forever
+    /// A closed capture may retry transient delivery for this long. Past this bound it
+    /// becomes explicitly incomplete: the phone keeps every segment, finalize is never
+    /// called, and the durable reason is shown to the user instead of deferring forever.
+    public nonisolated static let incompleteRecoveryWindow: TimeInterval = 7 * 24 * 60 * 60
     /// At most this many distinct captures are ATTEMPTED per drain tick (the in-flight /
     /// backlog concurrency valve) — so a multi-day backlog drains steadily, never a storm.
     public nonisolated static let maxCapturesPerDrain = 3
@@ -4623,7 +4630,7 @@ public final class CaptureManager: ObservableObject {
     /// synced WAL (no pending segments). On success the marker is cleared; on
     /// failure it stays so the next retry tick tries again. Idempotent + guarded
     /// against concurrent attempts for the same capture.
-    private func tryFinalize(_ wal: CaptureWAL) async {
+    private func tryFinalize(_ wal: CaptureWAL, allowExpiredRecovery: Bool = false) async {
         guard !accountExposureClosing,
               !accountExposureClosed,
               !Task.isCancelled else { return }
@@ -4653,6 +4660,12 @@ public final class CaptureManager: ObservableObject {
         }
         // Gate: audio must be durably on the desktop before finalize.
         guard snap.totalSegments > 0, snap.pendingSegments == 0 else {
+            if snap.pendingSegments > 0, recoveryWindowExpired(id), !allowExpiredRecovery {
+                markIncomplete(id, pendingSegments: snap.pendingSegments)
+                wal.refreshStatus()
+                finalizing.remove(id)
+                return
+            }
             finalizing.remove(id)   // released — not a real attempt, retry next tick
             log?.info("capture \(id): finalize deferred — \(snap.pendingSegments) segment(s) not yet ACK'd")
             return
@@ -4856,6 +4869,8 @@ public final class CaptureManager: ObservableObject {
             guard wal.status.pendingSegments > 0 || wal.status.streaming else { continue }
             let id = wal.captureId
             if isAbandoned(id) { continue }
+            if isIncomplete(id) { continue }
+            if manuallyRecoveringCaptureIds.contains(id) { continue }
             if isDiscarded(id) { continue }   // a sub-substance junk fragment never uploads
             if isDeleted(id) { continue }     // user-deleted captures never resurrect/re-upload
             if let held = suspendedSession, held.wal === wal { continue }   // hold uploads until the grace resolves
@@ -4923,6 +4938,96 @@ public final class CaptureManager: ObservableObject {
     }
 
     // MARK: terminal-retire (ONLY permanent poison — audio is never deleted)
+
+    private func incompleteMarker(_ captureId: String) -> URL {
+        baseDir.appendingPathComponent(captureId, isDirectory: true)
+            .appendingPathComponent(".incomplete")
+    }
+    private func isIncomplete(_ captureId: String) -> Bool {
+        FileManager.default.fileExists(atPath: incompleteMarker(captureId).path)
+    }
+    private func recoveryWindowExpired(_ captureId: String, now: Date = Date()) -> Bool {
+        guard let attrs = try? FileManager.default.attributesOfItem(
+            atPath: needsFinalizeMarker(captureId).path),
+              let closedAt = attrs[.modificationDate] as? Date else { return false }
+        return now.timeIntervalSince(closedAt) >= Self.incompleteRecoveryWindow
+    }
+    private func markIncomplete(_ captureId: String, pendingSegments: Int,
+                                detail: String? = nil) {
+        let suffix = detail.map { "; \($0)" } ?? ""
+        let reason = "incomplete: \(pendingSegments) segments unrecovered; audio kept on phone\(suffix)"
+        try? Data(reason.utf8).write(to: incompleteMarker(captureId), options: [.atomic])
+        clearNeedsFinalize(captureId)
+        retryStates[captureId] = nil
+        log?.error("capture \(captureId): INCOMPLETE — \(pendingSegments) segment(s) unrecovered; audio KEPT on device")
+    }
+
+    /// Whether the card should offer its explicit recovery action. The marker is the
+    /// durable source of truth; a failed attempt always restores it.
+    public func canManuallyRecover(_ captureId: String) -> Bool {
+        isIncomplete(captureId) && !manuallyRecoveringCaptureIds.contains(captureId)
+    }
+
+    public func isManualRecoveryInProgress(_ captureId: String) -> Bool {
+        manuallyRecoveringCaptureIds.contains(captureId)
+    }
+
+    /// Deliberately bypass the automatic seven-day give-up for one capture. A fresh
+    /// manifest reconciliation happens before upload, so durable desktop segments are
+    /// ACK'd locally and never sent twice. Every failure restores `.incomplete`; no
+    /// segment or ACK file is removed here.
+    public func recoverIncompleteCapture(_ captureId: String) async {
+        guard !accountExposureClosing, !accountExposureClosed,
+              !Task.isCancelled, isIncomplete(captureId),
+              !manuallyRecoveringCaptureIds.contains(captureId),
+              let wal = captures.first(where: { $0.captureId == captureId }),
+              wal !== active, !isDeleted(captureId) else { return }
+
+        manuallyRecoveringCaptureIds.insert(captureId)
+        defer { manuallyRecoveringCaptureIds.remove(captureId) }
+        DeletionRecorder.shared.emit("capture_manual_recovery", "started capture=\(captureId)")
+
+        // Removing only the terminal marker re-arms the existing durable upload/finalize
+        // path. Phone audio remains untouched throughout the attempt.
+        try? FileManager.default.removeItem(at: incompleteMarker(captureId))
+        markNeedsFinalize(captureId)
+        retryStates[captureId] = nil
+        resyncedCaptures.remove(captureId) // force a current desktop manifest read
+        wal.refreshStatus()
+
+        await resyncIfNeeded(wal)
+        let outcome = await wal.sync()
+        let failureDetail: String?
+        switch outcome {
+        case .failed:
+            failureDetail = wal.snapshot().lastSyncError ?? "upload failed"
+        case .poisoned(let seq, let reason):
+            failureDetail = "segment \(seq): \(reason)"
+        case .authExpired:
+            handleUploadAuthExpired()
+            failureDetail = "session expired"
+        case .idle, .progressed:
+            failureDetail = nil
+        }
+
+        if failureDetail == nil {
+            await tryFinalize(wal, allowExpiredRecovery: true)
+        }
+        let snap = await Task.detached { wal.snapshot() }.value
+        if !isPendingFinalize(captureId) {
+            try? FileManager.default.removeItem(at: incompleteMarker(captureId))
+            wal.refreshStatus()
+            DeletionRecorder.shared.emit("capture_manual_recovery", "succeeded capture=\(captureId)")
+            return
+        }
+
+        let detail = failureDetail ?? "manual recovery failed before finalize completed"
+        markIncomplete(captureId, pendingSegments: snap.pendingSegments,
+                       detail: "manual recovery failed: \(detail)")
+        wal.refreshStatus()
+        DeletionRecorder.shared.emit("capture_manual_recovery",
+                                     "failed capture=\(captureId) reason=\(detail)")
+    }
 
     private func abandonedMarker(_ captureId: String) -> URL {
         baseDir.appendingPathComponent(captureId, isDirectory: true)
