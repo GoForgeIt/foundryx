@@ -1592,7 +1592,7 @@ private struct CaptureCard: View {
                 Button(CaptureCardPresentation.manualRecoveryActionTitle) { onRecover?() }
                     .disabled(recoveryInProgress)
                     .grainTextStyle(.body)
-                    .accessibilityHint("Retries sending this recording's audio to your computer")
+                    .accessibilityHint("Retries sending this voice note's audio to your computer")
             }
         }
         // Drive the door→Lore status poll while the card is on screen; stop when it

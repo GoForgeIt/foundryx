@@ -29,26 +29,27 @@ struct ChatScreen: View {
                                     captureId: String?, utterance: String?)?
     @State private var sessionId = ""
     @State private var streaming = false
-    @State private var showingChats = false
-    /// Kiln's SHARED library — every chat on the Mac, including ones this phone never
-    /// created. A SHEET off this tab, deliberately not a fifth tab: `app-shell.feature`
-    /// asserts exactly four, and there is a recorded product decision against adding one.
+    /// THE chat list — every chat, one list: the ones this phone started and the ones
+    /// resident on the Mac (Kiln's own, and every imported Claude Code / Codex transcript),
+    /// merged and ordered by recency with the SOURCE as a facet on each row. A SHEET off
+    /// this tab, deliberately not a fifth tab: `app-shell.feature` asserts exactly four, and
+    /// there is a recorded product decision against adding one.
     ///
     /// Owned by the SHELL rather than this screen so it is part of the durable place: an
     /// open sheet is somewhere you were, and coming back should not close it
     /// (features/app-place-restore.feature).
-    @Binding var showingKilnLibrary: Bool
+    @Binding var showingChatList: Bool
 
     init(target: DoorTarget,
          store: ChatConversationStore,
          accountBinding: CaptureAccountScope.AccountBinding,
          log: DoorLog,
-         showingKilnLibrary: Binding<Bool> = .constant(false)) {
+         showingChatList: Binding<Bool> = .constant(false)) {
         self.target = target
         self.store = store
         self.accountBinding = accountBinding
         self.log = log
-        _showingKilnLibrary = showingKilnLibrary
+        _showingChatList = showingChatList
     }
     /// A run artifact the user tapped to view (sheet with the in-app viewers).
     @State private var viewingArtifact: ChatViewModel.RunArtifact?
@@ -141,17 +142,16 @@ struct ChatScreen: View {
         .onReceive(AmbientCardBroker.shared.$pendingPrefill) { _ in consumeAmbientPrefill() }
         // An already-acted action's "Continue in chat →" (EXT2).
         .onReceive(AmbientCardBroker.shared.$pendingOpenChatId) { _ in consumeOpenChat() }
-        .sheet(isPresented: $showingChats) {
-            ChatListSheet(store: store) { showingChats = false }
-        }
-        .sheet(isPresented: $showingKilnLibrary) {
+        .sheet(isPresented: $showingChatList) {
             // `computerConnected: true` is a fact here, not an assumption: this screen only
             // exists on the door-backed tier — the phone-only tier renders LocalChatScreen
-            // instead and never dials a door at all.
-            KilnLibraryView(
+            // instead and never dials a door at all. Whether the Mac ANSWERS is a different
+            // question, and the list says so rather than pretending its half is the whole.
+            ChatListView(
+                chats: store,
                 target: target, log: log, accountBinding: accountBinding,
                 computerConnected: true,
-                onDismiss: { showingKilnLibrary = false })
+                onDismiss: { showingChatList = false })
         }
         .sheet(item: $viewingArtifact) { artifact in
             NavigationStack {
@@ -222,42 +222,27 @@ struct ChatScreen: View {
 
     private var header: some View {
         HStack(spacing: GrainSpacing.x2) {
-            // ONE way in, not two lookalike siblings.
+            // ONE way in, because there is one list.
             //
-            // This was "Chats" and "All" side by side. Two short quantifier-shaped labels
-            // read as a filter PAIR over one list rather than as doors onto two different
-            // corpora — and the sheet behind "Chats" has its own `All` provenance chip, so
-            // the same word meant two unrelated things on one screen. Someone looking for
-            // their desktop chats opened the obvious one, saw what this phone had started,
-            // and concluded the Mac library had not shipped.
-            //
-            // The menu is driven from `ChatScope.allCases` and renders the KIT's words: each
-            // choice names a PLACE and says what is behind it (for the Mac: Kiln, Claude Code
-            // and Codex) at the point of choice, before anything is committed to. Same idiom
-            // as the privacy and model pickers beside it — no new UI primitive.
-            Menu {
-                ForEach(ChatScope.allCases, id: \.self) { scope in
-                    Section {
-                        Button { open(scope) } label: {
-                            Label(scope.title, systemImage: scope.symbol)
-                        }
-                        .accessibilityIdentifier(scope.accessibilityIdentifier)
-                    } header: {
-                        Text(scope.caption)
-                    }
-                }
-            } label: {
+            // This was, in turn: two lookalike text buttons ("Chats" / "All"), and then a
+            // menu that named the two PLACES those buttons led to. Naming them made the
+            // split legible; it did not remove it, and the split was the defect. A harness
+            // is a SOURCE joined into one corpus — Kiln, Claude Code, Codex, and this phone.
+            // So there is no scope to choose: the button opens everything, and WHERE a chat
+            // came from is a facet on its row.
+            Button { showingChatList = true } label: {
                 HStack(spacing: GrainSpacing.x1) {
-                    Text(ChatScopeCopy.controlLabel).grainTextStyle(.caption)
-                    Image(systemName: "chevron.down").font(.system(size: 9))
+                    Image(systemName: "list.bullet")
+                    Text(KilnLibraryCopy.listTitle).grainTextStyle(.caption)
                 }
                 .foregroundStyle(GrainColor.textMuted)
                 .padding(.vertical, GrainSpacing.x1)
                 .contentShape(Rectangle())
             }
-            .accessibilityIdentifier(ChatScopeCopy.controlAccessibilityIdentifier)
-            .accessibilityLabel(ChatScopeCopy.controlAccessibilityLabel)
-            .accessibilityHint(ChatScopeCopy.controlAccessibilityHint)
+            .buttonStyle(.plain)
+            .accessibilityIdentifier(ChatListCopy.controlAccessibilityIdentifier)
+            .accessibilityLabel(ChatListCopy.controlAccessibilityLabel)
+            .accessibilityHint(ChatListCopy.controlAccessibilityHint)
 
             Spacer(minLength: 0)
 
@@ -312,14 +297,6 @@ struct ChatScreen: View {
     }
 
     // MARK: actions
-
-    /// Open the corpus the reader chose. The scope decides WHICH; the sheets are unchanged.
-    private func open(_ scope: ChatScope) {
-        switch scope {
-        case .thisPhone: showingChats = true
-        case .onYourMac: showingKilnLibrary = true
-        }
-    }
 
     private func setModel(_ id: String?) {
         guard let active = store.active else { return }
@@ -445,163 +422,6 @@ struct ChatScreen: View {
 
     private func answer(_ callId: String, _ decision: String) {
         Task { try? await client.answerApproval(sessionId: sessionId, callId: callId, decision: decision) }
-    }
-}
-
-// MARK: - Chat list drawer (recent conversations)
-
-private struct ChatListSheet: View {
-    @ObservedObject var store: ChatConversationStore
-    var onDismiss: () -> Void
-
-    /// EXT3 — provenance + category pills (the capture list's chip idiom) and,
-    /// under "From voice notes", grouping by source note. All the
-    /// filter/group logic is ChatListOrganizer (kit, tested); this renders it.
-    @State private var provenance: ChatListOrganizer.Provenance = .all
-    @State private var categoryFilter: String?
-
-    private var filtered: [ChatConversationStore.Conversation] {
-        ChatListOrganizer.filter(store.conversations,
-                                 provenance: provenance, category: categoryFilter)
-    }
-
-    var body: some View {
-        NavigationStack {
-            List {
-                if provenance == .fromConversations {
-                    ForEach(Array(ChatListOrganizer.groupedBySource(filtered).enumerated()),
-                            id: \.offset) { _, group in
-                        Section {
-                            ForEach(group.conversations) { convo in chatRow(convo) }
-                                .onDelete { idx in
-                                    delete(idx.map { group.conversations[$0].id })
-                                }
-                        } header: {
-                            Text(Self.sourceHeader(group.captureId))
-                                .grainTextStyle(.caption)
-                                .foregroundStyle(GrainColor.textFaint)
-                        }
-                    }
-                } else {
-                    ForEach(filtered) { convo in chatRow(convo) }
-                        .onDelete { idx in delete(idx.map { filtered[$0].id }) }
-                }
-            }
-            .navigationTitle("Chats")
-            .safeAreaInset(edge: .top) { filterBar }
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("New") { store.newConversation(); onDismiss() }
-                }
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { onDismiss() }
-                }
-            }
-        }
-    }
-
-    // MARK: rows
-
-    private func chatRow(_ convo: ChatConversationStore.Conversation) -> some View {
-        Button {
-            store.select(convo.id)
-            onDismiss()
-        } label: {
-            HStack {
-                VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-                    Text(convo.title.isEmpty ? "New chat" : convo.title)
-                        .grainTextStyle(.body)
-                        .foregroundStyle(GrainColor.ink)
-                        .lineLimit(1)
-                    HStack(spacing: GrainSpacing.x1) {
-                        if convo.isFromConversation {
-                            Text("From a voice note" +
-                                 (convo.origin?.category.map { " · \($0)" } ?? ""))
-                                .grainTextStyle(.caption)
-                                .foregroundStyle(GrainColor.forgeBlue)
-                        }
-                        Text(Self.subtitle(convo))
-                            .grainTextStyle(.caption)
-                            .foregroundStyle(GrainColor.textFaint)
-                            .lineLimit(1)
-                    }
-                }
-                Spacer()
-                if convo.id == store.activeId {
-                    Image(systemName: "checkmark").foregroundStyle(GrainColor.sage)
-                }
-            }
-        }
-        .accessibilityIdentifier("chat-row")
-    }
-
-    private func delete(_ ids: [String]) {
-        for id in ids {
-            store.delete(id)
-            // A deleted chat must never be routed back to (EXT2 honesty).
-            ActionChatLinkStore.removeLinks(toChatId: id,
-                                            baseDir: CaptureWAL.documentsCaptures())
-        }
-    }
-
-    // MARK: filter pills
-
-    /// Provenance pills always; category pills only when any chat carries one.
-    private var filterBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: GrainSpacing.x2) {
-                ForEach(ChatListOrganizer.Provenance.allCases, id: \.self) { p in
-                    pill(p.rawValue, selected: provenance == p) {
-                        provenance = p
-                    }
-                }
-                let categories = ChatListOrganizer.categories(of: store.conversations)
-                if !categories.isEmpty {
-                    Rectangle().fill(GrainColor.borderHairline)
-                        .frame(width: 1, height: 16)
-                    ForEach(categories, id: \.self) { name in
-                        pill(name, selected: categoryFilter == name) {
-                            categoryFilter = categoryFilter == name ? nil : name
-                        }
-                    }
-                }
-            }
-            .padding(.horizontal, GrainSpacing.x4)
-            .padding(.vertical, GrainSpacing.x2)
-        }
-        .background(.bar)
-        .accessibilityIdentifier("chat-filter-bar")
-    }
-
-    private func pill(_ label: String, selected: Bool,
-                      action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(label)
-                .grainTextStyle(.caption)
-                .foregroundStyle(selected ? GrainColor.surface : GrainColor.textMuted)
-                .padding(.horizontal, GrainSpacing.x3)
-                .padding(.vertical, GrainSpacing.x1)
-                .background(Capsule().fill(selected ? GrainColor.forgeBlue : GrainColor.surfaceElevated))
-                .overlay(Capsule().strokeBorder(GrainColor.border, lineWidth: selected ? 0 : 1))
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("chat-filter-\(label)")
-    }
-
-    /// The section header for a source group: the conversation's title when the
-    /// card store still has it; chats whose source is unknown (accepted cards
-    /// mid-recording) share one honest header.
-    private static func sourceHeader(_ captureId: String?) -> String {
-        guard let captureId else { return "From a voice note" }
-        let title = ConversationCardStore.load(
-            captureId: captureId, baseDir: CaptureWAL.documentsCaptures())?.title
-        return title?.isEmpty == false ? title! : "A voice note"
-    }
-
-    private static func subtitle(_ convo: ChatConversationStore.Conversation) -> String {
-        let last = convo.messages.last?.text ?? ""
-        if last.isEmpty { return "No messages yet" }
-        return last
     }
 }
 

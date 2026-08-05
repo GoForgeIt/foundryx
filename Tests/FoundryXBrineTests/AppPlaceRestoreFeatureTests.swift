@@ -75,12 +75,32 @@ private final class AppPlaceWorld: @unchecked Sendable {
             saved: saved,
             generation: generation,
             doorTier: doorTier,
-            doorConnected: doorConnected,
             captureExists: { [captures] in captures.contains($0) },
             chatExists: { [chats] in chats.contains($0) })
     }
 
     var placement: AppPlacement? { landed?.placement }
+
+    /// The list the restored place actually reopens onto, resolved through the REAL merged
+    /// resolver with the door failing the way an unreachable Mac makes it fail. The phone's
+    /// own chats are the rows it still has.
+    func reopenedList() async throws -> KilnLibraryPresentation.Rail {
+        guard placement?.chatListOpen == true else {
+            throw BrineStepError("the chat list was not reopened, so there is no list to judge")
+        }
+        let phone = PhoneChatSource.rows(chats.sorted().map {
+            ChatConversationStore.Conversation(id: $0, title: "A chat I started here")
+        })
+        let state = await KilnLibraryPresentation.resolve(
+            computerConnected: doorTier, phoneRows: phone,
+            lens: KilnLibraryPresentation.defaultMergedLens,
+            nowMs: 1_754_400_000_000,
+            load: { throw doorConnected ? KilnLibraryError.noSession : KilnLibraryError.unreachable })
+        guard case .loaded(let rail) = state else {
+            throw BrineStepError("the restored list did not draw at all: \(state)")
+        }
+        return rail
+    }
 }
 
 private enum AppPlaceSteps {
@@ -99,10 +119,28 @@ private enum AppPlaceSteps {
                                       generation: w.generation, doorTier: w.doorTier))
                 return ctx
             },
-            defineStep("I have my computer's chats open over the Chat tab") { ctx, _, _ in
+            defineStep("I have my chat list open over the Chat tab") { ctx, _, _ in
                 w.reset()
-                w.record(AppPlacement(tab: .chat, openChatId: "chat-a", macLibraryOpen: true,
+                w.record(AppPlacement(tab: .chat, openChatId: "chat-a", chatListOpen: true,
                                       generation: w.generation, doorTier: true))
+                return ctx
+            },
+            // The PREVIOUS BUILD'S document, byte for byte — written straight to disk with
+            // the retired key, because the whole question is whether the current decoder
+            // still understands it. Round-tripping today's type would prove nothing.
+            defineStep(
+                "the app remembered my place while that sheet was still my computer's library"
+            ) { ctx, _, _ in
+                w.reset()
+                let legacy = """
+                {"tab":"chat","openChatId":"chat-a","macLibraryOpen":true,\
+                "generation":\(w.generation),"doorTier":true}
+                """
+                AppPlacementStore.forgetCachedReadsForTests()
+                try FileManager.default.createDirectory(
+                    at: w.root, withIntermediateDirectories: true)
+                try legacy.data(using: .utf8)!.write(
+                    to: AppPlacementStore.url(inAccountRoot: w.root), options: .atomic)
                 return ctx
             },
             defineStep("I am on the Chat tab on my computer's brain") { ctx, _, _ in
@@ -189,14 +227,36 @@ private enum AppPlaceSteps {
                         "open transcript was \(String(describing: w.placement?.openCaptureId))")
                 }
             },
-            defineCheck("my computer's chats are still open") { _, _, _ in
-                guard w.placement?.macLibraryOpen == true else {
-                    throw BrineStepError("the computer's chats were not reopened")
+            defineCheck("my chat list is still open") { _, _, _ in
+                guard w.placement?.chatListOpen == true else {
+                    throw BrineStepError("the chat list was not reopened")
                 }
             },
-            defineCheck("my computer's chats are not open") { _, _, _ in
-                guard w.placement?.macLibraryOpen == false else {
-                    throw BrineStepError("the computer's chats were reopened onto no computer")
+            // The list the restored place puts you back into is REAL, not a placeholder:
+            // resolved through the same `KilnLibraryPresentation.resolve` the sheet uses,
+            // with the door failing exactly as an unreachable Mac makes it fail. Without
+            // this, "the sheet reopened" would be a claim about a boolean.
+            defineCheck("the list I come back to is not an empty shell") { _, _, _ in
+                let rail = try await w.reopenedList()
+                guard !rail.isEmpty else {
+                    throw BrineStepError(
+                        "the restored list holds nothing — reopening it put the person in "
+                            + "front of an empty shell, which is what closing it prevented")
+                }
+            },
+            defineCheck("the list I come back to says my Mac's chats are missing from it") { _, _, _ in
+                let rail = try await w.reopenedList()
+                guard rail.macReach != .reachable else {
+                    throw BrineStepError("the restored list thinks the Mac was reachable")
+                }
+                guard let line = KilnLibraryCopy.reachLine(rail.macReach) else {
+                    throw BrineStepError(
+                        "the restored list says NOTHING about the Mac being missing, so this "
+                            + "phone's chats read as all of them")
+                }
+                for word in ["this phone", "isn't reachable"] where
+                    !line.localizedCaseInsensitiveContains(word) {
+                    throw BrineStepError("\"\(line)\" does not say \(word)")
                 }
             },
             defineCheck("no transcript is open") { _, _, _ in

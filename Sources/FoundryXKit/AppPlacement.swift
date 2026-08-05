@@ -43,8 +43,15 @@ public struct AppPlacement: Codable, Equatable, Sendable {
     public var openCaptureId: String?
     /// The chat conversation that was live on the Chat tab.
     public var openChatId: String?
-    /// The "on your Mac" library sheet was open over the Chat tab.
-    public var macLibraryOpen: Bool
+    /// The chat LIST sheet was open over the Chat tab.
+    ///
+    /// This field was `macLibraryOpen` when the phone had two lists and this one was the
+    /// Mac's. There is one list now — this phone's chats and the Mac's, merged — so the
+    /// field means the same PLACE under a truer name, and `init(from:)` below reads the old
+    /// key so a place written by the previous build still restores. Renaming it without that
+    /// would silently close the sheet for everyone who upgraded with it open, which is the
+    /// exact failure this whole file exists to prevent.
+    public var chatListOpen: Bool
     /// The identity generation this was recorded under. A place recorded by one
     /// account is never handed to another.
     public var generation: UInt64
@@ -54,15 +61,47 @@ public struct AppPlacement: Codable, Equatable, Sendable {
     public init(tab: AppTab,
                 openCaptureId: String? = nil,
                 openChatId: String? = nil,
-                macLibraryOpen: Bool = false,
+                chatListOpen: Bool = false,
                 generation: UInt64,
                 doorTier: Bool) {
         self.tab = tab
         self.openCaptureId = openCaptureId
         self.openChatId = openChatId
-        self.macLibraryOpen = macLibraryOpen
+        self.chatListOpen = chatListOpen
         self.generation = generation
         self.doorTier = doorTier
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case tab, openCaptureId, openChatId, chatListOpen, generation, doorTier
+        /// The pre-one-list name of `chatListOpen`. Read, never written.
+        case macLibraryOpen
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tab = try c.decode(AppTab.self, forKey: .tab)
+        openCaptureId = try c.decodeIfPresent(String.self, forKey: .openCaptureId)
+        openChatId = try c.decodeIfPresent(String.self, forKey: .openChatId)
+        // The new key wins; the old one is honoured so an upgrade keeps the open sheet.
+        chatListOpen = try (c.decodeIfPresent(Bool.self, forKey: .chatListOpen)
+            ?? c.decodeIfPresent(Bool.self, forKey: .macLibraryOpen)
+            ?? false)
+        generation = try c.decode(UInt64.self, forKey: .generation)
+        doorTier = try c.decode(Bool.self, forKey: .doorTier)
+    }
+
+    /// Written explicitly because `CodingKeys` carries a key with no property behind it
+    /// (`macLibraryOpen`, read-only). The retired name is never WRITTEN — a place saved by
+    /// this build carries only `chatListOpen`.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(tab, forKey: .tab)
+        try c.encodeIfPresent(openCaptureId, forKey: .openCaptureId)
+        try c.encodeIfPresent(openChatId, forKey: .openChatId)
+        try c.encode(chatListOpen, forKey: .chatListOpen)
+        try c.encode(generation, forKey: .generation)
+        try c.encode(doorTier, forKey: .doorTier)
     }
 
     /// The place with everything openable dropped — the tab's own list.
@@ -70,7 +109,7 @@ public struct AppPlacement: Codable, Equatable, Sendable {
         var out = self
         out.openCaptureId = nil
         out.openChatId = nil
-        out.macLibraryOpen = false
+        out.chatListOpen = false
         return out
     }
 }
@@ -89,8 +128,16 @@ public enum AppPlacementFallback: String, Codable, Equatable, Sendable, CaseIter
     case captureGone
     /// The chat conversation that was live has been deleted.
     case chatGone
-    /// The Mac library sheet was open, and the Mac is not reachable now.
-    case doorUnreachable
+
+    // THERE IS NO `doorUnreachable` ANY MORE, and its absence is load-bearing.
+    //
+    // It existed because the open sheet was the MAC's library, which without a Mac was an
+    // empty shell — so the honest thing was to close it and say why. The sheet is now the
+    // ONE chat list, which holds this phone's chats too and states plainly when the Mac's
+    // are missing from it (`KilnLibraryCopy.reachLine`). Restoring it onto an unreachable
+    // Mac now restores a real, honest, usable list, so closing it would take the person's
+    // place away for no reason. Re-adding this case means the sheet went back to being
+    // half a corpus.
 
     /// What the person is told, in their words, when their place could not be kept.
     /// `nil` where there is nothing to explain (the place WAS kept, or there never
@@ -107,8 +154,6 @@ public enum AppPlacementFallback: String, Codable, Equatable, Sendable, CaseIter
             return "That conversation isn't here anymore, so this is the list."
         case .chatGone:
             return "That chat isn't here anymore, so this is your chats."
-        case .doorUnreachable:
-            return "Your computer isn't reachable, so this is your chats."
         }
     }
 }
@@ -141,14 +186,19 @@ public enum AppPlacementRestore {
     /// - `saved`: what was written last time (nil ⇒ nothing was).
     /// - `generation`: the identity generation live NOW.
     /// - `doorTier`: whether this launch is door-backed (computer/cell) or phone-only.
-    /// - `doorConnected`: whether the computer is actually reachable right now.
     /// - `captureExists` / `chatExists`: does that conversation still exist? Asked only
     ///   for the one id we would restore into, never over the whole library.
+    ///
+    /// There is deliberately no `doorConnected` any more. It existed to close the Mac
+    /// library sheet when the Mac was unreachable; the sheet is now the ONE chat list, which
+    /// is real and honest without a Mac, so reachability is no longer a reason to take
+    /// someone's place away. (It was also never true in production: `RootView` passed
+    /// `!local`, which on the door tier is always `true` — the branch could only ever fire
+    /// under test.)
     public static func resolve(
         saved: AppPlacement?,
         generation: UInt64,
         doorTier: Bool,
-        doorConnected: Bool,
         captureExists: (String) -> Bool,
         chatExists: (String) -> Bool
     ) -> AppPlacementResolution {
@@ -172,12 +222,6 @@ public enum AppPlacementRestore {
 
         var out = saved
 
-        // The Mac sheet needs a Mac. Drop it before anything else so an unreachable door
-        // is reported as itself and not mistaken for a missing conversation.
-        if out.macLibraryOpen, !(doorTier && doorConnected) {
-            out.macLibraryOpen = false
-            return AppPlacementResolution(placement: out, fallback: .doorUnreachable)
-        }
         if let captureId = out.openCaptureId, !captureExists(captureId) {
             out.openCaptureId = nil
             return AppPlacementResolution(placement: out, fallback: .captureGone)

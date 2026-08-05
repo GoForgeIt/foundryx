@@ -109,6 +109,38 @@ public enum KilnTimestamp {
         return era * 146_097 + doe - 719_468
     }
 
+    /// The INVERSE of `millis` — an RFC-3339 `…Z` string for a wall-clock instant.
+    ///
+    /// Hand-rolled for the same reasons `millis` is: `ISO8601DateFormatter` is not `Sendable`
+    /// (so it cannot be a shared static), and allocating one per row is the habit that once
+    /// put a formatter inside a sort comparator. Pure arithmetic — total, deterministic,
+    /// locale-free, and it round-trips through `millis` exactly.
+    public static func iso8601(millisSince1970 ms: Double) -> String {
+        let total = Int(ms.rounded(.down))
+        var days = total / 86_400_000
+        var rem = total % 86_400_000
+        if rem < 0 { rem += 86_400_000; days -= 1 }
+        let (y, mo, d) = civilFromDays(days)
+        let seconds = rem / 1000
+        return String(
+            format: "%04d-%02d-%02dT%02d:%02d:%02dZ",
+            y, mo, d, seconds / 3600, (seconds % 3600) / 60, seconds % 60)
+    }
+
+    /// Howard Hinnant's civil-from-days — the exact inverse of `daysFromCivil`.
+    static func civilFromDays(_ z0: Int) -> (year: Int, month: Int, day: Int) {
+        let z = z0 + 719_468
+        let era = (z >= 0 ? z : z - 146_096) / 146_097
+        let doe = z - era * 146_097
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365
+        let y = yoe + era * 400
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+        let mp = (5 * doy + 2) / 153
+        let d = doy - (153 * mp + 2) / 5 + 1
+        let m = mp + (mp < 10 ? 3 : -9)
+        return (m <= 2 ? y + 1 : y, m, d)
+    }
+
     /// Midnight of the LOCAL calendar day containing `ms`. The Time lens's buckets are
     /// calendar-day aligned so "Today" means today, not "the last 24 hours".
     public static func startOfLocalDay(_ ms: Double) -> Double {
@@ -521,5 +553,74 @@ public enum KilnLibraryCopy {
     /// and the app's existing chat surface already says "Chats".
     public static let emptyTitle = "No chats yet"
     public static let emptyMessage =
-        "Chats you have in Kiln, Claude Code or Codex will show up here."
+        "Chats you have on this phone, in Kiln, Claude Code or Codex all show up here."
+
+    // ── The ONE list ─────────────────────────────────────────────────────────
+
+    /// The list's own name. Names the THING, not a quantity — `ChatProvenance.bareQuantifiers`
+    /// is the rule, and "All chats" is what it exists to keep out. There is only one list, so
+    /// it does not need to say whose chats these are: it is all of them.
+    public static let listTitle = "Chats"
+
+    /// The reason string a reach failure carries, for the coverage line.
+    public static func reason(_ reach: MacReach) -> String {
+        switch reach {
+        case .reachable: return ""
+        case .noComputer: return "No computer is connected."
+        case .unreachable(let line): return line
+        }
+    }
+
+    /// WHAT THE LIST SAYS WHEN THE MAC IS NOT THERE. `nil` — silence — is allowed ONLY when
+    /// the Mac was actually reached.
+    ///
+    /// This is the honesty invariant of the merged list. A phone-only list drawn silently
+    /// reads as "these are your chats", and the reader who cannot find this morning's Claude
+    /// Code session concludes it was never imported. It is the same class as the empty-list
+    /// trap the door answers 502/503 for, moved one layer out: the door refuses to say
+    /// "nothing", so this must refuse to say "everything".
+    public static func reachLine(_ reach: MacReach) -> String? {
+        switch reach {
+        case .reachable:
+            return nil
+        case .noComputer:
+            return "These are the chats on this phone. No computer is connected, so the "
+                + "chats on your Mac aren't listed."
+        case .unreachable(let detail):
+            let tail = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+            return "These are the chats on this phone. Your Mac isn't reachable, so the "
+                + "chats there aren't listed." + (tail.isEmpty ? "" : " \(tail)")
+        }
+    }
+
+    /// WHAT A SEARCH IS ALLOWED TO CLAIM IT COVERED.
+    ///
+    /// `nil` is allowed ONLY for a complete list that is not being searched. While a search
+    /// is running this MUST return a sentence — a result set with no stated scope is a
+    /// partial answer wearing a complete one's clothes.
+    public static func coverageLine(_ coverage: ChatListCoverage, searching: Bool) -> String? {
+        switch coverage {
+        case .complete:
+            return searching ? "Searched this phone and your Mac." : nil
+        case .truncated(let shown, let total):
+            let head = searching ? "Searched this phone and your Mac" : "Showing the newest chats"
+            return "\(head) — \(shown) of \(total) from your Mac, most recent first."
+        case .thisPhoneOnly(let reason):
+            let tail = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (searching
+                ? "Searched this phone only — your Mac's chats were not searched."
+                : "This phone's chats only — your Mac's chats aren't listed.")
+                + (tail.isEmpty ? "" : " \(tail)")
+        case .pending:
+            return searching ? "Still searching your Mac…" : "Still reading your Mac…"
+        }
+    }
+
+    /// WHAT A SOURCE FACET SAYS WHILE IT IS NARROWING THE LIST. `nil` — and only `nil` —
+    /// when nothing is filtered. A facet that hid rows quietly would be indistinguishable
+    /// from a corpus that had lost them.
+    public static func provenanceLine(_ p: ChatProvenance?) -> String? {
+        guard let p else { return nil }
+        return "Showing only chats from \(p.label)."
+    }
 }

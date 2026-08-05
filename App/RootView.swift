@@ -524,9 +524,9 @@ private struct MainTabs: View {
     /// The transcript that is open RIGHT NOW, reported by the detail itself as it appears
     /// and disappears. This is what gets written down.
     @State private var openCaptureId: String?
-    /// Whether the "on your Mac" library sheet is open over the Chat tab — restored on
-    /// mount, and reported back so it is written down.
-    @State private var macLibraryOpen: Bool
+    /// Whether the ONE chat list sheet — this phone's chats and the Mac's, merged — is open
+    /// over the Chat tab; restored on mount, and reported back so it is written down.
+    @State private var chatListOpen: Bool
     /// What the person is told when their place could NOT be kept as saved (deleted
     /// conversation, unreachable computer, a different account). `nil` when it was kept.
     @State private var placementNotice: String?
@@ -575,9 +575,6 @@ private struct MainTabs: View {
             saved: savedPlacement,
             generation: accountBinding?.generation ?? CaptureAccountScope.identityGeneration,
             doorTier: !local,
-            // This tree is only mounted on the door tier once the door RESOLVED (RootView's
-            // `hostResolved` gate), so being here on the door tier is the connection fact.
-            doorConnected: !local,
             captureExists: { id in
                 guard let root = accountBinding?.root else { return false }
                 return AppPlacementStore.captureExists(id, inAccountRoot: root)
@@ -586,7 +583,7 @@ private struct MainTabs: View {
             chatExists: { _ in true })
         self.savedChatId = restored.placement.openChatId
         _restoreCaptureId = State(initialValue: restored.placement.openCaptureId)
-        _macLibraryOpen = State(initialValue: restored.placement.macLibraryOpen)
+        _chatListOpen = State(initialValue: restored.placement.chatListOpen)
         _placementNotice = State(initialValue: restored.notice)
         let log = DoorLog()
         // Ship the phone's BLE/audio/capture/chat log to the relay diag sink so
@@ -1067,7 +1064,7 @@ private struct MainTabs: View {
                                 store: chats,
                                 accountBinding: accountBinding,
                                 log: log,
-                                showingKilnLibrary: $macLibraryOpen)
+                                showingChatList: $chatListOpen)
                         } else {
                             Color.clear
                         }
@@ -1170,7 +1167,7 @@ private struct MainTabs: View {
             savePlacement()
         }
         .onChange(of: openCaptureId) { _ in savePlacement() }
-        .onChange(of: macLibraryOpen) { _ in savePlacement() }
+        .onChange(of: chatListOpen) { _ in savePlacement() }
         .onChange(of: chats.activeId) { _ in savePlacement() }
         // Land on the chat tab whenever the card broker carries a seed (an accepted
         // card's [Run]) OR a composer prefill (the Actions face's "Act on it in
@@ -1346,7 +1343,7 @@ private struct MainTabs: View {
             AppPlacement(tab: router.selected,
                          openCaptureId: openCaptureId,
                          openChatId: chats.activeId.isEmpty ? nil : chats.activeId,
-                         macLibraryOpen: macLibraryOpen,
+                         chatListOpen: chatListOpen,
                          generation: accountBinding.generation,
                          doorTier: !local),
             inAccountRoot: accountBinding.root)

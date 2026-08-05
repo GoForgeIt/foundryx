@@ -23,10 +23,10 @@ Feature: Coming back to the app continues where I was
     And the same conversation's transcript is still open
 
   Scenario: leaving and returning keeps the sheet I had open
-    Given I have my computer's chats open over the Chat tab
+    Given I have my chat list open over the Chat tab
     When I leave the app and come back
     Then I am on the Chat tab
-    And my computer's chats are still open
+    And my chat list is still open
 
   Scenario: a conversation that was deleted while I was away drops me on the list
     Given I am reading a conversation's transcript
@@ -44,12 +44,30 @@ Feature: Coming back to the app continues where I was
     And no chat conversation is open
     And I am told "That chat isn't here anymore, so this is your chats."
 
-  Scenario: my computer's chats do not reopen onto an unreachable computer
-    Given I have my computer's chats open over the Chat tab
+  # SUPERSEDES "my computer's chats do not reopen onto an unreachable computer".
+  #
+  # That scenario closed the sheet, because the sheet WAS the Mac's library and without a
+  # Mac it was an empty shell. The sheet is now the one chat list, which holds this phone's
+  # chats too and says out loud when the Mac's are missing from it — so closing it would
+  # take someone's place away and show them LESS truth, not more. The harm the old scenario
+  # guarded against (coming back to an empty shell) is now guarded by the list itself, and
+  # this scenario asserts that guard directly rather than by removing the destination.
+  Scenario: my chat list reopens even when my computer is unreachable, and says so
+    Given I have my chat list open over the Chat tab
     When my computer is unreachable and I come back
     Then I am on the Chat tab
-    And my computer's chats are not open
-    And I am told "Your computer isn't reachable, so this is your chats."
+    And my chat list is still open
+    And the list I come back to is not an empty shell
+    And the list I come back to says my Mac's chats are missing from it
+    And I am not told anything went wrong
+
+  # The sheet used to be "my computer's chats" and is now the one list that holds both.
+  # Someone upgrading with it open must not have it silently closed by the rename.
+  Scenario: a place remembered before the two lists became one still reopens the list
+    Given the app remembered my place while that sheet was still my computer's library
+    When I leave the app and come back
+    Then I am on the Chat tab
+    And my chat list is still open
 
   Scenario: switching where my conversations live drops me on the list
     Given I am reading a conversation's transcript on my computer's brain

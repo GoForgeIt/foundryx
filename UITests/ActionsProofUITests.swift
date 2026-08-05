@@ -164,30 +164,26 @@ final class ActionsProofUITests: XCTestCase {
 
         // 4. Continue lands on the chat tab, on the linked conversation.
         let chatTab = app.buttons["Chat"].firstMatch
-        // ONE header control chooses the corpus now ("Chats ⌄"); "On this phone" and
-        // "On your Mac" are the choices inside it. The two sibling text buttons it replaced
-        // read as a filter pair, which is how the Mac library came to look unshipped.
-        let scopePicker = app.buttons["chat-scope-picker"].firstMatch
-        XCTAssertTrue(scopePicker.waitForExistence(timeout: 10),
+        // ONE header control, and it opens ONE list. It was two sibling text buttons, then
+        // a menu naming the two places those buttons led to; both shapes asked the reader to
+        // pick a corpus before seeing anything. There is no corpus to pick now — the phone
+        // is a source in the same list as Kiln, Claude Code and Codex.
+        let openChats = app.buttons["open-chats"].firstMatch
+        XCTAssertTrue(openChats.waitForExistence(timeout: 10),
                       "landed on the chat surface")
         _ = chatTab
         shoot(app, "08-linked-chat")
 
-        // 5. The chat list organizes by provenance + groups under the source.
-        scopePicker.tap()
-        let thisPhone = app.buttons["open-chats"].firstMatch
-        XCTAssertTrue(thisPhone.waitForExistence(timeout: 5),
-                      "the scope menu offers this phone's own chats")
-        thisPhone.tap()
-        // The pill labels are `ChatListOrganizer.Provenance` rawValues — "From voice notes"
-        // since the voice-notes language change. This assertion named the retired label and
-        // could not have passed on any recent build.
-        let fromPill = app.buttons["chat-filter-From voice notes"].firstMatch
-        XCTAssertTrue(fromPill.waitForExistence(timeout: 5), "provenance pills render")
-        fromPill.tap()
-        XCTAssertTrue(app.staticTexts["Launch deck and relay numbers"].firstMatch
-            .waitForExistence(timeout: 5),
-            "conversation-born chats group under their source conversation")
+        // 5. The one list opens, and the SOURCE is a facet on it rather than a door.
+        openChats.tap()
+        XCTAssertTrue(app.otherElements["chat-list"].firstMatch.waitForExistence(timeout: 10)
+                      || app.staticTexts["chat-list-empty"].firstMatch.exists
+                      || app.otherElements["chat-list-loading"].firstMatch.exists,
+                      "the one chat list opens")
+        let thisPhoneChip = app.buttons["chat-source-this-phone"].firstMatch
+        XCTAssertTrue(thisPhoneChip.waitForExistence(timeout: 10),
+                      "this phone is offered as a SOURCE within the one list")
+        thisPhoneChip.tap()
         shoot(app, "09-chat-list-organization")
     }
 }

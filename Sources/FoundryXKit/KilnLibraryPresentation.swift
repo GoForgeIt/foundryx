@@ -13,12 +13,22 @@ public enum KilnLibraryPresentation {
     // Lenses and sorts
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// FOUR-plus views over ONE node set, not four data paths.
+    /// FIVE-plus views over ONE node set, not five data paths.
     public enum Lens: String, CaseIterable, Equatable, Sendable {
+        /// EVERYTHING, most recent first, in one run — no project buckets and no Inbox zone.
+        ///
+        /// Added for the merged list, and it is the thing Nick actually asked for: "they
+        /// should all be one". Under the Project lens a chat started on this phone has no
+        /// project, so it lands in the INBOX zone above a project-grouped body — which draws
+        /// the phone's chats as their own block at the top of the screen and reproduces the
+        /// two-list shape the merge exists to end. Archived chats still go to History; being
+        /// in one list is not a reason to put last spring back in front of you.
+        case recent
         case project, time, tree, state, manual
 
         public var label: String {
             switch self {
+            case .recent: return "Recent"
             case .project: return "Project"
             case .time: return "Time"
             case .tree: return "Tree"
@@ -26,11 +36,24 @@ public enum KilnLibraryPresentation {
             case .manual: return "Manual"
             }
         }
+
+        /// Does this lens draw the INBOX zone above its body? `.recent` and `.state` render
+        /// every active node in the body themselves, so drawing it too would double them.
+        var showsInbox: Bool { self != .recent && self != .state }
+
+        /// Does this lens keep archived chats OUT of the body, in History? `.state` IS the
+        /// archived presentation (Active/Archived buckets), so it owns them.
+        var showsHistory: Bool { self != .state }
     }
 
-    /// `project` is FIRST and is the DEFAULT — a product decision the desktop's Brine suite
-    /// asserts. Changing it here silently desynchronises the two surfaces.
+    /// `project` is FIRST among the desktop's lenses and is ITS default — a product decision
+    /// the desktop's Brine suite asserts. Changing it here silently desynchronises the two
+    /// surfaces, so it stays.
     public static let defaultLens: Lens = .project
+
+    /// What the PHONE's one list opens on. A different surface with a different job: the
+    /// desktop rail is a filing cabinet, this is "all my chats, newest first".
+    public static let defaultMergedLens: Lens = .recent
 
     /// How the rail orders conversations WITHIN whatever grouping the lens produces.
     public enum Sort: String, CaseIterable, Equatable, Sendable {
@@ -145,19 +168,37 @@ public enum KilnLibraryPresentation {
             .joined(separator: " ").lowercased()
     }
 
-    public static func matchesFilter(_ n: ChatNode, _ f: ParsedFilter) -> Bool {
+    /// - `freeTextAlreadyApplied`: this node arrived ALREADY narrowed by the door's own
+    ///   full-text search, so the free-text terms must NOT be re-applied here. The door
+    ///   searches message CONTENT; this side's haystack is title/project/source/agent only.
+    ///   Re-applying it would silently DROP every row the door matched on the strength of
+    ///   something said inside the conversation — measured: `q=deletion` returns 1,053 rows,
+    ///   many titled things like "CW-FoundryX" that no title match would ever keep. The
+    ///   typed terms (`s:` / `a:` / `#`) are structural, the door does not understand them,
+    ///   and they still apply.
+    public static func matchesFilter(
+        _ n: ChatNode, _ f: ParsedFilter, freeTextAlreadyApplied: Bool = false
+    ) -> Bool {
         if let s = f.state, !n.state.rawValue.hasPrefix(s) { return false }
         if let a = f.agent, !(n.agent ?? "").lowercased().contains(a) { return false }
         if let pr = f.pr, !n.title.contains(pr) { return false }
+        if freeTextAlreadyApplied { return true }
         let hay = haystack(n)
         return f.text.allSatisfy { hay.contains($0) }
     }
 
     /// Narrow the node set by a raw query string. An empty query is the identity.
-    public static func filterNodes(_ nodes: [ChatNode], _ query: String) -> [ChatNode] {
+    ///
+    /// `preMatchedIds` names the nodes the DOOR already matched against its own full-text
+    /// index (see `matchesFilter`). Everything else is matched here.
+    public static func filterNodes(
+        _ nodes: [ChatNode], _ query: String, preMatchedIds: Set<String> = []
+    ) -> [ChatNode] {
         let f = parseFilter(query)
         if f.isEmpty { return nodes }
-        return nodes.filter { matchesFilter($0, f) }
+        return nodes.filter {
+            matchesFilter($0, f, freeTextAlreadyApplied: preMatchedIds.contains($0.id))
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -199,6 +240,7 @@ public enum KilnLibraryPresentation {
         nowMs: Double
     ) -> [NodeGroup] {
         switch lens {
+        case .recent: return recentGroups(nodes)
         case .project: return projectGroups(nodes)
         case .time: return timeGroups(nodes, nowMs: nowMs)
         case .tree: return treeGroups(nodes)
@@ -232,7 +274,15 @@ public enum KilnLibraryPresentation {
         }
     }
 
-    /// Project lens (DEFAULT) — one group per project, project-less chats sinking to the
+    /// Recent lens — ONE group holding every node it is given, in the order it is given
+    /// them (the global sort, which defaults to last-interacted descending). No bucketing at
+    /// all: this is the merged list's default, and its whole claim is that a chat from this
+    /// phone and a chat from Claude Code sit next to each other purely by when they happened.
+    static func recentGroups(_ nodes: [ChatNode]) -> [NodeGroup] {
+        [NodeGroup(key: "r:all", label: "Recent", rank: 0, nodes: nodes)]
+    }
+
+    /// Project lens — one group per project, project-less chats sinking to the
     /// bottom. An imported conversation lands under its SYNTHETIC `import-cwd:` project.
     static func projectGroups(_ nodes: [ChatNode]) -> [NodeGroup] {
         bucket(nodes) { n in
@@ -373,11 +423,25 @@ public enum KilnLibraryPresentation {
         public let totalNodes: Int
         /// How many rows the server says exist in total (`LibraryPage.total`).
         public let totalRows: Int
+        /// Whether the Mac's half of the corpus could be listed at all. NOT reachable ⇒ the
+        /// list is this phone's chats only and MUST say so — see `KilnLibraryCopy.reachLine`.
+        public let macReach: MacReach
+        /// How much of the corpus this list stands for. Never silent about a partial answer.
+        public let coverage: ChatListCoverage
+        /// The source facet in force, or `nil` for every source. A row hidden by a facet is
+        /// hidden by a control the reader can see (`KilnLibraryCopy.provenanceLine`).
+        public let provenance: ChatProvenance?
+        /// The sources actually present in the unfiltered node set — the chips to offer.
+        public let sourcesPresent: [ChatProvenance]
 
         public init(
             loops: [ChatNode] = [], inbox: [ChatNode] = [], groups: [NodeGroup] = [],
             archived: [ChatNode] = [], filtering: Bool = false,
-            parentIds: Set<String> = [], totalNodes: Int = 0, totalRows: Int = 0
+            parentIds: Set<String> = [], totalNodes: Int = 0, totalRows: Int = 0,
+            macReach: MacReach = .reachable,
+            coverage: ChatListCoverage = .complete,
+            provenance: ChatProvenance? = nil,
+            sourcesPresent: [ChatProvenance] = []
         ) {
             self.loops = loops
             self.inbox = inbox
@@ -387,6 +451,10 @@ public enum KilnLibraryPresentation {
             self.parentIds = parentIds
             self.totalNodes = totalNodes
             self.totalRows = totalRows
+            self.macReach = macReach
+            self.coverage = coverage
+            self.provenance = provenance
+            self.sourcesPresent = sourcesPresent
         }
 
         /// Nothing at all to show — genuinely empty, which is a DIFFERENT fact from "the
@@ -415,30 +483,43 @@ public enum KilnLibraryPresentation {
         lens: Lens = defaultLens,
         sort: Sort = defaultSort,
         query: String = "",
+        provenance: ChatProvenance? = nil,
+        preMatchedIds: Set<String> = [],
+        macReach: MacReach = .reachable,
+        coverage: ChatListCoverage = .complete,
         nowMs: Double,
         totalRows: Int = 0
     ) -> Rail {
         let nodes = KilnLibrary.toNodes(rows: rows, projects: projects)
         let sorted = sortNodes(nodes, sort)
-        let visible = filterNodes(sorted, query)
+        let matched = filterNodes(sorted, query, preMatchedIds: preMatchedIds)
+        // The source facet narrows AFTER the query, and the chips are derived from the
+        // UNFACETED set — so choosing "Claude Code" can never make the chip that would take
+        // you back disappear.
+        let visible = provenance.map { p in matched.filter { ChatProvenance($0) == p } } ?? matched
 
-        let showZones = lens != .state
         let activeNodes = visible.filter { $0.state == .active }
         let archivedNodes = visible.filter { $0.state == .archived }
-        let inbox = showZones ? KilnChatOrg.inboxNodes(activeNodes, org) : []
+        let inbox = lens.showsInbox ? KilnChatOrg.inboxNodes(activeNodes, org) : []
         let inboxIds = Set(inbox.map(\.id))
-        let bodyNodes = lens == .state ? visible : activeNodes.filter { !inboxIds.contains($0.id) }
+        let bodyNodes = lens.showsHistory
+            ? activeNodes.filter { !inboxIds.contains($0.id) }
+            : visible
         let bodyGroups = groupByLens(bodyNodes, lens: lens, org: org, nowMs: nowMs)
 
         return Rail(
             loops: [],
             inbox: inbox,
             groups: bodyGroups,
-            archived: showZones ? archivedNodes : [],
+            archived: lens.showsHistory ? archivedNodes : [],
             filtering: !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
             parentIds: KilnLibrary.parentSessionIds(rows),
             totalNodes: nodes.count,
-            totalRows: totalRows)
+            totalRows: totalRows,
+            macReach: macReach,
+            coverage: coverage,
+            provenance: provenance,
+            sourcesPresent: ChatProvenance.present(in: nodes))
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -475,30 +556,70 @@ public enum KilnLibraryPresentation {
         }
     }
 
-    /// Resolve the library state. `load` is injected (normally the two `DoorClient` reads) so
-    /// this is testable without a network.
+    /// Resolve the ONE list's state. `load` is injected (normally the two `DoorClient` reads)
+    /// so this is testable without a network.
     ///
-    /// A THROW NEVER BECOMES AN EMPTY RAIL. Every failure maps through `DoorFailureMessage`
-    /// to `.unreachable`, which the UI renders as an error, not as an empty library.
+    /// A THROW NEVER BECOMES AN EMPTY RAIL, and — since the phone is a SOURCE and not a
+    /// second list — a throw never becomes a blank screen either. Three outcomes:
+    ///
+    ///   * the Mac answered  ⇒ `.loaded`, both sources merged, coverage stated;
+    ///   * the Mac failed and this phone HAS chats ⇒ `.loaded` with the phone's chats and
+    ///     `macReach = .unreachable`, so the list shows what it honestly has AND says the
+    ///     Mac's chats are missing from it. Showing them silently, as if that were
+    ///     everything, is the exact lie the 502/503 contract exists to prevent;
+    ///   * the Mac failed and there is nothing else to show ⇒ `.unreachable`. There is no
+    ///     honest list to draw, so the failure IS the screen.
+    ///
+    /// `phoneRows` must already be narrowed by the free-text half of `query`
+    /// (`PhoneChatSource.matching`) — the door narrows its own rows and this side cannot
+    /// re-apply free text to them without dropping content matches. See `matchesFilter`.
     public static func resolve(
         computerConnected: Bool,
+        phoneRows: [LibraryChatRow] = [],
         lens: Lens = defaultLens,
         sort: Sort = defaultSort,
         query: String = "",
+        provenance: ChatProvenance? = nil,
         nowMs: Double,
         load: @Sendable () async throws -> Load
     ) async -> State {
-        guard computerConnected else { return .notConnected }
+        func phoneOnly(_ reach: MacReach) -> State {
+            .loaded(rail(
+                rows: phoneRows, org: KilnChatOrg.empty,
+                lens: lens, sort: sort, query: query, provenance: provenance,
+                preMatchedIds: Set(phoneRows.map(\.id)), macReach: reach,
+                coverage: .thisPhoneOnly(reason: KilnLibraryCopy.reason(reach)),
+                nowMs: nowMs, totalRows: phoneRows.count))
+        }
+
+        guard computerConnected else {
+            guard !phoneRows.isEmpty else { return .notConnected }
+            return phoneOnly(.noComputer)
+        }
         do {
             let loaded = try await load()
+            let mac = loaded.page.chats
             return .loaded(rail(
-                rows: loaded.page.chats, projects: loaded.projects, org: loaded.org,
-                lens: lens, sort: sort, query: query, nowMs: nowMs,
-                totalRows: loaded.page.total))
-        } catch let e as KilnLibraryError {
-            return .unreachable(DoorFailureMessage.make(kilnLibraryFailure: e).line)
+                rows: ChatCorpus.merge(phone: phoneRows, mac: mac),
+                projects: loaded.projects, org: loaded.org,
+                lens: lens, sort: sort, query: query, provenance: provenance,
+                // EVERY row here was already matched by a full-text search of its own
+                // source: the Mac's by the door's index, the phone's by
+                // `PhoneChatSource.matching`. Both look INSIDE the conversation; this
+                // side's haystack is title/project/source/agent. Re-applying the free text
+                // here would therefore throw away exactly the rows that matched on
+                // something SAID — which is most of them.
+                preMatchedIds: Set(mac.map(\.id)).union(phoneRows.map(\.id)),
+                macReach: .reachable,
+                coverage: ChatListCoverage.make(
+                    shownFromMac: mac.count, totalOnMac: loaded.page.total),
+                nowMs: nowMs, totalRows: loaded.page.total))
         } catch {
-            return .unreachable(DoorFailureMessage.make(doorTransportFailure: error).line)
+            let line = (error as? KilnLibraryError).map {
+                DoorFailureMessage.make(kilnLibraryFailure: $0).line
+            } ?? DoorFailureMessage.make(doorTransportFailure: error).line
+            guard !phoneRows.isEmpty else { return .unreachable(line) }
+            return phoneOnly(.unreachable(line))
         }
     }
 }
