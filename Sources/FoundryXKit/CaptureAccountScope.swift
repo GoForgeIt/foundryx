@@ -353,6 +353,8 @@ public enum CaptureAccountScope {
     nonisolated(unsafe) private static var defaultsOverride: UserDefaults?
     nonisolated(unsafe) private static var pairingKeychainServicesOverride:
         (cell: String, door: String)?
+    nonisolated(unsafe) private static var interruptedDeletionRecoveryForTests:
+        (@Sendable (AuthIdentity) async throws -> Void)?
     private static let preferenceMutationDepthKey =
         "foundryx.capture-account.preference-mutation-depth"
     nonisolated(unsafe) private static var lastValidatedContainer: URL?
@@ -449,13 +451,25 @@ public enum CaptureAccountScope {
 
     /// Persist a PENDING boundary before AuthStore changes the keychain. While pending,
     /// background restoration is unauthorized and currentRoot fails closed.
-    static func beginActivation(for identity: AuthIdentity) throws -> ActivationTransaction {
+    static func beginActivation(for identity: AuthIdentity) async throws -> ActivationTransaction {
+        let target = try persistenceQueue.sync {
+            let current = try readActivationRecordForMutation()
+            return try resolveIdentityScope(identity, against: current).scope
+        }
+        let completedDeletion = try await completedDeletionAllowsReturn(
+            ownerScope: target, identity: identity)
+        return try beginActivationAfterDeletionCheck(
+            identity, completedDeletion: completedDeletion)
+    }
+
+    private static func beginActivationAfterDeletionCheck(
+        _ identity: AuthIdentity,
+        completedDeletion: Bool
+    ) throws -> ActivationTransaction {
         return try persistenceQueue.sync {
             let current = try readActivationRecordForMutation()
             let resolved = try resolveIdentityScope(identity, against: current)
             let target = resolved.scope
-            let completedDeletion = try completedDeletionAllowsReturn(
-                ownerScope: target)
             switch current.phase {
             case .active where current.scope == target:
                 try persistActivationRecord(.pending(
@@ -500,11 +514,23 @@ public enum CaptureAccountScope {
     static func completeActivation(
         _ transaction: ActivationTransaction,
         activatePreferences: Bool = true
+    ) async throws {
+        let deletionCompleted = try await completedDeletionAllowsReturn(
+            ownerScope: transaction.scope,
+            identity: transaction.identity)
+        try completeActivationAfterDeletionCheck(
+            transaction,
+            activatePreferences: activatePreferences,
+            deletionCompleted: deletionCompleted)
+    }
+
+    private static func completeActivationAfterDeletionCheck(
+        _ transaction: ActivationTransaction,
+        activatePreferences: Bool,
+        deletionCompleted: Bool
     ) throws {
         guard transaction.requiresActivation else {
             try persistenceQueue.sync {
-                _ = try completedDeletionAllowsReturn(
-                    ownerScope: transaction.scope)
                 let defaults = currentDefaults()
                 let preferenceValues: [String: AccountPreferenceValue]?
                 if activatePreferences {
@@ -532,8 +558,6 @@ public enum CaptureAccountScope {
             }
             return
         }
-        let deletionCompleted = try completedDeletionAllowsReturn(
-            ownerScope: transaction.scope)
         try persistenceQueue.sync {
             let container = try durableContainer()
             let admitted = try AccountDeletionLifecycleStore(
@@ -679,13 +703,17 @@ public enum CaptureAccountScope {
 
     /// Resume or roll back an interrupted activation after the keychain becomes readable.
     @discardableResult
-    static func restorePersistedIdentity(_ identity: AuthIdentity) throws -> String {
+    static func restorePersistedIdentity(_ identity: AuthIdentity) async throws -> String {
+        let target = try persistenceQueue.sync {
+            let record = try readActivationRecordForMutation()
+            return try resolveIdentityScope(identity, against: record).scope
+        }
+        let completedDeletion = try await completedDeletionAllowsReturn(
+            ownerScope: target, identity: identity)
         let action: ActivationTransaction = try persistenceQueue.sync {
             let record = try readActivationRecordForMutation()
             let resolved = try resolveIdentityScope(identity, against: record)
             let target = resolved.scope
-            let completedDeletion = try completedDeletionAllowsReturn(
-                ownerScope: target)
             switch record.phase {
             case .active where record.scope == target:
                 try persistActivationRecord(.pending(
@@ -743,7 +771,7 @@ public enum CaptureAccountScope {
                     identity: identity)
             }
         }
-        try completeActivation(action)
+        try await completeActivation(action)
         return action.scope
     }
 
@@ -2032,8 +2060,9 @@ public enum CaptureAccountScope {
     }
 
     private static func completedDeletionAllowsReturn(
-        ownerScope: String
-    ) throws -> Bool {
+        ownerScope: String,
+        identity: AuthIdentity
+    ) async throws -> Bool {
         let store = AccountDeletionLifecycleStore(
             container: try durableContainer())
         switch store.read(ownerScope: ownerScope) {
@@ -2044,14 +2073,37 @@ public enum CaptureAccountScope {
         case .record:
             installResolution(
                 .blocked, widgetOwner: nil, identityTransition: true)
-            // A TYPED refusal, not a generic activation error. Signing in is the
-            // only screen this person can reach — their server account is already
-            // gone and "Retry deletion" lives behind the sign-in this refuses — so
-            // the caller has to be able to recognise this case and offer the way out.
-            DeletionRecorder.shared.emit(
-                "account.signin.refused", "deletion_cleanup_pending")
-            throw CaptureAccountScopeError.deletionCleanupPending(
-                ownerScope: ownerScope)
+            do {
+                let recovery = stateLock.withLock {
+                    interruptedDeletionRecoveryForTests
+                }
+                if let recovery {
+                    try await recovery(identity)
+                } else {
+                    let services = stateLock.withLock {
+                        pairingKeychainServicesOverride
+                            ?? (
+                                cell: "com.goforgeit.foundryx.cell",
+                                door: DoorConfigStore.service)
+                    }
+                    let runner = CurrentOwnerSelectiveDeletionRunner(
+                        containerProvider: { CaptureAccountScope.container() },
+                        defaults: currentDefaults(),
+                        secretStore: SystemPairingSecretStore(),
+                        pairingServices: services,
+                        exposureCoordinator: .process,
+                        identityProvider: { identity })
+                    try await runner.eraseVerifiedCurrentOwner()
+                }
+                DeletionRecorder.shared.emit(
+                    "account.signin.cleanup_completed", "ok")
+                return true
+            } catch {
+                DeletionRecorder.shared.emit(
+                    "account.signin.refused", "cleanup_failed \(error)")
+                throw CaptureAccountScopeError.deletionCleanupPending(
+                    ownerScope: ownerScope)
+            }
         case .blocked(let reason):
             installResolution(
                 .blocked, widgetOwner: nil, identityTransition: true)
@@ -2552,6 +2604,14 @@ public enum CaptureAccountScope {
         stateLock.unlock()
     }
 
+    static func setInterruptedDeletionRecoveryForTests(
+        _ recovery: (@Sendable (AuthIdentity) async throws -> Void)?
+    ) {
+        stateLock.withLock {
+            interruptedDeletionRecoveryForTests = recovery
+        }
+    }
+
     /// Publishes an account identity for fixtures. Preference activation is opt-in
     /// so the accepted Task-1 snapshot/writer oracles retain their identity-only
     /// setup; Task-6 feature worlds request the production activation path.
@@ -2559,10 +2619,85 @@ public enum CaptureAccountScope {
         _ identity: AuthIdentity,
         activatePreferences: Bool = false
     ) throws {
-        let transaction = try beginActivation(for: identity)
-        try completeActivation(
+        let ownerScope = try key(for: identity)
+        let completedDeletion: Bool
+        switch AccountDeletionLifecycleStore(
+            container: try durableContainer()).read(ownerScope: ownerScope) {
+        case .missing:
+            completedDeletion = false
+        case .record(let record) where record.phase == .completed:
+            completedDeletion = true
+        case .record:
+            installResolution(
+                .blocked, widgetOwner: nil, identityTransition: true)
+            throw CaptureAccountScopeError.deletionCleanupPending(
+                ownerScope: ownerScope)
+        case .blocked(let reason):
+            installResolution(
+                .blocked, widgetOwner: nil, identityTransition: true)
+            throw CaptureAccountScopeError.activationState(
+                "account deletion state is unreadable: \(reason)")
+        }
+        let transaction = try beginActivationAfterDeletionCheck(
+            identity, completedDeletion: completedDeletion)
+        try completeActivationAfterDeletionCheck(
             transaction,
-            activatePreferences: activatePreferences)
+            activatePreferences: activatePreferences,
+            deletionCompleted: completedDeletion)
+    }
+
+    static func beginActivationForTestsOnly(
+        for identity: AuthIdentity
+    ) throws -> ActivationTransaction {
+        let ownerScope = try key(for: identity)
+        let completedDeletion: Bool
+        switch AccountDeletionLifecycleStore(
+            container: try durableContainer()).read(ownerScope: ownerScope) {
+        case .missing:
+            completedDeletion = false
+        case .record(let record) where record.phase == .completed:
+            completedDeletion = true
+        case .record:
+            installResolution(
+                .blocked, widgetOwner: nil, identityTransition: true)
+            throw CaptureAccountScopeError.deletionCleanupPending(
+                ownerScope: ownerScope)
+        case .blocked(let reason):
+            installResolution(
+                .blocked, widgetOwner: nil, identityTransition: true)
+            throw CaptureAccountScopeError.activationState(
+                "account deletion state is unreadable: \(reason)")
+        }
+        return try beginActivationAfterDeletionCheck(
+            identity, completedDeletion: completedDeletion)
+    }
+
+    static func completeActivationForTestsOnly(
+        _ transaction: ActivationTransaction,
+        activatePreferences: Bool = true
+    ) throws {
+        let deletionCompleted: Bool
+        switch AccountDeletionLifecycleStore(
+            container: try durableContainer()).read(ownerScope: transaction.scope) {
+        case .missing:
+            deletionCompleted = false
+        case .record(let record) where record.phase == .completed:
+            deletionCompleted = true
+        case .record:
+            installResolution(
+                .blocked, widgetOwner: nil, identityTransition: true)
+            throw CaptureAccountScopeError.deletionCleanupPending(
+                ownerScope: transaction.scope)
+        case .blocked(let reason):
+            installResolution(
+                .blocked, widgetOwner: nil, identityTransition: true)
+            throw CaptureAccountScopeError.activationState(
+                "account deletion state is unreadable: \(reason)")
+        }
+        try completeActivationAfterDeletionCheck(
+            transaction,
+            activatePreferences: activatePreferences,
+            deletionCompleted: deletionCompleted)
     }
 
     /// Fixture-only account publication that bypasses UserDefaults durability. It
@@ -2663,6 +2798,7 @@ public enum CaptureAccountScope {
         applicationSupportOverride = nil
         defaultsOverride = nil
         pairingKeychainServicesOverride = nil
+        interruptedDeletionRecoveryForTests = nil
         beforeAccountBindingPublicationHook = nil
         activationMigrationPauseHookForTests = nil
         lastValidatedContainer = nil

@@ -6,6 +6,19 @@ Feature: An interrupted deletion never locks me out of my own app
     Then the local cleanup is completed
     And I am signed in
 
+  Scenario: The app sign-in activation chokepoint finishes an interrupted deletion
+    Given the app sign-in path finds an unfinished deletion for my account
+    When the app begins account activation for my sign-in
+    Then the activation chokepoint completes the local cleanup
+    And account activation is allowed to continue
+
+  Scenario: The app sign-in chokepoint diagnoses a genuine cleanup failure
+    Given the app sign-in path finds an unfinished deletion for my account
+    And cleanup at the activation chokepoint will fail
+    When the app begins account activation for my sign-in
+    Then account activation is refused with a typed cleanup error
+    And the sign-in diagnostics identify cleanup failure
+
   Scenario: A cleanup that genuinely fails still refuses, with a reason
     Given a deletion record exists for my account that never finished
     And the local cleanup cannot complete

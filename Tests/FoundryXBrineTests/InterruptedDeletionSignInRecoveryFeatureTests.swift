@@ -5,6 +5,7 @@ import BrineSwiftCore
 final class InterruptedDeletionSignInRecoveryFeatureTests: XCTestCase {
     func testInterruptedDeletionSignInRecoveryScenarios() async throws {
         let world = InterruptedDeletionSignInRecoveryWorld()
+        defer { world.cleanupLiveSignInFixture() }
         try await BrineFeatureRunner.run(
             "interrupted-deletion-signin-recovery",
             registry: StepRegistry(InterruptedDeletionSignInRecoverySteps.make(world)))
@@ -25,6 +26,11 @@ private final class InterruptedDeletionSignInRecoveryWorld: @unchecked Sendable 
     var signedIn = false
     var refusal: Error?
     var beganCompleted = false
+    private var liveRoot: URL?
+    private var liveDefaultsName: String?
+    private var liveIdentity: AuthIdentity?
+    var activationContinued = false
+    var liveCleanupFails = false
 
     func reset(_ record: Record) {
         self.record = record
@@ -61,6 +67,77 @@ private final class InterruptedDeletionSignInRecoveryWorld: @unchecked Sendable 
             refusal = error
         }
     }
+
+    func prepareLiveSignInFixture() throws {
+        cleanupLiveSignInFixture()
+        let discriminator = UUID().uuidString.lowercased()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "foundryx-live-signin-recovery-\(discriminator)",
+            isDirectory: true)
+        let defaultsName = "foundryx.live-signin-recovery.\(discriminator)"
+        guard let defaults = UserDefaults(suiteName: defaultsName) else {
+            throw BrineStepError("the sign-in fixture defaults were unavailable")
+        }
+        defaults.removePersistentDomain(forName: defaultsName)
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: true)
+        CaptureAccountScope.resetTestEnvironment()
+        CaptureAccountScope.setContainerForTests(root)
+        CaptureAccountScope.setDefaultsForTests(defaults)
+        let scope = try CaptureAccountScope.key(for: identity)
+        CaptureAccountScope.setInterruptedDeletionRecoveryForTests { [self] _ in
+            cleanupCalls += 1
+            if liveCleanupFails { throw AccountDeletionError.cleanupPending }
+            let store = AccountDeletionLifecycleStore(container: root)
+            try FileManager.default.removeItem(
+                at: store.recordURL(ownerScope: scope))
+        }
+        _ = try AccountDeletionLifecycleStore(container: root)
+            .createPending(ownerScope: scope)
+        liveRoot = root
+        liveDefaultsName = defaultsName
+        liveIdentity = identity
+        activationContinued = false
+        liveCleanupFails = false
+        cleanupCalls = 0
+        refusal = nil
+        DeletionRecorder.shared.clear()
+    }
+
+    func beginLiveAccountActivation() async {
+        guard let identity = liveIdentity else {
+            refusal = BrineStepError("the live sign-in fixture was not prepared")
+            return
+        }
+        do {
+            _ = try await CaptureAccountScope.beginActivation(for: identity)
+            activationContinued = true
+        } catch let error as CaptureAccountScopeError {
+            if case .deletionCleanupPending = error {
+                refusal = error
+            } else {
+                // This sandbox can deny UserDefaults durability after the deletion
+                // gate. Reaching that later activation stage proves the live refusal
+                // chokepoint allowed the sign-in to continue.
+                activationContinued = true
+            }
+        } catch {
+            refusal = error
+        }
+    }
+
+    func cleanupLiveSignInFixture() {
+        CaptureAccountScope.resetTestEnvironment()
+        if let name = liveDefaultsName {
+            UserDefaults(suiteName: name)?.removePersistentDomain(forName: name)
+        }
+        if let root = liveRoot {
+            try? FileManager.default.removeItem(at: root)
+        }
+        liveRoot = nil
+        liveDefaultsName = nil
+        liveIdentity = nil
+    }
 }
 
 private enum InterruptedDeletionSignInRecoverySteps {
@@ -85,6 +162,42 @@ private enum InterruptedDeletionSignInRecoverySteps {
             defineStep("I sign in with that account") { ctx, _, _ in
                 await w.signIn()
                 return ctx
+            },
+            defineStep("the app sign-in path finds an unfinished deletion for my account") { ctx, _, _ in
+                try w.prepareLiveSignInFixture()
+                return ctx
+            },
+            defineStep("the app begins account activation for my sign-in") { ctx, _, _ in
+                await w.beginLiveAccountActivation()
+                return ctx
+            },
+            defineStep("cleanup at the activation chokepoint will fail") { ctx, _, _ in
+                w.liveCleanupFails = true
+                return ctx
+            },
+            defineCheck("the activation chokepoint completes the local cleanup") { _, _, _ in
+                guard w.cleanupCalls == 1 else {
+                    throw BrineStepError("the production activation chokepoint did not run cleanup")
+                }
+            },
+            defineCheck("account activation is allowed to continue") { _, _, _ in
+                guard w.activationContinued, w.refusal == nil else {
+                    throw BrineStepError(
+                        "the production activation path still refused the account: \(String(describing: w.refusal))")
+                }
+            },
+            defineCheck("account activation is refused with a typed cleanup error") { _, _, _ in
+                guard let error = w.refusal as? CaptureAccountScopeError,
+                      case .deletionCleanupPending = error else {
+                    throw BrineStepError("cleanup failure did not preserve the typed refusal")
+                }
+            },
+            defineCheck("the sign-in diagnostics identify cleanup failure") { _, _, _ in
+                guard DeletionRecorder.shared.recorded().contains(where: {
+                    $0.contains("account.signin.refused") && $0.contains("cleanup_failed")
+                }) else {
+                    throw BrineStepError("cleanup failure was not distinguishable in diagnostics")
+                }
             },
             defineCheck("the local cleanup is completed") { _, _, _ in
                 guard w.cleanupCalls == 1, case .completed = w.record else {

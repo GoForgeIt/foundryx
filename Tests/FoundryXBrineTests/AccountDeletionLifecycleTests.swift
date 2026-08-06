@@ -501,7 +501,7 @@ final class AccountDeletionLifecycleTests: XCTestCase {
         defer { fixture.cleanup() }
         let identity = fixture.identity(subject: "owner-b")
         let scope = try CaptureAccountScope.key(for: identity)
-        let transaction = try CaptureAccountScope.beginActivation(
+        let transaction = try CaptureAccountScope.beginActivationForTestsOnly(
             for: identity)
         let store = AccountDeletionLifecycleStore(container: fixture.root)
         let pending = try store.createPending(ownerScope: scope)
@@ -517,7 +517,7 @@ final class AccountDeletionLifecycleTests: XCTestCase {
             "idToken",
             forKey: "foundryx.cell.authMode")
 
-        try CaptureAccountScope.completeActivation(transaction)
+        try CaptureAccountScope.completeActivationForTestsOnly(transaction)
 
         XCTAssertNil(fixture.defaults.object(
             forKey: "\(scope).foundryx.cell.url"))
@@ -532,7 +532,7 @@ final class AccountDeletionLifecycleTests: XCTestCase {
         let fixture = try DeletionScopeFixture()
         defer { fixture.cleanup() }
         let identity = fixture.identity(subject: "owner-b")
-        let activationTransaction = try CaptureAccountScope.beginActivation(
+        let activationTransaction = try CaptureAccountScope.beginActivationForTestsOnly(
             for: identity)
         let scope = activationTransaction.scope
 
@@ -548,7 +548,7 @@ final class AccountDeletionLifecycleTests: XCTestCase {
         }
 
         let activation = Task {
-            try CaptureAccountScope.completeActivation(
+            try CaptureAccountScope.completeActivationForTestsOnly(
                 activationTransaction)
         }
         XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)

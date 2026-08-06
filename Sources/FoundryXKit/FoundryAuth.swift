@@ -203,19 +203,7 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
     private func saveRecoveringInterruptedDeletion(
         _ identity: AuthIdentity
     ) async throws {
-        let runner = CurrentOwnerSelectiveDeletionRunner(
-            containerProvider: { CaptureAccountScope.container() },
-            defaults: .standard,
-            secretStore: SystemPairingSecretStore(),
-            pairingServices: (
-                cell: "com.goforgeit.foundryx.cell",
-                door: DoorConfigStore.service),
-            exposureCoordinator: .process,
-            identityProvider: { identity })
-        try await Self.persistAfterRecoveringInterruptedDeletion(
-            identity: identity,
-            persist: { try AuthStore.save($0) },
-            recover: { try await runner.eraseVerifiedCurrentOwner() })
+        try await AuthStore.save(identity)
     }
 
     static func persistAfterRecoveringInterruptedDeletion(
@@ -256,7 +244,7 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
               let refresh = id.refreshToken else { return nil }
         do {
             let fresh = try await refreshToken(provider, clientID: clientID, refresh: refresh)
-            try AuthStore.save(fresh)
+            try await AuthStore.save(fresh)
             return fresh.idToken
         } catch {
             log?.error("id_token refresh failed: \(error)")
@@ -267,7 +255,7 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
     public func signOut() throws { try AuthStore.clear() }
     public var signedInEmail: String? { AuthStore.load()?.email }
     public var signedInIdentity: AuthIdentity? { AuthStore.load() }
-    public func restorePersistedIdentity() throws -> AuthIdentity? {
+    public func restorePersistedIdentity() async throws -> AuthIdentity? {
         // A keychain that CANNOT ANSWER is not an error to show the user. Launching
         // while the device is locked returns errSecInteractionNotAllowed, and a
         // simulator/test host returns errSecMissingEntitlement — in both cases
@@ -289,7 +277,7 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
             try CaptureAccountScope.confirmSignedOutAfterReadableKeychain()
             return nil
         }
-        try CaptureAccountScope.restorePersistedIdentity(identity)
+        try await CaptureAccountScope.restorePersistedIdentity(identity)
         return identity
     }
     /// Lock-screen-safe "is anyone signed in?" — the UserDefaults mirror first (the
@@ -475,14 +463,14 @@ enum AuthStore {
     /// stamps it.
     static let signedInMirrorKey = "foundryx.auth.signed-in"
 
-    static func save(_ id: AuthIdentity) throws {
+    static func save(_ id: AuthIdentity) async throws {
         let data: Data
         do {
             data = try JSONEncoder().encode(id)
         } catch {
             throw AuthError.persistence("identity encoding failed: \(error.localizedDescription)")
         }
-        let activation = try CaptureAccountScope.beginActivation(for: id)
+        let activation = try await CaptureAccountScope.beginActivation(for: id)
         let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrService as String: service,
                                     kSecAttrAccount as String: account]
@@ -499,7 +487,7 @@ enum AuthStore {
         }
         // Filesystem ownership and chat/capture migration must finish before ACTIVE
         // is published. A failure intentionally leaves the durable state pending.
-        try CaptureAccountScope.completeActivation(activation)
+        try await CaptureAccountScope.completeActivation(activation)
     }
 
     /// Optional presentation lookup. Security-sensitive restoration uses

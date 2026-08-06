@@ -106,7 +106,7 @@ public final class RemoteSession: ObservableObject {
     /// On launch / appear: if already signed in, resolve the host silently.
     public func restore() async {
         do {
-            guard let identity = try auth.restorePersistedIdentity() else {
+            guard let identity = try await auth.restorePersistedIdentity() else {
                 // A locked launch cannot read the keychain. A fully ACTIVE opaque
                 // scope remains authorized for background capture; a pending/missing
                 // scope does not.

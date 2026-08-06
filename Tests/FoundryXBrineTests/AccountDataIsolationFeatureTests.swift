@@ -1640,7 +1640,7 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
             }
             let started = Date()
             state.pendingActivation =
-                try CaptureAccountScope.beginActivation(for: second)
+                try CaptureAccountScope.beginActivationForTestsOnly(for: second)
             state.pendingBlockedGeneration =
                 CaptureAccountScope.identityGeneration
             state.pendingDesiredState =
@@ -1721,7 +1721,7 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
                     "the unfinished sign-in blocked the app or lost its transaction")
             }
             let started = Date()
-            try CaptureAccountScope.completeActivation(transaction)
+            try CaptureAccountScope.completeActivationForTestsOnly(transaction)
             state.pendingActivatedGeneration =
                 CaptureAccountScope.identityGeneration
             state.pendingCompletionElapsed =
@@ -2237,7 +2237,8 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
             }
 
             CaptureAccountScope.resetProcessCacheForTests()
-            _ = try CaptureAccountScope.restorePersistedIdentity(identity)
+            try CaptureAccountScope.activateForTests(
+                identity, activatePreferences: true)
         }
     }
 

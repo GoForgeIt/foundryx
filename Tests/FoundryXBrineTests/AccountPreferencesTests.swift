@@ -741,7 +741,7 @@ final class AccountPreferencesTests: XCTestCase {
     func testUnresolvedTransitionNeverMutatesAnyPartOfThePersistentDomain() throws {
         let fixture = try AccountPreferenceScopeFixture()
         defer { fixture.cleanup() }
-        _ = try CaptureAccountScope.beginActivation(
+        _ = try CaptureAccountScope.beginActivationForTestsOnly(
             for: fixture.identity(subject: "pending-owner"))
         let store = AccountPreferenceWriteStore(suiteName: fixture.defaultsName)
 
