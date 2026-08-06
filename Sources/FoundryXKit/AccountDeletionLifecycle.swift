@@ -220,6 +220,7 @@ enum AccountDeletionLifecycleError: Error, Equatable, Sendable {
     case preferenceMutationInProgress
     case exposureBarrierFailed
     case cleanupVerificationFailed(AccountDeletionCleanupGroup)
+    case cleanupStepFailed(String, String)
     case blocked(AccountDeletionLifecycleBlockedReason)
 }
 
@@ -1069,7 +1070,12 @@ final class AccountDeletionLifecycle: @unchecked Sendable {
         }
         if !immediateGatesClosed {
             try inject(.before, .signedInMirror)
-            try environment.setSignedInMirrorFalse(binding)
+            do {
+                try environment.setSignedInMirrorFalse(binding)
+            } catch {
+                throw AccountDeletionLifecycleError.cleanupStepFailed(
+                    "signedInMirror", String(describing: error))
+            }
             try inject(.after, .signedInMirror)
         }
         environment.deliverIdentityBoundary(blockedGeneration)
@@ -1104,12 +1110,17 @@ final class AccountDeletionLifecycle: @unchecked Sendable {
         try inject(.after, .barrierVerification)
 
         try inject(.before, .barrierSync)
-        record = try store.compareAndSwap(
-            ownerScope: binding.scope,
-            expectedEpoch: record.deletionEpoch
-        ) {
-            $0.exposureBarrier = .closed
-            $0.blockedGeneration = blockedGeneration
+        do {
+            record = try store.compareAndSwap(
+                ownerScope: binding.scope,
+                expectedEpoch: record.deletionEpoch
+            ) {
+                $0.exposureBarrier = .closed
+                $0.blockedGeneration = blockedGeneration
+            }
+        } catch {
+            throw AccountDeletionLifecycleError.cleanupStepFailed(
+                "barrierSync", String(describing: error))
         }
         try inject(.after, .barrierSync)
         try inject(.before, .barrierReadback)
@@ -1126,29 +1137,44 @@ final class AccountDeletionLifecycle: @unchecked Sendable {
         for group in AccountDeletionCleanupGroup.allCases
             .dropFirst(record.completedGroups.count) {
             try inject(.before, DeletionFaultStage(rawValue: group.rawValue)!)
-            try environment.removeGroup(group, binding, legacyOwned)
+            do {
+                try environment.removeGroup(group, binding, legacyOwned)
+            } catch {
+                throw AccountDeletionLifecycleError.cleanupStepFailed(
+                    group.rawValue, String(describing: error))
+            }
             guard try environment.verifyGroupAbsent(group, binding) else {
                 throw AccountDeletionLifecycleError
                     .cleanupVerificationFailed(group)
             }
-            record = try store.compareAndSwap(
-                ownerScope: binding.scope,
-                expectedEpoch: record.deletionEpoch
-            ) {
-                $0.completedGroups.append(group)
-                if group == .legacyInputs {
-                    $0.legacyDisposition =
-                        legacyOwned ? .retired : .notOwned
+            do {
+                record = try store.compareAndSwap(
+                    ownerScope: binding.scope,
+                    expectedEpoch: record.deletionEpoch
+                ) {
+                    $0.completedGroups.append(group)
+                    if group == .legacyInputs {
+                        $0.legacyDisposition =
+                            legacyOwned ? .retired : .notOwned
+                    }
                 }
+            } catch {
+                throw AccountDeletionLifecycleError.cleanupStepFailed(
+                    "\(group.rawValue)Sync", String(describing: error))
             }
             try inject(.after, DeletionFaultStage(rawValue: group.rawValue)!)
         }
 
         try inject(.before, .completedSync)
-        record = try store.compareAndSwap(
-            ownerScope: binding.scope,
-            expectedEpoch: record.deletionEpoch
-        ) { $0.phase = .completed }
+        do {
+            record = try store.compareAndSwap(
+                ownerScope: binding.scope,
+                expectedEpoch: record.deletionEpoch
+            ) { $0.phase = .completed }
+        } catch {
+            throw AccountDeletionLifecycleError.cleanupStepFailed(
+                "completedSync", String(describing: error))
+        }
         try inject(.after, .completedSync)
         try inject(.before, .completedReadback)
         eventObserver(.completedDurableReadback)
@@ -1455,8 +1481,16 @@ extension AccountDeletionLifecycle {
                 context.legacyOwnerScope()
             },
             reassertDeletionBarrier: { ownerScope in
-                try CaptureAccountScope.reassertAccountDeletionBarrier(
-                    ownerScope: ownerScope)
+                // Recovery may run before AuthStore can publish a pending activation.
+                // The verified OAuth identity is therefore the ownership proof for
+                // the signed-out path; never reconstruct a destructive binding
+                // without that exact proof.
+                guard verifiedIdentityForScope(ownerScope) != nil else {
+                    throw AccountDeletionLifecycleError.staleBinding
+                }
+                return try CaptureAccountScope.reassertAccountDeletionBarrier(
+                    ownerScope: ownerScope,
+                    verifiedSignedOutOwner: true)
             },
             authorizePendingDeletion: { binding, persistPending in
                 let pending =

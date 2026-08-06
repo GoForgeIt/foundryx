@@ -2213,7 +2213,8 @@ public enum CaptureAccountScope {
     }
 
     static func reassertAccountDeletionBarrier(
-        ownerScope: String
+        ownerScope: String,
+        verifiedSignedOutOwner: Bool = false
     ) throws -> (AccountBinding, UInt64)? {
         try persistenceQueue.sync {
             let base = try durableContainer()
@@ -2224,10 +2225,14 @@ public enum CaptureAccountScope {
                 return nil
             }
             let activation = try readActivationRecordForMutation()
-            guard activation.scope == ownerScope,
-                  activation.phase == .active
-                    || activation.phase == .pendingSignOut
-                    || activation.phase == .pendingActivation else {
+            let activationOwnsScope =
+                (activation.scope == ownerScope
+                    && (activation.phase == .active
+                        || activation.phase == .pendingActivation))
+                || (activation.previousScope == ownerScope
+                    && activation.phase == .pendingSignOut)
+                || (activation.phase == .signedOut && verifiedSignedOutOwner)
+            guard activationOwnsScope else {
                 throw AccountDeletionLifecycleError.staleBinding
             }
             exposurePublicationLock.lock()

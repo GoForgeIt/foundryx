@@ -13,6 +13,23 @@ final class InterruptedDeletionSignInRecoveryFeatureTests: XCTestCase {
 }
 
 private final class InterruptedDeletionSignInRecoveryWorld: @unchecked Sendable {
+    private final class RecoveryDefaults: UserDefaults, @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [String: Any] = [:]
+
+        init() { super.init(suiteName: nil)! }
+        required init?(coder: NSCoder) { nil }
+        override func object(forKey key: String) -> Any? {
+            lock.withLock { values[key] }
+        }
+        override func set(_ value: Any?, forKey key: String) {
+            lock.withLock { values[key] = value }
+        }
+        override func removeObject(forKey key: String) {
+            _ = lock.withLock { values.removeValue(forKey: key) }
+        }
+        override func synchronize() -> Bool { true }
+    }
     enum Record: Equatable { case pending, completed, unreadable }
     let identity = AuthIdentity(
         provider: AuthProvider.google.rawValue,
@@ -31,6 +48,7 @@ private final class InterruptedDeletionSignInRecoveryWorld: @unchecked Sendable 
     private var liveIdentity: AuthIdentity?
     var activationContinued = false
     var liveCleanupFails = false
+    var realRunnerRoot: URL?
 
     func reset(_ record: Record) {
         self.record = record
@@ -74,34 +92,81 @@ private final class InterruptedDeletionSignInRecoveryWorld: @unchecked Sendable 
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "foundryx-live-signin-recovery-\(discriminator)",
             isDirectory: true)
-        let defaultsName = "foundryx.live-signin-recovery.\(discriminator)"
-        guard let defaults = UserDefaults(suiteName: defaultsName) else {
-            throw BrineStepError("the sign-in fixture defaults were unavailable")
-        }
-        defaults.removePersistentDomain(forName: defaultsName)
+        let defaults = RecoveryDefaults()
         try FileManager.default.createDirectory(
             at: root, withIntermediateDirectories: true)
         CaptureAccountScope.resetTestEnvironment()
         CaptureAccountScope.setContainerForTests(root)
         CaptureAccountScope.setDefaultsForTests(defaults)
         let scope = try CaptureAccountScope.key(for: identity)
-        CaptureAccountScope.setInterruptedDeletionRecoveryForTests { [self] _ in
+        CaptureAccountScope.setInterruptedDeletionRecoveryForTests { [self, defaults] _ in
             cleanupCalls += 1
-            if liveCleanupFails { throw AccountDeletionError.cleanupPending }
-            let store = AccountDeletionLifecycleStore(container: root)
-            try FileManager.default.removeItem(
-                at: store.recordURL(ownerScope: scope))
+            let secrets = DeletionTypedSecretStore()
+            if liveCleanupFails { secrets.forceNextRemoval(.failed) }
+            let runner = CurrentOwnerSelectiveDeletionRunner(
+                container: root,
+                defaults: defaults,
+                secretStore: secrets,
+                pairingServices: (cell: "cell.test", door: "door.test"),
+                exposureCoordinator: AccountExposureCoordinator(),
+                identityProvider: { self.identity })
+            try await runner.eraseVerifiedCurrentOwner()
         }
         _ = try AccountDeletionLifecycleStore(container: root)
             .createPending(ownerScope: scope)
         liveRoot = root
-        liveDefaultsName = defaultsName
+        liveDefaultsName = nil
         liveIdentity = identity
         activationContinued = false
         liveCleanupFails = false
         cleanupCalls = 0
         refusal = nil
         DeletionRecorder.shared.clear()
+    }
+
+    func prepareSignedOutRealRunnerFixture() throws {
+        cleanupLiveSignInFixture()
+        let discriminator = UUID().uuidString.lowercased()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "foundryx-real-signin-recovery-\(discriminator)", isDirectory: true)
+        let defaults = RecoveryDefaults()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        CaptureAccountScope.resetTestEnvironment()
+        CaptureAccountScope.setContainerForTests(root)
+        CaptureAccountScope.setDefaultsForTests(defaults)
+        let scope = try CaptureAccountScope.key(for: identity)
+        _ = try AccountDeletionLifecycleStore(container: root)
+            .createPending(ownerScope: scope)
+        // Keep the production eraser/lifecycle and replace only the macOS test
+        // process's Keychain backend. The phone uses SystemPairingSecretStore;
+        // an empty typed store has the same observable state without requiring
+        // this test host to hold the app's Keychain entitlement.
+        CaptureAccountScope.setInterruptedDeletionRecoveryForTests { [identity, defaults] _ in
+            let runner = CurrentOwnerSelectiveDeletionRunner(
+                container: root,
+                defaults: defaults,
+                secretStore: DeletionTypedSecretStore(),
+                pairingServices: (cell: "cell.test", door: "door.test"),
+                exposureCoordinator: AccountExposureCoordinator(),
+                identityProvider: { identity })
+            try await runner.eraseVerifiedCurrentOwner()
+        }
+        liveRoot = root
+        realRunnerRoot = root
+        liveDefaultsName = nil
+        liveIdentity = identity
+        activationContinued = false
+        refusal = nil
+        DeletionRecorder.shared.clear()
+    }
+
+    func saveThroughRealSignInPersistence() async {
+        do {
+            try await AuthStore.save(identity)
+            activationContinued = true
+        } catch {
+            refusal = error
+        }
     }
 
     func beginLiveAccountActivation() async {
@@ -137,6 +202,7 @@ private final class InterruptedDeletionSignInRecoveryWorld: @unchecked Sendable 
         liveRoot = nil
         liveDefaultsName = nil
         liveIdentity = nil
+        realRunnerRoot = nil
     }
 }
 
@@ -175,6 +241,33 @@ private enum InterruptedDeletionSignInRecoverySteps {
                 w.liveCleanupFails = true
                 return ctx
             },
+            defineStep("I am signed out with a cleanup-pending deletion for my account") { ctx, _, _ in
+                try w.prepareSignedOutRealRunnerFixture()
+                return ctx
+            },
+            defineStep("the real sign-in persistence path saves my verified identity") { ctx, _, _ in
+                await w.saveThroughRealSignInPersistence()
+                return ctx
+            },
+            defineCheck("the pending deletion cleanup completes") { _, _, _ in
+                guard let root = w.realRunnerRoot else {
+                    throw BrineStepError("the real runner fixture was not prepared")
+                }
+                let scope = try CaptureAccountScope.key(for: w.identity)
+                guard case .record(let record) = AccountDeletionLifecycleStore(container: root)
+                    .read(ownerScope: scope), record.phase == .completed else {
+                    throw BrineStepError(
+                        "the real AuthStore.save → CaptureAccountScope recovery path did not complete: \(String(describing: w.refusal)); diag=\(DeletionRecorder.shared.recorded())")
+                }
+            },
+            defineCheck("the sign-in refusal diagnostic does not report cleanupPending") { _, _, _ in
+                let lines = DeletionRecorder.shared.recorded()
+                guard !lines.contains(where: {
+                    $0.contains("account.signin.refused") && $0.contains("cleanupPending")
+                }) else {
+                    throw BrineStepError("the underlying recovery cause was flattened: \(lines)")
+                }
+            },
             defineCheck("the activation chokepoint completes the local cleanup") { _, _, _ in
                 guard w.cleanupCalls == 1 else {
                     throw BrineStepError("the production activation chokepoint did not run cleanup")
@@ -194,9 +287,12 @@ private enum InterruptedDeletionSignInRecoverySteps {
             },
             defineCheck("the sign-in diagnostics identify cleanup failure") { _, _, _ in
                 guard DeletionRecorder.shared.recorded().contains(where: {
-                    $0.contains("account.signin.refused") && $0.contains("cleanup_failed")
+                    $0.contains("account.signin.refused")
+                        && $0.contains("cleanup_failed")
+                        && $0.contains("pairingSecrets")
                 }) else {
-                    throw BrineStepError("cleanup failure was not distinguishable in diagnostics")
+                    throw BrineStepError(
+                        "cleanup failure did not retain its specific cause in diagnostics: \(DeletionRecorder.shared.recorded())")
                 }
             },
             defineCheck("the local cleanup is completed") { _, _, _ in

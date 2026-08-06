@@ -78,6 +78,7 @@ public enum AccountDeletionError: Error, Equatable, Sendable {
     case server
     case ownerUnproven
     case cleanupPending
+    case cleanupFailed(String)
     /// The server has no deletion route (404/501) — the feature is not available yet.
     ///
     /// This is NOT a connection problem and NOT the user's fault. The gateway serves only
@@ -247,6 +248,8 @@ public final class AccountDeletionModel: ObservableObject {
             }
         } catch AccountDeletionError.cleanupPending {
             phase = .blocked(scope); record("account.delete.blocked", choice.wireScope)
+        } catch AccountDeletionError.cleanupFailed {
+            phase = .blocked(scope); record("account.delete.blocked", choice.wireScope)
         } catch AccountDeletionError.routeMissing {
             phase = .routeMissing(scope); record("account.delete.failed", "\(choice.wireScope) route_missing")
         } catch AccountDeletionError.signInExpired {
@@ -275,6 +278,9 @@ public final class AccountDeletionModel: ObservableObject {
             phase = .done(scope)
             record("account.delete.completed", scope.wireScope)
         } catch AccountDeletionError.cleanupPending {
+            phase = .blocked(scope)
+            record("account.delete.blocked", scope.wireScope)
+        } catch AccountDeletionError.cleanupFailed {
             phase = .blocked(scope)
             record("account.delete.blocked", scope.wireScope)
         } catch AccountDeletionError.routeMissing {
@@ -442,7 +448,8 @@ final class CurrentOwnerSelectiveDeletionRunner: @unchecked Sendable {
             case .blocked(let reason):
                 DeletionRecorder.shared.emit(
                     "account.delete.local", "store_blocked \(reason)")
-                throw AccountDeletionError.cleanupPending
+                throw AccountDeletionError.cleanupFailed(
+                    "store_blocked \(String(describing: reason))")
             }
         } catch AccountDeletionError.cleanupPending {
             throw AccountDeletionError.cleanupPending
@@ -451,9 +458,10 @@ final class CurrentOwnerSelectiveDeletionRunner: @unchecked Sendable {
             DeletionRecorder.shared.emit("account.delete.local", "failed \(error)")
             switch lifecycle.record(ownerScope: ownerScope) {
             case .record(let record) where record.phase == .cleanupPending:
-                throw AccountDeletionError.cleanupPending
-            case .blocked:
-                throw AccountDeletionError.cleanupPending
+                throw AccountDeletionError.cleanupFailed(String(describing: error))
+            case .blocked(let reason):
+                throw AccountDeletionError.cleanupFailed(
+                    "store_blocked \(String(describing: reason))")
             default:
                 throw error
             }
