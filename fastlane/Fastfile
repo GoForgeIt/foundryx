@@ -93,7 +93,15 @@ platform :ios do
           "BUILD_NUMBER=<n> explicitly (must exceed the highest build already on TestFlight)."
         )
       end
-      next_number = [commits, latest + 1].max
+      # FLOOR. Builds 101/102/106/107 each failed with "bundle version must be higher
+      # than the previously uploaded version" AFTER a full build+sign+notarize, because
+      # the ASC query kept returning a value below what TestFlight already held (the
+      # phone was on 397 while the query answered lower). Four wasted cycles is enough:
+      # this floor sits above every build known to exist, so an under-reporting query
+      # can no longer produce a collision. The ASC result still governs ABOVE the floor,
+      # so normal monotonic behaviour is unchanged once numbering passes it.
+      floor = 500
+      next_number = [commits, latest + 1, floor].max
       UI.message("build number #{next_number} (commits=#{commits}, testflight=#{latest})")
       next_number.to_s
     end
