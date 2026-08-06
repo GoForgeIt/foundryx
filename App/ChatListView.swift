@@ -292,7 +292,7 @@ struct ChatListView: View {
             GrainEmptyState(
                 systemImage: "desktopcomputer.trianglebadge.exclamationmark",
                 title: "No computer is connected",
-                message: "Open Foundry on your Mac and sign in with the same account to reach "
+                message: "Open Solleva on your Mac and sign in with the same account to reach "
                     + "the chats you have there.")
                 .accessibilityIdentifier("chat-list-not-connected")
 

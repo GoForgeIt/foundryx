@@ -1076,7 +1076,7 @@ private struct MainTabs: View {
                         Color.clear
                     }
                 }
-                .navigationTitle("FoundryX")
+                .navigationTitle("Solleva")
             }
             .tabItem { Label(AppTab.chat.label, systemImage: AppTab.chat.systemImage) }
             .tag(TabRouter.Tab.chat)
@@ -1126,7 +1126,7 @@ private struct MainTabs: View {
             }
         }
         // The Action Button's "Ask me" chooser (Phase 5, decision #4).
-        .confirmationDialog("FoundryX", isPresented: $router.showActionChooser) {
+        .confirmationDialog("Solleva", isPresented: $router.showActionChooser) {
                 Button("Start a note") {
                 router.selected = .capture
                 manager.startMicRecording()

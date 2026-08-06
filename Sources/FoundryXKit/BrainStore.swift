@@ -19,7 +19,7 @@ public enum BrainChoice: String, CaseIterable, Sendable {
         switch self {
         case .justMyPhone: return "Just my phone"
         case .myComputer: return "My computer"
-        case .foundryCloud: return "Foundry Cloud"
+        case .foundryCloud: return "Solleva Cloud"
         }
     }
 }

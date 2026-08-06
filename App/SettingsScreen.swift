@@ -88,7 +88,7 @@ struct SettingsScreen: View {
                 // 20260630T0458_secure_web_hosted_foundry) — waitlist until it ships.
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Foundry Cloud — your cell").grainTextStyle(.body)
+                        Text("Solleva Cloud — your cell").grainTextStyle(.body)
                             .foregroundStyle(GrainColor.textMuted)
                         Text("Coming soon. Speakers, memory, and bigger models — from anywhere.")
                             .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
@@ -264,7 +264,7 @@ struct SettingsScreen: View {
                 Button("Replay the full first-run tour") { showingTour = true }
                 NavigationLink("Privacy & your data") { PrivacyView() }
             } header: {
-                Text("FoundryX")
+                Text("Solleva")
             } footer: {
                 Text("The welcome speaks differently to an expert, a person organizing their life, or a firm. Open it to explore each and pick yours.")
             }
@@ -411,7 +411,7 @@ struct SettingsScreen: View {
         if let status = WelcomeFrontDoor.connectStatus(remote.status, email: remote.email) {
             return status.text
         }
-        return "Pair with the Foundry desktop app (sign in on your Mac first)."
+        return "Pair with the Solleva desktop app (sign in on your Mac first)."
     }
 
     private func brainRow(_ c: BrainChoice, subtitle: String) -> some View {

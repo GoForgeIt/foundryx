@@ -117,7 +117,7 @@ public enum VaultEntry {
         case .off where purchaseAllowed:
             return Presentation(
                 title: "Turn on your Vault",
-                subtitle: "Search everything, chat with your memory, and let Foundry act — on your private, isolated Vault.",
+                subtitle: "Search everything, chat with your memory, and let Solleva act — on your private, isolated Vault.",
                 actionable: true,
                 showsPurchaseCTA: true)
         case .off:
@@ -160,7 +160,7 @@ public enum VaultPlan: String, CaseIterable, Equatable, Sendable {
         case .starter:
             return "Search every capture by meaning, and connect your memory to your own tools."
         case .pro:
-            return "Everything in Starter, plus chat with Foundry about anything you've captured. Larger AI allowance."
+            return "Everything in Starter, plus chat with Solleva about anything you've captured. Larger AI allowance."
         case .power:
             return "Everything in Pro, plus scheduled playbooks, advanced approvals, and premium voice recognition."
         }

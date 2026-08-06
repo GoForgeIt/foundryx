@@ -170,7 +170,7 @@ enum AmbientNotifier {
             logAnswerDelivered(answer: answer, utterance: candidate.utterance,
                                captureId: captureId, binding: binding)
         case ("lookup", nil):
-            title = "FoundryX"
+            title = "Solleva"
             body = "You wanted to look something up — I checked your memory but didn't find it: “\(candidate.utterance)”"
         case ("agent", _):
             // OWNER GATE: an agent command whose voice did NOT match the enrolled
@@ -206,7 +206,7 @@ enum AmbientNotifier {
         default:
             // Door unreachable — still surface the raw moment honestly, and let a
             // tap seed a chat (the chat itself will fail honestly if the door is down).
-            title = "FoundryX"
+            title = "Solleva"
             body = "\(candidate.summary.isEmpty ? "Something I can help with" : candidate.summary) — “\(candidate.utterance)”"
             seed = chatSeed(candidate)
         }

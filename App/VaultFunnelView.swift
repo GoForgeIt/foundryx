@@ -64,7 +64,7 @@ struct VaultFunnelView: View {
                        spinning: true)
         case .checkingPayment:
             VStack(spacing: GrainSpacing.x4) {
-                waitScreen(label: "Back in FoundryX", title: "Checking your payment…",
+                waitScreen(label: "Back in Solleva", title: "Checking your payment…",
                            body: "Welcome back. We finish on our servers and reconcile the moment you return — closing the app is safe.",
                            spinning: true)
                 // An exit from the WAITING state too, not just from a failure. Waiting is
@@ -94,7 +94,7 @@ struct VaultFunnelView: View {
             microLabel("\(action.triggerLabel) · Search everything")
             Text("This lives in your Vault")
                 .grainTextStyle(.title).multilineTextAlignment(.center)
-            Text("Asking Foundry about everything you've captured — and searching by meaning — runs on your private Vault. It's off right now.")
+            Text("Asking Solleva about everything you've captured — and searching by meaning — runs on your private Vault. It's off right now.")
                 .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
                 .multilineTextAlignment(.center)
             privacyLine("key", "Encrypted, isolated, and yours. Only your voice and login open it.")
@@ -122,8 +122,8 @@ struct VaultFunnelView: View {
                 unlockRow("magnifyingglass", "Search everything by meaning",
                           "Find any capture by what it meant, not just its words.")
                 unlockRow("bubble.left.and.bubble.right", "Ask your memory anything",
-                          "Chat with Foundry about everything you've captured.")
-                unlockRow("bolt", "Foundry acts for you",
+                          "Chat with Solleva about everything you've captured.")
+                unlockRow("bolt", "Solleva acts for you",
                           "Approved agent actions run on your private Vault.")
             }
             Spacer()

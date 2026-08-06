@@ -11,7 +11,7 @@ import Foundation
 /// hunting through view code.
 public enum ChatCopy {
     /// The composer's invitation (fullflow2 `renderChat`, :2372).
-    public static let composerPlaceholder = "Ask FoundryX"
+    public static let composerPlaceholder = "Ask Solleva"
 }
 
 /// Calm presentation of a failed send. The thread shows one of two human

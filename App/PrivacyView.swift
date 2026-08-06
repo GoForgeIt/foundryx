@@ -11,7 +11,7 @@ struct PrivacyView: View {
     var body: some View {
         List {
             Section {
-                Text("FoundryX is built so your voice notes belong to you. Here is exactly where things live — no fine print.")
+                Text("Solleva is built so your voice notes belong to you. Here is exactly where things live — no fine print.")
                     .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
             }
 

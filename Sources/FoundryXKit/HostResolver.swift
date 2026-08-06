@@ -39,7 +39,7 @@ public enum HostResolveError: Error, LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .noHostDesignated: return "No desktop is designated as your host yet — open Foundry on your Mac and press “Make this machine the host”."
+        case .noHostDesignated: return "No desktop is designated as your host yet — open Solleva on your Mac and press “Make this machine the host”."
         case .http(let c, let b): return "Host lookup failed (\(c)): \(b)"
         case .badResponse: return "Unexpected response from the gateway"
         }

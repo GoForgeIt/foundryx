@@ -115,7 +115,7 @@ public struct LocalChatEngine: Sendable {
 public enum LocalChatPresentation {
     public static let honestyNotice =
         "Answers run entirely on your phone and may be inaccurate or hallucinate. " +
-        "For accurate, cited answers across all your voice notes, upgrade to Foundry " +
+        "For accurate, cited answers across all your voice notes, upgrade to Solleva " +
         "(Cloud or your computer)."
     public static let waitlistButtonTitle = "Join the waitlist"
     /// The upgrade prompt shown instead of chat on phones without Apple Intelligence

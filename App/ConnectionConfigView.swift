@@ -20,13 +20,13 @@ struct ConnectionConfigView: View {
             VStack(alignment: .leading, spacing: GrainSpacing.x6) {
                 VStack(alignment: .leading, spacing: GrainSpacing.x1) {
                     Text("Connect").grainTextStyle(.display).foregroundStyle(GrainColor.inkEmphasis)
-                    Text("Point FoundryX at your local Foundry door.")
+                    Text("Point Solleva at your local Solleva door.")
                         .grainTextStyle(.body).foregroundStyle(GrainColor.inkSecondary)
                 }
 
                 GrainCard(.elevated) {
                     VStack(alignment: .leading, spacing: GrainSpacing.x4) {
-                        Text("Local Foundry door")
+                        Text("Local Solleva door")
                             .grainTextStyle(.caption).textCase(.uppercase)
                             .foregroundStyle(GrainColor.inkTertiary)
                         GrainTextField("http://127.0.0.1:14288", text: $urlText, label: "Door URL")

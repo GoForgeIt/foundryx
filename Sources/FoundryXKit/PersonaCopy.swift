@@ -48,7 +48,7 @@ public enum PersonaCopy {
             return PersonaWelcomeCopy(
                 headline: "Take the work back.",
                 emphasis: "",
-                sub: "Clients come for your judgment. FoundryX carries the record, recall, and follow-through.",
+                sub: "Clients come for your judgment. Solleva carries the record, recall, and follow-through.",
                 lockLine: canonicalLockLine
             )
         case .individual:

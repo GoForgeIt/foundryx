@@ -56,7 +56,7 @@ public struct DoorFailureMessage: Equatable, Sendable {
         case .noHost:
             return DoorFailureMessage(
                 text: "No computer is set up for this account yet.",
-                action: "Open Foundry on your Mac and sign in with the same account.")
+                action: "Open Solleva on your Mac and sign in with the same account.")
         case .resolving:
             return DoorFailureMessage(
                 text: "Still connecting to your computer…",
@@ -68,7 +68,7 @@ public struct DoorFailureMessage: Equatable, Sendable {
             // the host fine and the dial failed because nothing was listening on the Mac end.
             return DoorFailureMessage(
                 text: "Your computer isn't connected right now.",
-                action: "Open Foundry on your Mac and make sure it's awake.")
+                action: "Open Solleva on your Mac and make sure it's awake.")
         }
     }
 
@@ -81,7 +81,7 @@ public struct DoorFailureMessage: Equatable, Sendable {
     public static func make(doorTransportFailure: Error) -> DoorFailureMessage {
         DoorFailureMessage(
             text: "Your computer isn't connected right now.",
-            action: "Open Foundry on your Mac and make sure it's awake.")
+            action: "Open Solleva on your Mac and make sure it's awake.")
     }
 
     /// For a failed read of Kiln's SHARED conversation library.
@@ -99,11 +99,11 @@ public struct DoorFailureMessage: Equatable, Sendable {
             // The door answered — so the Mac IS reachable. What is missing is Kiln itself.
             return DoorFailureMessage(
                 text: "Kiln isn't running on your computer right now.",
-                action: "Open Foundry on your Mac and start Kiln.")
+                action: "Open Solleva on your Mac and start Kiln.")
         case .unreachable, .http:
             return DoorFailureMessage(
                 text: "Your computer couldn't reach Kiln right now.",
-                action: "Open Foundry on your Mac and make sure it's awake.")
+                action: "Open Solleva on your Mac and make sure it's awake.")
         case .unauthorized:
             return DoorFailureMessage(
                 text: "You're signed out.",
