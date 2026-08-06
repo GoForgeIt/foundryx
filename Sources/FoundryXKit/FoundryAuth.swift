@@ -172,10 +172,13 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
     /// Run the interactive OAuth flow for `provider`, persist the identity, and
     /// return it. Throws `AuthError.notConfigured` if the client-id is missing.
     @MainActor
-    public func signIn(_ provider: AuthProvider) async throws -> AuthIdentity {
+    public func signIn(
+        _ provider: AuthProvider,
+        recoveryProgress: @escaping @Sendable (DeletionSignInRecoveryEvent) -> Void = { _ in }
+    ) async throws -> AuthIdentity {
         if provider == .apple {
             let id = try await AppleSignInCoordinator().run()
-            try await saveRecoveringInterruptedDeletion(id)
+            try await saveRecoveringInterruptedDeletion(id, recoveryProgress: recoveryProgress)
             return id
         }
         guard let clientID = config.clientID(for: provider) else {
@@ -196,14 +199,15 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
             throw AuthError.providerError(Self.queryValue(callback, "error") ?? "no authorization code")
         }
         let token = try await exchange(provider, clientID: clientID, code: code, verifier: verifier, redirect: redirect)
-        try await saveRecoveringInterruptedDeletion(token)
+        try await saveRecoveringInterruptedDeletion(token, recoveryProgress: recoveryProgress)
         return token
     }
 
     private func saveRecoveringInterruptedDeletion(
-        _ identity: AuthIdentity
+        _ identity: AuthIdentity,
+        recoveryProgress: @escaping @Sendable (DeletionSignInRecoveryEvent) -> Void
     ) async throws {
-        try await AuthStore.save(identity)
+        try await AuthStore.save(identity, recoveryProgress: recoveryProgress)
     }
 
     static func persistAfterRecoveringInterruptedDeletion(
@@ -463,14 +467,18 @@ enum AuthStore {
     /// stamps it.
     static let signedInMirrorKey = "foundryx.auth.signed-in"
 
-    static func save(_ id: AuthIdentity) async throws {
+    static func save(
+        _ id: AuthIdentity,
+        recoveryProgress: @escaping @Sendable (DeletionSignInRecoveryEvent) -> Void = { _ in }
+    ) async throws {
         let data: Data
         do {
             data = try JSONEncoder().encode(id)
         } catch {
             throw AuthError.persistence("identity encoding failed: \(error.localizedDescription)")
         }
-        let activation = try await CaptureAccountScope.beginActivation(for: id)
+        let activation = try await CaptureAccountScope.beginActivation(
+            for: id, recoveryProgress: recoveryProgress)
         let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrService as String: service,
                                     kSecAttrAccount as String: account]

@@ -10,6 +10,22 @@ import SwiftUI
 // NOT YET COMPILE-VERIFIED in CI — validate in Xcode.
 @MainActor
 public final class RemoteSession: ObservableObject {
+    public enum DeletionCleanupStage: String, Equatable, Sendable {
+        case preparing
+        case signedInMirror
+        case widgetWithdrawal
+        case liveExposureClosure
+        case staleWorkCancellation
+        case barrierVerification
+        case barrierSync
+        case trackBPreferences
+        case pairingPreferences
+        case pairingSecrets
+        case localRoot
+        case legacyInputs
+        case completedSync
+    }
+
     public enum Status: Equatable, Sendable {
         case unconfigured          // this build has no remote/OAuth config
         case signedOut
@@ -21,6 +37,9 @@ public final class RemoteSession: ObservableObject {
         /// sign-in screen can offer the ONE action that resolves it — the person
         /// cannot reach Settings, which is where "Retry deletion" lives.
         case deletionCleanupPending(ownerScope: String)
+        case deletionCleanupInProgress(stage: DeletionCleanupStage)
+        case deletionCleanupFailed(stage: DeletionCleanupStage, reason: String)
+        case deletionCleanupSucceeded
     }
 
     // `internal(set)` rather than `private(set)`: the seams need to drive a status
@@ -46,6 +65,7 @@ public final class RemoteSession: ObservableObject {
     private let auth: FoundryAuth
     private let remote: RemoteConfig?
     private let log: DoorLog?
+    private var lastSignInProvider: AuthProvider?
 
     public init(log: DoorLog? = nil) {
         self.auth = FoundryAuth(log: log)
@@ -136,9 +156,31 @@ public final class RemoteSession: ObservableObject {
 
     public func signIn(_ provider: AuthProvider) async {
         guard remote != nil else { status = .unconfigured; return }
+        lastSignInProvider = provider
         note("signIn(\(provider.rawValue)) start")
         do {
-            let id = try await auth.signIn(provider)
+            let id = try await auth.signIn(provider) { [weak self] event in
+                Task { @MainActor in
+                    guard let self else { return }
+                    switch event {
+                    case .required:
+                        self.status = .deletionCleanupPending(ownerScope: "pending")
+                    case .stage(let stage):
+                        self.status = .deletionCleanupInProgress(stage: stage)
+                    case .succeeded:
+                        self.status = .deletionCleanupSucceeded
+                    case .failed(let stage, let reason):
+                        self.status = .deletionCleanupFailed(stage: stage, reason: reason)
+                    }
+                }
+            }
+            // Let the final recovery event reach the main actor, then keep the
+            // completion sentence on screen long enough to be perceived before
+            // ordinary host resolution replaces it.
+            await Task.yield()
+            if case .deletionCleanupSucceeded = status {
+                try? await Task.sleep(for: .milliseconds(650))
+            }
             relay = nil
             idToken = nil
             boundIdToken = nil
@@ -156,7 +198,11 @@ public final class RemoteSession: ObservableObject {
                 // NOT `.error`: a generic message with no action is what stranded
                 // someone on the login screen with a deleted server account and no
                 // way forward.
-                status = .deletionCleanupPending(ownerScope: scope)
+                if case .deletionCleanupFailed = status {
+                    // Preserve the named stage supplied by the real cleanup path.
+                } else {
+                    status = .deletionCleanupPending(ownerScope: scope)
+                }
                 note("signIn refused — deletion cleanup pending for \(scope)")
             } else {
                 status = .error(e.localizedDescription)
@@ -168,6 +214,11 @@ public final class RemoteSession: ObservableObject {
             status = .error(error.localizedDescription)
             note("signIn FAILED: \(error.localizedDescription)")
         }
+    }
+
+    public func retryInterruptedDeletionSignIn() async {
+        guard let provider = lastSignInProvider else { return }
+        await signIn(provider)
     }
 
     /// Finish a deletion that never completed, from the LOGIN screen.
@@ -185,7 +236,10 @@ public final class RemoteSession: ObservableObject {
     public func finishInterruptedDeletion(
         eraseLocal: @Sendable () async throws -> Void
     ) async -> Bool {
-        guard case .deletionCleanupPending = status else { return false }
+        switch status {
+        case .deletionCleanupPending, .deletionCleanupFailed: break
+        default: return false
+        }
         DeletionRecorder.shared.emit("account.signin.recover", "start")
         do {
             try await eraseLocal()
@@ -384,6 +438,13 @@ public final class RemoteSession: ObservableObject {
         case .microsoft: return "Microsoft account"
         }
     }
+}
+
+public enum DeletionSignInRecoveryEvent: Equatable, Sendable {
+    case required
+    case stage(RemoteSession.DeletionCleanupStage)
+    case succeeded
+    case failed(RemoteSession.DeletionCleanupStage, String)
 }
 
 /// Build-time feature flags. `mux` activates the multiplexed door transport (one

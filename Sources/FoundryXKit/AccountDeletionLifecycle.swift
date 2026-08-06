@@ -953,6 +953,7 @@ final class AccountDeletionLifecycle: @unchecked Sendable {
     private let faultInjector: DeletionFaultInjector
     private let eventObserver:
         @Sendable (AccountDeletionLifecycleEvent) -> Void
+    private let progressObserver: @Sendable (String) -> Void
     private var activeOperations: Set<String> = []
 
     private(set) var lockStateForTests: LockState = .unlocked
@@ -964,12 +965,14 @@ final class AccountDeletionLifecycle: @unchecked Sendable {
         faultInjector: DeletionFaultInjector = .none,
         eventObserver:
             @escaping @Sendable (AccountDeletionLifecycleEvent) -> Void
-                = { _ in }
+                = { _ in },
+        progressObserver: @escaping @Sendable (String) -> Void = { _ in }
     ) {
         self.store = store
         self.environment = environment
         self.faultInjector = faultInjector
         self.eventObserver = eventObserver
+        self.progressObserver = progressObserver
     }
 
     func record(
@@ -1061,11 +1064,13 @@ final class AccountDeletionLifecycle: @unchecked Sendable {
         var record = starting
 
         if !immediateGatesClosed {
+            progressObserver("signedInMirror")
             try inject(.before, .resolutionGeneration)
         }
         let blockedGeneration = try reassertedGeneration
             ?? environment.blockResolution(binding)
         if !immediateGatesClosed {
+            progressObserver("widgetWithdrawal")
             try inject(.after, .resolutionGeneration)
         }
         if !immediateGatesClosed {
@@ -1089,6 +1094,7 @@ final class AccountDeletionLifecycle: @unchecked Sendable {
             try inject(.after, .widgetWithdrawal)
         }
 
+        progressObserver("liveExposureClosure")
         try inject(.before, .liveExposureClosure)
         let live = await environment.closeLiveExposures(binding)
         guard Self.allAcknowledged(live) else {
@@ -1096,6 +1102,7 @@ final class AccountDeletionLifecycle: @unchecked Sendable {
         }
         try inject(.after, .liveExposureClosure)
 
+        progressObserver("staleWorkCancellation")
         try inject(.before, .staleWorkCancellation)
         let stale = await environment.cancelStaleWork(binding)
         guard Self.allAcknowledged(stale) else {
@@ -1103,12 +1110,14 @@ final class AccountDeletionLifecycle: @unchecked Sendable {
         }
         try inject(.after, .staleWorkCancellation)
 
+        progressObserver("barrierVerification")
         try inject(.before, .barrierVerification)
         guard try environment.verifyExposureBarrier(live, stale) else {
             throw AccountDeletionLifecycleError.exposureBarrierFailed
         }
         try inject(.after, .barrierVerification)
 
+        progressObserver("barrierSync")
         try inject(.before, .barrierSync)
         do {
             record = try store.compareAndSwap(
@@ -1136,6 +1145,7 @@ final class AccountDeletionLifecycle: @unchecked Sendable {
         let legacyOwned = try environment.legacyOwnerScope() == binding.scope
         for group in AccountDeletionCleanupGroup.allCases
             .dropFirst(record.completedGroups.count) {
+            progressObserver(group.rawValue)
             try inject(.before, DeletionFaultStage(rawValue: group.rawValue)!)
             do {
                 try environment.removeGroup(group, binding, legacyOwned)
@@ -1165,6 +1175,7 @@ final class AccountDeletionLifecycle: @unchecked Sendable {
             try inject(.after, DeletionFaultStage(rawValue: group.rawValue)!)
         }
 
+        progressObserver("completedSync")
         try inject(.before, .completedSync)
         do {
             record = try store.compareAndSwap(
@@ -1425,7 +1436,8 @@ extension AccountDeletionLifecycle {
             @escaping @Sendable (String) -> AuthIdentity?,
         legacyEnumerationObserver:
             @escaping @Sendable (URL) -> Void,
-        faultInjector: DeletionFaultInjector = .none
+        faultInjector: DeletionFaultInjector = .none,
+        progressObserver: @escaping @Sendable (String) -> Void = { _ in }
     ) -> AccountDeletionLifecycle {
         let context = LiveAccountDeletionContext(
             container: container,
@@ -1502,6 +1514,7 @@ extension AccountDeletionLifecycle {
         return AccountDeletionLifecycle(
             store: AccountDeletionLifecycleStore(container: container),
             environment: environment,
-            faultInjector: faultInjector)
+            faultInjector: faultInjector,
+            progressObserver: progressObserver)
     }
 }

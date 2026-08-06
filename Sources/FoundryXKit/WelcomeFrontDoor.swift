@@ -26,6 +26,59 @@ public struct WelcomeConnectStatus: Equatable, Sendable {
 }
 
 public enum WelcomeFrontDoor {
+    public struct SignInRecoveryPresentation: Equatable, Sendable {
+        public let text: String
+        public let action: String?
+    }
+
+    public static func signInRecoveryPresentation(
+        _ status: RemoteSession.Status
+    ) -> SignInRecoveryPresentation? {
+        switch status {
+        case .deletionCleanupPending:
+            return .init(
+                text: "Deleting this account previously did not finish. It must finish before you can sign in.",
+                action: nil)
+        case .deletionCleanupInProgress(let stage):
+            return .init(
+                text: "Finishing previous deletion: \(progressPhrase(stage))…",
+                action: nil)
+        case .deletionCleanupFailed(let stage, let reason):
+            return .init(
+                text: "\(stageTitle(stage)) couldn't be removed (\(reason)). Your deletion is still incomplete.",
+                action: "Retry cleanup")
+        case .deletionCleanupSucceeded:
+            return .init(
+                text: "Previous deletion finished. Continuing sign-in…",
+                action: nil)
+        default:
+            return nil
+        }
+    }
+
+    private static func stageTitle(_ stage: RemoteSession.DeletionCleanupStage) -> String {
+        switch stage {
+        case .pairingSecrets: return "Pairing secrets"
+        case .pairingPreferences: return "Pairing preferences"
+        case .trackBPreferences: return "Account preferences"
+        case .localRoot: return "Local account data"
+        case .legacyInputs: return "Legacy account data"
+        case .signedInMirror: return "Sign-in state"
+        case .widgetWithdrawal: return "Widget data"
+        case .liveExposureClosure: return "Open account activity"
+        case .staleWorkCancellation: return "Background account work"
+        case .barrierVerification, .barrierSync: return "Deletion safety barrier"
+        case .completedSync: return "Deletion completion record"
+        case .preparing: return "Deletion cleanup"
+        }
+    }
+
+    private static func progressPhrase(_ stage: RemoteSession.DeletionCleanupStage) -> String {
+        switch stage {
+        case .pairingSecrets: return "removing pairing secrets"
+        default: return "finishing \(stageTitle(stage).lowercased())"
+        }
+    }
 
     /// Which rendition of the welcome fronts the `.signInGate` destination.
     public enum Surface: Equatable, Sendable {
@@ -68,7 +121,8 @@ public enum WelcomeFrontDoor {
     public static func connectStatus(_ status: RemoteSession.Status,
                                      email: String?) -> WelcomeConnectStatus? {
         switch status {
-        case .deletionCleanupPending:
+        case .deletionCleanupPending, .deletionCleanupInProgress,
+             .deletionCleanupFailed, .deletionCleanupSucceeded:
             // No connection pill: this is not a connection state, and a hopeful
             // "Connecting…" would paper over a refusal the person must act on.
             return nil
@@ -96,9 +150,9 @@ public enum WelcomeFrontDoor {
         // THE line the person actually reads after a refused sign-in. Returning
         // nil here is what made a deleted account look like nothing happened: they
         // tapped Google, came back, and landed on the same screen with no words.
-        case .deletionCleanupPending:
-            return "Deleting this account never finished on this iPhone. "
-                + "Finish it to use this account again."
+        case .deletionCleanupPending, .deletionCleanupInProgress,
+             .deletionCleanupFailed, .deletionCleanupSucceeded:
+            return signInRecoveryPresentation(status)?.text
         case .signedOut, .connected, .noHost: return nil
         }
     }

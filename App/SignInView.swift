@@ -111,6 +111,11 @@ struct SignInView: View {
                 }
                 .buttonStyle(.plain)
             }
+            if case .deletionCleanupFailed = remote.status {
+                GrainButton("Retry cleanup", variant: .filled, size: .sm) {
+                    Task { await remote.retryInterruptedDeletionSignIn() }
+                }
+            }
         } else {
             GrainButton("Retry connection", variant: .filled, size: .sm) {
                 Task { await remote.resolve() }
@@ -139,7 +144,9 @@ struct SignInView: View {
         switch remote.status {
         case .connected: return GrainColor.sage
         case .resolving: return GrainColor.amber
-        case .noHost, .error, .deletionCleanupPending: return GrainColor.amber
+        case .noHost, .error, .deletionCleanupPending,
+             .deletionCleanupInProgress, .deletionCleanupFailed,
+             .deletionCleanupSucceeded: return GrainColor.amber
         case .signedOut, .unconfigured: return GrainColor.inkTertiary
         }
     }
@@ -156,9 +163,10 @@ struct SignInView: View {
         // Named plainly on the screen the person is actually looking at. This used
         // to fall through to nothing, so a deleted account read as a tap that did
         // not register.
-        case .deletionCleanupPending:
-            return "Deleting this account never finished on this iPhone. "
-                + "Finish it to use this account again." 
+        case .deletionCleanupPending, .deletionCleanupInProgress,
+             .deletionCleanupFailed, .deletionCleanupSucceeded:
+            return WelcomeFrontDoor.signInRecoveryPresentation(remote.status)?.text
+                ?? "A previous deletion must finish before you can sign in."
         }
     }
 }

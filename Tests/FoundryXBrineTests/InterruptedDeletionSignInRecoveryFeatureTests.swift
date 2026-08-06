@@ -49,6 +49,7 @@ private final class InterruptedDeletionSignInRecoveryWorld: @unchecked Sendable 
     var activationContinued = false
     var liveCleanupFails = false
     var realRunnerRoot: URL?
+    var visibleStatus: RemoteSession.Status = .signedOut
 
     func reset(_ record: Record) {
         self.record = record
@@ -58,6 +59,7 @@ private final class InterruptedDeletionSignInRecoveryWorld: @unchecked Sendable 
         refusal = nil
         beganCompleted = record == .completed
         DeletionRecorder.shared.clear()
+        visibleStatus = .signedOut
     }
 
     func signIn() async {
@@ -322,6 +324,50 @@ private enum InterruptedDeletionSignInRecoverySteps {
                           $0.contains("account.signin.refused") && $0.contains("cleanup_failed")
                       }) else {
                     throw BrineStepError("cleanup failure was not typed and diagnosed")
+                }
+            },
+            defineCheck("I see that a previous deletion must finish before I can sign in") { _, _, _ in
+                let presentation = WelcomeFrontDoor.signInRecoveryPresentation(
+                    .deletionCleanupPending(ownerScope: "acct-returning0001"))
+                guard presentation?.text.contains("must finish before you can sign in") == true else {
+                    throw BrineStepError("the real sign-in presentation did not explain the refusal")
+                }
+            },
+            defineStep("sign-in cleanup reaches the pairing secrets stage") { ctx, _, _ in
+                w.visibleStatus = .deletionCleanupInProgress(stage: .pairingSecrets)
+                return ctx
+            },
+            defineCheck("I see that pairing secrets are being removed") { _, _, _ in
+                let presentation = WelcomeFrontDoor.signInRecoveryPresentation(w.visibleStatus)
+                guard presentation?.text == "Finishing previous deletion: removing pairing secrets…" else {
+                    throw BrineStepError("named cleanup progress was not rendered")
+                }
+            },
+            defineStep("sign-in cleanup fails at the pairing secrets stage") { ctx, _, _ in
+                w.visibleStatus = .deletionCleanupFailed(
+                    stage: .pairingSecrets, reason: "durability")
+                return ctx
+            },
+            defineCheck("I see that cleanup failed at Pairing secrets") { _, _, _ in
+                let presentation = WelcomeFrontDoor.signInRecoveryPresentation(w.visibleStatus)
+                guard presentation?.text.contains("Pairing secrets") == true,
+                      presentation?.text.contains("couldn't be removed") == true else {
+                    throw BrineStepError("the failed stage was hidden from the person")
+                }
+            },
+            defineCheck("I am offered to retry cleanup") { _, _, _ in
+                guard WelcomeFrontDoor.signInRecoveryPresentation(w.visibleStatus)?.action == "Retry cleanup" else {
+                    throw BrineStepError("cleanup failure did not render a retry action")
+                }
+            },
+            defineStep("sign-in cleanup succeeds") { ctx, _, _ in
+                w.visibleStatus = .deletionCleanupSucceeded
+                return ctx
+            },
+            defineCheck("I see that cleanup finished and sign-in is continuing") { _, _, _ in
+                guard WelcomeFrontDoor.signInRecoveryPresentation(w.visibleStatus)?.text
+                        == "Previous deletion finished. Continuing sign-in…" else {
+                    throw BrineStepError("cleanup success was invisible")
                 }
             },
         ]

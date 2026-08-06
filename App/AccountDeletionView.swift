@@ -97,6 +97,17 @@ struct AccountDeletionView: View {
                     .disabled(isBusy)
                 }
             }
+            if case .incomplete(let scope, let stage, let reason) = model.phase {
+                Section {
+                    Text("Deletion is incomplete at \(stage): \(reason). This account stays closed until every erase step finishes.")
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.dangerRed)
+                    Button("Retry deletion") {
+                        Task { await run(scope) }
+                    }
+                    .disabled(isBusy)
+                }
+            }
         }
         .grainBackground()
         .navigationTitle("Delete account")

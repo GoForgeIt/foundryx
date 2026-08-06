@@ -41,6 +41,13 @@ Feature: Deleting my account tells me the truth about why it failed
     Then the account is deleted on the server
     And this account's local data is erased
 
+  Scenario: an incomplete local erase records the stage and reason
+    Given my sign-in is valid
+    And local deletion cannot durably remove pairing secrets
+    When I delete my account everywhere
+    Then deletion remains incomplete at pairing secrets because of durability
+    And I can retry the incomplete deletion
+
   Scenario: a deletion the server isn't serving says so, and does not blame my connection
     The route exists now, so a 404 means this app is pointed somewhere that is not
     serving it. That is still not something retrying or a better signal will fix.

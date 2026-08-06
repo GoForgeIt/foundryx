@@ -33,6 +33,7 @@ private final class DeletionTruthWorld: @unchecked Sendable {
     var model: AccountDeletionModel!
     /// How many times the central router drove the app to signed-out.
     var signedOutCount = 0
+    var localFailure: AccountDeletionError?
 
     @MainActor
     func makeModel() {
@@ -43,9 +44,13 @@ private final class DeletionTruthWorld: @unchecked Sendable {
         presentedToken = nil
         deletedOnServer = false
         localErased = false
+        localFailure = nil
         let box = self
         let service = LiveAccountDeletionService(
-            eraseLocal: { box.localErased = true },
+            eraseLocal: {
+                if let failure = box.localFailure { throw failure }
+                box.localErased = true
+            },
             deleteRemote: { _, idToken in
                 // Mirrors the production wiring: refresh at request time, fall back to the
                 // snapshot, and treat a missing token as an AUTH failure rather than a
@@ -109,6 +114,24 @@ private enum DeletionTruthSteps {
             defineStep("I delete my account everywhere") { ctx, _, _ in
                 await w.deleteEverywhere()
                 return ctx
+            },
+            defineStep("local deletion cannot durably remove pairing secrets") { ctx, _, _ in
+                w.localFailure = .cleanupFailed(
+                    "cleanupStepFailed(\"pairingSecrets\", \"durability\")")
+                return ctx
+            },
+            defineCheck("deletion remains incomplete at pairing secrets because of durability") { _, _, _ in
+                let phase = await MainActor.run { w.model.phase }
+                guard case .incomplete(_, let stage, let reason) = phase,
+                      stage == "pairingSecrets", reason == "durability" else {
+                    throw BrineStepError("the incomplete stage/reason was discarded: \(phase)")
+                }
+            },
+            defineCheck("I can retry the incomplete deletion") { _, _, _ in
+                let phase = await MainActor.run { w.model.phase }
+                guard case .incomplete = phase else {
+                    throw BrineStepError("the retryable incomplete state was not retained")
+                }
             },
 
             defineCheck("the app refreshes my token first") { _, _, _ in

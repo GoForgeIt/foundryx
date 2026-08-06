@@ -205,7 +205,11 @@ struct RootView: View {
                         ? WelcomeSignInActions(
                             providers: remote.isConfigured ? remote.providers : [],
                             statusText: WelcomeFrontDoor.signInCaption(remote.status),
-                            onTap: { p in Task { await remote.signIn(p) } })
+                            onTap: { p in Task { await remote.signIn(p) } },
+                            onRetryCleanup: {
+                                guard case .deletionCleanupFailed = remote.status else { return }
+                                Task { await remote.retryInterruptedDeletionSignIn() }
+                            })
                         : nil)
             case .computerBrain:
                 if let target = remote.makeDoorTarget() {

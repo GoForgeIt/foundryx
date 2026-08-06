@@ -174,6 +174,7 @@ struct WelcomeSignInActions {
     /// unconfigured-build notice). nil = nothing to say.
     let statusText: String?
     let onTap: (AuthProvider) -> Void
+    var onRetryCleanup: (() -> Void)? = nil
 }
 
 struct PersonaWelcomeStep: View {
@@ -329,6 +330,11 @@ struct PersonaWelcomeStep: View {
                     .grainTextStyle(.caption)
                     .foregroundStyle(GrainColor.textFaint)
                     .multilineTextAlignment(.center)
+            }
+            if let retry = signIn.onRetryCleanup {
+                GrainButton("Retry cleanup", variant: .filled, size: .sm) {
+                    retry()
+                }
             }
         }
         .padding(.horizontal, GrainSpacing.x4)

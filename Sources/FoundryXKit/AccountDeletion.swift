@@ -204,6 +204,9 @@ public final class AccountDeletionModel: ObservableObject {
         /// The server cannot do this yet. Distinct so the UI stops telling the user to
         /// retry something that can never succeed.
         case blocked(AccountDeletionScope)
+        /// Required local erase stopped. The stage and reason are retained for the
+        /// person and for a safe retry; this is never represented as success.
+        case incomplete(AccountDeletionScope, stage: String, reason: String)
     }
 
     @Published public private(set) var phase: Phase = .idle
@@ -248,8 +251,10 @@ public final class AccountDeletionModel: ObservableObject {
             }
         } catch AccountDeletionError.cleanupPending {
             phase = .blocked(scope); record("account.delete.blocked", choice.wireScope)
-        } catch AccountDeletionError.cleanupFailed {
-            phase = .blocked(scope); record("account.delete.blocked", choice.wireScope)
+        } catch AccountDeletionError.cleanupFailed(let detail) {
+            let failure = Self.cleanupFailure(detail)
+            phase = .incomplete(scope, stage: failure.stage, reason: failure.reason)
+            record("account.delete.incomplete", "\(choice.wireScope) stage=\(failure.stage) reason=\(failure.reason)")
         } catch AccountDeletionError.routeMissing {
             phase = .routeMissing(scope); record("account.delete.failed", "\(choice.wireScope) route_missing")
         } catch AccountDeletionError.signInExpired {
@@ -280,9 +285,10 @@ public final class AccountDeletionModel: ObservableObject {
         } catch AccountDeletionError.cleanupPending {
             phase = .blocked(scope)
             record("account.delete.blocked", scope.wireScope)
-        } catch AccountDeletionError.cleanupFailed {
-            phase = .blocked(scope)
-            record("account.delete.blocked", scope.wireScope)
+        } catch AccountDeletionError.cleanupFailed(let detail) {
+            let failure = Self.cleanupFailure(detail)
+            phase = .incomplete(scope, stage: failure.stage, reason: failure.reason)
+            record("account.delete.incomplete", "\(scope.wireScope) stage=\(failure.stage) reason=\(failure.reason)")
         } catch AccountDeletionError.routeMissing {
             phase = .routeMissing(scope)
             record("account.delete.failed", "\(scope.wireScope) route_missing")
@@ -297,6 +303,17 @@ public final class AccountDeletionModel: ObservableObject {
             phase = .failed(scope)
             record("account.delete.failed", "\(scope.wireScope) server")
         }
+    }
+
+    private static func cleanupFailure(_ detail: String) -> (stage: String, reason: String) {
+        for stage in DeletionFaultStage.requiredV1.map(\.rawValue) {
+            if detail.contains(stage) {
+                let reason = detail.lowercased().contains("durability")
+                    ? "durability" : detail
+                return (stage, reason)
+            }
+        }
+        return ("preparing", detail)
     }
 }
 
@@ -357,6 +374,7 @@ final class CurrentOwnerSelectiveDeletionRunner: @unchecked Sendable {
     private let pairingServices: (cell: String, door: String)
     private let exposureCoordinator: AccountExposureCoordinator
     private let identityProvider: @Sendable () -> AuthIdentity?
+    private let progress: @Sendable (DeletionSignInRecoveryEvent) -> Void
 
     init(
         container: URL,
@@ -364,7 +382,8 @@ final class CurrentOwnerSelectiveDeletionRunner: @unchecked Sendable {
         secretStore: any PairingSecretStore,
         pairingServices: (cell: String, door: String),
         exposureCoordinator: AccountExposureCoordinator,
-        identityProvider: @escaping @Sendable () -> AuthIdentity?
+        identityProvider: @escaping @Sendable () -> AuthIdentity?,
+        progress: @escaping @Sendable (DeletionSignInRecoveryEvent) -> Void = { _ in }
     ) {
         self.containerProvider = { container }
         self.defaults = defaults
@@ -372,6 +391,7 @@ final class CurrentOwnerSelectiveDeletionRunner: @unchecked Sendable {
         self.pairingServices = pairingServices
         self.exposureCoordinator = exposureCoordinator
         self.identityProvider = identityProvider
+        self.progress = progress
     }
 
     init(
@@ -380,7 +400,8 @@ final class CurrentOwnerSelectiveDeletionRunner: @unchecked Sendable {
         secretStore: any PairingSecretStore,
         pairingServices: (cell: String, door: String),
         exposureCoordinator: AccountExposureCoordinator,
-        identityProvider: @escaping @Sendable () -> AuthIdentity?
+        identityProvider: @escaping @Sendable () -> AuthIdentity?,
+        progress: @escaping @Sendable (DeletionSignInRecoveryEvent) -> Void = { _ in }
     ) {
         self.containerProvider = containerProvider
         self.defaults = defaults
@@ -388,6 +409,7 @@ final class CurrentOwnerSelectiveDeletionRunner: @unchecked Sendable {
         self.pairingServices = pairingServices
         self.exposureCoordinator = exposureCoordinator
         self.identityProvider = identityProvider
+        self.progress = progress
     }
 
     func eraseVerifiedCurrentOwner() async throws {
@@ -417,7 +439,10 @@ final class CurrentOwnerSelectiveDeletionRunner: @unchecked Sendable {
             verifiedIdentityForScope: { requestedScope in
                 requestedScope == ownerScope ? identity : nil
             },
-            legacyEnumerationObserver: { _ in })
+            legacyEnumerationObserver: { _ in },
+            progressObserver: { [progress] stage in
+                progress(.stage(Self.presentationStage(stage)))
+            })
 
         // Which PATH this took, recorded before it can be flattened. Several
         // distinct failures — a stale binding, an unproven owner, a cleanup group
@@ -467,4 +492,42 @@ final class CurrentOwnerSelectiveDeletionRunner: @unchecked Sendable {
             }
         }
     }
+
+    private static func presentationStage(
+        _ stage: String
+    ) -> RemoteSession.DeletionCleanupStage {
+        RemoteSession.DeletionCleanupStage(rawValue: stage) ?? .preparing
+    }
+}
+
+enum AccountDeletionRecoveryFailure {
+    static func describe(
+        _ error: Error
+    ) -> (stage: RemoteSession.DeletionCleanupStage, reason: String) {
+        if case AccountDeletionLifecycleError.cleanupStepFailed(let stage, let reason) = error {
+            return (RemoteSession.DeletionCleanupStage(rawValue: stage) ?? .preparing, reason)
+        }
+        if case AccountDeletionLifecycleError.cleanupVerificationFailed(let group) = error {
+            return (RemoteSession.DeletionCleanupStage(rawValue: group.rawValue) ?? .preparing,
+                    "verification failed")
+        }
+        if case AccountDeletionError.cleanupFailed(let detail) = error {
+            for stage in RemoteSession.DeletionCleanupStage.allCasesForDeletion {
+                if detail.contains(stage.rawValue) {
+                    return (stage, detail.lowercased().contains("durability")
+                            ? "durability" : detail)
+                }
+            }
+        }
+        return (.preparing, String(describing: error))
+    }
+}
+
+private extension RemoteSession.DeletionCleanupStage {
+    static let allCasesForDeletion: [Self] = [
+        .signedInMirror, .widgetWithdrawal, .liveExposureClosure,
+        .staleWorkCancellation, .barrierVerification, .barrierSync,
+        .trackBPreferences, .pairingPreferences, .pairingSecrets,
+        .localRoot, .legacyInputs, .completedSync,
+    ]
 }

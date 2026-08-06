@@ -451,13 +451,17 @@ public enum CaptureAccountScope {
 
     /// Persist a PENDING boundary before AuthStore changes the keychain. While pending,
     /// background restoration is unauthorized and currentRoot fails closed.
-    static func beginActivation(for identity: AuthIdentity) async throws -> ActivationTransaction {
+    static func beginActivation(
+        for identity: AuthIdentity,
+        recoveryProgress: @escaping @Sendable (DeletionSignInRecoveryEvent) -> Void = { _ in }
+    ) async throws -> ActivationTransaction {
         let target = try persistenceQueue.sync {
             let current = try readActivationRecordForMutation()
             return try resolveIdentityScope(identity, against: current).scope
         }
         let completedDeletion = try await completedDeletionAllowsReturn(
-            ownerScope: target, identity: identity)
+            ownerScope: target, identity: identity,
+            recoveryProgress: recoveryProgress)
         return try beginActivationAfterDeletionCheck(
             identity, completedDeletion: completedDeletion)
     }
@@ -2061,7 +2065,8 @@ public enum CaptureAccountScope {
 
     private static func completedDeletionAllowsReturn(
         ownerScope: String,
-        identity: AuthIdentity
+        identity: AuthIdentity,
+        recoveryProgress: @escaping @Sendable (DeletionSignInRecoveryEvent) -> Void = { _ in }
     ) async throws -> Bool {
         let store = AccountDeletionLifecycleStore(
             container: try durableContainer())
@@ -2071,6 +2076,7 @@ public enum CaptureAccountScope {
         case .record(let record) where record.phase == .completed:
             return true
         case .record:
+            recoveryProgress(.required)
             installResolution(
                 .blocked, widgetOwner: nil, identityTransition: true)
             do {
@@ -2092,13 +2098,17 @@ public enum CaptureAccountScope {
                         secretStore: SystemPairingSecretStore(),
                         pairingServices: services,
                         exposureCoordinator: .process,
-                        identityProvider: { identity })
+                        identityProvider: { identity },
+                        progress: recoveryProgress)
                     try await runner.eraseVerifiedCurrentOwner()
                 }
+                recoveryProgress(.succeeded)
                 DeletionRecorder.shared.emit(
                     "account.signin.cleanup_completed", "ok")
                 return true
             } catch {
+                let detail = AccountDeletionRecoveryFailure.describe(error)
+                recoveryProgress(.failed(detail.stage, detail.reason))
                 DeletionRecorder.shared.emit(
                     "account.signin.refused", "cleanup_failed \(error)")
                 throw CaptureAccountScopeError.deletionCleanupPending(

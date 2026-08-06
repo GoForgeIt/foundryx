@@ -28,6 +28,20 @@ public struct DoorFailureMessage: Equatable, Sendable {
             return DoorFailureMessage(
                 text: "Deleting this account never finished on this iPhone.",
                 action: "Finish deleting it to use this account again.")
+        case .deletionCleanupInProgress:
+            return DoorFailureMessage(
+                text: WelcomeFrontDoor.signInRecoveryPresentation(status)?.text
+                    ?? "Finishing the previous deletion…",
+                action: nil)
+        case .deletionCleanupFailed:
+            return DoorFailureMessage(
+                text: WelcomeFrontDoor.signInRecoveryPresentation(status)?.text
+                    ?? "The previous deletion is still incomplete.",
+                action: "Retry cleanup")
+        case .deletionCleanupSucceeded:
+            return DoorFailureMessage(
+                text: "Previous deletion finished. Continuing sign-in…",
+                action: nil)
         case .signedOut:
             // Post-2026-07-23 this should be unreachable from inside the app (RootGate now
             // requires sign-in), but it stays honest rather than falling through to a

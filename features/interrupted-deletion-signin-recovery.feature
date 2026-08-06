@@ -6,6 +6,27 @@ Feature: An interrupted deletion never locks me out of my own app
     Then the local cleanup is completed
     And I am signed in
 
+  Scenario: A pending deletion refusal is visible on the sign-in screen
+    Given a deletion record exists for my account that never finished
+    When I sign in with that account
+    Then I see that a previous deletion must finish before I can sign in
+
+  Scenario: Cleanup progress is visible by named stage
+    Given a deletion record exists for my account that never finished
+    When sign-in cleanup reaches the pairing secrets stage
+    Then I see that pairing secrets are being removed
+
+  Scenario: A named cleanup failure is visible and retryable
+    Given a deletion record exists for my account that never finished
+    When sign-in cleanup fails at the pairing secrets stage
+    Then I see that cleanup failed at Pairing secrets
+    And I am offered to retry cleanup
+
+  Scenario: Successful cleanup visibly continues sign-in
+    Given a deletion record exists for my account that never finished
+    When sign-in cleanup succeeds
+    Then I see that cleanup finished and sign-in is continuing
+
   Scenario: The app sign-in activation chokepoint finishes an interrupted deletion
     Given the app sign-in path finds an unfinished deletion for my account
     When the app begins account activation for my sign-in
