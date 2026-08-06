@@ -72,9 +72,17 @@ platform :ios do
     build_number = ENV["BUILD_NUMBER"] || begin
       commits = sh("cd .. && git rev-list --count HEAD").strip.to_i
       latest = begin
+        # `version:` is REQUIRED, not optional. Without it the query answers for whatever
+        # version ASC considers current, which returned a STALE number while builds
+        # 390-397 existed — every computed number then collided and the upload was
+        # rejected after a full build (2026-08-05, builds 101/102/106). Read the
+        # marketing version from project.yml so this cannot drift from what ships.
+        marketing = File.read("../project.yml")[/MARKETING_VERSION:\s*"([^"]+)"/, 1]
+        UI.user_error!("could not read MARKETING_VERSION from project.yml") if marketing.nil?
         latest_testflight_build_number(
           api_key: api_key,
           app_identifier: "com.goforgeit.foundryx",
+          version: marketing,
           initial_build_number: 0,
         ).to_i
       rescue => e
