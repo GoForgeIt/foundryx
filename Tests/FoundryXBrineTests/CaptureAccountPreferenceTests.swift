@@ -736,13 +736,13 @@ final class CaptureAccountPreferenceTests: ProcessGlobalStateTestCase {
         let coordinator = AccountExposureCoordinator()
         var releasedLive: Exposure? = Exposure(
             "released-live", binding: fixture.binding)
-        weak var weakLive = releasedLive
+        weak let weakLive = releasedLive
         _ = coordinator.registerExposure(try XCTUnwrap(releasedLive))
         releasedLive = nil
         XCTAssertNil(weakLive)
         var releasedWork: Work? = Work(
             "released-work", binding: fixture.binding)
-        weak var weakWork = releasedWork
+        weak let weakWork = releasedWork
         _ = coordinator.registerStaleWork(try XCTUnwrap(releasedWork))
         releasedWork = nil
         XCTAssertNil(weakWork)
@@ -848,7 +848,7 @@ final class CaptureAccountPreferenceTests: ProcessGlobalStateTestCase {
                 owner.record(expected)
                 return .closed
             })
-        weak var weakReleased = released
+        weak let weakReleased = released
         coordinator.register(try XCTUnwrap(released))
         released = nil
         XCTAssertNil(weakReleased)

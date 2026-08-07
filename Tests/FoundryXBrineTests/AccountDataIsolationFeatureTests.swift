@@ -2158,7 +2158,7 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
     }
 
     func ownerNeverChoseGrading() throws {
-        try queue.sync {
+        queue.sync {
             scopeDefaults.removeObject(
                 forKey: AccountPreferenceCatalog.ambientGrading.canonicalKey)
             state.explicitGradingEnabled = false
@@ -4571,6 +4571,10 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         CaptureAccountScope.setContainerForTests(captureContainer)
         CaptureAccountScope.setApplicationSupportRootForTests(applicationSupportRoot)
         CaptureAccountScope.setDefaultsForTests(scopeDefaults)
+        // Every scenario declares its own identity transitions. Do not let the
+        // developer machine's real FoundryX Keychain identity turn a hermetic
+        // pre-sign-in fixture into production's intentionally fail-closed scope.
+        CaptureAccountScope.setIdentityPresenceForTests(.absent)
         CaptureAccountScope.setPairingKeychainServicesForTests(
             cell: cellKeychainService,
             door: doorKeychainService)

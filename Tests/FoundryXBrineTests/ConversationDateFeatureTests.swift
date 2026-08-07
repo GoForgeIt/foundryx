@@ -79,7 +79,7 @@ private enum ConversationDateSteps {
 
     static func make(world w: ConversationDateWorld) -> [StepDefinition] {
         // Reusable "now" reference for the local-bucketing scenario.
-        var local = pdtCalendar()
+        let local = pdtCalendar()
         let start = local.date(from: DateComponents(year: 2026, month: 6, day: 25, hour: 20, minute: 25))!
         let now = local.date(from: DateComponents(year: 2026, month: 6, day: 26, hour: 12, minute: 0))!
 

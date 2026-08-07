@@ -1084,7 +1084,7 @@ public final class CaptureManager: ObservableObject {
     /// Count of widget snapshot writes + reload hints (test-observable, deterministic).
     /// The acceptance instrument for the addendum: N meter ticks during a recording must
     /// drive AT MOST the throttled number of these, not one per tick.
-    nonisolated(unsafe) private static let _widgetPushLock = NSLock()
+    nonisolated private static let _widgetPushLock = NSLock()
     nonisolated(unsafe) private static var _widgetPushes = 0
     nonisolated static func noteWidgetPush() {
         _widgetPushLock.lock(); _widgetPushes += 1; _widgetPushLock.unlock()
@@ -1196,6 +1196,14 @@ public final class CaptureManager: ObservableObject {
     /// Per-capture upload retry state (consecutive failures + earliest next attempt).
     private struct RetryState { var failures = 0; var nextEligible: TimeInterval = 0 }
     private var retryStates: [String: RetryState] = [:]
+
+    /// Deterministic test seam: model an elapsed upload-backoff window without a
+    /// fixed wall-clock sleep. Production scheduling still uses real time.
+    func expireUploadBackoffForTests() {
+        for id in retryStates.keys {
+            retryStates[id]?.nextEligible = 0
+        }
+    }
 
     /// Captures whose resync handshake (AC1) already ran this tunnel-session — so the
     /// door's seq set is fetched ONCE per capture, not on every 5s drain tick. An
@@ -2228,8 +2236,8 @@ public final class CaptureManager: ObservableObject {
     /// off-main warm-index writer never count. Static because the sites span a nonisolated
     /// static and nonisolated instance method. Makes the CQRS assertion a hard integer
     /// (0 on a warm library; K>0 under the repro) rather than a wall-clock flake. Mirrors the
-    /// existing `*ForTests` seam idiom; `nonisolated(unsafe)` + NSLock like `PerfHook`.
-    nonisolated(unsafe) private static let _decodeCounterLock = NSLock()
+    /// existing `*ForTests` seam idiom; a nonisolated NSLock protects the counter.
+    nonisolated private static let _decodeCounterLock = NSLock()
     nonisolated(unsafe) private static var _mainThreadDecodes = 0
     /// Increment the main-actor decode counter iff we are ON the main thread (the pathology).
     nonisolated static func noteMainThreadDecode() {
@@ -2259,9 +2267,9 @@ public final class CaptureManager: ObservableObject {
     ///    fan-out and proves the unreachable-door breaker stops the cycle after the first
     ///    failure instead of paying N timeouts.
     ///
-    /// Same `nonisolated(unsafe)` + NSLock idiom as the decode counter above, so the
+    /// Same nonisolated NSLock idiom as the decode counter above, so the
     /// assertions are machine-independent integers rather than wall-clock budgets.
-    nonisolated(unsafe) private static let _deleteLaneLock = NSLock()
+    nonisolated private static let _deleteLaneLock = NSLock()
     nonisolated(unsafe) private static var _mainThreadDeleteDiskOps = 0
     nonisolated(unsafe) private static var _remoteDeleteAttempts = 0
     /// Increment the delete-lane disk-op counter iff we are ON the main thread (the pathology).

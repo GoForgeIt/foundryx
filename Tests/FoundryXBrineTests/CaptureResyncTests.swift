@@ -1,6 +1,6 @@
 import XCTest
 import Foundation
-import FoundryXKit
+@testable import FoundryXKit
 
 /// Resync-handshake tests (capture-sync AC1): lost ACKs (a tunnel drop mid-drain —
 /// the 0.1.245 desktop restart) left the phone re-uploading audio the desktop ALREADY
@@ -232,7 +232,7 @@ final class CaptureResyncDrainTests: XCTestCase {
         // the desktop already holds everything → the backlog bulk-ACKs with no re-upload.
         stub.error = nil; stub.answer = (0...9).map(UInt64.init)
         rec.error = nil
-        try await Task.sleep(nanoseconds: 2_600_000_000)   // wait out the one-failure backoff
+        await mgr.expireUploadBackoffForTests()
         await mgr.drainPending()
         XCTAssertEqual(stub.calls, 2, "an un-memoised handshake is retried next pass")
         XCTAssertEqual(mgr.pendingSegments, 0, "the re-fetched seq set bulk-ACKs the whole backlog")
@@ -253,11 +253,12 @@ final class CaptureResyncDrainTests: XCTestCase {
         XCTAssertEqual(stub.calls, 1)
         let sentDuringFlap = rec.sent.count   // however many raced onto the wire before the 503
 
-        // Reconnected: uploads work again. Wait out the failure backoff (≤ 2.5s for
-        // one failure), then drain — the flap must have cleared the memo → re-fetch.
+        // Reconnected: uploads work again. Expire the failure backoff through the
+        // deterministic scheduler seam, then drain — the flap must have cleared the
+        // memo → re-fetch.
         rec.error = nil
         stub.answer = [0, 1, 2]                                  // the drop lost our ACK knowledge only
-        try await Task.sleep(nanoseconds: 2_600_000_000)
+        await mgr.expireUploadBackoffForTests()
         await mgr.drainPending()
         XCTAssertEqual(stub.calls, 2, "a flap clears the memo — the seq set is re-fetched on reconnect")
         XCTAssertEqual(mgr.pendingSegments, 0, "the re-fetched seq set bulk-ACKs everything (no re-upload)")

@@ -716,7 +716,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     // pins the pathology as a HARD INTEGER — `computeStatus()` calls made while ON the
     // main thread — exactly like CaptureManager's `mainThread*DiskOpsForTests` probes
     // (nonisolated + NSLock, machine-independent, can't flake into green).
-    nonisolated(unsafe) private static let _computeStatusProbeLock = NSLock()
+    private static let _computeStatusProbeLock = NSLock()
     nonisolated(unsafe) private static var _mainThreadComputeStatus = 0
     private static func noteMainThreadComputeStatus() {
         guard Thread.isMainThread else { return }
@@ -812,7 +812,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     /// Publish a pre-computed status (the warm cache-hit path publishes a cached snapshot
     /// WITHOUT calling `computeStatus`, so no segment enumeration happens).
     private func publish(_ s: CaptureStatus) {
-        let apply: () -> Void = { [weak self] in
+        let apply: @Sendable () -> Void = { [weak self] in
             // Skip the @Published write (and the SwiftUI invalidation it triggers) when the
             // status is UNCHANGED — a re-warm/refresh that computed the same snapshot costs
             // nothing on the main thread. `CaptureStatus` is Equatable.

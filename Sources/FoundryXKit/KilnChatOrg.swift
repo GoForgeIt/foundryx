@@ -134,7 +134,7 @@ public enum KilnChatOrg {
         var out: [String: Double] = [:]
         for (k, val) in dict {
             // `true`/`false` bridge to NSNumber in JSONSerialization; a bool is not a rank.
-            if let n = val as? NSNumber, !(n is NSNull),
+            if let n = val as? NSNumber,
                CFGetTypeID(n) != CFBooleanGetTypeID(), n.doubleValue.isFinite {
                 out[k] = n.doubleValue
             }

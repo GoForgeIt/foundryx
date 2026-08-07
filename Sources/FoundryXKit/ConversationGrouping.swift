@@ -152,7 +152,7 @@ public enum ConversationGrouping {
     /// `DateFormatter` is not thread-safe, so the cache AND the `string(from:)` call that
     /// uses an instance are both under the lock (grouping runs on the main actor in the app,
     /// but the tests and the off-main warm paths must stay safe).
-    nonisolated(unsafe) private static let formatterLock = NSLock()
+    private static let formatterLock = NSLock()
     nonisolated(unsafe) private static var formatters: [String: DateFormatter] = [:]
 
     /// Test seam: how many `DateFormatter`s the grouping has EVER built. The acceptance

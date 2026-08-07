@@ -19,7 +19,7 @@ public enum OggOpusReplay {
     public static func packets(fromOgg data: Data) -> [Data] {
         var packets: [Data] = []
         var pending = Data()
-        var i = data.startIndex
+        let i = data.startIndex
         let bytes = [UInt8](data)
         var idx = 0
         _ = i

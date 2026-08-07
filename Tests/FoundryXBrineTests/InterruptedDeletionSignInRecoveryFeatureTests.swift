@@ -13,7 +13,7 @@ final class InterruptedDeletionSignInRecoveryFeatureTests: XCTestCase {
 }
 
 private final class InterruptedDeletionSignInRecoveryWorld: @unchecked Sendable {
-    private final class RecoveryDefaults: UserDefaults, @unchecked Sendable {
+    private final class RecoveryDefaults: UserDefaults {
         private let lock = NSLock()
         private var values: [String: Any] = [:]
 
@@ -29,6 +29,10 @@ private final class InterruptedDeletionSignInRecoveryWorld: @unchecked Sendable 
             _ = lock.withLock { values.removeValue(forKey: key) }
         }
         override func synchronize() -> Bool { true }
+    }
+    private final class SendableDefaultsBox: @unchecked Sendable {
+        let value: UserDefaults
+        init(_ value: UserDefaults) { self.value = value }
     }
     enum Record: Equatable { case pending, completed, unreadable }
     let identity = AuthIdentity(
@@ -95,19 +99,20 @@ private final class InterruptedDeletionSignInRecoveryWorld: @unchecked Sendable 
             "foundryx-live-signin-recovery-\(discriminator)",
             isDirectory: true)
         let defaults = RecoveryDefaults()
+        let defaultsBox = SendableDefaultsBox(defaults)
         try FileManager.default.createDirectory(
             at: root, withIntermediateDirectories: true)
         CaptureAccountScope.resetTestEnvironment()
         CaptureAccountScope.setContainerForTests(root)
         CaptureAccountScope.setDefaultsForTests(defaults)
         let scope = try CaptureAccountScope.key(for: identity)
-        CaptureAccountScope.setInterruptedDeletionRecoveryForTests { [self, defaults] _ in
+        CaptureAccountScope.setInterruptedDeletionRecoveryForTests { [self, defaultsBox] _ in
             cleanupCalls += 1
             let secrets = DeletionTypedSecretStore()
             if liveCleanupFails { secrets.forceNextRemoval(.failed) }
             let runner = CurrentOwnerSelectiveDeletionRunner(
                 container: root,
-                defaults: defaults,
+                defaults: defaultsBox.value,
                 secretStore: secrets,
                 pairingServices: (cell: "cell.test", door: "door.test"),
                 exposureCoordinator: AccountExposureCoordinator(),
@@ -132,6 +137,7 @@ private final class InterruptedDeletionSignInRecoveryWorld: @unchecked Sendable 
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "foundryx-real-signin-recovery-\(discriminator)", isDirectory: true)
         let defaults = RecoveryDefaults()
+        let defaultsBox = SendableDefaultsBox(defaults)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         CaptureAccountScope.resetTestEnvironment()
         CaptureAccountScope.setContainerForTests(root)
@@ -143,10 +149,10 @@ private final class InterruptedDeletionSignInRecoveryWorld: @unchecked Sendable 
         // process's Keychain backend. The phone uses SystemPairingSecretStore;
         // an empty typed store has the same observable state without requiring
         // this test host to hold the app's Keychain entitlement.
-        CaptureAccountScope.setInterruptedDeletionRecoveryForTests { [identity, defaults] _ in
+        CaptureAccountScope.setInterruptedDeletionRecoveryForTests { [identity, defaultsBox] _ in
             let runner = CurrentOwnerSelectiveDeletionRunner(
                 container: root,
-                defaults: defaults,
+                defaults: defaultsBox.value,
                 secretStore: DeletionTypedSecretStore(),
                 pairingServices: (cell: "cell.test", door: "door.test"),
                 exposureCoordinator: AccountExposureCoordinator(),

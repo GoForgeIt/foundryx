@@ -16,6 +16,29 @@ import Foundation
 #if canImport(AVFoundation)
 import AVFoundation
 #endif
+
+#if canImport(AVFoundation)
+/// `AVAudioConverter` declares its input callback `@Sendable` even though conversion
+/// invokes it synchronously. Own the non-Sendable PCM reference behind a lock and
+/// vend it exactly once so the callback captures only a genuinely synchronized box.
+private final class ConverterInputBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private let buffer: AVAudioPCMBuffer
+    private var wasConsumed = false
+
+    init(_ buffer: AVAudioPCMBuffer) {
+        self.buffer = buffer
+    }
+
+    func take() -> AVAudioPCMBuffer? {
+        lock.withLock {
+            guard !wasConsumed else { return nil }
+            wasConsumed = true
+            return buffer
+        }
+    }
+}
+#endif
 #if canImport(Speech)
 import Speech
 #endif
@@ -390,12 +413,13 @@ public final class SpeechAnalyzerLiveTranscriber: LiveTranscribing, @unchecked S
         let ratio = format.sampleRate / input.format.sampleRate
         let capacity = AVAudioFrameCount(Double(input.frameLength) * ratio) + 1024
         guard let output = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else { return nil }
-        final class Once { var fed = false }
-        let once = Once()
+        let boxedInput = ConverterInputBox(input)
         var err: NSError?
         let status = converter.convert(to: output, error: &err) { _, outStatus in
-            if once.fed { outStatus.pointee = .noDataNow; return nil }
-            once.fed = true
+            guard let input = boxedInput.take() else {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
             outStatus.pointee = .haveData
             return input
         }

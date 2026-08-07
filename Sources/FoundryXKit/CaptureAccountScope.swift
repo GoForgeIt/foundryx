@@ -364,6 +364,8 @@ public enum CaptureAccountScope {
         (() -> Void)?
     nonisolated(unsafe) private static var activationMigrationPauseHookForTests:
         (() -> Void)?
+    nonisolated(unsafe) private static var identityPresenceOverrideForTests:
+        AuthStore.IdentityPresence?
 
     // MARK: - Stable provider-qualified key
 
@@ -564,7 +566,7 @@ public enum CaptureAccountScope {
         }
         try persistenceQueue.sync {
             let container = try durableContainer()
-            let admitted = try AccountDeletionLifecycleStore(
+            let admitted: Void? = try AccountDeletionLifecycleStore(
                 container: container
             ).withOwnerAdmission(ownerScope: transaction.scope) {
                 let record = try readActivationRecordForMutation()
@@ -1968,7 +1970,10 @@ public enum CaptureAccountScope {
                     if currentDefaults().bool(forKey: AuthStore.signedInMirrorKey) {
                         return (.blocked, nil)
                     }
-                    switch AuthStore.identityPresence() {
+                    let identityPresence = stateLock.withLock {
+                        identityPresenceOverrideForTests
+                    } ?? AuthStore.identityPresence()
+                    switch identityPresence {
                     case .absent:
                         // Genuinely never signed in — the free on-device tier.
                         return (
@@ -2604,6 +2609,17 @@ public enum CaptureAccountScope {
         preferenceMutationLock.unlock()
     }
 
+    static func setIdentityPresenceForTests(
+        _ presence: AuthStore.IdentityPresence?
+    ) {
+        stateLock.withLock {
+            identityPresenceOverrideForTests = presence
+            cachedResolution = nil
+            cachedAccountPreferenceSnapshot = nil
+            generation &+= 1
+        }
+    }
+
     static func setPairingKeychainServicesForTests(
         cell: String,
         door: String
@@ -2816,6 +2832,7 @@ public enum CaptureAccountScope {
         interruptedDeletionRecoveryForTests = nil
         beforeAccountBindingPublicationHook = nil
         activationMigrationPauseHookForTests = nil
+        identityPresenceOverrideForTests = nil
         lastValidatedContainer = nil
         cachedResolution = nil
         cachedAccountPreferenceSnapshot = nil

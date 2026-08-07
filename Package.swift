@@ -35,6 +35,7 @@ let package = Package(
             exclude: [
                 "then-capabilities.json",
                 "fixtures/device-agnostic",
+                "fixtures/s05-device-shape-interpretation.json",
             ],
             resources: [
                 .copy("fixtures/handshake_vectors.json"),
