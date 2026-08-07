@@ -28,6 +28,7 @@ private final class VaultProvisioningTrapWorld: @unchecked Sendable {
     let fixture: PairingTestFixture
     let defaults: UserDefaults
     let service = ProvisioningStubService()
+    let secrets = ScriptedPairingSecretStore()
     var attempts: VaultCheckoutAttemptStore!
     var model: VaultFunnelModel!
     var didStartCapture = false
@@ -45,7 +46,10 @@ private final class VaultProvisioningTrapWorld: @unchecked Sendable {
         model = VaultFunnelModel(
             service: service,
             browser: ProvisioningNoopBrowser(),
-            cellStore: CellStore(defaults: defaults, keychainService: fixture.cellService),
+            cellStore: CellStore(
+                defaults: defaults,
+                keychainService: fixture.cellService,
+                secretStore: secrets),
             attempts: attempts,
             storefrontCountryCode: { "USA" })
         service.result = .success(.provisioning)
@@ -57,7 +61,10 @@ private final class VaultProvisioningTrapWorld: @unchecked Sendable {
         model = VaultFunnelModel(
             service: service,
             browser: ProvisioningNoopBrowser(),
-            cellStore: CellStore(defaults: defaults, keychainService: fixture.cellService),
+            cellStore: CellStore(
+                defaults: defaults,
+                keychainService: fixture.cellService,
+                secretStore: secrets),
             attempts: attempts,
             storefrontCountryCode: { "USA" })
         await model.reconcileOnForeground(generation: CaptureAccountScope.identityGeneration)
