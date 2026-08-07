@@ -136,7 +136,7 @@ struct CaptureStatusWidget: Widget {
             }
         }
         .configurationDisplayName("Capture Status")
-        .description("Shows whether FoundryX is capturing and your last conversation.")
+        .description("Shows whether Solleva is capturing and your last conversation.")
         .supportedFamilies(supportedFamilies)
     }
 

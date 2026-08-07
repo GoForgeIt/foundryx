@@ -99,7 +99,7 @@ public struct ToggleCapturePauseIntent: LiveActivityIntent {
 /// but defined in the SHARED file so the widget extension can reference it.
 @available(iOS 16.0, *)
 public struct StartRecordingControlIntent: AppIntent {
-    public static let title: LocalizedStringResource = "Start FoundryX Recording"
+    public static let title: LocalizedStringResource = "Start Solleva Recording"
     public static let description = IntentDescription("Start recording from the phone microphone.")
     public static let openAppWhenRun: Bool = true
 
@@ -115,7 +115,7 @@ public struct StartRecordingControlIntent: AppIntent {
 /// "Open Chat" for the Controls picker — same broker path as the App Shortcut.
 @available(iOS 16.0, *)
 public struct OpenChatControlIntent: AppIntent {
-    public static let title: LocalizedStringResource = "Open FoundryX Chat"
+    public static let title: LocalizedStringResource = "Open Solleva Chat"
     public static let description = IntentDescription("Jump straight into chat.")
     public static let openAppWhenRun: Bool = true
 
@@ -133,9 +133,9 @@ public struct OpenChatControlIntent: AppIntent {
 /// (duplicated literal: the widget target can't see ActionButtonChoice in the App target).
 @available(iOS 16.0, *)
 public struct FoundryXActionControlIntent: AppIntent {
-    public static let title: LocalizedStringResource = "FoundryX Action"
+    public static let title: LocalizedStringResource = "Solleva Action"
     public static let description = IntentDescription(
-        "Runs your chosen FoundryX action — start recording, open chat, or ask each time.")
+        "Runs your chosen Solleva action — start recording, open chat, or ask each time.")
     public static let openAppWhenRun: Bool = true
 
     public init() {}

@@ -20,8 +20,8 @@ struct FoundryXRecordControl: ControlWidget {
                 Label("Record", systemImage: "waveform")
             }
         }
-        .displayName("FoundryX Recording")
-        .description("Start a FoundryX recording.")
+        .displayName("Solleva Recording")
+        .description("Start a Solleva recording.")
     }
 }
 
@@ -33,8 +33,8 @@ struct FoundryXChatControl: ControlWidget {
                 Label("Chat", systemImage: "message")
             }
         }
-        .displayName("FoundryX Chat")
-        .description("Jump straight into FoundryX chat.")
+        .displayName("Solleva Chat")
+        .description("Jump straight into Solleva chat.")
     }
 }
 
@@ -43,10 +43,10 @@ struct FoundryXActionControl: ControlWidget {
     var body: some ControlWidgetConfiguration {
         StaticControlConfiguration(kind: "com.goforgeit.foundryx.control.action") {
             ControlWidgetButton(action: FoundryXActionControlIntent()) {
-                Label("FoundryX", systemImage: "bolt")
+                Label("Solleva", systemImage: "bolt")
             }
         }
-        .displayName("FoundryX Action")
+        .displayName("Solleva Action")
         .description("Your chosen action — record, chat, or ask each time.")
     }
 }

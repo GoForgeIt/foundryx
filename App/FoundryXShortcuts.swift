@@ -11,7 +11,7 @@ import AppIntents
 
 @available(iOS 16.0, *)
 struct StartFoundryXRecordingIntent: AppIntent {
-    static let title: LocalizedStringResource = "Start FoundryX Voice Note"
+    static let title: LocalizedStringResource = "Start Solleva Voice Note"
     static let description = IntentDescription("Start a voice note from the phone microphone.")
     static let openAppWhenRun = true
 
@@ -24,7 +24,7 @@ struct StartFoundryXRecordingIntent: AppIntent {
 
 @available(iOS 16.0, *)
 struct OpenFoundryXChatIntent: AppIntent {
-    static let title: LocalizedStringResource = "Open FoundryX Chat"
+    static let title: LocalizedStringResource = "Open Solleva Chat"
     static let description = IntentDescription("Jump straight into chat.")
     static let openAppWhenRun = true
 
@@ -58,9 +58,9 @@ enum ActionButtonChoice: String, CaseIterable {
 
 @available(iOS 16.0, *)
 struct FoundryXActionIntent: AppIntent {
-    static let title: LocalizedStringResource = "FoundryX Action"
+    static let title: LocalizedStringResource = "Solleva Action"
     static let description = IntentDescription(
-        "Runs your chosen FoundryX action — start a note, open chat, or ask each time.")
+        "Runs your chosen Solleva action — start a note, open chat, or ask each time.")
     static let openAppWhenRun = true
 
     @MainActor
@@ -92,7 +92,7 @@ struct FoundryXShortcuts: AppShortcutsProvider {
         AppShortcut(
             intent: FoundryXActionIntent(),
             phrases: ["\(.applicationName) action"],
-            shortTitle: "FoundryX Action",
+            shortTitle: "Solleva Action",
             systemImageName: "bolt")
     }
 }
