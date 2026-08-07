@@ -153,10 +153,10 @@ final class ChatAnswerArtifactsTests: XCTestCase {
 
     // Scenario: hosted runs say where they run
     func testHostedRunStatesVenueAndTrialPlainly() {
-        XCTAssertEqual(RunVenue.hostedLine(run: 1, of: 10, venue: "Foundry Cloud"),
-                       "Run 1 of 10 · runs on Foundry Cloud")
-        XCTAssertEqual(RunVenue.hostedLine(run: 9, of: 10, venue: "Foundry Cloud"),
-                       "Run 9 of 10 · runs on Foundry Cloud")
+        XCTAssertEqual(RunVenue.hostedLine(run: 1, of: 10, venue: "Solleva Cloud"),
+                       "Run 1 of 10 · runs on Solleva Cloud")
+        XCTAssertEqual(RunVenue.hostedLine(run: 9, of: 10, venue: "Solleva Cloud"),
+                       "Run 9 of 10 · runs on Solleva Cloud")
     }
 
     // Scenario: a finished run shows findings and takes a follow-up

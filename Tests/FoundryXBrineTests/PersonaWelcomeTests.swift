@@ -42,7 +42,7 @@ final class PersonaWelcomeTests: XCTestCase {
     // The welcome bodies match the prototype word for word.
     func testWelcomeBodiesMatchThePrototype() {
         XCTAssertEqual(PersonaCopy.welcome(for: .expert).sub,
-                       "Clients come for your judgment. FoundryX carries the record, recall, and follow-through.")
+                       "Clients come for your judgment. Solleva carries the record, recall, and follow-through.")
         XCTAssertEqual(PersonaCopy.welcome(for: .individual).sub,
                        "It catches the parts of life you meant to remember, right when they matter.")
         XCTAssertEqual(PersonaCopy.welcome(for: .firm).sub,

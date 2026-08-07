@@ -85,7 +85,7 @@ final class LocalChatEngineTests: XCTestCase {
 
     func testPresentationContractCarriesTheLockedCopy() {
         XCTAssertTrue(LocalChatPresentation.honestyNotice.contains("entirely on your phone"))
-        XCTAssertTrue(LocalChatPresentation.honestyNotice.contains("upgrade to Foundry"))
+        XCTAssertTrue(LocalChatPresentation.honestyNotice.contains("upgrade to Solleva"))
         XCTAssertEqual(LocalChatPresentation.waitlistButtonTitle, "Join the waitlist")
         XCTAssertTrue(LocalChatPresentation.noAppleIntelligencePrompt.contains("make voice notes"))
     }

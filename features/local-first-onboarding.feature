@@ -86,7 +86,7 @@ Feature: FoundryX is whole without a brain — local-first onboarding
     When I open the brain picker in settings
     Then "Just my phone" is the current choice
     And "My computer" is offered for pairing with the desktop app
-    And "Foundry Cloud" is shown as coming soon with a waitlist
+    And "Solleva Cloud" is shown as coming soon with a waitlist
 
   Scenario: joining the waitlist is a one-tap flag on my existing account
     Given I have signed in

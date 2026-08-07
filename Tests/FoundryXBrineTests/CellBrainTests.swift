@@ -41,7 +41,7 @@ final class CellBrainTests: XCTestCase {
 
     func testFoundryCloudChoiceLabelAndRawValue() {
         XCTAssertEqual(BrainChoice.foundryCloud.rawValue, "cloud")
-        XCTAssertEqual(BrainChoice.foundryCloud.label, "Foundry Cloud")
+        XCTAssertEqual(BrainChoice.foundryCloud.label, "Solleva Cloud")
         XCTAssertTrue(BrainChoice.allCases.contains(.foundryCloud))
     }
 

@@ -13,7 +13,7 @@ final class DoorFailureMessageTests: XCTestCase {
         let m = DoorFailureMessage.make(status: .connected(host: "h-532f1547e05a33df"),
                                         underlying: "Could not connect to the server.")
         XCTAssertEqual(m.text, "Your computer isn't connected right now.")
-        XCTAssertEqual(m.action, "Open Foundry on your Mac and make sure it's awake.")
+        XCTAssertEqual(m.action, "Open Solleva on your Mac and make sure it's awake.")
         XCTAssertFalse(m.line.contains("server"), "must not surface the transport string")
     }
 
@@ -27,7 +27,7 @@ final class DoorFailureMessageTests: XCTestCase {
     func testNoHostTellsYouToSetTheComputerUp() {
         let m = DoorFailureMessage.make(status: .noHost, underlying: "Could not connect to the server.")
         XCTAssertEqual(m.text, "No computer is set up for this account yet.")
-        XCTAssertEqual(m.action, "Open Foundry on your Mac and sign in with the same account.")
+        XCTAssertEqual(m.action, "Open Solleva on your Mac and sign in with the same account.")
     }
 
     func testSignedOutSaysSignedOutNotNetwork() {

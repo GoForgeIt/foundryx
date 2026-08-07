@@ -4,7 +4,7 @@ import FoundryXKit
 
 /// UX prototype realignment — chat-answer lane (track 20260714T1800,
 /// features/chat-answer-and-artifacts.feature). Step definitions for:
-///   - "the chat composer invites the user with 'Ask FoundryX'"
+///   - "the chat composer invites the user with 'Ask Solleva'"
 ///   - "a failed send reads calmly, never a code"
 ///   - "an answer with a recommendation renders the decision brief"
 ///   - "a finished agent run folds into a finding"
@@ -12,10 +12,10 @@ import FoundryXKit
 /// (ChatSendFailure / AnswerBrief / AgentRunFinding + the real ChatViewModel).
 final class ChatAnswerRealignmentTests: XCTestCase {
 
-    // MARK: - Scenario: the chat composer invites the user with "Ask FoundryX"
+    // MARK: - Scenario: the chat composer invites the user with "Ask Solleva"
 
     func testComposerPlaceholderReadsAskFoundryX() {
-        XCTAssertEqual(ChatCopy.composerPlaceholder, "Ask FoundryX")
+        XCTAssertEqual(ChatCopy.composerPlaceholder, "Ask Solleva")
     }
 
     // MARK: - Scenario: a failed send reads calmly, never a code

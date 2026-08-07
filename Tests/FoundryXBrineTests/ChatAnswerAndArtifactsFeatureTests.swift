@@ -54,8 +54,8 @@ private enum ChatArtifactsSteps {
         [
             // ── S1 composer placeholder
             defineStep("I open Chat") { ctx, _, _ in return ctx },
-            defineCheck("the composer placeholder reads \"Ask FoundryX\"") { _, _, _ in
-                guard ChatCopy.composerPlaceholder == "Ask FoundryX" else { throw BrineStepError("placeholder was \(ChatCopy.composerPlaceholder)") }
+            defineCheck("the composer placeholder reads \"Ask Solleva\"") { _, _, _ in
+                guard ChatCopy.composerPlaceholder == "Ask Solleva" else { throw BrineStepError("placeholder was \(ChatCopy.composerPlaceholder)") }
             },
 
             // ── S2 failed send reads calmly
@@ -256,10 +256,10 @@ private enum ChatArtifactsSteps {
             },
 
             // ── S15 hosted run venue line
-            defineStep("an agent run hosted on Foundry Cloud as the first of ten trials") { ctx, _, _ in return ctx },
-            defineCheck("the run states \"Run 1 of 10 · runs on Foundry Cloud\"") { _, _, _ in
-                let line = RunVenue.hostedLine(run: 1, of: 10, venue: "Foundry Cloud")
-                guard line == "Run 1 of 10 · runs on Foundry Cloud" else { throw BrineStepError("hosted line was \(line)") }
+            defineStep("an agent run hosted on Solleva Cloud as the first of ten trials") { ctx, _, _ in return ctx },
+            defineCheck("the run states \"Run 1 of 10 · runs on Solleva Cloud\"") { _, _, _ in
+                let line = RunVenue.hostedLine(run: 1, of: 10, venue: "Solleva Cloud")
+                guard line == "Run 1 of 10 · runs on Solleva Cloud" else { throw BrineStepError("hosted line was \(line)") }
             },
 
             // ── S16-S20 artifact rendering (real fetch→classify→state path)

@@ -90,7 +90,7 @@ public struct RunStepTile: Equatable, Sendable, Identifiable {
 }
 
 /// Hosted-run honesty: where the run executes and which trial this is,
-/// stated plainly — "Run 1 of 10 · runs on Foundry Cloud".
+/// stated plainly — "Run 1 of 10 · runs on Solleva Cloud".
 public enum RunVenue {
     public static func hostedLine(run: Int, of total: Int, venue: String) -> String {
         "Run \(run) of \(total) · runs on \(venue)"
