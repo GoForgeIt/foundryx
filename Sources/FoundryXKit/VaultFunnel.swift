@@ -203,6 +203,11 @@ public enum VaultProvisionStatus: Equatable, Sendable {
 public enum VaultProvisionFailure: Equatable, Sendable {
     /// Payment took, provisioning did not finish. Retryable.
     case provisioningFailed
+    /// The provisioner reported the account's cell already exists. This is not a
+    /// mysterious retryable failure: the paid owner already has a Vault to recover.
+    case alreadyExists
+    /// A safe, user-displayable reason returned by the provisioning service.
+    case server(String)
     /// The Vault exists but is suspended.
     case suspended
     /// The server does not consider this account entitled.
@@ -216,7 +221,8 @@ public enum VaultProvisionFailure: Equatable, Sendable {
     /// What the user is told. Short, no jargon, and never blames them.
     public var headline: String {
         switch self {
-        case .provisioningFailed: return "Setting up your Vault didn't finish"
+        case .provisioningFailed, .server: return "Setting up your Vault didn't finish"
+        case .alreadyExists: return "You already have a Vault"
         case .suspended: return "Your Vault is paused"
         case .notEntitled: return "We couldn't confirm your Vault"
         case .signInExpired: return "Your sign-in expired"
@@ -230,10 +236,32 @@ public enum VaultProvisionFailure: Equatable, Sendable {
     /// Is retrying meaningful? `suspended` is not something a retry fixes.
     public var isRetryable: Bool {
         switch self {
-        case .suspended: return false
+        case .suspended, .alreadyExists: return false
         default: return true
         }
     }
+
+    public var explanation: String {
+        switch self {
+        case .server(let reason): return reason
+        case .alreadyExists:
+            return "This account already has a Vault. Your payment and existing Vault are safe."
+        default:
+            return "Your payment is safe. You can leave while we sort this out."
+        }
+    }
+}
+
+/// User-visible contract for the funnel. SwiftUI renders this value and behavior tests
+/// assert it, preventing model-only tests from passing while the actual screen stays stuck.
+public struct VaultFunnelPresentation: Equatable, Sendable, CustomStringConvertible {
+    public enum Action: Equatable, Sendable { case none, leaveProvisioning, enterVault }
+    public let title: String
+    public let body: String
+    public let showsProgress: Bool
+    public let primaryAction: Action
+    public var allVisibleText: String { "\(title) \(body)" }
+    public var description: String { allVisibleText }
 }
 
 /// The result of persisting a checkout attempt: the opaque id we reconcile against,
@@ -393,6 +421,8 @@ public enum VaultFunnelState: Equatable, Sendable {
     case checkingPayment
     /// "Setting up your Vault." — payment confirmed, the cell is provisioning.
     case settingUp
+    /// The bounded foreground wait elapsed. Provisioning still continues server-side.
+    case settingUpDelayed
     /// "Your Vault is live." — connected to the cell (CellConfig carried for the app).
     case live(CellConfig)
     /// A TERMINAL, ESCAPABLE stop. Renders what went wrong plus a way out — the state
@@ -442,6 +472,39 @@ public final class VaultFunnelModel: ObservableObject {
     private let checkoutBase: URL
     /// The deep-link return callback the browser redirects to.
     private let returnCallback: URL
+    @Published public private(set) var lastProvisioningState: VaultFunnelState?
+
+    public var presentation: VaultFunnelPresentation {
+        presentation(for: state)
+    }
+
+    /// Durable, non-modal status for Settings. Unlike `presentation`, this survives
+    /// leaving the flow and is refreshed by background reconciliation.
+    public var statusPresentation: VaultFunnelPresentation {
+        presentation(for: lastProvisioningState ?? (connectedVault == nil ? .idle : state))
+    }
+
+    private func presentation(for state: VaultFunnelState) -> VaultFunnelPresentation {
+        switch state {
+        case .settingUp:
+            return .init(title: "Setting up your Vault",
+                         body: "Payment confirmed. Provisioning continues in the background.",
+                         showsProgress: true, primaryAction: .leaveProvisioning)
+        case .settingUpDelayed:
+            return .init(title: "This is taking longer than expected",
+                         body: "You can keep using FoundryX. We'll email you when your Vault is ready.",
+                         showsProgress: false, primaryAction: .leaveProvisioning)
+        case .failed(let reason):
+            return .init(title: reason.headline, body: reason.explanation,
+                         showsProgress: false, primaryAction: .leaveProvisioning)
+        case .live:
+            return .init(title: "Your Vault is live",
+                         body: "Your private Vault is ready.", showsProgress: false,
+                         primaryAction: .enterVault)
+        default:
+            return .init(title: "", body: "", showsProgress: false, primaryAction: .none)
+        }
+    }
 
     /// Whether the paid Vault purchase path may be shown on this device, gated by the App
     /// Store storefront (US-first; unknown → fail closed). Non-eligible / unknown storefronts
@@ -531,6 +594,11 @@ public final class VaultFunnelModel: ObservableObject {
         // Storefront-gated (track T-STOREFRONT): only launch the purchase funnel where the
         // App Store storefront allows it. A blocked/unknown storefront is sign-in only — the
         // Settings row presents sign-in itself, so this is a no-op (never the plans path).
+        if attempts.load(generation: CaptureAccountScope.identityGeneration) != nil,
+           let lastProvisioningState {
+            state = lastProvisioningState
+            return
+        }
         guard purchaseAllowed else { return }
         beginSetup()
     }
@@ -550,6 +618,31 @@ public final class VaultFunnelModel: ObservableObject {
 
     /// Dismiss the funnel (Not now) — back to the free app, action not performed.
     public func dismiss() { state = .idle }
+
+    /// Leave the full-screen provisioning status without cancelling server work or
+    /// clearing the paid checkout attempt. Settings can reopen the last observed status.
+    public func leaveProvisioning() {
+        switch state {
+        case .settingUp, .settingUpDelayed, .failed:
+            lastProvisioningState = state
+            state = .idle
+        default: dismiss()
+        }
+    }
+
+    /// Called by the screen after its bounded foreground wait. This changes only what is
+    /// communicated; it does not alter entitlement or provisioning.
+    public func provisioningWaitDidExpire() {
+        guard state == .settingUp else { return }
+        state = .settingUpDelayed
+        lastProvisioningState = state
+    }
+
+    public func reportProvisioningFailure(_ reason: VaultProvisionFailure) {
+        let failure = VaultFunnelState.failed(reason)
+        lastProvisioningState = failure
+        if state != .idle { state = failure }
+    }
 
     /// ABANDON a checkout that is going nowhere: clear the durable attempt and return to
     /// the app.
@@ -660,9 +753,6 @@ public final class VaultFunnelModel: ObservableObject {
         guard let pending = attempts.load(generation: generation) else {
             return
         }
-        // If nothing is on screen yet but an attempt is mid-flight, surface the durable
-        // "checking" state so the user sees progress, never a dead free screen.
-        if case .idle = state { state = .checkingPayment }
         do {
             let status = try await service.reconcile(
                 attemptId: pending.attemptId, idToken: await freshIdToken())
@@ -671,10 +761,14 @@ public final class VaultFunnelModel: ObservableObject {
             // The server rejected our bearer. This is NOT a blip to sit on: an expired
             // id_token cannot fix itself by waiting, and the old code retried it silently
             // on every foreground forever.
-            state = .failed(.signInExpired)
+            reportProvisioningFailure(.signInExpired)
             // Tell the SESSION, not just this screen: a rejected bearer means the whole
             // app is signed out, and the remedy is the front door.
             AuthExpiryRouter.shared.authRejected(generation: generation)
+        } catch VaultSignupError.provisioning(let reason) {
+            let lower = reason.lowercased()
+            reportProvisioningFailure(lower.contains("already exists") || lower.contains("cell already exists")
+                                      ? .alreadyExists : .server(reason))
         } catch {
             // A genuine network blip: keep the durable waiting state and retry next
             // foreground. This is the ONLY error class that should be invisible.
@@ -692,25 +786,17 @@ public final class VaultFunnelModel: ObservableObject {
             // Not verified yet — hold "Checking payment" unless we've already advanced.
             if isWaiting { state = .checkingPayment }
         case .provisioning:
-            state = .settingUp
+            lastProvisioningState = .settingUp
+            if state != .idle { state = .settingUp }
         case .ready(let cellURL, let handoff):
             connect(
                 cellURL: cellURL,
                 handoff: handoff,
                 generation: generation)
         case .failed(let reason):
-            // A terminal failure CLEARS its own attempt, so it cannot haunt every future
-            // launch. Nothing but a successful connect used to clear one, which is why a
-            // provision that aborted once put the user back on "Checking your payment…"
-            // on every single launch afterwards.
-            //
-            // `signInExpired` is deliberately EXEMPT: the checkout itself may be perfectly
-            // good and merely unverifiable right now, so the attempt is kept and signing
-            // in again resumes it rather than losing a paid-for Vault.
-            if !reason.needsSignIn {
-                attempts.clear(generation: generation)
-            }
-            state = .failed(reason)
+            // Keep the paid attempt. A failure is status, not cancellation; retaining it
+            // allows Settings re-entry and a later server recovery without another charge.
+            reportProvisioningFailure(reason)
         }
     }
 
@@ -743,7 +829,8 @@ public final class VaultFunnelModel: ObservableObject {
             }
             connectedVault = backend
             _ = attempts.clear(generation: generation)
-            state = .live(config)
+            lastProvisioningState = .live(config)
+            if state != .idle { state = .live(config) }
         } catch {
             // A malformed cell URL/bearer from the server — stay in setting-up; reconcile
             // will try again. Fail loud in logs, not by dropping the user out of the funnel.

@@ -99,4 +99,27 @@ final class VaultSignupClientTests: XCTestCase {
             XCTAssertEqual(error as? VaultSignupError, .server)
         }
     }
+
+    func testProvisioningReasonSurvivesA5xxResponse() async {
+        Stub.status = 500
+        Stub.responseJSON = ["error": "registry error: cell already exists: c-123"]
+        do {
+            _ = try await client().reconcile(attemptId: "x", idToken: nil)
+            XCTFail("a provisioning failure must throw its displayable reason")
+        } catch {
+            XCTAssertEqual(error as? VaultSignupError,
+                           .provisioning("registry error: cell already exists: c-123"))
+        }
+    }
+
+    func testFailedStatusPreservesReasonAndRecognisesExistingVault() async throws {
+        Stub.status = 200
+        Stub.responseJSON = ["status": "failed", "reason": "registry could not create cell"]
+        let failed = try await client().reconcile(attemptId: "x", idToken: nil)
+        XCTAssertEqual(failed, .failed(.server("registry could not create cell")))
+
+        Stub.responseJSON = ["status": "failed", "reason": "cell already exists: c-123"]
+        let existing = try await client().reconcile(attemptId: "x", idToken: nil)
+        XCTAssertEqual(existing, .failed(.alreadyExists))
+    }
 }

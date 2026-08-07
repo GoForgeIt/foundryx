@@ -345,8 +345,27 @@ struct SettingsScreen: View {
 
     /// The "Your Vault" row. Copy + actionability come from the pure, tested
     /// VaultEntry.presentation(entitlement:); tapping (when off) drives the funnel via
-    /// vaultFunnel.activateFromSettings() → RootView's fullScreenCover presents it.
+    /// vaultFunnel.activateFromSettings() opens the deliberately requested status/setup sheet.
     @ViewBuilder private var vaultEntryRow: some View {
+        let status = vaultFunnel.statusPresentation
+        if status.primaryAction != .none {
+            Button { vaultFunnel.activateFromSettings() } label: {
+                HStack(spacing: GrainSpacing.x2) {
+                    Image(systemName: vaultFunnel.entitlement == .live
+                          ? "checkmark.seal.fill" : "key.fill")
+                        .foregroundStyle(vaultFunnel.entitlement == .live
+                                         ? GrainColor.sage : GrainColor.forgeBlue)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(status.title).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                        Text(status.body).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12)).foregroundStyle(GrainColor.textFaint)
+                }
+            }
+            .buttonStyle(.plain)
+        } else {
         // Storefront-aware (track T-STOREFRONT): US → the purchase CTA (launches the funnel);
         // non-US / unknown storefront → sign-in only (open an existing Vault), NO purchase CTA.
         let p = VaultEntry.presentation(entitlement: vaultFunnel.entitlement,
@@ -381,6 +400,7 @@ struct SettingsScreen: View {
                 Spacer()
                 Text("On").grainTextStyle(.caption).foregroundStyle(GrainColor.sage)
             }
+        }
         }
     }
 

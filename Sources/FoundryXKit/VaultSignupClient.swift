@@ -61,6 +61,11 @@ public struct VaultSignupClient: VaultSignupService {
             throw VaultSignupError.unauthorized
         }
         guard (200..<300).contains(http.statusCode) else {
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let reason = (object?["reason"] as? String)
+                ?? (object?["error"] as? String)
+                ?? (object?["message"] as? String)
+            if let reason, !reason.isEmpty { throw VaultSignupError.provisioning(reason) }
             throw VaultSignupError.server
         }
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -85,6 +90,12 @@ public struct VaultSignupClient: VaultSignupService {
         case "pending":
             return .pending
         case "failed":
+            let reason = (json["reason"] as? String) ?? (json["error"] as? String)
+                ?? (json["message"] as? String)
+            if let reason, reason.lowercased().contains("already exists") {
+                return .failed(.alreadyExists)
+            }
+            if let reason, !reason.isEmpty { return .failed(.server(reason)) }
             return .failed(.provisioningFailed)
         case "suspended":
             return .failed(.suspended)
@@ -103,6 +114,7 @@ public struct VaultSignupClient: VaultSignupService {
 
 public enum VaultSignupError: Error, Equatable, Sendable {
     case server
+    case provisioning(String)
     case malformedResponse
     /// The server REJECTED our bearer (401/403). Distinct from `.server` because the
     /// remedy is different and the old code could not tell them apart: `reconcileOnForeground`

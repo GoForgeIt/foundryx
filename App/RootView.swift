@@ -277,9 +277,9 @@ struct RootView: View {
                     }
             }
         }
-        // The Vault funnel rides over every destination: a paid-intent trigger, the browser
-        // hand-off, and the durable return states. Dismisses to `.idle` (back to the app).
-        .fullScreenCover(isPresented: Binding(
+        // Vault setup is an explicitly opened sheet, never a launch-time gate over the
+        // phone-only app. Background reconciliation updates Settings without presenting it.
+        .sheet(isPresented: Binding(
             get: { vaultFunnel.state != .idle },
             set: { if !$0 { vaultFunnel.dismiss() } })) {
             VaultFunnelView(model: vaultFunnel, onSignInAgain: { showingAccount = true })

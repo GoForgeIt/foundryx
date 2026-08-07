@@ -76,10 +76,8 @@ struct VaultFunnelView: View {
                 .padding(.bottom, GrainSpacing.x4)
                 .accessibilityIdentifier("stop-waiting")
             }
-        case .settingUp:
-            waitScreen(label: "Payment confirmed", title: "Setting up your Vault",
-                       body: "Your private Vault, your memory, and your agent. Yours alone — isolated from every other Vault.",
-                       spinning: true)
+        case .settingUp, .settingUpDelayed:
+            provisioningScreen
         case .live:
             liveScreen
         case .failed(let reason):
@@ -202,6 +200,25 @@ struct VaultFunnelView: View {
 
     // MARK: durable wait states
 
+    private var provisioningScreen: some View {
+        let presentation = model.presentation
+        return VStack(spacing: GrainSpacing.x4) {
+            waitScreen(label: "Payment confirmed", title: presentation.title,
+                       body: presentation.body, spinning: presentation.showsProgress)
+            GrainButton("Keep using FoundryX", variant: .outlined, size: .regular) {
+                model.leaveProvisioning()
+            }
+            .padding(.bottom, GrainSpacing.x4)
+            .accessibilityIdentifier("leave-vault-provisioning")
+        }
+        .task(id: model.state) {
+            guard model.state == .settingUp else { return }
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
+            guard !Task.isCancelled else { return }
+            model.provisioningWaitDidExpire()
+        }
+    }
+
     private func waitScreen(label: String, title: String, body: String, spinning: Bool) -> some View {
         VStack(spacing: GrainSpacing.x4) {
             Spacer()
@@ -235,7 +252,7 @@ struct VaultFunnelView: View {
             Text(reason.headline).grainTextStyle(.title).multilineTextAlignment(.center)
             Text(reason.needsSignIn
                  ? "Your payment is safe. Sign in again and we'll pick up exactly where this left off."
-                 : "Your payment is safe — nothing was charged twice, and no half-built Vault was left behind. You can try again now.")
+                 : reason.explanation)
                 .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
                 .multilineTextAlignment(.center)
 
@@ -246,13 +263,13 @@ struct VaultFunnelView: View {
                     onSignInAgain?()
                 }
             } else if reason.isRetryable {
-                GrainButton("Try again", variant: .filled, size: .regular) {
-                    model.beginSetup()
+                GrainButton("Check again", variant: .filled, size: .regular) {
+                    Task { await model.reconcileOnForeground() }
                 }
             }
             // ALWAYS present, whatever the reason — this is the door that did not exist.
             GrainButton("Back to my notes", variant: .outlined, size: .regular) {
-                model.abandonCheckout()
+                model.leaveProvisioning()
             }
             Spacer()
         }
