@@ -136,7 +136,7 @@ struct SettingsScreen: View {
                     }
                 }
                 .onChange(of: actionChoice) { c in ActionButtonChoice.current = c }
-                Text("Bind “FoundryX Action” to the Action Button, Control Center, or back-tap in iOS Settings; Siri: “Start a FoundryX voice note”.")
+                Text("Bind “Solleva Action” to the Action Button, Control Center, or back-tap in iOS Settings; Siri: “Start a Solleva voice note”.")
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             } header: {
                 GrainSectionEyebrow("ACTION BUTTON")
