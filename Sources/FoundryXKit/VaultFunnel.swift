@@ -309,6 +309,17 @@ public struct VaultCheckoutAttemptStore {
     private static let planKey = "foundryx.vault.checkoutAttempt.plan"
 
     private let compatibility: AccountPreferenceCompatibilityStore?
+    private let mutations = MutationCounter()
+
+    private final class MutationCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+
+        func read() -> Int { lock.withLock { value } }
+        func advance() { lock.withLock { value += 1 } }
+    }
+
+    fileprivate var mutationGeneration: Int { mutations.read() }
 
     public init() {
         compatibility = nil
@@ -342,15 +353,19 @@ public struct VaultCheckoutAttemptStore {
         generation: UInt64
     ) -> AccountPreferenceWriteResult {
         _ = generation
+        let result: AccountPreferenceWriteResult
         if let compatibility {
-            return compatibility.writeLegacyCheckoutAttempt(
+            result = compatibility.writeLegacyCheckoutAttempt(
                 id: attemptId,
                 plan: plan.rawValue)
+        } else {
+            result = AccountPreferences.writeCheckoutAttempt(
+                id: attemptId,
+                plan: plan.rawValue,
+                generation: generation)
         }
-        return AccountPreferences.writeCheckoutAttempt(
-            id: attemptId,
-            plan: plan.rawValue,
-            generation: generation)
+        mutations.advance()
+        return result
     }
 
     public func load() -> Pending? {
@@ -395,10 +410,14 @@ public struct VaultCheckoutAttemptStore {
         generation: UInt64
     ) -> AccountPreferenceWriteResult {
         _ = generation
+        let result: AccountPreferenceWriteResult
         if let compatibility {
-            return compatibility.clearLegacyCheckoutAttempt()
+            result = compatibility.clearLegacyCheckoutAttempt()
+        } else {
+            result = AccountPreferences.clearCheckoutAttempt(generation: generation)
         }
-        return AccountPreferences.clearCheckoutAttempt(generation: generation)
+        mutations.advance()
+        return result
     }
 }
 
@@ -448,6 +467,11 @@ public final class VaultFunnelModel: ObservableObject {
     private let browser: VaultCheckoutBrowser
     private let cellStore: CellStore
     private let attempts: VaultCheckoutAttemptStore
+    /// A checkout already persisted when this model was created belongs to an earlier
+    /// app session. Foreground reconciliation must refresh its Settings status without
+    /// reopening the funnel over the free app. An attempt created during this model's
+    /// lifetime is an active checkout and continues to drive the visible state machine.
+    private let attemptMutationGenerationAtLaunch: Int
     private let idToken: @Sendable () -> String?
     /// An ASYNC token seam that may REFRESH before answering.
     ///
@@ -526,6 +550,7 @@ public final class VaultFunnelModel: ObservableObject {
         self.browser = browser
         self.cellStore = cellStore
         self.attempts = attempts
+        self.attemptMutationGenerationAtLaunch = attempts.mutationGeneration
         self.checkoutBase = checkoutBase
         self.returnCallback = returnCallback
         self.idToken = idToken
@@ -752,6 +777,13 @@ public final class VaultFunnelModel: ObservableObject {
     ) async {
         guard let pending = attempts.load(generation: generation) else {
             return
+        }
+        // Preserve the honest state machine for a checkout active in this app session.
+        // Relaunches deliberately remain idle: their inherited attempt is reconciled into
+        // `lastProvisioningState` for Settings and never presents the sheet uninvited.
+        if case .idle = state,
+           attempts.mutationGeneration != attemptMutationGenerationAtLaunch {
+            state = .checkingPayment
         }
         do {
             let status = try await service.reconcile(

@@ -733,12 +733,12 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
     private let fileManager = FileManager.default
     private let token: String
     private let sandbox: URL
-    private let captureContainer: URL
-    private let applicationSupportRoot: URL
-    private let scopeDefaultsName: String
-    private let widgetDefaultsName: String
-    private let scopeDefaults: UserDefaults
-    private let widgetDefaults: UserDefaults
+    private var captureContainer: URL
+    private var applicationSupportRoot: URL
+    private var scopeDefaultsName: String
+    private var widgetDefaultsName: String
+    private var scopeDefaults: UserDefaults
+    private var widgetDefaults: UserDefaults
     private let cellKeychainService: String
     private let doorKeychainService: String
     private var scenarioNumber = 0
@@ -772,9 +772,9 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         self.token = token
         self.sandbox = sandbox
         self.captureContainer = sandbox.appendingPathComponent(
-            "documents/foundryx-captures", isDirectory: true)
+            "scenario-0/documents/foundryx-captures", isDirectory: true)
         self.applicationSupportRoot = sandbox.appendingPathComponent(
-            "application-support", isDirectory: true)
+            "scenario-0/application-support", isDirectory: true)
         self.scopeDefaultsName = scopeDefaultsName
         self.widgetDefaultsName = widgetDefaultsName
         self.scopeDefaults = scopeDefaults
@@ -4495,8 +4495,34 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
         widgetDefaults.removePersistentDomain(forName: widgetDefaultsName)
         scenarioNumber += 1
         state = State()
+        try installFreshScenarioStorageLocked()
         installTestEnvironmentLocked()
         CaptureAccountScope.resetProcessCacheForTests()
+    }
+
+    /// `removePersistentDomain` is not a durable isolation boundary in every XCTest
+    /// host. Never reuse a defaults suite or container after a scenario has written
+    /// identity state; give the next scenario new durable namespaces instead.
+    private func installFreshScenarioStorageLocked() throws {
+        let scenarioToken = "\(token).scenario-\(scenarioNumber).\(UUID().uuidString)"
+        let scopeName = "foundryx.account-data-isolation.scope.\(scenarioToken)"
+        let widgetName = "foundryx.account-data-isolation.widget.\(scenarioToken)"
+        guard let freshScopeDefaults = UserDefaults(suiteName: scopeName),
+              let freshWidgetDefaults = UserDefaults(suiteName: widgetName) else {
+            throw BrineStepError(
+                "could not create fresh scenario UserDefaults suites")
+        }
+        let scenarioRoot = sandbox.appendingPathComponent(
+            "scenario-\(scenarioNumber)-\(UUID().uuidString)",
+            isDirectory: true)
+        captureContainer = scenarioRoot.appendingPathComponent(
+            "documents/foundryx-captures", isDirectory: true)
+        applicationSupportRoot = scenarioRoot.appendingPathComponent(
+            "application-support", isDirectory: true)
+        scopeDefaultsName = scopeName
+        widgetDefaultsName = widgetName
+        scopeDefaults = freshScopeDefaults
+        widgetDefaults = freshWidgetDefaults
     }
 
     private func restoreRestorationDefaultsLocked() {
