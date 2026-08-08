@@ -4,6 +4,48 @@
 // carries an immutable AccountBinding rather than re-resolving a later identity.
 
 import Foundation
+
+private final class ContentionObservableLock: @unchecked Sendable {
+    private let underlying = NSLock()
+    private let state = NSCondition()
+    private var held = false
+    private var contenders = 0
+
+    func lock() {
+        state.lock()
+        if held {
+            contenders += 1
+            state.broadcast()
+        }
+        state.unlock()
+        underlying.lock()
+        state.withLock {
+            if contenders > 0 { contenders -= 1 }
+            held = true
+        }
+    }
+
+    func unlock() {
+        state.withLock { held = false }
+        underlying.unlock()
+    }
+
+    func `try`() -> Bool {
+        guard underlying.try() else { return false }
+        state.withLock { held = true }
+        return true
+    }
+
+    func waitUntilContended(timeout: TimeInterval) -> Bool {
+        state.lock()
+        defer { state.unlock() }
+        let deadline = Date().addingTimeInterval(timeout)
+        while contenders == 0 {
+            guard state.wait(until: deadline) else { return false }
+        }
+        return true
+    }
+}
 import Security
 
 public enum CaptureAccountScopeError: Error, LocalizedError {
@@ -324,7 +366,7 @@ public enum CaptureAccountScope {
     private static let preferenceMutationLock = NSLock()
     private static let preferenceBarrierProbeLock = NSLock()
     private static let resolutionProbeLock = NSLock()
-    private static let exposurePublicationLock = NSLock()
+    private static let exposurePublicationLock = ContentionObservableLock()
     private static let persistenceQueue =
         DispatchQueue(label: "foundryx.capture-account-persistence")
     private static let migrationQueue =
@@ -2806,6 +2848,18 @@ public enum CaptureAccountScope {
         stateLock.withLock {
             afterAccountBindingGuardHookForTests = hook
         }
+    }
+
+    static var isExposurePublicationGuardHeldForTests: Bool {
+        guard exposurePublicationLock.try() else { return true }
+        exposurePublicationLock.unlock()
+        return false
+    }
+
+    static func waitUntilExposurePublicationGuardIsContendedForTests(
+        timeout: TimeInterval
+    ) -> Bool {
+        exposurePublicationLock.waitUntilContended(timeout: timeout)
     }
     #endif
 

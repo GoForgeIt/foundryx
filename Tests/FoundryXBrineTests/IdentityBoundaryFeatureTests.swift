@@ -94,7 +94,15 @@ final class IdentityBoundaryFeatureTests: XCTestCase {
                     return ctx
                 },
                 defineStep("I switch to a new account before that work finishes") { ctx, _, _ in
-                    world.racePassed = try world.requireFixture().runOldReaderRace()
+                    let fixture = try world.requireFixture()
+                    world.racePassed = try await withCheckedThrowingContinuation {
+                        continuation in
+                        DispatchQueue.global().async {
+                            continuation.resume(with: Result {
+                                try fixture.runOldReaderRace()
+                            })
+                        }
+                    }
                     return ctx
                 },
                 defineCheck("the widget shows only my new account after the old work finishes") { _, _, _ in
@@ -457,28 +465,43 @@ private final class IdentityBoundaryFixture: @unchecked Sendable {
         let guarded = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
         let readerDone = DispatchSemaphore(value: 0)
+        let transitionEntered = DispatchSemaphore(value: 0)
         let transitionDone = DispatchSemaphore(value: 0)
+        let ordering = IdentityBoundaryRaceOrdering()
         let newIdentity = identity(subject: "race-new")
         let newScope = try CaptureAccountScope.key(for: newIdentity)
         CaptureAccountScope.setAfterAccountBindingGuardHookForTests {
             guarded.signal(); _ = release.wait(timeout: .now() + 5)
         }
         DispatchQueue.global().async {
-            _ = CaptureAccountScope.currentAccountBinding(); readerDone.signal()
+            _ = CaptureAccountScope.currentAccountBinding()
+            ordering.record(.readerExited)
+            readerDone.signal()
         }
         guard guarded.wait(timeout: .now() + 2) == .success else { return false }
+        let readerHoldsTransitionGate =
+            CaptureAccountScope.isExposurePublicationGuardHeldForTests
         DispatchQueue.global().async {
+            transitionEntered.signal()
             try? CaptureAccountScope.activateForTests(newIdentity)
+            ordering.record(.transitionExited)
             transitionDone.signal()
         }
-        let transitionWasBlocked = transitionDone.wait(timeout: .now() + 0.25) == .timedOut
+        guard transitionEntered.wait(timeout: .now() + 2) == .success else {
+            return false
+        }
+        guard CaptureAccountScope
+            .waitUntilExposurePublicationGuardIsContendedForTests(timeout: 2) else {
+            return false
+        }
         release.signal()
         guard readerDone.wait(timeout: .now() + 2) == .success,
               transitionDone.wait(timeout: .now() + 2) == .success else { return false }
         CaptureAccountScope.setAfterAccountBindingGuardHookForTests(nil)
         let current = try XCTUnwrap(CaptureAccountScope.currentAccountBinding())
         try seedWidget(owner: current, title: "New note")
-        return transitionWasBlocked
+        return readerHoldsTransitionGate
+            && ordering.events == [.readerExited, .transitionExited]
             && old.scope != newScope
             && current.scope == newScope
             && CaptureWidgetSnapshotStore.activeOwnerForTests == newScope
@@ -494,4 +517,12 @@ private final class IdentityBoundaryFixture: @unchecked Sendable {
         defaults.removePersistentDomain(forName: defaultsName)
         try? FileManager.default.removeItem(at: root)
     }
+}
+
+private final class IdentityBoundaryRaceOrdering: @unchecked Sendable {
+    enum Event: Equatable { case readerExited, transitionExited }
+    private let lock = NSLock()
+    private var stored: [Event] = []
+    var events: [Event] { lock.withLock { stored } }
+    func record(_ event: Event) { lock.withLock { stored.append(event) } }
 }

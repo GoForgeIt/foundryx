@@ -10,8 +10,10 @@ final class IdentityBoundaryRaceTests: XCTestCase {
         let readerGuarded = DispatchSemaphore(value: 0)
         let releaseReader = DispatchSemaphore(value: 0)
         let readerFinished = DispatchSemaphore(value: 0)
+        let transitionEntered = DispatchSemaphore(value: 0)
         let transitionFinished = DispatchSemaphore(value: 0)
         let transitionError = LockedRaceError()
+        let ordering = LockedRaceOrdering()
 
         CaptureAccountScope.setAfterAccountBindingGuardHookForTests {
             readerGuarded.signal()
@@ -20,35 +22,41 @@ final class IdentityBoundaryRaceTests: XCTestCase {
 
         DispatchQueue.global().async {
             _ = CaptureAccountScope.currentAccountBinding()
+            ordering.record(.readerExited)
             readerFinished.signal()
         }
         XCTAssertEqual(readerGuarded.wait(timeout: .now() + 2), .success)
+        XCTAssertTrue(
+            CaptureAccountScope.isExposurePublicationGuardHeldForTests,
+            "the guarded reader must hold the identity-transition serialization gate")
 
         let newIdentity = fixture.identity(subject: "new-owner")
         let newScope = try CaptureAccountScope.key(for: newIdentity)
         DispatchQueue.global().async {
+            transitionEntered.signal()
             do {
                 try CaptureAccountScope.activateForTests(newIdentity)
             } catch {
                 transitionError.store(error)
             }
+            ordering.record(.transitionExited)
             transitionFinished.signal()
         }
 
-        let transitionBeatReader =
-            transitionFinished.wait(timeout: .now() + 0.25) == .success
-        XCTAssertFalse(
-            transitionBeatReader,
-            "the identity transition must remain blocked until the guarded reader exits")
-        if transitionBeatReader {
-            try fixture.seedWidgetPayload(owner: newScope, title: "New account note")
-        }
+        XCTAssertEqual(
+            transitionEntered.wait(timeout: .now() + 2), .success,
+            "the identity transition never entered its worker")
+        XCTAssertTrue(
+            CaptureAccountScope.waitUntilExposurePublicationGuardIsContendedForTests(
+                timeout: 2),
+            "the identity transition must wait on the reader-held serialization gate")
         releaseReader.signal()
         XCTAssertEqual(readerFinished.wait(timeout: .now() + 2), .success)
-        if !transitionBeatReader {
-            XCTAssertEqual(transitionFinished.wait(timeout: .now() + 2), .success)
-            try fixture.seedWidgetPayload(owner: newScope, title: "New account note")
-        }
+        XCTAssertEqual(transitionFinished.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(
+            ordering.events, [.readerExited, .transitionExited],
+            "the identity transition must remain blocked until the guarded reader exits")
+        try fixture.seedWidgetPayload(owner: newScope, title: "New account note")
         CaptureAccountScope.setAfterAccountBindingGuardHookForTests(nil)
 
         XCTAssertNil(transitionError.value)
@@ -58,6 +66,14 @@ final class IdentityBoundaryRaceTests: XCTestCase {
             CaptureWidgetSnapshotStore.read().lastFinishedTitle,
             "New account note")
     }
+}
+
+private final class LockedRaceOrdering: @unchecked Sendable {
+    enum Event: Equatable { case readerExited, transitionExited }
+    private let lock = NSLock()
+    private var stored: [Event] = []
+    var events: [Event] { lock.withLock { stored } }
+    func record(_ event: Event) { lock.withLock { stored.append(event) } }
 }
 
 private final class LockedRaceError: @unchecked Sendable {
