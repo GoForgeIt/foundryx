@@ -7,6 +7,7 @@ enum AccountDeletionCleanupGroup: String, Codable, CaseIterable, Sendable {
     case pairingSecrets
     case localRoot
     case legacyInputs
+    case accountSurfaces
 }
 
 enum AccountDeletionPhase: String, Codable, Sendable {
@@ -150,6 +151,7 @@ enum DeletionFaultStage: String, CaseIterable, Sendable {
     case pairingSecrets
     case localRoot
     case legacyInputs
+    case accountSurfaces
     case completedSync
     case completedReadback
 
@@ -169,6 +171,7 @@ enum DeletionFaultStage: String, CaseIterable, Sendable {
         .pairingSecrets,
         .localRoot,
         .legacyInputs,
+        .accountSurfaces,
         .completedSync,
         .completedReadback,
     ]
@@ -1017,7 +1020,7 @@ final class AccountDeletionLifecycle: @unchecked Sendable {
         try inject(.after, .signedInMirror)
         try inject(.before, .widgetWithdrawal)
         let widgetResult = try environment.withdrawWidget(binding)
-        guard Self.isTerminalSuccess(widgetResult) else {
+        guard Self.isWidgetTerminalSuccess(widgetResult) else {
             throw AccountDeletionLifecycleError.exposureBarrierFailed
         }
         try inject(.after, .widgetWithdrawal)
@@ -1088,7 +1091,7 @@ final class AccountDeletionLifecycle: @unchecked Sendable {
         if !immediateGatesClosed {
             try inject(.before, .widgetWithdrawal)
             let widgetResult = try environment.withdrawWidget(binding)
-            guard Self.isTerminalSuccess(widgetResult) else {
+            guard Self.isWidgetTerminalSuccess(widgetResult) else {
                 throw AccountDeletionLifecycleError.exposureBarrierFailed
             }
             try inject(.after, .widgetWithdrawal)
@@ -1222,6 +1225,16 @@ final class AccountDeletionLifecycle: @unchecked Sendable {
         result == .closed || result == .alreadyClosed
     }
 
+    /// Widget ownerMismatch is produced only after the snapshot store has
+    /// corroborated that any retained payload envelope belongs to another owner.
+    /// It is intentionally terminal here only; participant mismatches still fail
+    /// `allAcknowledged` because they cannot prove that exposure was closed.
+    private static func isWidgetTerminalSuccess(
+        _ result: AccountExposureCloseResult
+    ) -> Bool {
+        isTerminalSuccess(result) || result == .ownerMismatch
+    }
+
     private static func allAcknowledged(
         _ acknowledgements: [AccountExposureAcknowledgement]
     ) -> Bool {
@@ -1349,6 +1362,18 @@ private final class LiveAccountDeletionContext: @unchecked Sendable {
                     throw AccountDeletionLifecycleError.durability
                 }
             }
+        case .accountSurfaces:
+            let outcomes = AccountSurfaceRegistry.eraseAll(
+                binding, defaults: defaults)
+            guard outcomes.values.allSatisfy(\.isTerminalSuccess) else {
+                let failures = outcomes
+                    .filter { !$0.value.isTerminalSuccess }
+                    .sorted { $0.key.rawValue < $1.key.rawValue }
+                    .map { "\($0.key.rawValue)=\($0.value)" }
+                    .joined(separator: ", ")
+                throw AccountDeletionLifecycleError.cleanupStepFailed(
+                    group.rawValue, failures)
+            }
         }
     }
 
@@ -1415,6 +1440,12 @@ private final class LiveAccountDeletionContext: @unchecked Sendable {
                 && secretStore.inspect(
                     service: pairingServices.door,
                     account: "") == .notFound
+        case .accountSurfaces:
+            // Erasers are idempotent and verify their terminal state. Re-running on
+            // recovery proves cross-process and keychain state after a crash.
+            return AccountSurfaceRegistry.eraseAll(
+                binding, defaults: defaults
+            ).values.allSatisfy(\.isTerminalSuccess)
         }
     }
 

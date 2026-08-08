@@ -200,7 +200,35 @@ public enum CaptureWidgetSnapshotStore {
             stateLock.unlock()
             return .alreadyAbsent
         }
-        guard priorOwner == expectedOwner else {
+        if priorOwner != expectedOwner {
+            // The owner tag alone is not proof: a stale tag can coexist with a
+            // payload written by the account being deleted. Corroborate the
+            // envelope before acknowledging that this widget belongs elsewhere.
+            if let priorPayload {
+                guard let envelope = try? JSONDecoder().decode(
+                    Envelope.self, from: priorPayload)
+                else {
+                    stateLock.unlock()
+                    return .persistenceFailed
+                }
+                if envelope.owner == expectedOwner {
+                    guard withdrawalFaultForTesting != .synchronizeFailure else {
+                        stateLock.unlock()
+                        return .persistenceFailed
+                    }
+                    defaults.removeObject(forKey: key)
+                    guard defaults.synchronize(),
+                          defaults.object(forKey: key) == nil else {
+                        defaults.set(priorPayload, forKey: key)
+                        _ = defaults.synchronize()
+                        stateLock.unlock()
+                        return .persistenceFailed
+                    }
+                    stateLock.unlock()
+                    reloadWidgetTimelines()
+                    return .withdrawn
+                }
+            }
             stateLock.unlock()
             return .ownerMismatch
         }
