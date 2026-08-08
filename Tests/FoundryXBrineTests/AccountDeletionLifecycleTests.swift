@@ -627,6 +627,7 @@ final class AccountDeletionLifecycleTests: XCTestCase {
             .pairingSecrets,
             .localRoot,
             .legacyInputs,
+            .accountSurfaces,
             .completedSync,
             .completedReadback,
         ]
@@ -801,6 +802,7 @@ final class AccountDeletionLifecycleTests: XCTestCase {
                 .cleanup(.pairingSecrets),
                 .cleanup(.localRoot),
                 .cleanup(.legacyInputs),
+                .cleanup(.accountSurfaces),
                 .completedDurableReadback,
             ])
     }
@@ -1237,7 +1239,7 @@ final class AccountDeletionLifecycleTests: XCTestCase {
             [.trackBPreferences, .pairingPreferences])
         XCTAssertEqual(
             fixture.cleanedGroups,
-            [.pairingSecrets, .localRoot, .legacyInputs])
+            [.pairingSecrets, .localRoot, .legacyInputs, .accountSurfaces])
     }
 
     func testLegacyInputsRequireOwnerProofAndMarkerIsPreserved()
@@ -1287,6 +1289,7 @@ final class AccountDeletionLifecycleTests: XCTestCase {
                 .pairingSecrets,
                 .localRoot,
                 .legacyInputs,
+                .accountSurfaces,
             ])
         XCTAssertTrue(fixture.allScopedBInputsAreAbsent)
         XCTAssertTrue(fixture.allProvedLegacyInputsAreAbsent)
@@ -2378,6 +2381,14 @@ final class SelectiveDeletionIntegrationFixture:
                 "foundryx.capture.widget-snapshot",
                 "foundryx.capture.widget-snapshot.active-owner",
                 "foundryx.auth.signed-in",
+                "foundryx.omi.peripheral-id",
+                "foundryx.omi.peripheral-name",
+                "foundryx.omi.last-connected",
+                "foundryx.battery.monitored.uuid",
+                "foundryx.battery.monitored.name",
+                "foundryx.capture.source",
+                "foundryx.capture.sources.added",
+                "foundryx.action-button.choice",
             ])
             .sorted()
     }
@@ -2418,6 +2429,7 @@ final class SelectiveDeletionIntegrationFixture:
         CaptureAccountScope.setPairingKeychainServicesForTests(
             cell: cellService,
             door: doorService)
+        AuthStore.setIdentityEraseForTests { .alreadyClean }
         try CaptureAccountScope.activateForTests(identityB)
         bindingB = try XCTUnwrap(
             CaptureAccountScope.currentAccountBinding())
@@ -2696,6 +2708,7 @@ final class SelectiveDeletionIntegrationFixture:
     }
 
     func cleanup() {
+        AuthStore.setIdentityEraseForTests(nil)
         CaptureWidgetSnapshotStore.resetDefaultsForTesting()
         CaptureAccountScope.resetTestEnvironment()
         defaults.removePersistentDomain(forName: defaultsName)
@@ -2712,6 +2725,7 @@ final class SelectiveDeletionIntegrationFixture:
         CaptureAccountScope.setPairingKeychainServicesForTests(
             cell: cellService,
             door: doorService)
+        AuthStore.setIdentityEraseForTests { .alreadyClean }
     }
 
     func allowRecovery() {
@@ -2950,10 +2964,12 @@ final class SelectiveDeletionBehaviorHarness: @unchecked Sendable {
         guard AccountDeletionScope.thisPhone.subtitle.contains(
                 "Other accounts"),
               AccountDeletionScope.thisPhone.subtitle.contains(
-                "device setup") else {
+                "pairings"),
+              AccountDeletionScope.thisPhone.subtitle.contains(
+                "cannot cross accounts") else {
             throw BrineStepError(
-                "local deletion does not promise to preserve other accounts "
-                    + "and this phone's device setup")
+                "local deletion does not preserve other accounts while disclosing "
+                    + "shared identity-setup removal")
         }
     }
 
@@ -2993,7 +3009,7 @@ final class SelectiveDeletionBehaviorHarness: @unchecked Sendable {
         guard interruptedCases.count == DeletionFaultPoint.requiredV1.count
         else {
             throw BrineStepError(
-                "did not retain all 34 interrupted deletion cases")
+                "did not retain every required interrupted deletion case")
         }
     }
 
@@ -3056,6 +3072,9 @@ final class SelectiveDeletionBehaviorHarness: @unchecked Sendable {
     }
 
     func assertPhoneUnchanged() throws {
+        // Shared identity-bearing setup may still be present before the final
+        // replay-tracked surface group, or absent after it; it must never alter the
+        // other account's scoped controls.
         try assertOtherAccountUnchanged()
     }
 

@@ -278,8 +278,8 @@ public final class RemoteSession: ObservableObject {
         // A signed-out phone must not keep an ambient-recording BLE link (or its
         // standing pending reconnect) alive — the shared DeviceManager would
         // otherwise persist past the UI teardown and keep capturing/reconnecting
-        // (including background state-restoration relaunches). Suspend, never
-        // forget: the pairing is kept, and the next sign-in re-arms hands-free.
+        // (including background state-restoration relaunches). AuthStore retains the
+        // saved Omi pairing, while this suspension prevents reconnect until sign-in.
         DeviceManager.sharedExisting()?.suspend()
     }
 

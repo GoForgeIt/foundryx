@@ -155,19 +155,19 @@ Feature: My recordings belong to my account, not to the phone
     Then the build fails
     And it identifies the file and saved choice that need classification
 
-  Scenario: deleting one account preserves the other account and the phone
+  Scenario: deleting one account preserves the other account and clears shared identity setup
     Given two accounts use this phone
     And the current account has choices, recordings, and computer connections on this phone
     When the current account opens the local deletion confirmation
     Then it says only the current account's local data will be erased
-    And it says other accounts and this phone's device setup will be preserved
+    And it says other accounts are preserved while shared identity setup is cleared
     When local deletion is interrupted at any point
     Then the current account cannot open the app or use capture
     And none of its local choices, recordings, or computer connections is available
     And the widget shows no activity for that account
     And the app offers a visible retry
     And the other account's choices, recordings, and computer connections remain unchanged
-    And this phone's paired-device setup remains unchanged
+    And the other account remains unchanged if shared phone setup is cleared
     When I retry deletion and it succeeds
     And the deleted account signs in again
     Then the deleted account receives a fresh first run

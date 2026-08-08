@@ -25,7 +25,7 @@ struct AccountDeletionView: View {
     var body: some View {
         List {
             Section {
-                Text("Delete what you choose — only the current account's local data, its hosted Vault, or the account everywhere. Other accounts and this phone's device setup are preserved.")
+                Text("Delete what you choose — the current account's local data, its hosted Vault, or the account everywhere. Other accounts stay intact. Immediate account deletion also clears shared device pairings and capture shortcuts so they cannot cross accounts.")
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
             }
             ForEach(AccountDeletionScope.allCases, id: \.self) { scope in

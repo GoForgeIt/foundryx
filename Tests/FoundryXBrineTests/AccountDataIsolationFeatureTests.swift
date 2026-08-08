@@ -5413,7 +5413,7 @@ private enum AccountDataIsolationSteps {
                 try w.assertCurrentAccountOnlyDeletionCopy()
             },
             defineCheck(
-                "it says other accounts and this phone's device setup will be preserved"
+                "it says other accounts are preserved while shared identity setup is cleared"
             ) { _, _, _ in
                 try w.assertOtherAccountsAndPhonePreservedCopy()
             },
@@ -5445,7 +5445,7 @@ private enum AccountDataIsolationSteps {
                 try w.assertOtherAccountUnchangedDuringDeletion()
             },
             defineCheck(
-                "this phone's paired-device setup remains unchanged"
+                "the other account remains unchanged if shared phone setup is cleared"
             ) { _, _, _ in
                 try w.assertPhoneSetupUnchangedDuringDeletion()
             },

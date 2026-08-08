@@ -466,6 +466,15 @@ enum AuthStore {
     /// Self-healing for pre-existing installs: any successful keychain load also
     /// stamps it.
     static let signedInMirrorKey = "foundryx.auth.signed-in"
+    #if DEBUG || PERF_HARNESS
+    nonisolated(unsafe) private static var identityEraseForTests:
+        (() -> AccountSurfaceOutcome)?
+    static func setIdentityEraseForTests(
+        _ erase: (() -> AccountSurfaceOutcome)?
+    ) {
+        identityEraseForTests = erase
+    }
+    #endif
 
     static func save(
         _ id: AuthIdentity,
@@ -557,16 +566,63 @@ enum AuthStore {
     }
 
     static func clear() throws {
+        let previousBinding = CaptureAccountScope.currentAccountBinding()
+        let detachSnapshot = AccountSurfaceRegistry.captureDetachSnapshot()
         let previous = try CaptureAccountScope.beginSignOut()
-        let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                    kSecAttrService as String: service,
-                                    kSecAttrAccount as String: account]
-        let status = SecItemDelete(base as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
+        let detached = AccountSurfaceRegistry.detachAll(previous: previousBinding)
+        if let failure = detached.sorted(by: { $0.key.rawValue < $1.key.rawValue })
+            .first(where: { !$0.value.isTerminalSuccess }) {
             CaptureAccountScope.rollbackSignOut(previousScope: previous)
-            throw securityError(operation: "clearing identity", status: status)
+            let restoration = AccountSurfaceRegistry.restoreDetachSnapshot(detachSnapshot)
+            if let restored = CaptureAccountScope.currentAccountBinding() {
+                _ = AccountSurfaceRegistry.attachAll(restored)
+            }
+            guard restoration.isTerminalSuccess else {
+                throw AuthError.persistence(
+                    "detaching \(failure.key.rawValue) failed and restoring detached state failed: \(restoration)")
+            }
+            throw AuthError.persistence(
+                "detaching \(failure.key.rawValue) failed: \(failure.value)")
+        }
+        guard eraseIdentityCredential().isTerminalSuccess else {
+            CaptureAccountScope.rollbackSignOut(previousScope: previous)
+            let restoration = AccountSurfaceRegistry.restoreDetachSnapshot(detachSnapshot)
+            if let restored = CaptureAccountScope.currentAccountBinding() {
+                _ = AccountSurfaceRegistry.attachAll(restored)
+            }
+            guard restoration.isTerminalSuccess else {
+                throw AuthError.persistence(
+                    "clearing identity failed and restoring detached state failed: \(restoration)")
+            }
+            throw AuthError.persistence("clearing identity failed")
         }
         try CaptureAccountScope.completeSignOut()
+    }
+
+    static func eraseIdentityCredential() -> AccountSurfaceOutcome {
+        #if DEBUG || PERF_HARNESS
+        if let identityEraseForTests { return identityEraseForTests() }
+        #endif
+        let base: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        let status = SecItemDelete(base as CFDictionary)
+        switch status {
+        case errSecSuccess: return .done
+        case errSecItemNotFound: return .alreadyClean
+        #if DEBUG || PERF_HARNESS
+        case errSecMissingEntitlement:
+            // Hostless iOS tests have no keychain entitlement. Release builds do not
+            // carry this exception and therefore fail closed on the same status.
+            return .alreadyClean
+        #endif
+        default:
+            return .failed(
+                securityError(operation: "clearing identity", status: status)
+                    .localizedDescription)
+        }
     }
 
     private static func securityError(operation: String, status: OSStatus) -> AuthError {

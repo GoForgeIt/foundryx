@@ -362,6 +362,10 @@ public enum CaptureAccountScope {
     nonisolated(unsafe) private static var resolutionPersistenceEntriesForTests = 0
     nonisolated(unsafe) private static var beforeAccountBindingPublicationHook:
         (() -> Void)?
+    #if DEBUG || PERF_HARNESS
+    nonisolated(unsafe) private static var afterAccountBindingGuardHookForTests:
+        (() -> Void)?
+    #endif
     nonisolated(unsafe) private static var activationMigrationPauseHookForTests:
         (() -> Void)?
     nonisolated(unsafe) private static var identityPresenceOverrideForTests:
@@ -797,8 +801,21 @@ public enum CaptureAccountScope {
                 currentDefaults().set(false, forKey: AuthStore.signedInMirrorKey)
                 installResolution(.blocked, widgetOwner: nil, identityTransition: true)
                 return scope
-            case .pendingActivation, .pendingSignOut:
-                throw CaptureAccountScopeError.activationAlreadyPending
+            case .pendingSignOut:
+                // Idempotent retry: the first attempt may have been interrupted after
+                // the durable transition but before the keychain delete.
+                return record.previousScope
+            case .pendingActivation:
+                // User intent to sign out wins over an unfinished sign-in. Re-phasing
+                // the durable transaction makes the activation finisher reject its
+                // stale transaction instead of re-publishing after sign-out.
+                let rollbackOwner = record.previousScope
+                try persistActivationRecord(.pendingSignOut(
+                    previous: record.scope ?? rollbackOwner ?? signedOutScope,
+                    aliases: record.aliases))
+                currentDefaults().set(false, forKey: AuthStore.signedInMirrorKey)
+                installResolution(.blocked, widgetOwner: nil, identityTransition: true)
+                return rollbackOwner
             }
         }
     }
@@ -1313,16 +1330,20 @@ public enum CaptureAccountScope {
         cachedSharedAdmissionCell = admissionCell
         cachedSharedAdmissionEpoch = admissionEpoch
         stateLock.unlock()
-        // Published OUTSIDE `stateLock`: this takes the widget store's own lock and
-        // performs a cross-process `synchronize()`. Nesting the two locks would make
-        // the ordering load-bearing forever.
-        CaptureWidgetSnapshotStore.publishActiveOwner(scope)
-        return AccountBinding(
+        #if DEBUG || PERF_HARNESS
+        afterAccountBindingGuardHookForTests?()
+        #endif
+        let binding = AccountBinding(
             root: base.appendingPathComponent(scope, isDirectory: true),
             scope: scope,
             generation: revision,
             admissionEpoch: admissionEpoch,
             admissionCell: admissionCell)
+        // Published OUTSIDE `stateLock`, while `exposurePublicationLock` still closes
+        // the generation-to-cross-process-publication window. Surface stores may take
+        // their own locks and synchronize; none is ever nested under `stateLock`.
+        _ = AccountSurfaceRegistry.attachAll(binding)
+        return binding
     }
 
     /// A binding for a producer that was handed an EXPLICIT root rather than the
@@ -1371,13 +1392,14 @@ public enum CaptureAccountScope {
             return nil
         }
         stateLock.unlock()
-        CaptureWidgetSnapshotStore.publishActiveOwner(scope)
-        return AccountBinding(
+        let binding = AccountBinding(
             root: root,
             scope: scope,
             generation: revision,
             admissionEpoch: admissionEpoch,
             admissionCell: admissionCell)
+        _ = AccountSurfaceRegistry.attachAll(binding)
+        return binding
     }
 
     public static func isCurrent(_ binding: AccountBinding) -> Bool {
@@ -2355,8 +2377,22 @@ public enum CaptureAccountScope {
         unlockPreferenceMutationGate()
 
         guard identityTransition else { return }
-        CaptureWidgetSnapshotStore.transition(
-            toOwner: publication.widgetOwner)
+        // Lock order is exposurePublicationLock -> surface-store locks. `stateLock`
+        // and the preference gate are already released, matching binding publication
+        // and preventing a stale reader from becoming the final widget owner.
+        exposurePublicationLock.lock()
+        if let owner = publication.widgetOwner {
+            let base = (try? durableContainer()) ?? failClosedRoot
+            let binding = AccountBinding(
+                root: base.appendingPathComponent(owner, isDirectory: true),
+                scope: owner,
+                generation: revision)
+            AccountSurfaceRegistry.publishIdentity(
+                binding, replacingIdentity: true)
+        } else {
+            AccountSurfaceRegistry.withdrawPublishedIdentity()
+        }
+        exposurePublicationLock.unlock()
         if Thread.isMainThread {
             NotificationCenter.default.post(
                 name: identityDidChangeNotification,
@@ -2557,6 +2593,8 @@ public enum CaptureAccountScope {
         stateLock.unlock()
         return overridden ?? .standard
     }
+
+    static var accountSurfaceDefaults: UserDefaults { currentDefaults() }
 
     private static func isAccountScope(_ scope: String) -> Bool {
         guard scope.hasPrefix(scopePrefix), scope != signedOutScope else { return false }
@@ -2761,6 +2799,16 @@ public enum CaptureAccountScope {
         }
     }
 
+    #if DEBUG || PERF_HARNESS
+    static func setAfterAccountBindingGuardHookForTests(
+        _ hook: (() -> Void)?
+    ) {
+        stateLock.withLock {
+            afterAccountBindingGuardHookForTests = hook
+        }
+    }
+    #endif
+
     static func setActivationMigrationPauseHookForTests(
         _ hook: (() -> Void)?
     ) {
@@ -2831,6 +2879,9 @@ public enum CaptureAccountScope {
         pairingKeychainServicesOverride = nil
         interruptedDeletionRecoveryForTests = nil
         beforeAccountBindingPublicationHook = nil
+        #if DEBUG || PERF_HARNESS
+        afterAccountBindingGuardHookForTests = nil
+        #endif
         activationMigrationPauseHookForTests = nil
         identityPresenceOverrideForTests = nil
         lastValidatedContainer = nil

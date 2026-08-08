@@ -448,6 +448,23 @@ public enum AccountPreferenceUsageGuard {
             let compactUse = resolved.use
                 .replacingOccurrences(
                     of: "\\s+", with: "", options: .regularExpression)
+            if context.type == "AccountSurfaceRuntime",
+               context.method == "clear",
+               ["removeObject", "object"].contains(method),
+               compactUse == "$0" {
+                // The identity boundary accepts only manifest-owned literal arrays;
+                // AccountSurfaceCompletenessTests independently reflects every literal.
+                return nil
+            }
+            if context.type == "AccountSurfaceRegistry",
+               ["captureDetachSnapshot", "restoreDetachSnapshot"]
+                    .contains(context.method),
+               ["object", "removeObject", "set"].contains(method),
+               ["key", "$0", "$0.key"].contains(compactUse) {
+                // Rollback touches only detachPreferenceKeys, the closed literal list
+                // owned by the 26-case manifest and independently completeness-scanned.
+                return nil
+            }
             if context.type == "LiveAccountDeletionContext",
                let enclosingMethod = context.method,
                ["remove", "verify"].contains(enclosingMethod),
