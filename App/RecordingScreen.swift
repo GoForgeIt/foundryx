@@ -147,11 +147,11 @@ struct RecordingScreen: View {
         HStack(spacing: 5) {
             BreathingDot(color: GrainColor.forgeInk, size: 5)
             Text(statusWord)
-                .font(GrainFont.sans(8, weight: .heavy))
+                .font(GrainFont.sans(12, weight: .heavy))
                 .tracking(0.6)
                 .foregroundStyle(GrainColor.forgeInk)
             SessionElapsedLabel(clock: clock,
-                                font: GrainFont.sans(8, weight: .heavy), color: GrainColor.forgeInk)
+                                font: GrainFont.sans(12, weight: .heavy), color: GrainColor.forgeInk)
         }
         .accessibilityElement(children: .combine)
     }
@@ -290,7 +290,7 @@ struct RecordingScreen: View {
             .frame(maxWidth: .infinity)
 
             Text("Saves this voice note and returns to Capture.")
-                .font(GrainFont.sans(8.5))
+                .font(GrainFont.sans(12))
                 .foregroundStyle(GrainColor.textMuted)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity)
@@ -358,7 +358,7 @@ private struct RecordingLiveTranscript: View {
 
     var body: some View {
         styled
-            .font(GrainFont.sans(10.5))
+            .font(GrainFont.sans(12))
             .foregroundStyle(GrainColor.textMuted)   // baseline for any unstyled run
             .lineSpacing(3)
             .frame(maxWidth: .infinity, alignment: .topLeading)

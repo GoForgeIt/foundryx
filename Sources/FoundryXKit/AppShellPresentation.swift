@@ -28,7 +28,7 @@ public enum AppTab: String, CaseIterable, Hashable, Sendable, Codable {
         switch self {
         case .capture: return "Capture"
         case .activity: return "Activity"
-        case .chat: return "Chat"
+        case .chat: return "Chats"
         case .settings: return "Settings"
         }
     }

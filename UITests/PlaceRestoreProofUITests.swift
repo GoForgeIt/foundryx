@@ -45,11 +45,11 @@ final class PlaceRestoreProofUITests: XCTestCase {
 
     /// The tab bar's selected item, read from the accessibility tree.
     private func selectedTab(_ app: XCUIApplication) -> String? {
-        for label in ["Capture", "Activity", "Chat", "Settings"] {
+        for label in ["Capture", "Activity", "Chats", "Settings"] {
             let button = app.tabBars.buttons[label].firstMatch
             if button.exists, button.isSelected { return label }
         }
-        for label in ["Capture", "Activity", "Chat", "Settings"] {
+        for label in ["Capture", "Activity", "Chats", "Settings"] {
             let button = app.buttons[label].firstMatch
             if button.exists, button.isSelected { return label }
         }
@@ -75,16 +75,16 @@ final class PlaceRestoreProofUITests: XCTestCase {
     func testTheTabISwitchedToSurvivesLeavingAndReturning() throws {
         let app = launched()
 
-        tapTab(app, "Chat")
+        tapTab(app, "Chats")
         RunLoop.current.run(until: Date().addingTimeInterval(2))
-        XCTAssertEqual(selectedTab(app), "Chat", "premise: I am standing on the Chat tab")
+        XCTAssertEqual(selectedTab(app), "Chats", "premise: I am standing on the Chats tab")
         shoot(app, "01-on-chat-before-leaving")
 
         goHomeAndBack(app)
         shoot(app, "02-after-returning")
 
-        XCTAssertEqual(selectedTab(app), "Chat",
-                       "returning to the app MUST land where I was (Chat), not on the "
+        XCTAssertEqual(selectedTab(app), "Chats",
+                       "returning to the app MUST land where I was (Chats), not on the "
                        + "conversation list")
     }
 
@@ -94,9 +94,9 @@ final class PlaceRestoreProofUITests: XCTestCase {
     func testTheTabISwitchedToSurvivesBeingReclaimedInTheBackground() throws {
         let app = launched()
 
-        tapTab(app, "Chat")
+        tapTab(app, "Chats")
         RunLoop.current.run(until: Date().addingTimeInterval(2))
-        XCTAssertEqual(selectedTab(app), "Chat", "premise: I am standing on the Chat tab")
+        XCTAssertEqual(selectedTab(app), "Chats", "premise: I am standing on the Chats tab")
 
         XCUIDevice.shared.press(.home)
         RunLoop.current.run(until: Date().addingTimeInterval(3))
@@ -108,9 +108,9 @@ final class PlaceRestoreProofUITests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(3))
         shoot(app, "02-after-relaunch")
 
-        XCTAssertEqual(selectedTab(app), "Chat",
+        XCTAssertEqual(selectedTab(app), "Chats",
                        "a background reclaim is not a reason to lose my place — coming back "
-                       + "MUST land on Chat, not on the conversation list")
+                       + "MUST land on Chats, not on the conversation list")
     }
 
     /// Open the demo library's first conversation and assert we are inside its detail.

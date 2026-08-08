@@ -14,17 +14,13 @@ public final class ChatViewModel: ObservableObject {
         public var text: String
         /// Router target_id that handled this (assistant) message, e.g.
         /// "local-qwen3-8b" — stamped from the door's `routed:` boundary. nil until routed.
+        /// Persisted and read for usage telemetry (`UsageHook.chat`); the per-message
+        /// "🔒 local · model" / "☁️ cloud · model" caption this once ALSO fed was retired
+        /// under T-PHONE-CHATLAW in favor of the header's route line
+        /// (`ChatScreen.swift`'s `routeLine`) — its two presentation-only derivations,
+        /// `routeIsLocal` / `routeModelLabel`, were deleted in the same change as their
+        /// only caller (`ChatView.swift`'s former `routeCaption`).
         public var routedVia: String?
-
-        /// True when the routing target ran on-device (target_id prefixed "local").
-        public var routeIsLocal: Bool { (routedVia ?? "").hasPrefix("local") }
-        /// Friendly model label for display — the target_id with a leading
-        /// "local-"/"cloud-" stripped (falls back to the raw id).
-        public var routeModelLabel: String? {
-            guard let r = routedVia else { return nil }
-            for p in ["local-", "cloud-"] where r.hasPrefix(p) { return String(r.dropFirst(p.count)) }
-            return r
-        }
     }
 
     public enum TurnState: Equatable {

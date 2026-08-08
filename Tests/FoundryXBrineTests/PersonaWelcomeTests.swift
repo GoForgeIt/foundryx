@@ -197,18 +197,29 @@ final class WelcomeGateTests: XCTestCase {
 }
 
 /// The app shell (features/app-shell.feature, spec §1 + T1 20260715T1457, Nick
-/// 2026-07-15): four tabs in order — Capture, Activity, Chat, Settings — Capture
+/// 2026-07-15): four tabs in order — Capture, Activity, Chats, Settings — Capture
 /// first. Settings is a first-class bottom-nav tab now (superseding the 2026-07-14
 /// "Settings as a sheet / 3 content tabs" decision); Device management still lives
-/// inside Settings (no Device tab).
+/// inside Settings (no Device tab). The Chat tab's label reads **Chats** (plural,
+/// matching the rail — T-PHONE-CHATLAW, IA-D1) — the tab count and order are
+/// unaffected (tracks.md T-PHONE-CHATLAW's own gate: "the four tabs and their
+/// order do not change; Capture stays the launch tab").
 final class AppShellPresentationTests: XCTestCase {
 
-    // Scenario: the app shows Capture, Activity, Chat, Settings tabs in order
-    func testTabBarIsCaptureActivityChatSettingsInOrder() {
+    // Scenario: the app shows Capture, Activity, Chats, Settings tabs in order
+    func testTabBarIsCaptureActivityChatsSettingsInOrder() {
         XCTAssertEqual(AppTab.allCases, [.capture, .activity, .chat, .settings])
         XCTAssertEqual(AppTab.allCases.map(\.label),
-                       ["Capture", "Activity", "Chat", "Settings"])
+                       ["Capture", "Activity", "Chats", "Settings"])
         XCTAssertEqual(AppTab.launch, .capture, "Capture is the launch/home tab")
+    }
+
+    // Regression guard (T-PHONE-CHATLAW): still exactly 4 tabs, no fifth added for
+    // multiplayer — it enters through the chat-list drawer instead
+    // (tracks.md T-PHONE-CHATLAW, ia-brief.md §5.3).
+    func testStillExactlyFourTabsNoFifthForMultiplayer() {
+        XCTAssertEqual(AppTab.allCases.count, 4,
+                       "multiplayer must enter through the chat-list drawer, never a fifth tab")
     }
 
     // Scenario: Settings IS a tab now; Device still is NOT (it lives inside Settings)

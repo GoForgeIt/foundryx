@@ -65,7 +65,7 @@ final class PerfBudgetNavUITests: XCTestCase {
 
         // Two full tab cycles = 8 `tab-switch` spans against the hydrated library.
         for lap in 1...2 {
-            for name in ["Activity", "Chat", "Settings", "Capture"] {
+            for name in ["Activity", "Chats", "Settings", "Capture"] {
                 let tab = app.buttons[name].firstMatch
                 XCTAssertTrue(tab.waitForExistence(timeout: 10), "\(name) tab present")
                 tab.tap()
@@ -226,7 +226,7 @@ final class PerfBudgetNavUITests: XCTestCase {
         var laps = 0
         while Date() < deadline {
             laps += 1
-            for name in ["Activity", "Chat", "Settings", "Capture"] {
+            for name in ["Activity", "Chats", "Settings", "Capture"] {
                 let tab = app.buttons[name].firstMatch
                 if tab.exists { tab.tap() }
                 RunLoop.current.run(until: Date().addingTimeInterval(0.4))
