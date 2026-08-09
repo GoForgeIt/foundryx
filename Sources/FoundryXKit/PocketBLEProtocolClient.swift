@@ -1,7 +1,7 @@
 import Foundation
 
 public enum PocketOperation: String, Sendable, Equatable {
-    case authentication, information, dateList, fileList, download
+    case authentication, information, dateList, fileList, download, wifiControl
 }
 
 public enum PocketProtocolError: Error, Sendable, Equatable, CustomStringConvertible {
@@ -28,6 +28,30 @@ public enum PocketProtocolError: Error, Sendable, Equatable, CustomStringConvert
 }
 
 public enum PocketTransportFailure: Error, Sendable { case timeout, stall, disconnected, other }
+
+/// Typed, provenance-labeled WiFi controls. Their wire values come from the reference trace;
+/// availability on a stock firmware family is not inferred from this enum or from CI fakes.
+public enum PocketWiFiCommand: Sendable, Equatable {
+    case initialize
+    case credentials
+    case enable
+    case status
+    case select(PocketRecordingRequest)
+    case beginTransfer
+    case close
+
+    fileprivate var wireValue: String {
+        switch self {
+        case .initialize: "U&WIFI"
+        case .credentials: "WIFI"
+        case .enable: "WIFIO"
+        case .status: "WIFIS"
+        case .select(let request): "U&\(request.date)&\(request.timestamp)"
+        case .beginTransfer: "U&WIFI"
+        case .close: "WIFIC"
+        }
+    }
+}
 
 public enum PocketTransportEvent: Sendable {
     case control(Data, generation: UInt64)
@@ -248,6 +272,16 @@ public actor PocketBLEClient {
         }
     }
 
+    /// T5's typed extension point. Commands remain serialized by this client's authenticated
+    /// session and generation rules; callers never receive a raw-command escape hatch.
+    /// The transcript is reference-derived and must remain behind E-WIFI-CONTROL in production.
+    public func performReferenceWiFiCommand(_ command: PocketWiFiCommand) async throws -> String {
+        try await protected(.wifiControl) {
+            try await write(command.wireValue)
+            return try await nextControl(operation: .wifiControl)
+        }
+    }
+
     private func scalar(command: String, prefix: String, operation: PocketOperation) async throws -> Int {
         try await protected(operation) {
             try await write(command)
@@ -327,6 +361,21 @@ public actor PocketBLEClient {
         catch let error as PocketProtocolError { return .failure(error) }
         catch { return .failure(.transportFailure) }
     }
+}
+
+extension PocketBLEClient: PocketFastSyncControlling {
+    public func prepare(_ request: PocketRecordingRequest) async throws {
+        guard try await performReferenceWiFiCommand(.initialize) == "MCU&WIFIS&0" else { throw PocketProtocolError.malformedResponse }
+        guard try await performReferenceWiFiCommand(.credentials).hasPrefix("MCU&WIFI&") else { throw PocketProtocolError.malformedResponse }
+        guard try await performReferenceWiFiCommand(.enable) == "MCU&WIFIO" else { throw PocketProtocolError.malformedResponse }
+        var ready = false
+        for _ in 0..<3 where !ready { ready = try await performReferenceWiFiCommand(.status) == "MCU&WIFIS&1" }
+        guard ready else { throw PocketProtocolError.malformedResponse }
+        guard try await performReferenceWiFiCommand(.select(request)).hasPrefix("MCU&U&") else { throw PocketProtocolError.malformedResponse }
+        guard try await performReferenceWiFiCommand(.beginTransfer) == "MCU&U&WIFI" else { throw PocketProtocolError.malformedResponse }
+    }
+
+    public func cleanup() async { _ = try? await performReferenceWiFiCommand(.close) }
 }
 
 private func validToken(_ value: String) -> Bool {

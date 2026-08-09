@@ -117,9 +117,16 @@ public struct StoredFileLiveEffectCounts: Equatable, Sendable {
 }
 
 public final class StoredFileLiveBoundarySpy: @unchecked Sendable {
-    public private(set) var counts = StoredFileLiveEffectCounts()
+    private let lock = NSLock()
+    private var storage = StoredFileLiveEffectCounts()
+    public var counts: StoredFileLiveEffectCounts { lock.withLock { storage } }
     public init() {}
-    fileprivate func storedFileLifecycleEvent() { counts.storedFileLifecycleEvents += 1 }
+    fileprivate func storedFileLifecycleEvent() { lock.withLock { storage.storedFileLifecycleEvents += 1 } }
+    public func activeSourceSelected() { lock.withLock { storage.activeSourceSelections += 1 } }
+    public func frameRouterStarted() { lock.withLock { storage.frameRouterStarts += 1 } }
+    public func walWritten() { lock.withLock { storage.walWrites += 1 } }
+    public func liveActivityStarted() { lock.withLock { storage.liveActivities += 1 } }
+    public func liveStateMutated() { lock.withLock { storage.liveStateMutations += 1 } }
 }
 
 public enum StoredFileDeviceLifecycle {
