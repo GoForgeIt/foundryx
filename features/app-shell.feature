@@ -1,13 +1,14 @@
-Feature: The app shell is four tabs — Capture, Activity, Chat, Settings
-  One bottom tab bar, exactly four tabs — Capture, Activity, Chat, Settings — with
+Feature: The app shell is four tabs — Capture, Activity, Chats, Settings
+  One bottom tab bar, exactly four tabs — Capture, Activity, Chats, Settings — with
   Capture as the launch tab. Settings is a first-class bottom-nav tab (Nick 2026-07-15,
   T1 20260715T1457), superseding the 2026-07-14 "Settings as a dismissable sheet / three
   content tabs" decision. Device management is NOT its own tab: it lives inside Settings
   as a "Devices & connections" page, so there is one management home, not a competing tab.
+  The Chat tab reads "Chats" — plural, matching the rail (T-PHONE-CHATLAW, IA-D1).
 
-  Scenario: the app shows Capture, Activity, Chat, Settings tabs in order
+  Scenario: the app shows Capture, Activity, Chats, Settings tabs in order
     When the app shell is presented
-    Then the bottom tab bar shows exactly "Capture", "Activity", "Chat", "Settings" in that order
+    Then the bottom tab bar shows exactly "Capture", "Activity", "Chats", "Settings" in that order
     And the Capture tab is selected
 
   Scenario: Settings is a tab and Device is not
