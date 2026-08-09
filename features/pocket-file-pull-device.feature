@@ -9,7 +9,7 @@ Feature: Pocket is a stored-file recording device in the one device list
     And it is excluded from live source candidates
 
   Scenario: The shared identity can be reconstructed without the session secret
-    Given a provisioned recorder identity and its persisted public lookup components
+    Given a recorder advertising its stable transport identity
     When the device list reconstructs the identity without the session secret
     Then its device-list identity and secret-storage key are identical
     And its advertised name is absent from that identity

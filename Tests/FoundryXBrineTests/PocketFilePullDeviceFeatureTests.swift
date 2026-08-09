@@ -16,7 +16,7 @@ private enum PocketFilePullSteps {
     static func make(_ world: PocketFilePullWorld) -> [StepDefinition] {
         let givens = [
             "an authenticated stored-file recorder without a live audio profile",
-            "a provisioned recorder identity and its persisted public lookup components",
+            "a recorder advertising its stable transport identity",
             "an authenticated Pocket transport reporting battery and firmware",
             "a connected stored-file recorder with battery and firmware facts",
             "recorder files that FoundryX has and files only on the recorder",
@@ -70,15 +70,12 @@ private actor PocketFilePullWorld {
                 reportedName: "Pocket", audioProfile: nil,
                 declaredCapabilities: [RecordingDeviceCapabilityKey.offlineStorage.rawValue: nil]))
         case "the device list reconstructs the identity without the session secret":
-            let provisioned = try PocketAuthenticatedIdentity(peripheralIdentifier: "ABC", sessionSecret: secret)
-            identity = try PocketAuthenticatedIdentity(
-                peripheralIdentifier: provisioned.peripheralIdentifier,
-                sessionKeyFingerprint: provisioned.sessionKeyFingerprint)
+            identity = try PocketAuthenticatedIdentity(peripheralIdentifier: "ABC")
         case "the Pocket discovery bridge observes the device":
             let transport = FilePullFakeTransport(actions: ["MCU&SK&OK", "MCU&BAT&72", "MCU&FW&1.6"])
             let client = try await PocketBLEClient.connect(transport: transport)
             try await client.authenticate(secret: secret)
-            let auth = try PocketAuthenticatedIdentity(peripheralIdentifier: "ABC", sessionSecret: secret)
+            let auth = try PocketAuthenticatedIdentity(peripheralIdentifier: "ABC")
             observed = await PocketRecordingDeviceBridge.observe(
                 client: client, identity: auth, advertisedName: " PKT01_BLUE_26079bc5 ")
         case "the device page presentation is built":

@@ -7,44 +7,22 @@ import Security
 /// The identity shared by Pocket custody and the device list. Neither component is display data.
 public struct PocketAuthenticatedIdentity: Hashable, Sendable, Codable {
     public let peripheralIdentifier: String
-    public let sessionKeyFingerprint: String
 
-    public init(peripheralIdentifier: String, sessionSecret: String) throws {
+    /// This is deliberately constructible from discovery state on a cold launch.
+    /// The session secret is record data, never part of the record's address.
+    public init(peripheralIdentifier: String) throws {
         let peripheral = peripheralIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !peripheral.isEmpty, sessionSecret.utf8.count == 16,
-              sessionSecret.unicodeScalars.allSatisfy({ $0.isASCII }) else {
+        guard !peripheral.isEmpty else {
             throw PocketIdentityError.missingOrInvalidComponent
         }
         self.peripheralIdentifier = peripheral.lowercased()
-        self.sessionKeyFingerprint = SHA256.hash(data: Data(sessionSecret.utf8))
-            .map { String(format: "%02x", $0) }.joined()
     }
-
-    /// Reconstructs the public lookup identity on reconnect. The fingerprint is persisted
-    /// beside attachment intent during provisioning, so Keychain lookup never requires the
-    /// secret that lookup is meant to retrieve.
-    public init(peripheralIdentifier: String, sessionKeyFingerprint: String) throws {
-        let peripheral = peripheralIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
-        let fingerprint = sessionKeyFingerprint.lowercased()
-        guard !peripheral.isEmpty, fingerprint.count == 64,
-              fingerprint.unicodeScalars.allSatisfy({ $0.isASCII && ("0"..."9").contains(Character(String($0))) || ("a"..."f").contains(Character(String($0))) }) else {
-            throw PocketIdentityError.missingOrInvalidComponent
-        }
-        self.peripheralIdentifier = peripheral.lowercased()
-        self.sessionKeyFingerprint = fingerprint
-    }
-
-    /// The exact `hardwareToken` T3 supplies to `RecordingDeviceIdentity(.filePull, ...)`.
-    /// Keeping composition here prevents custody and list identity from drifting apart.
-    public var hardwareToken: String {
-        "\(peripheralIdentifier)/\(sessionKeyFingerprint)"
-    }
-
-    public var storageKey: String { "filePull/\(hardwareToken)" }
 
     public var recordingDeviceIdentity: RecordingDeviceIdentity {
-        RecordingDeviceIdentity(shape: .filePull, hardwareToken: hardwareToken)
+        RecordingDeviceIdentity(shape: .filePull, hardwareToken: peripheralIdentifier)
     }
+
+    public var storageKey: String { recordingDeviceIdentity.storageKey }
 }
 
 public enum PocketIdentityError: Error, Equatable, Sendable {
@@ -60,13 +38,30 @@ public protocol PocketSecretStore: Sendable {
 }
 
 public actor InMemoryPocketSecretStore: PocketSecretStore {
-    private var values: [String: String] = [:]
+    private struct Record: Sendable {
+        let secret: String
+        let fingerprint: String
+    }
+    private var values: [String: Record] = [:]
     public init() {}
     public func save(_ secret: String, for identity: PocketAuthenticatedIdentity) throws {
-        values[identity.storageKey] = secret
+        guard PocketSecretRecord.isValid(secret) else { throw PocketSecretStoreError.unavailable }
+        values[identity.storageKey] = Record(secret: secret, fingerprint: PocketSecretRecord.fingerprint(secret))
     }
     public func secret(for identity: PocketAuthenticatedIdentity) -> String? {
-        values[identity.storageKey]
+        guard let record = values[identity.storageKey],
+              PocketSecretRecord.fingerprint(record.secret) == record.fingerprint else { return nil }
+        return record.secret
+    }
+}
+
+private enum PocketSecretRecord {
+    static func isValid(_ secret: String) -> Bool {
+        secret.utf8.count == 16 && secret.unicodeScalars.allSatisfy(\.isASCII)
+    }
+
+    static func fingerprint(_ secret: String) -> String {
+        SHA256.hash(data: Data(secret.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 }
 
@@ -78,6 +73,7 @@ public actor KeychainPocketSecretStore: PocketSecretStore {
 
     public func save(_ secret: String, for identity: PocketAuthenticatedIdentity) throws {
 #if canImport(Security)
+        guard PocketSecretRecord.isValid(secret) else { throw PocketSecretStoreError.unavailable }
         let base: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -86,6 +82,7 @@ public actor KeychainPocketSecretStore: PocketSecretStore {
         ]
         let attributes: [String: Any] = [
             kSecValueData as String: Data(secret.utf8),
+            kSecAttrGeneric as String: Data(PocketSecretRecord.fingerprint(secret).utf8),
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
         ]
         var add = base
@@ -111,13 +108,18 @@ public actor KeychainPocketSecretStore: PocketSecretStore {
             kSecAttrAccount as String: identity.storageKey,
             kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
             kSecReturnData as String: true,
+            kSecReturnAttributes as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess, let data = result as? Data,
-              let value = String(data: data, encoding: .utf8) else {
+        guard status == errSecSuccess, let item = result as? [String: Any],
+              let data = item[kSecValueData as String] as? Data,
+              let fingerprintData = item[kSecAttrGeneric as String] as? Data,
+              let value = String(data: data, encoding: .utf8),
+              let fingerprint = String(data: fingerprintData, encoding: .utf8),
+              PocketSecretRecord.fingerprint(value) == fingerprint else {
             throw PocketSecretStoreError.unavailable
         }
         return value
@@ -171,9 +173,7 @@ public actor PocketOnboardingCoordinator {
 
     /// Called only for a factory-fresh unit after the firmware alphabet/entropy gate is met.
     public func provisionFactoryFresh(identity: PocketAuthenticatedIdentity?, candidate: String) async -> PocketOnboardingState {
-        guard let identity,
-              (try? PocketAuthenticatedIdentity(peripheralIdentifier: identity.peripheralIdentifier,
-                                                sessionSecret: candidate)) == identity else {
+        guard let identity, PocketSecretRecord.isValid(candidate) else {
             return .quarantined
         }
         guard await client.authenticate(secret: candidate) == .accepted else {

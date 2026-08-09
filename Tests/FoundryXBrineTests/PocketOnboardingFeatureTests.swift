@@ -8,17 +8,15 @@ final class PocketOnboardingFeatureTests: XCTestCase {
         let result = try await BrineFeatureRunner.run(
             "pocket-onboarding",
             registry: StepRegistry(PocketOnboardingSteps.make(world: world)))
-        XCTAssertEqual(result.passed, 11)
+        XCTAssertEqual(result.passed, 12)
     }
 
     func testIdentityMutationCannotRetrieveSecret() async throws {
         let store = InMemoryPocketSecretStore()
         let original = try PocketAuthenticatedIdentity(
-            peripheralIdentifier: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
-            sessionSecret: "0123456789ABCDEF")
+            peripheralIdentifier: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")
         let mutation = try PocketAuthenticatedIdentity(
-            peripheralIdentifier: "AAAAAAAA-BBBB-CCCC-DDDD-FFFFFFFFFFFF",
-            sessionSecret: "0123456789ABCDEF")
+            peripheralIdentifier: "AAAAAAAA-BBBB-CCCC-DDDD-FFFFFFFFFFFF")
         try await store.save("0123456789ABCDEF", for: original)
         let retrieved = await store.secret(for: mutation)
         XCTAssertNil(retrieved)
@@ -30,6 +28,7 @@ private enum PocketOnboardingSteps {
         let givens = [
             "a selected factory-fresh Pocket with authenticated identity components",
             "a stored Pocket secret bound to an authenticated composite identity",
+            "only a stored Pocket custody record remains after launch",
             "an already-used Pocket with a matching stored secret",
             "an already-used Pocket without a matching stored secret",
             "a Pocket with a missing or mismatched identity component",
@@ -42,6 +41,7 @@ private enum PocketOnboardingSteps {
             "I open Pocket setup",
             "Pocket accepts the candidate and FoundryX securely stores it",
             "only the CoreBluetooth peripheral identifier is substituted",
+            "the Pocket reconnects with its transport identity",
             "I reconnect it",
             "I ask how to connect it",
             "I try to set it up",
@@ -55,6 +55,7 @@ private enum PocketOnboardingSteps {
             "I see one sentence and one Set up button without credential language",
             "setup completes only after battery and firmware confirmation",
             "no Pocket secret is returned",
+            "the stored Pocket secret is retrieved without already possessing it",
             "FoundryX submits only the stored secret and preserves the maker-app setup",
             "coexistence is explained as advanced key capture and reset is the last resort",
             "no credential is submitted and the observation is quarantined",
@@ -95,7 +96,7 @@ private actor PocketOnboardingWorld {
 
     func when(_ phrase: String) async throws {
         whenPhrase = phrase
-        let identity = try PocketAuthenticatedIdentity(peripheralIdentifier: "A", sessionSecret: secret)
+        let identity = try PocketAuthenticatedIdentity(peripheralIdentifier: "A")
         switch phrase {
         case "Pocket accepts the candidate and FoundryX securely stores it":
             await client.configure(authentication: .accepted, battery: 72, firmware: "1.6")
@@ -103,14 +104,21 @@ private actor PocketOnboardingWorld {
             result = await flow.provisionFactoryFresh(identity: identity, candidate: secret)
         case "only the CoreBluetooth peripheral identifier is substituted":
             try await store.save(secret, for: identity)
-            let changed = try PocketAuthenticatedIdentity(peripheralIdentifier: "B", sessionSecret: secret)
-            retrieved = try await store.secret(for: changed)
+            let changed = try PocketAuthenticatedIdentity(peripheralIdentifier: "B")
+            retrieved = await store.secret(for: changed)
+        case "the Pocket reconnects with its transport identity":
+            try await store.save(secret, for: identity)
+            let coldLaunchIdentity = try PocketAuthenticatedIdentity(peripheralIdentifier: "A")
+            retrieved = await store.secret(for: coldLaunchIdentity)
         case "I reconnect it":
             try await store.save(secret, for: identity)
             await client.configure(authentication: .accepted, battery: 72, firmware: "1.6")
             result = await PocketOnboardingCoordinator(client: client, store: store).restore(identity: identity)
-        case "I ask how to connect it": result = .coexistenceAvailable
-        case "I try to set it up": result = .quarantined
+        case "I ask how to connect it":
+            result = await PocketOnboardingCoordinator(client: client, store: store).restore(identity: identity)
+        case "I try to set it up":
+            result = await PocketOnboardingCoordinator(client: client, store: store)
+                .provisionFactoryFresh(identity: nil, candidate: secret)
         case "I retry secure storage for the same identity":
             let failing = FailingThenWorkingPocketSecretStore()
             let isolatedClient = PocketOnboardingClientSpy()
@@ -120,7 +128,10 @@ private actor PocketOnboardingWorld {
             submittedBeforeRetry = await isolatedClient.submittedSecrets
             result = await flow.retrySecureStorage()
             scenarioSubmitted = await isolatedClient.submittedSecrets
-        case "setup handles the result": result = .indeterminate
+        case "setup handles the result":
+            await client.configure(authentication: .indeterminate, battery: 72, firmware: "1.6")
+            result = await PocketOnboardingCoordinator(client: client, store: store)
+                .provisionFactoryFresh(identity: identity, candidate: secret)
         default: break
         }
     }
@@ -135,6 +146,7 @@ private actor PocketOnboardingWorld {
         case "setup completes only after battery and firmware confirmation":
             XCTAssertEqual(result, .ready(batteryPercent: 72, firmware: "1.6"))
         case "no Pocket secret is returned": XCTAssertNil(retrieved)
+        case "the stored Pocket secret is retrieved without already possessing it": XCTAssertEqual(retrieved, secret)
         case "FoundryX submits only the stored secret and preserves the maker-app setup":
             let submitted = await client.submittedSecrets
             XCTAssertEqual(submitted, [secret]); XCTAssertEqual(result, .ready(batteryPercent: 72, firmware: "1.6"))

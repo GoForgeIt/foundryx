@@ -16,6 +16,11 @@ Feature: Set up a Pocket without weakening the owner's custody
     When only the CoreBluetooth peripheral identifier is substituted
     Then no Pocket secret is returned
 
+  Scenario: A cold launch restores custody from transport identity alone
+    Given only a stored Pocket custody record remains after launch
+    When the Pocket reconnects with its transport identity
+    Then the stored Pocket secret is retrieved without already possessing it
+
   Scenario: A prior FoundryX pairing is restored before any fresh write
     Given an already-used Pocket with a matching stored secret
     When I reconnect it
