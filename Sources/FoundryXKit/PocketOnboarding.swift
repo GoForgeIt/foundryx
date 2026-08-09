@@ -237,13 +237,13 @@ public struct PocketSetupPresentation: Equatable, Sendable {
         actions: ["Try again"])
     public static let ready = PocketSetupPresentation(title: "Pocket is ready.", body: "", actions: ["Done"])
     public static let indeterminate = PocketSetupPresentation(
-        title: "Setup didn't finish", body: "FoundryX couldn't determine this recorder's setup.", actions: ["Try again"])
+        title: "Setup didn't finish", body: "Solleva couldn't determine this recorder's setup.", actions: ["Try again"])
     public static let keepBothApps = PocketSetupPresentation(
         title: "Keep both apps",
-        body: "FoundryX won't reset your recorder. Both apps can use the same recorder. They connect one at a time.",
+        body: "Solleva won't reset your recorder. Both apps can use the same recorder. They connect one at a time.",
         actions: ["Advanced instructions", "Reset and start over"])
     public static let quarantined = PocketSetupPresentation(
-        title: "Can't verify this Pocket", body: "FoundryX can't safely match this recorder to secure custody.", actions: [])
+        title: "Can't verify this Pocket", body: "Solleva can't safely match this recorder to secure custody.", actions: [])
     public static let all = [setup, didNotFinish, acceptedNotDurable, ready, indeterminate, keepBothApps, quarantined]
 }
 
@@ -256,7 +256,7 @@ public struct PocketDeviceEducation: Equatable, Sendable {
     public let sections: [PocketEducationSection]
     public let claimsTelemetry: Bool
     public static let presentation = PocketDeviceEducation(sections: [
-        .init(title: "Is it recording?", body: "Check the light on the recorder. FoundryX doesn't show recording state yet."),
+        .init(title: "Is it recording?", body: "Check the light on the recorder. Solleva doesn't show recording state yet."),
         .init(title: "The light", body: "Solid amber — Recording\nBlue — Connected\nRed — Charging"),
         .init(title: "The button", body: "Press once — Start or stop\nHold 3 seconds — Turn it off"),
         .init(title: "The switch", body: "Normal — Everything around you\nCall — Phone calls only")

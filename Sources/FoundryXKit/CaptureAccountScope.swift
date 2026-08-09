@@ -75,7 +75,7 @@ public enum CaptureAccountScopeError: Error, LocalizedError {
         case .activationState(let detail):
             return "The account's durable storage state could not be recorded: \(detail)"
         case .durableContainer(let detail):
-            return "The durable FoundryX storage container is unavailable: \(detail)"
+            return "The durable Solleva storage container is unavailable: \(detail)"
         case .ownershipMarker(let detail):
             return "Local-data ownership could not be recorded: \(detail)"
         case .legacyEnumeration(let detail):

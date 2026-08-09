@@ -205,7 +205,7 @@ struct VaultFunnelView: View {
         return VStack(spacing: GrainSpacing.x4) {
             waitScreen(label: "Payment confirmed", title: presentation.title,
                        body: presentation.body, spinning: presentation.showsProgress)
-            GrainButton("Keep using FoundryX", variant: .outlined, size: .regular) {
+            GrainButton("Keep using Solleva", variant: .outlined, size: .regular) {
                 model.leaveProvisioning()
             }
             .padding(.bottom, GrainSpacing.x4)

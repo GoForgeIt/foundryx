@@ -55,7 +55,7 @@ public enum ChatProvenance: Equatable, Hashable, Sendable {
     /// Map a human source label (`KilnLibrary.sourceLabel`) onto the facet.
     public init(sourceLabel: String) {
         switch sourceLabel {
-        case "FoundryX": self = .thisPhone
+        case "Solleva": self = .thisPhone
         case "Kiln": self = .kiln
         case "Claude Code": self = .claudeCode
         case "Codex": self = .codex
@@ -83,7 +83,7 @@ public enum ChatProvenance: Equatable, Hashable, Sendable {
     /// The label this facet corresponds to on a `ChatNode`.
     public var sourceLabel: String {
         switch self {
-        case .thisPhone: return "FoundryX"
+        case .thisPhone: return "Solleva"
         case .kiln: return "Kiln"
         case .claudeCode: return "Claude Code"
         case .codex: return "Codex"
