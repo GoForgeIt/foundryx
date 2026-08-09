@@ -300,6 +300,27 @@ for (const m of targetsSection.matchAll(/\n  ([A-Za-z0-9_]+):\n([\s\S]*?)(?=\n  
 if (shipped.length === 0) die('project.yml parsed to 0 shipping targets carrying a CFBundleDisplayName');
 const displayNames = shipped.map((t) => t.dn);
 const distinctNames = [...new Set(displayNames)];
+const SRC_ROOTS = ['App', 'Sources', 'Widget'];
+const files = execFileSync('bash', ['-lc',
+  SRC_ROOTS.map((r) => `find ${JSON.stringify(join(REPO, r))} -name '*.swift'`).join('; ')],
+  { encoding: 'utf8' }).split('\n').filter(Boolean);
+
+// The SEAM-D4 carve-out, COUNTED rather than waved at. These are the bare-"Foundry" literals
+// the rename deliberately left alone because the agent's name is an unruled decision. They are
+// excluded from the clause, but a reader of this gate is owed the number: every one of them is
+// a place a customer still reads the retired product name.
+const seamD4Sites = [];
+for (const f of files) {
+  const rel = f.replace(REPO + '/', '');
+  readFileSync(f, 'utf8').split('\n').forEach((line, i) => {
+    const t = line.trim();
+    if (t.startsWith('//') || t.startsWith('*')) return;
+    for (const m of line.matchAll(/"((?:[^"\\\n]|\\.)*)"/g)) {
+      if (/Foundry/.test(m[1]) && !m[1].includes('FoundryX')) seamD4Sites.push(`${rel}:${i + 1}`);
+    }
+  });
+}
+
 const shortcuts = read(join(REPO, 'App/FoundryXShortcuts.swift'), 'FoundryXShortcuts.swift');
 const phrases = [...shortcuts.matchAll(/phrases:\s*\[([\s\S]*?)\]/g)].map((m) => m[1]);
 const phraseLiterals = phrases.flatMap((p) => [...p.matchAll(/"([^"]*)"/g)].map((m) => m[1]));
@@ -311,7 +332,8 @@ clause('one-name-on-the-device', nameOK,
   [`SHIPPED bundles carrying a display name (${shipped.length}): ${shipped.map((t) => `${t.name}[${t.type}]="${t.dn}"`).join(', ')}`,
    `EXCLUDED — non-shipping targets (${notShipped.length}): ${notShipped.map((t) => `${t.name}[${t.type}]="${t.dn}"`).join(', ') || '—'}`,
    `Siri/App Intents phrases parsed: ${phraseLiterals.length}, of which ${phraseLiterals.filter((p) => p.includes('.applicationName')).length} are built from \\(.applicationName) and so cannot drift from the bundle`,
-   `EXCLUDED — SEAM-D4: the default AGENT name is still "Foundry" (App/OnboardingFlowView.swift) pending Nick's ruling. Lane B screened SOLA NO; the register carries it PENDING-B. An agent's name is not a device name, so it is out of this clause's population by RULE, not by convenience — see milestone-verification-m11.md for the amendment this exclusion depends on.`]);
+   `EXCLUDED — SEAM-D4, the default AGENT name, ${seamD4Sites.length} site(s) still reading "Foundry": ${seamD4Sites.join(', ')}`,
+   `    SEAM-D4 is PENDING-B → awaiting Nick (lane B screened SOLA NO and supplied B-1, a plain owner-editable role noun; Nick has ruled neither). An agent's name is not a device name, so these are out of this clause's population by RULE — but they ARE ${seamD4Sites.length} place(s) where a customer reads a second, retired product name on the device. This clause is green only under the amended reading of M11's "one name"; see milestone-verification-m11.md §"the amendment".`]);
 
 // ═════════════════════════════════════════════════════════════════════════════════════
 // CLAUSE 6 — the "-X" suffix gone.
@@ -344,10 +366,6 @@ const CLASSES = [
     ['Sources/FoundryXKit/FoundryAuth.swift', /client id not set in Info\.plist/, 'a thrown configuration error naming the Info.plist key above'],
   ], 'a developer diagnostic, not product chrome'],
 ];
-const SRC_ROOTS = ['App', 'Sources', 'Widget'];
-const files = execFileSync('bash', ['-lc',
-  SRC_ROOTS.map((r) => `find ${JSON.stringify(join(REPO, r))} -name '*.swift'`).join('; ')],
-  { encoding: 'utf8' }).split('\n').filter(Boolean);
 
 const visible = [], excluded = { identifier: [], diagnostic: [] };
 let literalsScanned = 0;
