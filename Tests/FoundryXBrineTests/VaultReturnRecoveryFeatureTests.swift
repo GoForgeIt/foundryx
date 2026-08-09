@@ -35,6 +35,7 @@ private final class VaultReturnRecoveryWorld: @unchecked Sendable {
     let fixture: PairingTestFixture
     let defaults: UserDefaults
     let service = VaultReturnService()
+    let secrets = ScriptedPairingSecretStore()
     var attempts: VaultCheckoutAttemptStore!
     var model: VaultFunnelModel!
     var refreshedToken: String?
@@ -54,7 +55,10 @@ private final class VaultReturnRecoveryWorld: @unchecked Sendable {
         model = VaultFunnelModel(
             service: service,
             browser: VaultReturnBrowser(),
-            cellStore: CellStore(defaults: defaults, keychainService: fixture.cellService),
+            cellStore: CellStore(
+                defaults: defaults,
+                keychainService: fixture.cellService,
+                secretStore: secrets),
             attempts: attempts,
             idToken: { cachedToken },
             refreshingIdToken: { world.refreshCount += 1; return world.refreshedToken },
