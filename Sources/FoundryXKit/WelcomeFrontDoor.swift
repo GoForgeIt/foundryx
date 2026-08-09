@@ -56,6 +56,11 @@ public enum WelcomeFrontDoor {
         }
     }
 
+    public static func showsCleanupRetry(_ status: RemoteSession.Status) -> Bool {
+        if case .deletionCleanupFailed = status { return true }
+        return false
+    }
+
     private static func stageTitle(_ stage: RemoteSession.DeletionCleanupStage) -> String {
         switch stage {
         case .pairingSecrets: return "Pairing secrets"

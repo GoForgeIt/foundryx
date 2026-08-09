@@ -146,7 +146,7 @@ private enum VaultTrapSteps {
                 await MainActor.run { w.makeModel() }
                 w.refreshed = nil                       // refresh fails
                 w.seedAttempt()
-                w.service.next = .failure(VaultSignupError.unauthorized)
+                w.service.next = .failure(VaultSignupError.credentialExpired)
                 return ctx
             },
             defineCheck("I am told my sign-in expired") { _, _, _ in

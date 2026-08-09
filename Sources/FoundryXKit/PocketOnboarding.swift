@@ -20,6 +20,20 @@ public struct PocketAuthenticatedIdentity: Hashable, Sendable, Codable {
             .map { String(format: "%02x", $0) }.joined()
     }
 
+    /// Reconstructs the public lookup identity on reconnect. The fingerprint is persisted
+    /// beside attachment intent during provisioning, so Keychain lookup never requires the
+    /// secret that lookup is meant to retrieve.
+    public init(peripheralIdentifier: String, sessionKeyFingerprint: String) throws {
+        let peripheral = peripheralIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fingerprint = sessionKeyFingerprint.lowercased()
+        guard !peripheral.isEmpty, fingerprint.count == 64,
+              fingerprint.unicodeScalars.allSatisfy({ $0.isASCII && ("0"..."9").contains(Character(String($0))) || ("a"..."f").contains(Character(String($0))) }) else {
+            throw PocketIdentityError.missingOrInvalidComponent
+        }
+        self.peripheralIdentifier = peripheral.lowercased()
+        self.sessionKeyFingerprint = fingerprint
+    }
+
     /// The exact `hardwareToken` T3 supplies to `RecordingDeviceIdentity(.filePull, ...)`.
     /// Keeping composition here prevents custody and list identity from drifting apart.
     public var hardwareToken: String {
@@ -27,6 +41,10 @@ public struct PocketAuthenticatedIdentity: Hashable, Sendable, Codable {
     }
 
     public var storageKey: String { "filePull/\(hardwareToken)" }
+
+    public var recordingDeviceIdentity: RecordingDeviceIdentity {
+        RecordingDeviceIdentity(shape: .filePull, hardwareToken: hardwareToken)
+    }
 }
 
 public enum PocketIdentityError: Error, Equatable, Sendable {

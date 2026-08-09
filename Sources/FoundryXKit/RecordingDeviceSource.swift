@@ -28,12 +28,16 @@ public enum RecordingDeviceShape: String, Codable, Sendable, Equatable, CaseIter
     case audioRoute
     /// The handset's own microphone.
     case builtInMic
+    /// The device records independently and later supplies completed stored files.
+    case filePull
 }
 
 /// WHICH code path turns a shape's bytes into capture frames.
 public enum RecordingDeviceAdapter: String, Sendable, Equatable {
     case bleFrameStream
     case handsetInputRoute
+    /// Classification only. Retrieval belongs to the stored-file sync track.
+    case storedFileSync
 }
 
 // MARK: - Capabilities
@@ -223,6 +227,12 @@ public struct RecordingDeviceEntry: Identifiable, Equatable, Sendable {
     }
 
     public var shape: RecordingDeviceShape { identity.shape }
+    public var isStoredFileUsable: Bool {
+        shape == .filePull && capabilities.state(of: .offlineStorage).isAvailable
+    }
+    public var isLiveSourceCandidate: Bool {
+        shape != .filePull && eligibility.isEligible
+    }
 }
 
 /// One source of observations. A provider knows a transport, never a vendor.
@@ -250,6 +260,7 @@ public enum RecordingSourceCatalog {
         switch shape {
         case .bleStream: return .bleFrameStream
         case .audioRoute, .builtInMic: return .handsetInputRoute
+        case .filePull: return .storedFileSync
         }
     }
 

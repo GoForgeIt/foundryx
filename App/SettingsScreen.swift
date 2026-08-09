@@ -86,22 +86,24 @@ struct SettingsScreen: View {
                 brainRow(.myComputer, subtitle: computerBrainSubtitle)
                 // The hosted cell's consumer entrypoint (proposal
                 // 20260630T0458_secure_web_hosted_foundry) — waitlist until it ships.
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Solleva Cloud — your cell").grainTextStyle(.body)
-                            .foregroundStyle(GrainColor.textMuted)
-                        Text("Coming soon. Speakers, memory, and bigger models — from anywhere.")
-                            .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-                    }
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 2) {
-                        // Never disabled for a tokenless user (B5) — tapping
-                        // routes through sign-in instead of silently no-opping.
-                        Button(waitlistJoined ? "On the list ✓" : "Join waitlist") { joinWaitlist() }
-                            .disabled(waitlistJoined)
-                        if !waitlistJoined, waitlistSignInDismissed, remote.idToken == nil {
-                            Text(WaitlistJoin.signInCaption)
+                if VaultSettingsPresentation.showWaitlist(entitlement: vaultFunnel.entitlement) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Solleva Cloud — your cell").grainTextStyle(.body)
+                                .foregroundStyle(GrainColor.textMuted)
+                            Text("Coming soon. Speakers, memory, and bigger models — from anywhere.")
                                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                        }
+                        Spacer()
+                        VStack(alignment: .trailing, spacing: 2) {
+                            // Never disabled for a tokenless user (B5) — tapping
+                            // routes through sign-in instead of silently no-opping.
+                            Button(waitlistJoined ? "On the list ✓" : "Join waitlist") { joinWaitlist() }
+                                .disabled(waitlistJoined)
+                            if !waitlistJoined, waitlistSignInDismissed, remote.idToken == nil {
+                                Text(WaitlistJoin.signInCaption)
+                                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                            }
                         }
                     }
                 }

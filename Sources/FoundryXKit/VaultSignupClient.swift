@@ -25,7 +25,8 @@ public struct VaultSignupClient: VaultSignupService {
     public func createCheckoutAttempt(plan: VaultPlan, idToken: String?) async throws -> VaultCheckoutAttempt {
         let json = try await post("signup/checkout-attempt",
                                   body: ["plan": plan.rawValue],
-                                  idToken: idToken)
+                                  idToken: idToken,
+                                  requiresCredential: true)
         guard let id = (json["checkout_attempt_id"] as? String) ?? (json["id"] as? String), !id.isEmpty else {
             throw VaultSignupError.malformedResponse
         }
@@ -36,18 +37,25 @@ public struct VaultSignupClient: VaultSignupService {
     public func reconcile(attemptId: String, idToken: String?) async throws -> VaultProvisionStatus {
         let json = try await post("signup/reconcile",
                                   body: ["checkout_attempt_id": attemptId],
-                                  idToken: idToken)
+                                  idToken: idToken,
+                                  requiresCredential: true)
         return try Self.status(from: json)
     }
 
     public func exchangeReturn(ticket: String, idToken: String?) async throws -> VaultProvisionStatus {
-        let json = try await post("app/return", body: ["ticket": ticket], idToken: idToken)
+        let json = try await post("app/return", body: ["ticket": ticket],
+                                  idToken: idToken, requiresCredential: false)
         return try Self.status(from: json)
     }
 
     // MARK: - wire
 
-    private func post(_ path: String, body: [String: String], idToken: String?) async throws -> [String: Any] {
+    private func post(_ path: String, body: [String: String], idToken: String?,
+                      requiresCredential: Bool) async throws -> [String: Any] {
+        if requiresCredential, idToken?.isEmpty != false {
+            // Do not knowingly send the headerless request that production maps to 401.
+            throw VaultSignupError.credentialUnavailable
+        }
         var req = URLRequest(url: baseURL.appendingPathComponent(path))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -58,7 +66,15 @@ public struct VaultSignupClient: VaultSignupService {
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw VaultSignupError.server }
         if http.statusCode == 401 || http.statusCode == 403 {
-            throw VaultSignupError.unauthorized
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let reason = ((object?["reason"] as? String)
+                ?? (object?["error"] as? String)
+                ?? (object?["message"] as? String) ?? "").lowercased()
+            if reason.contains("expired") { throw VaultSignupError.credentialExpired }
+            if reason.contains("present the google id_token") {
+                throw VaultSignupError.credentialUnavailable
+            }
+            throw VaultSignupError.requestRejected
         }
         guard (200..<300).contains(http.statusCode) else {
             let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -123,4 +139,7 @@ public enum VaultSignupError: Error, Equatable, Sendable {
     /// Every reconcile from the owner's phone on 2026-07-28 returned 401 and none of them
     /// surfaced anything.
     case unauthorized
+    case credentialUnavailable
+    case credentialExpired
+    case requestRejected
 }

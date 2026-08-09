@@ -93,10 +93,40 @@ final class VaultSignupClientTests: XCTestCase {
         Stub.status = 500
         Stub.responseJSON = [:]
         do {
-            _ = try await client().reconcile(attemptId: "x", idToken: nil)
+            _ = try await client().reconcile(attemptId: "x", idToken: "valid-test-token")
             XCTFail("a 5xx must throw")
         } catch {
             XCTAssertEqual(error as? VaultSignupError, .server)
+        }
+    }
+
+    func testReconcileWithoutCredentialNeverSendsHeaderlessRequest() async {
+        Stub.lastRequest = nil
+        do {
+            _ = try await client().reconcile(attemptId: "paid", idToken: nil)
+            XCTFail("a reconcile without a credential must stop locally")
+        } catch {
+            XCTAssertEqual(error as? VaultSignupError, .credentialUnavailable)
+            XCTAssertNil(Stub.lastRequest)
+        }
+    }
+
+    func testUnauthorizedReasonDistinguishesExpiryFromGenericRejection() async {
+        Stub.status = 401
+        Stub.responseJSON = ["error": "request rejected by policy"]
+        do {
+            _ = try await client().reconcile(attemptId: "paid", idToken: "current-token")
+            XCTFail("401 must throw")
+        } catch {
+            XCTAssertEqual(error as? VaultSignupError, .requestRejected)
+        }
+
+        Stub.responseJSON = ["error": "id_token rejected: token expired"]
+        do {
+            _ = try await client().reconcile(attemptId: "paid", idToken: "expired-token")
+            XCTFail("expired 401 must throw")
+        } catch {
+            XCTAssertEqual(error as? VaultSignupError, .credentialExpired)
         }
     }
 
@@ -104,7 +134,7 @@ final class VaultSignupClientTests: XCTestCase {
         Stub.status = 500
         Stub.responseJSON = ["error": "registry error: cell already exists: c-123"]
         do {
-            _ = try await client().reconcile(attemptId: "x", idToken: nil)
+            _ = try await client().reconcile(attemptId: "x", idToken: "valid-test-token")
             XCTFail("a provisioning failure must throw its displayable reason")
         } catch {
             XCTAssertEqual(error as? VaultSignupError,
@@ -115,11 +145,11 @@ final class VaultSignupClientTests: XCTestCase {
     func testFailedStatusPreservesReasonAndRecognisesExistingVault() async throws {
         Stub.status = 200
         Stub.responseJSON = ["status": "failed", "reason": "registry could not create cell"]
-        let failed = try await client().reconcile(attemptId: "x", idToken: nil)
+        let failed = try await client().reconcile(attemptId: "x", idToken: "valid-test-token")
         XCTAssertEqual(failed, .failed(.server("registry could not create cell")))
 
         Stub.responseJSON = ["status": "failed", "reason": "cell already exists: c-123"]
-        let existing = try await client().reconcile(attemptId: "x", idToken: nil)
+        let existing = try await client().reconcile(attemptId: "x", idToken: "valid-test-token")
         XCTAssertEqual(existing, .failed(.alreadyExists))
     }
 }

@@ -206,10 +206,9 @@ struct RootView: View {
                             providers: remote.isConfigured ? remote.providers : [],
                             statusText: WelcomeFrontDoor.signInCaption(remote.status),
                             onTap: { p in Task { await remote.signIn(p) } },
-                            onRetryCleanup: {
-                                guard case .deletionCleanupFailed = remote.status else { return }
-                                Task { await remote.retryInterruptedDeletionSignIn() }
-                            })
+                            onRetryCleanup: WelcomeFrontDoor.showsCleanupRetry(remote.status)
+                                ? { Task { await remote.retryInterruptedDeletionSignIn() } }
+                                : nil)
                         : nil)
             case .computerBrain:
                 if let target = remote.makeDoorTarget() {
@@ -328,6 +327,14 @@ struct RootView: View {
                     if let token {
                         vaultFunnel.refreshForAvailableToken(
                             expectedGeneration: token.generation)
+                        // Browser return can beat identity restoration by one task turn.
+                        // The first status check then honestly records "couldn't check";
+                        // retry as soon as the credential becomes available so a paid
+                        // checkout converges without requiring another app foreground.
+                        Task {
+                            await vaultFunnel.reconcileOnForeground(
+                                generation: token.generation)
+                        }
                     } else {
                         vaultFunnel.clearUnavailableIdentityToken(
                             expectedGeneration:

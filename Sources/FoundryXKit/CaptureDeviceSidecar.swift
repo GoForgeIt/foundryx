@@ -193,6 +193,7 @@ public enum CaptureDeviceSidecar {
         switch shape {
         case .bleStream: return CaptureSourceKind.omi.rawValue
         case .audioRoute, .builtInMic: return CaptureSourceKind.phoneMic.rawValue
+        case .filePull: return RecordingDeviceShape.filePull.rawValue
         }
     }
 

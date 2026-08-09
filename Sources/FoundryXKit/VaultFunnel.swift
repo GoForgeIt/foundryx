@@ -40,6 +40,9 @@ public enum VaultAction: String, CaseIterable, Equatable, Sendable {
 /// Whether this phone currently has a live, paid Vault.
 public enum VaultEntitlement: Equatable, Sendable {
     case off
+    /// A paid attempt exists, but the authoritative check could not complete. This must
+    /// never collapse to `.off`, which is the waitlist / purchase state.
+    case unknown
     case live
 }
 
@@ -58,6 +61,7 @@ public enum VaultRouter {
     public static func route(action: VaultAction, entitlement: VaultEntitlement) -> VaultRoute {
         switch entitlement {
         case .off: return .trigger(action)
+        case .unknown: return .trigger(action)
         case .live: return .vault(action)
         }
     }
@@ -127,7 +131,21 @@ public enum VaultEntry {
                 subtitle: "Already have a Vault? Sign in to open it on this iPhone.",
                 actionable: true,
                 showsPurchaseCTA: false)
+        case .unknown:
+            return Presentation(
+                title: "We couldn't check your Vault",
+                subtitle: "Your payment is safe. We'll check setup again when the connection is available.",
+                actionable: false,
+                showsPurchaseCTA: false)
         }
+    }
+}
+
+/// Pure Settings visibility rule. A waitlist is an explicitly unentitled state; paid,
+/// live, and temporarily unknown owners must never see it.
+public enum VaultSettingsPresentation {
+    public static func showWaitlist(entitlement: VaultEntitlement) -> Bool {
+        entitlement == .off
     }
 }
 
@@ -215,6 +233,9 @@ public enum VaultProvisionFailure: Equatable, Sendable {
     /// The sign-in the funnel presented was rejected. Retryable AFTER signing in again —
     /// distinct from `provisioningFailed` because the remedy is different.
     case signInExpired
+    /// The request was rejected, but the server did not prove token expiry. Signing in
+    /// again would mint an equivalent credential and create a loop.
+    case statusCheckRejected
     /// A status string this build has never seen.
     case unknown(String)
 
@@ -226,6 +247,7 @@ public enum VaultProvisionFailure: Equatable, Sendable {
         case .suspended: return "Your Vault is paused"
         case .notEntitled: return "We couldn't confirm your Vault"
         case .signInExpired: return "Your sign-in expired"
+        case .statusCheckRejected: return "We couldn't check your Vault"
         case .unknown: return "Something went wrong setting up your Vault"
         }
     }
@@ -244,6 +266,8 @@ public enum VaultProvisionFailure: Equatable, Sendable {
     public var explanation: String {
         switch self {
         case .server(let reason): return reason
+        case .statusCheckRejected:
+            return "The Vault service rejected this status check. Your payment is safe, and we'll try again when the app can present a valid credential."
         case .alreadyExists:
             return "This account already has a Vault. Your payment and existing Vault are safe."
         default:
@@ -461,7 +485,11 @@ public final class VaultFunnelModel: ObservableObject {
     @Published public private(set) var connectedVault: CellBackend?
 
     /// Current entitlement, derived from whether a Vault is connected/paired.
-    public var entitlement: VaultEntitlement { connectedVault == nil ? .off : .live }
+    public var entitlement: VaultEntitlement {
+        if connectedVault != nil { return .live }
+        if attempts.load(generation: CaptureAccountScope.identityGeneration) != nil { return .unknown }
+        return .off
+    }
 
     private let service: VaultSignupService
     private let browser: VaultCheckoutBrowser
@@ -486,7 +514,10 @@ public final class VaultFunnelModel: ObservableObject {
     /// The bearer to sign a reconcile with: refreshed when a refreshing seam is wired,
     /// else the cached snapshot.
     private func freshIdToken() async -> String? {
-        if let refreshingIdToken { return await refreshingIdToken() ?? idToken() }
+        // When production wires a refreshing authority, its nil is authoritative. Falling
+        // back to the browser-era cache caused the 2026-08-08 headerless reconcile (both
+        // values were nil) and can also resurrect an expired token.
+        if let refreshingIdToken { return await refreshingIdToken() }
         return idToken()
     }
     /// The App Store storefront country code (StoreKit `Storefront`, read via a thin adapter
@@ -615,7 +646,7 @@ public final class VaultFunnelModel: ObservableObject {
     /// (the row reflects the connected Vault — there is nothing to turn on). Entitlement-aware
     /// so the same row never dead-ends nor re-triggers a paid user.
     public func activateFromSettings() {
-        guard entitlement == .off else { return }
+        guard entitlement != .live else { return }
         // Storefront-gated (track T-STOREFRONT): only launch the purchase funnel where the
         // App Store storefront allows it. A blocked/unknown storefront is sign-in only — the
         // Settings row presents sign-in itself, so this is a no-op (never the plans path).
@@ -789,7 +820,7 @@ public final class VaultFunnelModel: ObservableObject {
             let status = try await service.reconcile(
                 attemptId: pending.attemptId, idToken: await freshIdToken())
             await apply(status, generation: generation)
-        } catch VaultSignupError.unauthorized {
+        } catch VaultSignupError.credentialExpired {
             // The server rejected our bearer. This is NOT a blip to sit on: an expired
             // id_token cannot fix itself by waiting, and the old code retried it silently
             // on every foreground forever.
@@ -797,6 +828,13 @@ public final class VaultFunnelModel: ObservableObject {
             // Tell the SESSION, not just this screen: a rejected bearer means the whole
             // app is signed out, and the remedy is the front door.
             AuthExpiryRouter.shared.authRejected(generation: generation)
+        } catch VaultSignupError.credentialUnavailable,
+                VaultSignupError.requestRejected,
+                VaultSignupError.unauthorized {
+            // Missing credentials and bare/generic 401s do not prove expiry. Keep the
+            // paid attempt, expose honest durable status in Settings, and retry after
+            // auth restoration/next foreground without signing the user out.
+            reportProvisioningFailure(.statusCheckRejected)
         } catch VaultSignupError.provisioning(let reason) {
             let lower = reason.lowercased()
             reportProvisioningFailure(lower.contains("already exists") || lower.contains("cell already exists")
