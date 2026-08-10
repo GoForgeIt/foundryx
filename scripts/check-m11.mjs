@@ -207,6 +207,49 @@ say(`  EXCLUDED — nested or non-public structs conforming to View (previews, p
 say(`  the generics a predicate without \`(<.*?>)?\` cannot see: ${components.filter((c) => c.generic).map((c) => c.name).join(', ')}`);
 
 // ═════════════════════════════════════════════════════════════════════════════════════
+// THE RENDERED LEG — parsed ONCE, here, because three clauses rule on it.
+//
+// It used to be parsed at CLAUSE 6 and consumed by CLAUSE 6 alone. `M11-TABS`,
+// `M11-SELECTED` and `M11-APP-LABEL` were read off the running app, PRINTED at the foot of
+// the report, and then ruled on by nothing — so `four-tabs-capture-first` and
+// `one-name-on-the-device` were decided entirely by re-reading the two Swift files the app
+// is built from. EXECUTED 2026-08-09: a log whose tab bar read
+// `Settings · Today · Capture · Chats · Extra` and whose app label read `FoundryX` still
+// scored 6 of 6, EXIT=0, with the contradicting line printed in the same output. That is
+// this programme's own law — ASSERT THE OUTCOME, NEVER THE ANNOUNCEMENT — failing inside
+// the gate that was supposed to enforce it. Fixed by moving the parse above the clauses
+// that need it and making both of them consume it.
+// ═════════════════════════════════════════════════════════════════════════════════════
+let renderLines = null;
+const rIdx = process.argv.indexOf('--render');
+if (rIdx > -1 && process.argv[rIdx + 1]) {
+  renderLines = read(process.argv[rIdx + 1], 'the render-proof log')
+    .split('\n').filter((l) => l.startsWith('M11-'));
+}
+const NO_RENDER = 'NOT RUN — pass --render <xcodebuild test log of M11RenderProofUITests>. The gate does not downgrade to source-only.';
+const PARTIAL = 'INCOMPLETE — the render proof produced no M11-END line, so its census is partial and cannot be trusted.';
+let renderSummary, renderOKForX = false;
+let renderedTabs = null, renderedName = null, renderedSelected = null, dominants = [];
+const renderUsable = !!renderLines && renderLines.some((l) => l === 'M11-END');
+if (!renderLines) {
+  renderSummary = NO_RENDER;
+} else if (!renderUsable) {
+  renderSummary = PARTIAL;
+} else {
+  renderedName = renderLines.find((l) => l.startsWith('M11-APP-LABEL:'))?.slice(15).trim();
+  renderedTabs = renderLines.find((l) => l.startsWith('M11-TABS:'))?.slice(9).split('|').map((s) => s.trim());
+  renderedSelected = renderLines.find((l) => l.startsWith('M11-SELECTED:'))?.slice(13).trim();
+  dominants = renderLines.filter((l) => l.startsWith('M11-DOMINANT')).map((l) => l.split(/\s+/));
+  const strings = renderLines.filter((l) => l.startsWith('M11-STRING '));
+  const totals = renderLines.filter((l) => l.startsWith('M11-STRINGS-TOTAL'))
+    .map((l) => Number(l.split(/\s+/)[2]));
+  const readCount = totals.reduce((a, b) => a + b, 0);
+  renderOKForX = strings.length === 0 && readCount > 0;
+  renderSummary = `${strings.length} rendered string(s) containing "Foundry" over ${readCount} string(s) actually read across ${totals.length} tab root(s)` +
+    (strings.length ? `: ${strings.map((s) => s.replace(/^M11-STRING /, '')).join('; ')}` : '');
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════
 // CLAUSE 3 — same chat law.
 // ═════════════════════════════════════════════════════════════════════════════════════
 const shell = read(join(REPO, 'Sources/FoundryXKit/AppShellPresentation.swift'), 'AppShellPresentation.swift');
@@ -264,17 +307,39 @@ const tabItems = [...rootView.matchAll(/\.tabItem \{ Label\(AppTab\.([a-z]+)\.la
 const launch = shell.match(/static let launch: AppTab = \.([a-z]+)/)?.[1];
 const activityLabel = shell.match(/case \.activity:\s*return "([^"]+)"/)?.[1];
 const orderOK = JSON.stringify(cases) === JSON.stringify(['capture', 'activity', 'chat', 'settings']);
-const renderOK = JSON.stringify(tabItems) === JSON.stringify(cases);
+const wiredOK = JSON.stringify(tabItems) === JSON.stringify(cases);
 const launchOK = launch === 'capture';
 const iaD8OK = activityLabel === 'Activity';   // IA-D8: the phone shows Activity, never Today
-const tabsOK = orderOK && renderOK && launchOK && iaD8OK;
+
+// The bar the OS actually drew. `cases` and `tabItems` are two readings of the SOURCE; a
+// tab bar is a claim about a screen, so the screen is the population that settles it. The
+// expected value is not written here either — it is the label each declared case returns
+// from AppShellPresentation, so a renamed tab moves the expectation and the render together
+// and this can only go red on a real disagreement between the two.
+const labelOf = (c) => shell.match(new RegExp(`case \\.${c}:\\s*return "([^"]+)"`))?.[1] ?? `(unparsed:${c})`;
+const declaredLabels = cases.map(labelOf);
+const renderedTabsOK = renderUsable && JSON.stringify(renderedTabs) === JSON.stringify(declaredLabels);
+const renderedSelectedOK = renderUsable && renderedSelected === labelOf(launch);
+const renderedTabsLine = !renderLines
+  ? `✗ rendered tab bar: ${NO_RENDER}`
+  : !renderUsable
+    ? `✗ rendered tab bar: ${PARTIAL}`
+    : `${renderedTabsOK ? '✓' : '✗'} the OS drew: ${renderedTabs.join(' · ')} (${renderedTabs.length}) — declared labels: ${declaredLabels.join(' · ')}`;
+const renderedSelectedLine = !renderUsable
+  ? `✗ the launched tab: unmeasured — no usable render proof`
+  : `${renderedSelectedOK ? '✓' : '✗'} the app launched onto "${renderedSelected}" and AppTab.launch = .${launch} → "${labelOf(launch)}"`;
+
+const tabsOK = orderOK && wiredOK && launchOK && iaD8OK && renderedTabsOK && renderedSelectedOK;
 clause('four-tabs-capture-first', tabsOK,
-  tabsOK ? `exactly ${cases.length} tabs, Capture first, and the second place reads "Activity"`
-         : 'the tab set, its order, its launch tab or IA-D8 does not hold',
+  tabsOK ? `exactly ${cases.length} tabs, Capture first, and the second place reads "Activity" — on the screen, not only in source`
+         : 'the tab set, its order, its launch tab, IA-D8 or the RENDERED bar does not hold',
   [`${orderOK ? '✓' : '✗'} declared: ${cases.join(' · ')} (${cases.length})`,
-   `${renderOK ? '✓' : '✗'} rendered by RootView in the same order: ${tabItems.join(' · ')} (${tabItems.length})`,
+   `${wiredOK ? '✓' : '✗'} wired by RootView in the same order: ${tabItems.join(' · ')} (${tabItems.length}) — a SOURCE reading, not a rendered one`,
    `${launchOK ? '✓' : '✗'} AppTab.launch = .${launch}`,
-   `${iaD8OK ? '✓' : '✗'} IA-D8 — the second place reads "${activityLabel}", never "Today"`]);
+   `${iaD8OK ? '✓' : '✗'} IA-D8 — the second place reads "${activityLabel}", never "Today"`,
+   renderedTabsLine,
+   renderedSelectedLine,
+   `    NOTE — M11-SELECTED is only honest on a device the app was NEVER installed on. simctl uninstall leaves state behind and has been measured returning "Settings" from the same build.`]);
 
 // ═════════════════════════════════════════════════════════════════════════════════════
 // CLAUSE 5 — one name on the device.
@@ -325,13 +390,31 @@ const shortcuts = read(join(REPO, 'App/FoundryXShortcuts.swift'), 'FoundryXShort
 const phrases = [...shortcuts.matchAll(/phrases:\s*\[([\s\S]*?)\]/g)].map((m) => m[1]);
 const phraseLiterals = phrases.flatMap((p) => [...p.matchAll(/"([^"]*)"/g)].map((m) => m[1]));
 const phrasesHardcoding = phraseLiterals.filter((p) => /Foundry|Solleva/.test(p));
-const nameOK = distinctNames.length === 1 && phrasesHardcoding.length === 0 && phraseLiterals.length > 0;
+
+// "on the device" is settled by the device. project.yml is the INTENT; `app.label` is what
+// iOS registered and shows under the icon, and the two can diverge — a stale Info.plist, a
+// build that did not pick up the rename, an install the OS kept the old label for. The
+// expected value is the one distinct shipped display name, so nothing is hardcoded here.
+const renderedNameOK = renderUsable && distinctNames.length === 1 && renderedName === distinctNames[0];
+const renderedNameLine = !renderLines
+  ? `✗ the name the OS shows: ${NO_RENDER}`
+  : !renderUsable
+    ? `✗ the name the OS shows: ${PARTIAL}`
+    : `${renderedNameOK ? '✓' : '✗'} the OS shows the app as "${renderedName}"; the shipped bundles declare "${distinctNames.join(' | ')}"`;
+
+const nameOK = distinctNames.length === 1 && phrasesHardcoding.length === 0 && phraseLiterals.length > 0
+               && renderedNameOK;
 clause('one-name-on-the-device', nameOK,
-  nameOK ? `one name — "${distinctNames[0]}" — across ${displayNames.length} bundle(s) and ${phraseLiterals.length} OS-registered phrase(s)`
-         : `${distinctNames.length} distinct display name(s): ${distinctNames.join(' | ')}; ${phrasesHardcoding.length} phrase(s) hardcode a product name`,
+  nameOK ? `one name — "${distinctNames[0]}" — across ${displayNames.length} bundle(s) and ${phraseLiterals.length} OS-registered phrase(s), and it is the name the OS shows`
+         : [`${distinctNames.length} distinct display name(s): ${distinctNames.join(' | ')}`,
+            `${phrasesHardcoding.length} phrase(s) hardcode a product name`,
+            renderedNameOK ? null
+              : renderUsable ? `the OS shows "${renderedName}", which is not the declared name`
+                             : 'the name the OS shows was not measured'].filter(Boolean).join('; '),
   [`SHIPPED bundles carrying a display name (${shipped.length}): ${shipped.map((t) => `${t.name}[${t.type}]="${t.dn}"`).join(', ')}`,
    `EXCLUDED — non-shipping targets (${notShipped.length}): ${notShipped.map((t) => `${t.name}[${t.type}]="${t.dn}"`).join(', ') || '—'}`,
    `Siri/App Intents phrases parsed: ${phraseLiterals.length}, of which ${phraseLiterals.filter((p) => p.includes('.applicationName')).length} are built from \\(.applicationName) and so cannot drift from the bundle`,
+   renderedNameLine,
    `EXCLUDED — SEAM-D4, the default AGENT name, ${seamD4Sites.length} site(s) still reading "Foundry": ${seamD4Sites.join(', ')}`,
    `    SEAM-D4 is PENDING-B → awaiting Nick (lane B screened SOLA NO and supplied B-1, a plain owner-editable role noun; Nick has ruled neither). An agent's name is not a device name, so these are out of this clause's population by RULE — but they ARE ${seamD4Sites.length} place(s) where a customer reads a second, retired product name on the device. This clause is green only under the amended reading of M11's "one name"; see milestone-verification-m11.md §"the amendment".`]);
 
@@ -387,31 +470,6 @@ for (const f of files) {
       else visible.push(`${rel}:${i + 1} «${v.slice(0, 70)}»`);
     }
   });
-}
-
-// the rendered half
-let renderLines = null;
-const rIdx = process.argv.indexOf('--render');
-if (rIdx > -1 && process.argv[rIdx + 1]) {
-  renderLines = read(process.argv[rIdx + 1], 'the render-proof log')
-    .split('\n').filter((l) => l.startsWith('M11-'));
-}
-let renderSummary, renderOKForX = false, renderedTabs = null, renderedName = null, dominants = [];
-if (!renderLines) {
-  renderSummary = 'NOT RUN — pass --render <xcodebuild test log of M11RenderProofUITests>. The gate does not downgrade to source-only.';
-} else if (!renderLines.some((l) => l === 'M11-END')) {
-  renderSummary = 'INCOMPLETE — the render proof produced no M11-END line, so its census is partial and cannot be trusted.';
-} else {
-  renderedName = renderLines.find((l) => l.startsWith('M11-APP-LABEL:'))?.slice(15).trim();
-  renderedTabs = renderLines.find((l) => l.startsWith('M11-TABS:'))?.slice(9).split('|').map((s) => s.trim());
-  dominants = renderLines.filter((l) => l.startsWith('M11-DOMINANT')).map((l) => l.split(/\s+/));
-  const strings = renderLines.filter((l) => l.startsWith('M11-STRING '));
-  const totals = renderLines.filter((l) => l.startsWith('M11-STRINGS-TOTAL'))
-    .map((l) => Number(l.split(/\s+/)[2]));
-  const readCount = totals.reduce((a, b) => a + b, 0);
-  renderOKForX = strings.length === 0 && readCount > 0;
-  renderSummary = `${strings.length} rendered string(s) containing "Foundry" over ${readCount} string(s) actually read across ${totals.length} tab root(s)` +
-    (strings.length ? `: ${strings.map((s) => s.replace(/^M11-STRING /, '')).join('; ')}` : '');
 }
 
 const xOK = visible.length === 0 && renderOKForX;
