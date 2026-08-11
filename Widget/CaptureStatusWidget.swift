@@ -97,7 +97,7 @@ struct CaptureStatusWidgetView: View {
 
     private var inlineAccessory: some View {
         Label(snap.isRecording ? "Capturing — \(snap.sourceLabel)"
-              : (snap.lastFinishedTitle ?? "FoundryX idle"),
+              : (snap.lastFinishedTitle ?? "Solleva idle"),
               systemImage: statusIcon)
     }
 

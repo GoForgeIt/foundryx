@@ -170,7 +170,7 @@ public struct ChatNode: Equatable, Sendable, Identifiable {
     public let projectId: String?
     /// Resolved project name, or `nil` for a project-less quick chat.
     public let projectName: String?
-    /// Human source label: "Kiln", "FoundryX", "Claude Code", "Codex", or an unrecognised
+    /// Human source label: "Kiln", "Solleva", "Claude Code", "Codex", or an unrecognised
     /// origin passed through verbatim.
     public let source: String
     public let state: State
@@ -346,7 +346,7 @@ public enum KilnLibrary {
     /// UNCHANGED — fail-loud: an unrecognised origin surfaces its raw value, never a
     /// silently-wrong "Kiln".
     public static func sourceLabel(_ origin: String) -> String {
-        if origin == "foundryx" { return "FoundryX" }
+        if origin == "foundryx" { return "Solleva" }
         if origin == "kiln" { return "Kiln" }
         return importHarnessLabels[origin] ?? origin
     }
@@ -381,7 +381,7 @@ public enum KilnLibrary {
     /// A conversation's SOURCE as a compact row badge: a 2-3 char tag plus the full label.
     public static func sourceTag(_ source: String) -> (short: String, label: String) {
         switch source {
-        case "FoundryX": return ("FDX", "FoundryX")
+        case "Solleva": return ("SOL", "Solleva")
         case "Kiln": return ("KLN", "Kiln")
         case "Claude Code": return ("CC", "Claude Code")
         case "Codex": return ("CDX", "Codex")

@@ -5,9 +5,10 @@ import UIKit
 #endif
 
 // Session-based chat: a list of resumable conversations (each its own kiln-session
-// chat_id), a "new chat" affordance, and a per-chat model picker (default = Kiln
-// router). The active conversation renders through ChatViewModel; its history is
-// snapshotted back into the durable ChatConversationStore at end-of-turn.
+// chat_id), a "new chat" affordance, and a read-only route line (privacy + the
+// resolved model — Auto by default; setting either is Settings' job, T-PHONE-CHATLAW
+// / ia-brief.md §5.3). The active conversation renders through ChatViewModel; its
+// history is snapshotted back into the durable ChatConversationStore at end-of-turn.
 struct ChatScreen: View {
     /// The resolved remote door target (relay tunnel + id_token bearer).
     let target: DoorTarget
@@ -53,20 +54,17 @@ struct ChatScreen: View {
     }
     /// A run artifact the user tapped to view (sheet with the in-app viewers).
     @State private var viewingArtifact: ChatViewModel.RunArtifact?
-    // Seed the picker synchronously from the warm cache so the dropdown paints the full
-    // grouped menu instantly on open (track 20260715T1501). `loadModels()` still runs on
-    // appear and refreshes this in the background — a changed live list replaces the cache.
+    // Seeded synchronously from the warm cache so the route line's resolved model name
+    // paints instantly (track 20260715T1501 origin). `loadModels()` still runs on appear
+    // and refreshes this in the background — a changed live list replaces the cache. The
+    // picker that once wrote INTO this array is gone (T-PHONE-CHATLAW); `models` now only
+    // resolves an id to a display name for the read-only route line.
     @State private var models: [ModelOption] = ModelCache.load()
     /// The conversation currently hydrated into `model` — guards against reloading the
     /// live view mid-stream when nothing actually switched.
     @State private var loadedId = ""
 
     private var client: DoorClient { DoorClient(target: target, log: log) }
-
-    // Auto/model-label/menu derivation lives in `ModelPickerMenu` (below) so the picker is an
-    // isolated Equatable subview — this screen's frequent re-renders don't reset its scroll.
-    // Only the privacy posture is derived here, because the privacy CONTROL lives on this
-    // screen and the picker is told about it rather than deriving it twice.
 
     /// Whether the active conversation is set to Private (Kiln keeps the turn on
     /// compliant / on-device targets). The core brand promise, surfaced per-chat.
@@ -218,8 +216,19 @@ struct ChatScreen: View {
         hydrateActive()
     }
 
-    // MARK: header — which chats · privacy · model picker · new chat
-
+    // MARK: header — which chats · route line (read-only) · new chat
+    //
+    // T-PHONE-CHATLAW (tracks.md): "the header's model picker replaced by a
+    // non-interactive route line carrying the privacy truth (five controls become
+    // three)" — this header used to carry an interactive Privacy `Menu` AND an
+    // interactive `ModelPickerMenu` alongside the chat-list button and "New" (four
+    // controls once "Chats"/"All" had already merged into one, five against the
+    // original ia-brief.md §5.3 inventory). Both fold into ONE non-interactive route
+    // line here — setting privacy or a model is Settings' job now (ia-brief.md §5.3:
+    // "the picker moves to Settings"); this line is a receipt, matching the same
+    // "choice is a receipt on the run, not a setting you maintain" law already shipped
+    // for the desktop (`ia-brief.md:910-913`). Three controls: chat list, route line,
+    // New.
     private var header: some View {
         HStack(spacing: GrainSpacing.x2) {
             // ONE way in, because there is one list.
@@ -246,48 +255,7 @@ struct ChatScreen: View {
 
             Spacer(minLength: 0)
 
-            // Privacy control — the single source of truth for where this chat's data goes.
-            // "Private" ⇒ sensitivity=confidential ⇒ Kiln keeps the turn on-device, AND we
-            // restrict the model picker to on-device routing (below) + clear any cloud pin, so
-            // the badge can never contradict the actual route. "Open" ⇒ sensitivity omitted ⇒
-            // the router may use a faster cloud model.
-            Menu {
-                Button { setPrivacy(true) } label: {
-                    Label("Private · stays on your Mac",
-                          systemImage: isPrivate ? "checkmark" : "lock.fill")
-                }
-                Button { setPrivacy(false) } label: {
-                    Label("Open · may use cloud for speed",
-                          systemImage: isPrivate ? "cloud" : "checkmark")
-                }
-            } label: {
-                HStack(spacing: GrainSpacing.x1) {
-                    Image(systemName: isPrivate ? "lock.fill" : "cloud")
-                    Text(isPrivate ? "Private" : "Open").grainTextStyle(.caption)
-                    Image(systemName: "chevron.down").font(.system(size: 9))
-                }
-                .foregroundStyle(isPrivate ? GrainColor.sage : GrainColor.textMuted)
-                .padding(.vertical, GrainSpacing.x1)
-                .contentShape(Rectangle())
-            }
-            .accessibilityIdentifier("privacy-picker")
-            .accessibilityLabel("Privacy")
-            .accessibilityValue(isPrivate ? "Private, stays on your Mac" : "Open, may use cloud")
-            .accessibilityHint("Changes whether this chat stays on your Mac")
-
-            // Model picker — extracted into an Equatable subview so the per-token / elapsed-timer
-            // re-renders of this screen do NOT re-evaluate the open menu (which resets its scroll
-            // to the top — you couldn't stay scrolled down to pick a model). It re-renders ONLY when
-            // the model list or the pinned selection actually changes.
-            // `isPrivate` is passed IN rather than re-derived: the restriction has to hold
-            // inside the picker itself (cloud models hidden), or the Private badge would be
-            // a label over a picker that still offers cloud — the exact contradiction the
-            // privacy control exists to prevent.
-            ModelPickerMenu(models: models,
-                            selectedId: store.active?.modelTargetId,
-                            isPrivate: isPrivate,
-                            onSelect: setModel)
-                .equatable()
+            routeLine
 
             GrainButton("New", variant: .text, size: .sm) { store.newConversation() }
                 .accessibilityIdentifier("new-chat")
@@ -296,20 +264,35 @@ struct ChatScreen: View {
         .padding(.vertical, GrainSpacing.x2)
     }
 
+    /// The privacy truth, as a plain (non-interactive — no button/menu wrapper, no tap
+    /// target) line: a lock/cloud SF Symbol + "Private · stays on your Mac" or
+    /// "Open · <resolved model>". Replaces the old per-message route caption at the same job
+    /// (`ChatView.swift`'s former `routeCaption`, dropped here as superseded — the
+    /// header now states the route once instead of repeating it under every turn).
+    private var routeLine: some View {
+        HStack(spacing: GrainSpacing.x1) {
+            Image(systemName: isPrivate ? "lock.fill" : "cloud")
+            Text(routeLineText).grainTextStyle(.caption)
+        }
+        .foregroundStyle(isPrivate ? GrainColor.sage : GrainColor.textMuted)
+        .padding(.vertical, GrainSpacing.x1)
+        .accessibilityIdentifier("route-line")
+        .accessibilityLabel("Route")
+        .accessibilityValue(routeLineText)
+    }
+
+    private var routeLineText: String {
+        isPrivate ? "Private · stays on your Mac" : "Open · \(resolvedModelLabel)"
+    }
+
+    /// "Auto" unless this conversation carries a pinned `modelTargetId` the door
+    /// already reported a friendly label for.
+    private var resolvedModelLabel: String {
+        guard let id = store.active?.modelTargetId else { return "Auto" }
+        return models.first(where: { $0.id == id }).map(ModelCatalog.displayName(for:)) ?? id
+    }
+
     // MARK: actions
-
-    private func setModel(_ id: String?) {
-        guard let active = store.active else { return }
-        store.setModel(id, for: active.id)
-    }
-
-    private func setPrivacy(_ on: Bool) {
-        guard let active = store.active else { return }
-        // The store clears any pinned model when going Private (a pin is a route, and a
-        // cloud pin under a "Private" badge would be a lie). The menu also hides cloud
-        // models while Private, so the two agree.
-        store.setSensitivity(on ? ChatConversationStore.Sensitivity.private : nil, for: active.id)
-    }
 
     /// Load the active conversation's persisted history into the live view (on first
     /// appearance + every switch). No-op if it's already loaded (avoids clobbering a
@@ -392,67 +375,10 @@ struct ChatScreen: View {
     }
 }
 
-/// The chat model picker, isolated as an Equatable subview.
-///
-/// The chat screen re-renders on every streamed token and on the per-second "Thinking…"
-/// elapsed timer. When the picker Menu lived inline, each of those re-evaluated the open
-/// menu's content and the system menu snapped its scroll back to the top — so you couldn't
-/// stay scrolled down to select a model near the bottom of the list. As an `Equatable`
-/// subview keyed only on `models` + `selectedId`, SwiftUI skips re-rendering it while a turn
-/// streams, so the open menu keeps its scroll position.
-private struct ModelPickerMenu: View, Equatable {
-    let models: [ModelOption]
-    let selectedId: String?
-    /// Private ⇒ on-device routing only. Cloud groups are hidden entirely rather than
-    /// shown-and-disabled, so nothing in the menu can contradict the Private badge.
-    let isPrivate: Bool
-    let onSelect: (String?) -> Void
-
-    nonisolated static func == (lhs: ModelPickerMenu, rhs: ModelPickerMenu) -> Bool {
-        lhs.models == rhs.models && lhs.selectedId == rhs.selectedId
-    }
-
-    private var menuData: ModelMenu { ModelCatalog.menu(from: models) }
-    private var isAuto: Bool { selectedId == nil }
-    private var selectedLabel: String {
-        guard let id = selectedId else { return "Auto" }
-        return models.first(where: { $0.id == id }).map(ModelCatalog.displayName(for:)) ?? id
-    }
-
-    var body: some View {
-        Menu {
-            Section {
-                Button { onSelect(nil) } label: {
-                    Label(menuData.auto.title,
-                          systemImage: isAuto ? "checkmark.shield.fill" : "lock.shield")
-                }
-            } header: {
-                Text(menuData.auto.recommended
-                     ? "Recommended — \(menuData.auto.caption)"
-                     : menuData.auto.caption)
-            }
-            if isPrivate {
-                Text("Private uses on-device routing")
-            } else {
-                ForEach(menuData.groups) { group in
-                    Section(group.title) {
-                        ForEach(group.options) { m in
-                            Button { onSelect(m.id) } label: {
-                                Label(ModelCatalog.displayName(for: m),
-                                      systemImage: selectedId == m.id ? "checkmark" : "")
-                            }
-                        }
-                    }
-                }
-            }
-        } label: {
-            HStack(spacing: GrainSpacing.x1) {
-                Image(systemName: isAuto ? "lock.shield.fill" : "cpu")
-                Text(isAuto ? "Auto · Secure" : selectedLabel).grainTextStyle(.caption)
-                Image(systemName: "chevron.down").font(.system(size: 9))
-            }
-            .foregroundStyle(isAuto ? GrainColor.sage : GrainColor.textMuted)
-        }
-        .accessibilityIdentifier("model-picker")
-    }
-}
+// The interactive `ModelPickerMenu` that used to live here (an Equatable Menu subview
+// wrapping `ModelCatalog.menu(from:)`) was deleted under T-PHONE-CHATLAW: the header's
+// model picker is retired in favor of the read-only `routeLine` above. `ModelCatalog`
+// itself is not dead — it still backs `model-picker.feature` and
+// `Tests/FoundryXBrineTests/ModelPickerTests.swift`, and `routeLine`'s
+// `resolvedModelLabel` still calls `ModelCatalog.displayName(for:)` to resolve a pinned
+// `modelTargetId` to a friendly name.

@@ -349,13 +349,13 @@ public struct PocketSetupPresentation: Equatable, Sendable {
         actions: ["Try again"])
     public static let ready = PocketSetupPresentation(title: "Pocket is ready.", body: "", actions: ["Done"])
     public static let indeterminate = PocketSetupPresentation(
-        title: "Setup didn't finish", body: "FoundryX couldn't determine this recorder's setup.", actions: ["Try again"])
+        title: "Setup didn't finish", body: "Solleva couldn't determine this recorder's setup.", actions: ["Try again"])
     public static let keepBothApps = PocketSetupPresentation(
         title: "Keep both apps",
-        body: "FoundryX won't reset your recorder. Both apps can use the same recorder. They connect one at a time.",
+        body: "Solleva won't reset your recorder. Both apps can use the same recorder. They connect one at a time.",
         actions: ["Advanced instructions", "Reset and start over"])
     public static let quarantined = PocketSetupPresentation(
-        title: "Can't verify this Pocket", body: "FoundryX can't safely match this recorder to secure custody.", actions: [])
+        title: "Can't verify this Pocket", body: "Solleva can't safely match this recorder to secure custody.", actions: [])
     /// WHAT ACTUALLY SHIPS TODAY (DESIGN-pocket-connect.md §3.6). T2 req 3 disables production
     /// provisioning until an evidenced firmware-compatible key alphabet and a security-reviewed
     /// entropy policy exist, so the setup ceremony is reachable and says so rather than
@@ -369,8 +369,8 @@ public struct PocketSetupPresentation: Equatable, Sendable {
     /// leaves the minting gate exactly where T2 req 3 put it.
     public static let setupUnavailable = PocketSetupPresentation(
         title: "Setup isn't available yet",
-        body: "FoundryX can't safely generate a key for this recorder yet. Setup is turned off "
-            + "until that's settled.\n\nYour recorder is untouched. FoundryX sent it nothing."
+        body: "Solleva can't safely generate a key for this recorder yet. Setup is turned off "
+            + "until that's settled.\n\nYour recorder is untouched. Solleva sent it nothing."
             + "\n\nIf another app already set this recorder up, you can enter the key it was "
             + "set up with.",
         actions: ["See what's connected", PocketSessionKeyEntryPresentation.entryAction])
@@ -387,7 +387,7 @@ public struct PocketDeviceEducation: Equatable, Sendable {
     public let sections: [PocketEducationSection]
     public let claimsTelemetry: Bool
     public static let presentation = PocketDeviceEducation(sections: [
-        .init(title: "Is it recording?", body: "Check the light on the recorder. FoundryX doesn't show recording state yet."),
+        .init(title: "Is it recording?", body: "Check the light on the recorder. Solleva doesn't show recording state yet."),
         .init(title: "The light", body: "Solid amber — Recording\nBlue — Connected\nRed — Charging"),
         .init(title: "The button", body: "Press once — Start or stop\nHold 3 seconds — Turn it off"),
         .init(title: "The switch", body: "Normal — Everything around you\nCall — Phone calls only")
@@ -446,13 +446,13 @@ public enum PocketSessionKeyEntryPresentation {
 
     public static let intro =
         "If another app already set this recorder up, that app and this one can use the same "
-        + "16-character session key. Enter it here and FoundryX will connect with it."
+        + "16-character session key. Enter it here and Solleva will connect with it."
 
     /// SAID FIRST AND SAID PLAINLY, because it is the sentence that saves someone twenty
     /// minutes of looking for a screen that does not exist.
     public static let vendorAppDoesNotShowIt =
         "The vendor app never shows you this key. It receives the key while it pairs and keeps "
-        + "it to itself — there is no screen in it, or in FoundryX, that displays the value. "
+        + "it to itself — there is no screen in it, or in Solleva, that displays the value. "
         + "The only way to read it is to capture it once from a Bluetooth HCI trace while the "
         + "vendor app connects."
 
@@ -488,19 +488,19 @@ public enum PocketSessionKeyEntryPresentation {
     // MARK: what a rejection says
 
     /// REFUSED WITHOUT TOUCHING THE RECORDER. Each of these is produced before a transport
-    /// exists, and each says so, because "FoundryX sent it nothing" is the one reassurance
+    /// exists, and each says so, because "Solleva sent it nothing" is the one reassurance
     /// this whole screen can actually make good on.
     public static func line(for defect: PocketSessionKeyDefect) -> String {
         switch defect {
         case .empty:
             return "Enter the recorder's 16-character session key. "
-                + "FoundryX hasn't sent the recorder anything."
+                + "Solleva hasn't sent the recorder anything."
         case .wrongLength(let count):
             return "A session key is exactly 16 characters, and that one is \(count). "
-                + "FoundryX hasn't sent the recorder anything."
+                + "Solleva hasn't sent the recorder anything."
         case .notPlainText:
             return "A session key is 16 plain text characters, and that one has characters the "
-                + "recorder's protocol can't carry. FoundryX hasn't sent the recorder anything."
+                + "recorder's protocol can't carry. Solleva hasn't sent the recorder anything."
         }
     }
 
@@ -508,22 +508,22 @@ public enum PocketSessionKeyEntryPresentation {
     /// deliberately NOT worded as a connection problem: the link was fine, which is exactly
     /// what makes "try again closer to the recorder" the wrong advice here.
     public static let refusedByRecorderLine =
-        "That key was refused by the recorder. FoundryX reached it and it did not accept this "
+        "That key was refused by the recorder. Solleva reached it and it did not accept this "
         + "key — check you captured the key for this recorder and not for another one."
 
     /// The link, and only the link. Distinct from `refusedByRecorderLine` by construction.
     public static let linkFailedLine =
-        "FoundryX couldn't reach the recorder to try that key. Bring it closer and try again."
+        "Solleva couldn't reach the recorder to try that key. Bring it closer and try again."
 
     /// The Keychain refused the write, so nothing was offered to the recorder either.
     public static let keyNotKeptLine =
-        "This iPhone couldn't store that key securely, so FoundryX didn't send it to the "
+        "This iPhone couldn't store that key securely, so Solleva didn't send it to the "
         + "recorder. Try again."
 
     /// The key worked and the ACCOUNT could not keep the result — a lost user decision, said
     /// out loud rather than shown as a recorder that silently never appears.
     public static let notRememberedLine =
-        "That key worked, but FoundryX couldn't save this recorder to your account. Try again."
+        "That key worked, but Solleva couldn't save this recorder to your account. Try again."
 
     /// The tapped device is not a record-then-sync recorder at all, so it has no session key.
     public static let notARecorderLine =

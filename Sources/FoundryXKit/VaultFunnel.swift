@@ -547,7 +547,7 @@ public final class VaultFunnelModel: ObservableObject {
                          showsProgress: true, primaryAction: .leaveProvisioning)
         case .settingUpDelayed:
             return .init(title: "This is taking longer than expected",
-                         body: "You can keep using FoundryX. We'll email you when your Vault is ready.",
+                         body: "You can keep using Solleva. We'll email you when your Vault is ready.",
                          showsProgress: false, primaryAction: .leaveProvisioning)
         case .failed(let reason):
             return .init(title: reason.headline, body: reason.explanation,

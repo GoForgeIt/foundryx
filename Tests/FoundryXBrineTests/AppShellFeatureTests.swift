@@ -48,9 +48,9 @@ private enum AppShellSteps {
                 w.present(); w.openSettings(); return ctx
             },
 
-            defineCheck("the bottom tab bar shows exactly \"Capture\", \"Activity\", \"Chat\", \"Settings\" in that order") { _, _, _ in
+            defineCheck("the bottom tab bar shows exactly \"Capture\", \"Activity\", \"Chats\", \"Settings\" in that order") { _, _, _ in
                 let labels = w.tabs.map(\.label)
-                guard labels == ["Capture", "Activity", "Chat", "Settings"] else {
+                guard labels == ["Capture", "Activity", "Chats", "Settings"] else {
                     throw BrineStepError("tab order was \(labels)")
                 }
             },

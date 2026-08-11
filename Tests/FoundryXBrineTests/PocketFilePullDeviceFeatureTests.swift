@@ -117,7 +117,7 @@ private actor PocketFilePullWorld {
             XCTAssertEqual(detail?.showsRecordingState, false); XCTAssertEqual(detail?.showsLiveActivity, false)
         case "each recording shows its custody and duration at 32 kilobits per second":
             XCTAssertEqual(manifest?.rows.map(\.duration), ["22 sec", "12 sec"])
-            XCTAssertEqual(manifest?.rows.map(\.custodyLabel), ["In FoundryX", "Only on the recorder"])
+            XCTAssertEqual(manifest?.rows.map(\.custodyLabel), ["In Solleva", "Only on the recorder"])
         case "no active source FrameRouter WAL Live Activity or live state mutation occurs":
             XCTAssertEqual(effects, .zero)
         default: XCTFail("Unhandled assertion: \(phrase)")

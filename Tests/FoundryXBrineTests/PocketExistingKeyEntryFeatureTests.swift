@@ -675,7 +675,7 @@ private final class ExistingKeyEntryWorld {
             XCTAssertTrue(body.contains("never shows you this key"),
                           "the guidance does not say the one thing that saves someone hunting "
                               + "for a screen that does not exist: \"\(body)\"")
-            XCTAssertTrue(Self.guidance.contains("no screen in it, or in FoundryX"),
+            XCTAssertTrue(Self.guidance.contains("no screen in it, or in Solleva"),
                           "the guidance implies there is a screen somewhere that displays the "
                               + "key")
             XCTAssertTrue(Self.guidance.contains("HCI"),

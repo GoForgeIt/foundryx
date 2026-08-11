@@ -165,7 +165,7 @@ public enum PocketPostCaptureParity {
 }
 
 public enum PocketRecorderCustodyPromise {
-    public static let text = "FoundryX never deletes anything from your recorder."
+    public static let text = "Solleva never deletes anything from your recorder."
     public static let automaticDeleteCommands = 0
 }
 

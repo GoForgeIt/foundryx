@@ -163,7 +163,7 @@ final class ActionsProofUITests: XCTestCase {
         cont.tap()
 
         // 4. Continue lands on the chat tab, on the linked conversation.
-        let chatTab = app.buttons["Chat"].firstMatch
+        let chatTab = app.buttons["Chats"].firstMatch
         // ONE header control, and it opens ONE list. It was two sibling text buttons, then
         // a menu naming the two places those buttons led to; both shapes asked the reader to
         // pick a corpus before seeing anything. There is no corpus to pick now — the phone

@@ -111,7 +111,7 @@ public enum StoredFileDevicePresentation {
         StoredFileManifestPresentation(rows: items.map {
             .init(title: $0.title,
                   duration: duration(sizeBytes: $0.sizeBytes),
-                  custodyLabel: $0.custody == .foundryX ? "In FoundryX" : "Only on the recorder")
+                  custodyLabel: $0.custody == .foundryX ? "In Solleva" : "Only on the recorder")
         })
     }
 

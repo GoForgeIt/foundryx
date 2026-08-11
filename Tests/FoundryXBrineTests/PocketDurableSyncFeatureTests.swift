@@ -96,7 +96,7 @@ private actor PocketDurableWorld {
         case "device time is used, uncertain time is labeled, and future grouping is clamped without losing the reported value":
             XCTAssertNil(times[0].warning); XCTAssertNotNil(times[1].warning); XCTAssertNotNil(times[2].warning); XCTAssertNotEqual(times[2].timeline, times[2].recorderReported)
         case "both use the same conversation and Activity flow and neither posts a content notification": XCTAssertEqual(ambient.map{$0.activityLineageCount}, [1,1]); XCTAssertEqual(ambient.map{$0.notificationCount}, [0,0])
-        case "no recorder delete is issued and the shipped deletion promise remains visible": XCTAssertEqual(deleteCommands, 0); XCTAssertEqual(PocketRecorderCustodyPromise.text, "FoundryX never deletes anything from your recorder.")
+        case "no recorder delete is issued and the shipped deletion promise remains visible": XCTAssertEqual(deleteCommands, 0); XCTAssertEqual(PocketRecorderCustodyPromise.text, "Solleva never deletes anything from your recorder.")
         case "no FrameRouter, WAL, Live Activity, recording pill, or currently-recording state is reached":
             XCTAssertEqual(liveEffects.storedFileLifecycleEvents, 5)
             XCTAssertEqual(liveEffects.activeSourceSelections, 0)
