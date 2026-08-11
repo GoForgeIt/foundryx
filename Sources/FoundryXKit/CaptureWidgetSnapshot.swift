@@ -208,8 +208,35 @@ public enum CaptureWidgetSnapshotStore {
                 guard let envelope = try? JSONDecoder().decode(
                     Envelope.self, from: priorPayload)
                 else {
+                    // AN UNREADABLE PAYLOAD IS NOT AN EXPOSURE — IT IS RUBBISH, AND
+                    // IT BLOCKED A REAL DELETION.
+                    //
+                    // This returned .persistenceFailed, which fails the barrier, so
+                    // "delete everything" stopped at "Clearing the widget" and told the
+                    // owner to close a widget they did not have. Nothing on the device
+                    // could clear it; the only escape was reinstalling the app.
+                    //
+                    // The widget renders through THIS decoder. A payload it cannot
+                    // decode is a payload the widget cannot draw — so these bytes are
+                    // not showing anyone's account, and removing them is strictly safer
+                    // than leaving them. Undecodable almost always means "written by an
+                    // older build whose Envelope had a different shape", which is
+                    // guaranteed to happen again on the next schema change.
+                    //
+                    // We cannot prove WHOSE it was, so we do not claim .withdrawn on
+                    // someone else's behalf — we clear it and report success only once
+                    // the slot is verifiably empty. A synchronize that does not stick
+                    // is still .persistenceFailed: that is a write we could not make,
+                    // not a value we could not read.
+                    defaults.removeObject(forKey: key)
+                    guard defaults.synchronize(),
+                          defaults.object(forKey: key) == nil else {
+                        stateLock.unlock()
+                        return .persistenceFailed
+                    }
                     stateLock.unlock()
-                    return .persistenceFailed
+                    reloadWidgetTimelines()
+                    return .withdrawn
                 }
                 if envelope.owner == expectedOwner {
                     guard withdrawalFaultForTesting != .synchronizeFailure else {

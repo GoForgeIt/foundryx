@@ -29,6 +29,10 @@ final class AccountDeletionWidgetBarrierFeatureTests: XCTestCase {
                     try world.reset(.staleTagForDeletedPayload)
                     return ctx
                 },
+                defineStep("the widget slot holds a payload this build cannot read") { ctx, _, _ in
+                    try world.reset(.unreadablePayload)
+                    return ctx
+                },
                 defineStep("the widget store cannot prove a durable withdrawal") { ctx, _, _ in
                     try world.reset(.persistenceFailure)
                     return ctx
@@ -44,6 +48,18 @@ final class AccountDeletionWidgetBarrierFeatureTests: XCTestCase {
                         world.result = .failure(error)
                     }
                     return ctx
+                },
+                defineCheck("the deletion finishes and the unreadable payload is gone") { _, _, _ in
+                    guard case .success = world.result else {
+                        throw BrineStepError(
+                            "deletion did not finish: an unreadable widget payload is rubbish, "
+                                + "not an exposure — the widget draws through the same decoder, "
+                                + "so bytes it cannot decode are bytes it cannot render")
+                    }
+                    guard let f = world.fixture,
+                          f.defaults.object(forKey: CaptureWidgetSnapshotStore.key) == nil else {
+                        throw BrineStepError("the unreadable payload survived the deletion")
+                    }
                 },
                 defineCheck("my deletion completes") { _, _, _ in
                     guard case .success(let record) = world.result,
@@ -79,7 +95,7 @@ final class AccountDeletionWidgetBarrierFeatureTests: XCTestCase {
 }
 
 fileprivate final class WidgetDeletionFixture: @unchecked Sendable {
-    enum Mode { case otherAccountPayload, staleTagForDeletedPayload, persistenceFailure }
+    enum Mode { case otherAccountPayload, staleTagForDeletedPayload, persistenceFailure, unreadablePayload }
 
     let root: URL
     let defaultsName: String
@@ -105,10 +121,18 @@ fileprivate final class WidgetDeletionFixture: @unchecked Sendable {
         let snapshot = CaptureWidgetSnapshot(
             phase: .idle,
             lastFinishedTitle: mode == .otherAccountPayload ? "Other account note" : "Deleted account note")
+        if mode == .unreadablePayload {
+            // A payload from a build whose Envelope had a different shape. The owner
+            // tag names someone else, so withdraw() takes the corroborate branch and
+            // must decode to decide — and cannot.
+            defaults.set(Data("{\"schema\":\"v0\",\"was\":\"a different shape\"}".utf8),
+                         forKey: CaptureWidgetSnapshotStore.key)
+        } else {
         defaults.set(
             try JSONEncoder().encode(CaptureWidgetSnapshotStore.Envelope(
                 owner: payloadOwner, snapshot: snapshot)),
             forKey: CaptureWidgetSnapshotStore.key)
+        }
         if mode == .persistenceFailure {
             defaults.set(deletedBinding.scope, forKey: CaptureWidgetSnapshotStore.activeOwnerKey)
             CaptureWidgetSnapshotStore.setWithdrawalFaultForTesting(.synchronizeFailure)
