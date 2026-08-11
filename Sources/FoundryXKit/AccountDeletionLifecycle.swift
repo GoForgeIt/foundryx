@@ -78,6 +78,33 @@ enum AccountDeletionLifecycleBlockedReason: Equatable, Sendable {
     case unreadable
     case protectedDataUnavailable
     case failed
+
+    /// Whether the record can be REBUILT on the device instead of ending the
+    /// account there.
+    ///
+    /// `.corrupt` and `.unsupportedVersion` were terminal at every entry point:
+    /// deletion answered `store_blocked`, sign-in threw "account deletion state
+    /// is unreadable", and resolution returned `.blocked`, so the app had no
+    /// account root and no way to get one. Delete-and-reinstall was the only
+    /// exit — and both are ordinary on TestFlight, where installing an older
+    /// build after a newer one is routine and the codec is SEALED on its exact
+    /// key set and version.
+    ///
+    /// Nothing in the record is irreplaceable: `blockedGeneration` and
+    /// `completedGroups` are bookkeeping, every cleanup group is idempotent, and
+    /// each one is independently re-verified by `verifyGroupAbsent`. So the safe
+    /// answer to bytes we cannot parse is to keep the account CLOSED and rebuild
+    /// a fresh pending deletion that re-walks every group — not to refuse.
+    ///
+    /// `.unreadable` / `.protectedDataUnavailable` / `.failed` stay fail-closed:
+    /// there we could not read the file AT ALL, so a record may be sitting there
+    /// intact and overwriting it would discard real progress. Those retry.
+    var isRepairable: Bool {
+        switch self {
+        case .corrupt, .unsupportedVersion: return true
+        case .unreadable, .protectedDataUnavailable, .failed: return false
+        }
+    }
 }
 
 enum AccountDeletionLifecycleReadResult: Equatable, Sendable {
@@ -616,6 +643,78 @@ final class AccountDeletionLifecycleStore: @unchecked Sendable {
         return pending
     }
 
+    /// Rebuild an unparseable record as a fresh pending deletion.
+    ///
+    /// Only ever called for a `.isRepairable` reason, and only under the same
+    /// owner admission lock every other writer takes. The discarded bytes are
+    /// recorded first — they are the only evidence of what went wrong, and this
+    /// overwrites them — then a pending record is written at an epoch strictly
+    /// above anything salvageable, so a stale cross-process cache cannot win.
+    ///
+    /// The rebuilt record claims NO progress: `completedGroups` is empty and the
+    /// barrier is `.pending`, so `continuePending` re-runs and re-verifies every
+    /// group. Every group is idempotent, so re-running them is safe; claiming
+    /// them without proof would not be.
+    func repairBlockedRecord(
+        ownerScope: String
+    ) throws -> AccountDeletionLifecycleRecord {
+        let repaired = try Self.serializationLock.withLock {
+            try withAdvisoryLock(ownerScope: ownerScope) {
+                () throws -> AccountDeletionLifecycleRecord in
+                switch readUnlocked(ownerScope: ownerScope) {
+                case .record(let record):
+                    // Someone else repaired it while we waited.
+                    return record
+                case .missing:
+                    throw AccountDeletionLifecycleError.invalidRecord
+                case .blocked(let reason):
+                    guard reason.isRepairable else {
+                        throw AccountDeletionLifecycleError.blocked(reason)
+                    }
+                }
+                let url = try recordURL(ownerScope: ownerScope)
+                let discarded = (try? fileIO.read(url)) ?? nil
+                DeletionRecorder.shared.emit(
+                    "account.delete.record_discarded",
+                    Self.describeDiscarded(discarded))
+                let record = AccountDeletionLifecycleRecord(
+                    version: 1,
+                    ownerScope: ownerScope,
+                    deletionEpoch: Self.salvagedEpoch(discarded) + 1,
+                    phase: .cleanupPending,
+                    exposureBarrier: .pending,
+                    blockedGeneration: nil,
+                    completedGroups: [],
+                    legacyDisposition: .pending)
+                return try persist(record)
+            }
+        }
+        CaptureAccountScope.cacheDurableDeletionTransition(
+            repaired, container: container)
+        return repaired
+    }
+
+    /// The highest epoch we can still believe from bytes we could not decode.
+    /// Zero when nothing is salvageable, so the rebuilt record starts at 1.
+    private static func salvagedEpoch(_ data: Data?) -> UInt64 {
+        guard let data,
+              let object = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+              let epoch = object["deletionEpoch"] as? NSNumber,
+              epoch.uint64Value < UInt64.max
+        else { return 0 }
+        return epoch.uint64Value
+    }
+
+    /// Bookkeeping only — the record holds an owner-scope DIGEST, an epoch and a
+    /// phase, never a name, an address or anything a person wrote.
+    private static func describeDiscarded(_ data: Data?) -> String {
+        guard let data else { return "unreadable bytes" }
+        let text = String(decoding: data.prefix(512), as: UTF8.self)
+            .replacingOccurrences(of: "\n", with: " ")
+        return "bytes=\(data.count) \(text)"
+    }
+
     func compareAndSwap(
         ownerScope: String,
         expectedEpoch: UInt64,
@@ -1015,9 +1114,15 @@ final class AccountDeletionLifecycle: @unchecked Sendable {
         try inject(.before, .resolutionGeneration)
         let blockedGeneration = try environment.blockResolution(binding)
         try inject(.after, .resolutionGeneration)
+        // Announced HERE too, not only on the recovery path. `begin` runs these
+        // two gates immediately and used to run them SILENTLY, so a progress
+        // screen watching the named phases saw nothing at all until the exposure
+        // barrier — and a failure in either was reported with no step name.
+        progressObserver("signedInMirror")
         try inject(.before, .signedInMirror)
         try environment.setSignedInMirrorFalse(binding)
         try inject(.after, .signedInMirror)
+        progressObserver("widgetWithdrawal")
         try inject(.before, .widgetWithdrawal)
         let widgetResult = try environment.withdrawWidget(binding)
         guard Self.isWidgetTerminalSuccess(widgetResult) else {
@@ -1044,6 +1149,11 @@ final class AccountDeletionLifecycle: @unchecked Sendable {
             record = value
         case .missing:
             throw AccountDeletionLifecycleError.invalidRecord
+        case .blocked(let reason) where reason.isRepairable:
+            // Bytes we cannot parse are not a reason to end the account on this
+            // device. Rebuild a fresh pending deletion and re-walk every group.
+            progressObserver("recordRepair")
+            record = try store.repairBlockedRecord(ownerScope: ownerScope)
         case .blocked(let reason):
             throw AccountDeletionLifecycleError.blocked(reason)
         }
@@ -1219,16 +1329,29 @@ final class AccountDeletionLifecycle: @unchecked Sendable {
         try faultInjector(DeletionFaultPoint(boundary, stage))
     }
 
+    /// The barrier's acceptance rule for ordinary participants. The per-case
+    /// reasoning — including why `.unavailable` is terminal SUCCESS and why
+    /// `.verificationFailed` / `.persistenceFailed` are not — lives on
+    /// `AccountExposureCloseResult.provesAccountExposureClosed`, so the lifecycle,
+    /// the live `verifyExposureBarrier` and the tests all decide it identically.
     fileprivate static func isTerminalSuccess(
         _ result: AccountExposureCloseResult
     ) -> Bool {
-        result == .closed || result == .alreadyClosed
+        result.provesAccountExposureClosed
     }
 
-    /// Widget ownerMismatch is produced only after the snapshot store has
-    /// corroborated that any retained payload envelope belongs to another owner.
-    /// It is intentionally terminal here only; participant mismatches still fail
-    /// `allAcknowledged` because they cannot prove that exposure was closed.
+    /// The widget is the ONE surface allowed to add `.ownerMismatch`, and only
+    /// because its mismatch is a different claim from a participant's: the
+    /// snapshot store has already read the retained payload envelope and
+    /// corroborated that it is tagged to ANOTHER owner, so the deleted account's
+    /// payload demonstrably is not there. A participant mismatch is produced by
+    /// comparing bindings, never by inspecting what the participant holds, so it
+    /// stays a failure in `allAcknowledged`.
+    ///
+    /// `withdrawWidget` never returns `.unavailable` (the snapshot store answers
+    /// withdrawn / alreadyAbsent / ownerMismatch / persistenceFailed), so
+    /// widening the shared base changes nothing on this path — it only keeps one
+    /// definition of "proved closed" instead of two.
     private static func isWidgetTerminalSuccess(
         _ result: AccountExposureCloseResult
     ) -> Bool {
@@ -1441,9 +1564,12 @@ private final class LiveAccountDeletionContext: @unchecked Sendable {
                     service: pairingServices.door,
                     account: "") == .notFound
         case .accountSurfaces:
-            // Erasers are idempotent and verify their terminal state. Re-running on
-            // recovery proves cross-process and keychain state after a crash.
-            return AccountSurfaceRegistry.eraseAll(
+            // Erasers are idempotent and verify their terminal state, so for
+            // almost every surface this IS the eraser run again — which is what
+            // proves cross-process and keychain state after a crash. A surface
+            // whose erase is expensive or can time out answers without redoing
+            // it; see `AccountBoundSurface.verifyAccountErased`.
+            return AccountSurfaceRegistry.verifyAll(
                 binding, defaults: defaults
             ).values.allSatisfy(\.isTerminalSuccess)
         }
@@ -1505,11 +1631,13 @@ extension AccountDeletionLifecycle {
                 await context.exposureCoordinator
                     .cancelRegisteredStaleWork(expected: binding)
             },
+            // The SECOND gate that used to re-derive this rule by hand. It has to
+            // agree with `allAcknowledged` exactly, or a result the barrier accepts
+            // at `liveExposureClosure` is rejected two steps later at
+            // `barrierVerification` — which is the same permanent lockout wearing a
+            // different stage name.
             verifyExposureBarrier: { live, stale in
-                (live + stale).allSatisfy {
-                    $0.result == .closed
-                        || $0.result == .alreadyClosed
-                }
+                AccountExposureBarrier.isSatisfied(live: live, stale: stale)
             },
             removeGroup: { group, binding, legacyOwned in
                 try context.remove(

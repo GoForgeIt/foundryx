@@ -4,6 +4,12 @@ import Foundation
 /// It deliberately asks T1 only for evidenced battery and firmware facts; `SPACE` and `STE`
 /// are neither queried nor interpreted by this device-list path.
 public enum PocketRecordingDeviceBridge {
+    /// The protocol this bridge speaks, as an identifier education and any other
+    /// protocol-keyed content attaches to (design §5). It is NOT a shape and NOT a reported
+    /// name: a second stored-file recorder speaking something else gets a different id, and
+    /// therefore none of this one's education.
+    public static let protocolIdentifier = "pocket-stored-file/v1"
+
     public static func observe(
         client: PocketBLEClient,
         identity: PocketAuthenticatedIdentity,
@@ -24,6 +30,39 @@ public enum PocketRecordingDeviceBridge {
             reportedName: trimmed.isEmpty ? "Unnamed recording device" : trimmed,
             audioProfile: nil,
             declaredCapabilities: capabilities)
+    }
+}
+
+/// THE MISSING HALF OF THE DEVICE LIST, AND THE ONE THIS TRACK EXISTS TO ADD.
+///
+/// `PocketRecordingDeviceBridge.observe` turns an authenticated stored-file session into a
+/// vendor-neutral `RecordingDeviceObservation` — and then nothing happened to it. The device
+/// list draws `RecordingDeviceStore` records, and the only caller of `recordUserPair` in the
+/// whole tree was `DeviceManager.connect`, always with `shape: .bleStream`. So no observation
+/// this bridge produced could ever become a row: the list could render at most the handset
+/// microphone and a remembered Omi, which is exactly the gap Nick found on TestFlight 771837.
+///
+/// This is the join. It is shape-blind and vendor-blind on purpose — it takes an observation,
+/// any observation, and records the pair the account will remember it by.
+///
+/// WHAT STILL BLOCKS THE ROW ON A REAL PHONE, STATED OUT LOUD. Nothing in the app reaches an
+/// authenticated stored-file session yet: there is no `PocketBLETransport` conformance backed
+/// by CoreBluetooth anywhere in the tree, and design §3.6 / T2 req 3 gate provisioning until
+/// an evidenced key alphabet and a security-reviewed entropy policy exist. So this seam is
+/// exercised end-to-end from the protocol client down, and the radio is the one leg that is
+/// still missing. It is named here rather than left as a green claim.
+public enum RecordingDeviceAdoption {
+    /// Remember an observed device under the identity the transport established for it.
+    ///
+    /// `reportedName` is DISPLAY metadata and nothing else — the durable address is
+    /// `observation.identity`, which for a stored-file recorder is the authenticated
+    /// peripheral token, never the advertised name.
+    @discardableResult
+    public static func remember(
+        _ observation: RecordingDeviceObservation
+    ) -> RecordingDeviceDetachOutcome {
+        RecordingDeviceStore.recordUserPair(identity: observation.identity,
+                                            displayName: observation.reportedName)
     }
 }
 
@@ -85,10 +124,18 @@ public enum StoredFileDevicePresentation {
     ) -> StoredFileDeviceDetailPresentation {
         StoredFileDeviceDetailPresentation(
             name: name,
-            eyebrow: "RECORDS ON ITS OWN",
-            linkLabel: link.rawValue.capitalized,
-            battery: battery.reportedValue ?? "N/A",
-            firmware: firmware.reportedValue ?? "N/A",
+            eyebrow: RecordingDeviceClass.recordThenSync.caption.uppercased(),
+            // LINK REACHABILITY, IN THE DESIGN'S OWN WORDS. `rawValue.capitalized` rendered
+            // `.disconnected` as "Disconnected" and `.reconnecting` as "Reconnecting"; the
+            // design's honest substitute for a hero status is `Connected` / `Connecting` /
+            // `Not connected`, and never "In range" — the phone cannot distinguish
+            // out-of-range from powered-off from connected-to-another-app.
+            linkLabel: link.label,
+            // NOT "N/A". A capability the device did not report is UNAVAILABLE — the shipped
+            // word, which is a statement — and the `N/A · N/A · N/A` strip an unpaired device
+            // used to render is the exact anti-pattern this replaces.
+            battery: battery.reportedValue ?? RecordingDeviceConnectPresentation.unavailableValue,
+            firmware: firmware.reportedValue ?? RecordingDeviceConnectPresentation.unavailableValue,
             manifest: manifest(items),
             showsRecordingState: false,
             showsLiveActivity: false)

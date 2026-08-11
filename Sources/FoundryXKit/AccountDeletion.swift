@@ -222,10 +222,19 @@ public final class AccountDeletionModel: ObservableObject {
     /// Carries the SCOPE and the OUTCOME only. Never the email, never a note.
     private let record: @Sendable (_ event: String, _ detail: String) -> Void
 
+    /// The step-by-step erase progress, for the screen the person watches. It is
+    /// fed by the deletion lifecycle's own named phases (see
+    /// `AccountDeletionProgress`), so the UI never has to guess what is happening
+    /// — which is how a several-minute destructive operation ended up behind a
+    /// bare spinner and a failure message naming a step that does not exist.
+    public let progress: AccountDeletionProgressModel
+
     public init(service: AccountDeletionService,
-                record: @escaping @Sendable (_ event: String, _ detail: String) -> Void = { _, _ in }) {
+                record: @escaping @Sendable (_ event: String, _ detail: String) -> Void = { _, _ in },
+                progress: AccountDeletionProgressModel = AccountDeletionProgressModel()) {
         self.service = service
         self.record = record
+        self.progress = progress
     }
 
     /// Run a deletion of the whole account with an explicit subscription outcome.
@@ -233,6 +242,10 @@ public final class AccountDeletionModel: ObservableObject {
                        choice: DeletionOutcomeChoice,
                        idToken: String?) async {
         phase = .deleting(scope)
+        // Only an immediate deletion erases this phone, so it is the only choice
+        // that has steps to watch.
+        if choice == .deleteNow { progress.begin() }
+        defer { settleProgress() }
         record("account.delete.requested", choice.wireScope)
         do {
             let outcome = try await service.deleteAccountEverywhere(choice: choice, idToken: idToken)
@@ -269,9 +282,7 @@ public final class AccountDeletionModel: ObservableObject {
     /// Execute a deletion for the chosen scope by routing to the matching seam. Idempotent
     /// per call; on failure the phase records which scope failed so the UI can retry.
     public func delete(scope: AccountDeletionScope, idToken: String?) async {
-        phase = .deleting(scope)
-        record("account.delete.requested", scope.wireScope)
-        do {
+        await runErase(scope: scope, wire: scope.wireScope) {
             switch scope {
             case .thisPhone:
                 try await service.eraseThisPhone()
@@ -280,28 +291,109 @@ public final class AccountDeletionModel: ObservableObject {
             case .everywhere:
                 try await service.deleteAccountEverywhere(choice: .deleteNow, idToken: idToken)
             }
+        }
+    }
+
+    /// Whether the ONLY thing left to retry is the local erase.
+    ///
+    /// Both of these phases mean the same thing: the server leg is behind us and
+    /// the erase stopped on this phone. Re-running the whole deletion from the
+    /// top then re-runs the REMOTE call first — against a tenant that no longer
+    /// exists, which answers 404, which the app maps to `routeMissing`, which
+    /// returns before `eraseLocal()` is ever reached. So "Retry deletion" could
+    /// not fix a `cleanupPending`, and the person was left with an account that
+    /// stays closed and a button that provably cannot open it. That is the trap
+    /// Nick hit on 2026-08-02.
+    public var awaitsLocalRetryOnly: Bool {
+        switch phase {
+        case .blocked, .incomplete: return true
+        default: return false
+        }
+    }
+
+    /// Retry ONLY the local erase, for a deletion whose server side is already
+    /// gone. Never touches the network.
+    public func retryLocalErase(scope: AccountDeletionScope) async {
+        await runErase(scope: scope, wire: "\(scope.wireScope) local_only") {
+            try await service.eraseThisPhone()
+        }
+    }
+
+    private func runErase(
+        scope: AccountDeletionScope,
+        wire: String,
+        _ operation: () async throws -> Void
+    ) async {
+        phase = .deleting(scope)
+        progress.begin()
+        defer { settleProgress() }
+        record("account.delete.requested", wire)
+        do {
+            try await operation()
             phase = .done(scope)
-            record("account.delete.completed", scope.wireScope)
+            record("account.delete.completed", wire)
         } catch AccountDeletionError.cleanupPending {
             phase = .blocked(scope)
-            record("account.delete.blocked", scope.wireScope)
+            record("account.delete.blocked", wire)
         } catch AccountDeletionError.cleanupFailed(let detail) {
             let failure = Self.cleanupFailure(detail)
             phase = .incomplete(scope, stage: failure.stage, reason: failure.reason)
-            record("account.delete.incomplete", "\(scope.wireScope) stage=\(failure.stage) reason=\(failure.reason)")
+            record("account.delete.incomplete", "\(wire) stage=\(failure.stage) reason=\(failure.reason)")
         } catch AccountDeletionError.routeMissing {
             phase = .routeMissing(scope)
-            record("account.delete.failed", "\(scope.wireScope) route_missing")
+            record("account.delete.failed", "\(wire) route_missing")
         } catch AccountDeletionError.signInExpired {
             AuthExpiryRouter.shared.authRejected(
                 generation: CaptureAccountScope.identityGeneration)
             // NOT `.failed`: nothing about the connection is wrong, and telling the user
             // to check it sends them to fix the one thing that is working.
             phase = .signInExpired(scope)
-            record("account.delete.failed", "\(scope.wireScope) sign_in_expired")
+            record("account.delete.failed", "\(wire) sign_in_expired")
         } catch {
             phase = .failed(scope)
-            record("account.delete.failed", "\(scope.wireScope) server")
+            record("account.delete.failed", "\(wire) server")
+        }
+    }
+
+    /// The terminal answer for the progress screen. The named steps arrive from
+    /// the deletion lifecycle WHILE the erase runs; this closes the screen out so
+    /// it can never be left on an indefinite spinner — which is what every one of
+    /// these outcomes used to look like from the outside.
+    private func settleProgress() {
+        switch phase {
+        case .done:
+            progress.complete()
+        case .incomplete(_, let stage, let reason):
+            progress.fail(
+                stage: RemoteSession.DeletionCleanupStage(rawValue: stage)
+                    ?? .preparing,
+                reason: reason)
+        case .blocked:
+            progress.fail(
+                stage: .preparing,
+                reason: "a previous deletion for this account never finished")
+        case .routeMissing:
+            // `route_missing` is the marker that makes this failure correctly
+            // NON-retryable. The route is not there, so the identical request
+            // cannot start working, and the screen used to offer a "Try again"
+            // that provably could never succeed.
+            progress.fail(
+                stage: .preparing,
+                reason: "route_missing the server isn't offering deletion at the address this app is using")
+        case .signInExpired:
+            // `owner_unproven` is the recorder's own word for it, and it is what
+            // makes this failure correctly NON-retryable: no button here can
+            // succeed until the person signs in again.
+            progress.fail(
+                stage: .preparing,
+                reason: "owner_unproven sign_in_expired")
+        case .failed:
+            progress.fail(
+                stage: .preparing,
+                reason: "the server couldn't be reached")
+        case .idle, .deleting, .scheduled, .subscriptionCancelled:
+            // Nothing local was erased, so there is no erase to report on.
+            break
         }
     }
 
@@ -470,6 +562,16 @@ final class CurrentOwnerSelectiveDeletionRunner: @unchecked Sendable {
                 DeletionRecorder.shared.emit("account.delete.local", "begin")
                 _ = try await lifecycle.begin(binding: binding)
                 DeletionRecorder.shared.emit("account.delete.local", "begin ok")
+            case .blocked(let reason) where reason.isRepairable:
+                // A record we cannot parse used to end the account here: the
+                // erase answered `store_blocked`, the retry re-read the same
+                // bytes, and sign-in was refused too, so there was no way out
+                // on the device at all. `recover` rebuilds it and re-walks
+                // every (idempotent, independently verified) cleanup group.
+                DeletionRecorder.shared.emit(
+                    "account.delete.local", "repair \(reason)")
+                _ = try await lifecycle.recover(ownerScope: ownerScope)
+                DeletionRecorder.shared.emit("account.delete.local", "repair ok")
             case .blocked(let reason):
                 DeletionRecorder.shared.emit(
                     "account.delete.local", "store_blocked \(reason)")
@@ -523,11 +625,14 @@ enum AccountDeletionRecoveryFailure {
     }
 }
 
-private extension RemoteSession.DeletionCleanupStage {
+extension RemoteSession.DeletionCleanupStage {
+    /// Every stage a local deletion walks, IN THE ORDER the lifecycle emits them.
+    /// This is the list the progress screen renders, so a stage missing from it
+    /// is a step the person watches the app skip over in silence.
     static let allCasesForDeletion: [Self] = [
         .signedInMirror, .widgetWithdrawal, .liveExposureClosure,
         .staleWorkCancellation, .barrierVerification, .barrierSync,
         .trackBPreferences, .pairingPreferences, .pairingSecrets,
-        .localRoot, .legacyInputs, .completedSync,
+        .localRoot, .legacyInputs, .accountSurfaces, .completedSync,
     ]
 }

@@ -16,6 +16,29 @@ public protocol AccountBoundSurface: Sendable {
     static func eraseAccount(
         _ binding: CaptureAccountScope.AccountBinding
     ) -> AccountSurfaceOutcome
+    /// Prove the erase held, WITHOUT erasing again.
+    ///
+    /// Deletion verifies each cleanup group after removing it, and re-verifies
+    /// every already-completed group on recovery, so this runs up to three times
+    /// per erase. Most surfaces are UserDefaults or Keychain reads where erasing
+    /// twice is free, and for those the default below is exactly right. It is
+    /// not right for a surface whose erase is expensive or can time out: the
+    /// Live Activity surface blocks the calling thread on a semaphore waiting
+    /// for a detached Task, so re-running it turned one 5-second cliff into
+    /// three, on a thread the deletion is already awaiting.
+    static func verifyAccountErased(
+        _ binding: CaptureAccountScope.AccountBinding
+    ) -> AccountSurfaceOutcome
+}
+
+public extension AccountBoundSurface {
+    /// Idempotent erasers ARE their own verification, and re-running them is
+    /// what proves cross-process and Keychain state after a crash.
+    static func verifyAccountErased(
+        _ binding: CaptureAccountScope.AccountBinding
+    ) -> AccountSurfaceOutcome {
+        eraseAccount(binding)
+    }
 }
 
 /// The complete manifest of identity-bearing state. The raw values are stable audit
@@ -198,6 +221,17 @@ public enum AccountSurfaceRegistry {
         defaults: UserDefaults
     ) -> [AccountSurfaceID: AccountSurfaceOutcome] {
         AccountSurfaceRuntime.withDefaults(defaults) { eraseAll(binding) }
+    }
+
+    /// Prove the erase held. Same manifest, same completeness guarantee — but a
+    /// surface may answer this without redoing its erase.
+    static func verifyAll(
+        _ binding: CaptureAccountScope.AccountBinding,
+        defaults: UserDefaults
+    ) -> [AccountSurfaceID: AccountSurfaceOutcome] {
+        AccountSurfaceRuntime.withDefaults(defaults) {
+            outcomes { $0.verifyAccountErased(binding) }
+        }
     }
 
     /// Identity publication is deliberately narrower than sign-out: activation may
@@ -444,6 +478,13 @@ private struct LiveActivitySurface: PassiveSurface {
     static func eraseAccount(_ binding: CaptureAccountScope.AccountBinding) -> AccountSurfaceOutcome {
         AccountLiveActivityBoundary.endAll()
     }
+    /// Asking ActivityKit whether anything is running is a synchronous read.
+    /// Ending them is not — see `AccountLiveActivityBoundary.endAll`.
+    static func verifyAccountErased(
+        _ binding: CaptureAccountScope.AccountBinding
+    ) -> AccountSurfaceOutcome {
+        AccountLiveActivityBoundary.verifyEnded()
+    }
 }
 
 private struct InMemorySessionSurface: PassiveSurface {
@@ -482,6 +523,23 @@ enum AccountLiveActivityBoundary {
             }
             return finished.wait(timeout: .now() + 5) == .success
                 ? .done : .failed("Live Activity termination timed out")
+        }
+        #endif
+        return .alreadyClean
+    }
+
+    /// The same question, asked without doing the work again. Reading
+    /// `Activity.activities` does not await anything, so verification cannot
+    /// block the deletion's own thread or time out.
+    static func verifyEnded() -> AccountSurfaceOutcome {
+        #if DEBUG || PERF_HARNESS
+        if let endAllForTests { return endAllForTests() }
+        #endif
+        #if canImport(ActivityKit) && os(iOS)
+        if #available(iOS 16.2, *) {
+            return Activity<CaptureActivityAttributes>.activities.isEmpty
+                ? .alreadyClean
+                : .failed("a Live Activity for this account is still running")
         }
         #endif
         return .alreadyClean

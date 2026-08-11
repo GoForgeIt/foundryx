@@ -60,6 +60,12 @@ public enum AccountPreferenceUsageGuard {
         "foundryx.capture-account-scope",
         "foundryx.capture.widget-snapshot",
         "foundryx.capture.widget-snapshot.active-owner",
+        // Answers "did THIS INSTALL's container survive?", which is a property of
+        // the phone and not of any account. It must never be account-scoped: a
+        // scoped marker would be absent for the next account and make an ordinary
+        // sign-in look like a reinstall. It must also survive account deletion —
+        // the container is still there, so the next launch is not a fresh install.
+        "foundryx.install.marker.v1",
     ]
 
     public static let accountInfrastructureKeys: Set<String> = [

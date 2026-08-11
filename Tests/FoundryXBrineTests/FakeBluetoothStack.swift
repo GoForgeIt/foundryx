@@ -183,6 +183,25 @@ final class FakeBLEStack: @unchecked Sendable {
         log.filter { $0 == event }.count
     }
 
+    /// THE SERVICE FILTER THE LAST SCAN WAS ISSUED WITH.
+    ///
+    /// `.scanStarted` says a scan happened; it says nothing about WHAT could answer it, and
+    /// that distinction is the whole of finding 2: `startScan()` asked CoreBluetooth for
+    /// `[OmiUUID.audioService]`, so the "one list, no brand" connect sheet was Omi-only by
+    /// construction and no device of any other family could appear in it. Recorded separately
+    /// rather than folded into `.scanStarted` so no existing assertion changes meaning.
+    private var lastScanServiceFilter: [CBUUID]??
+
+    fileprivate func recordScanFilter(_ services: [CBUUID]?) {
+        lock.lock(); lastScanServiceFilter = .some(services); lock.unlock()
+    }
+
+    /// nil until a scan has been issued at all; `.some(nil)` for an UNFILTERED scan.
+    var observedScanServiceFilter: [CBUUID]?? {
+        lock.lock(); defer { lock.unlock() }
+        return lastScanServiceFilter
+    }
+
     func clearLog() {
         lock.lock(); events.removeAll(); lock.unlock()
     }
@@ -490,6 +509,7 @@ final class FakeBLECentral: BLECentral, @unchecked Sendable {
 
     func scanForPeripherals(withServices serviceUUIDs: [CBUUID]?, options: [String: Any]?) {
         stack.record(.scanStarted)
+        stack.recordScanFilter(serviceUUIDs)
     }
 
     func stopScan() { stack.record(.scanStopped) }

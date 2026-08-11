@@ -2013,6 +2013,17 @@ public enum CaptureAccountScope {
         resolutionProbeLock.withLock {
             resolutionPersistenceEntriesForTests += 1
         }
+        // Set whenever the answer is "I could not READ", never when it is a
+        // durable fact. Caching the first kind is how ONE locked-device launch
+        // pinned the whole process to `.blocked`: iOS relaunches this app for
+        // CoreBluetooth state restoration while the phone is locked, the record
+        // file is unopenable before first unlock, `.blocked` was cached, and
+        // nothing in the process ever invalidated it — `installResolution` and
+        // the deletion barrier are its only production writers. The person then
+        // unlocked, opened the app, and had no capture root, no deletion (it
+        // refuses `ownerUnproven`) and no sign-in, with force-quit as the only
+        // way out and nothing on screen saying so.
+        var resolutionIsTransient = false
         let restored: (
             resolution: Resolution,
             preferenceValues: [String: AccountPreferenceValue]?
@@ -2051,7 +2062,10 @@ public enum CaptureAccountScope {
                         return (.blocked, nil)
                     case .unreadableLocked:
                         // Locked device: an identity may exist. Fail closed rather
-                        // than strand authenticated audio in `acct-none`.
+                        // than strand authenticated audio in `acct-none` — but do
+                        // NOT remember it, because it is a statement about the
+                        // lock, not about the account.
+                        resolutionIsTransient = true
                         return (.blocked, nil)
                     case .unreadable:
                         // The keychain cannot answer for a non-lock reason, e.g.
@@ -2088,7 +2102,14 @@ public enum CaptureAccountScope {
                               currentDefaults().bool(
                                 forKey: AuthStore.signedInMirrorKey)
                         else { return (.blocked, nil) }
-                    case .record, .blocked:
+                    case .record:
+                        return (.blocked, nil)
+                    case .blocked(let reason):
+                        // Unreadable is not unparseable. `.unreadable` /
+                        // `.protectedDataUnavailable` / `.failed` mean the file
+                        // could not be opened — before first unlock, that is
+                        // every launch — so the answer must not be remembered.
+                        resolutionIsTransient = !reason.isRepairable
                         return (.blocked, nil)
                     }
                     // The activation record and the App-Group handoff are two
@@ -2110,8 +2131,18 @@ public enum CaptureAccountScope {
                     return (.blocked, nil)
                 }
             } catch {
+                // The activation record itself could not be read — a locked
+                // container, not a decided account. Same rule.
+                resolutionIsTransient = true
                 return (.blocked, nil)
             }
+        }
+
+        if resolutionIsTransient {
+            // Deliberately NOT cached, and deliberately still returned: the
+            // caller is refused now, and the very next call reads again — which
+            // is what makes unlocking the device enough to recover.
+            return restored.resolution
         }
 
         stateLock.lock()
@@ -2144,7 +2175,21 @@ public enum CaptureAccountScope {
             return false
         case .record(let record) where record.phase == .completed:
             return true
-        case .record:
+        case .blocked(let reason) where !reason.isRepairable:
+            // We could not read the file at all. A real record may be sitting
+            // there, so overwriting it would discard genuine progress; this
+            // stays fail-closed and the next attempt reads again.
+            installResolution(
+                .blocked, widgetOwner: nil, identityTransition: true)
+            throw CaptureAccountScopeError.activationState(
+                "account deletion state is unreadable: \(reason)")
+        case .record, .blocked:
+            // `.blocked` lands here only for a REPAIRABLE reason — bytes that
+            // will not parse. Refusing sign-in for those was the third face of
+            // the same lockout: the app resolved `.blocked`, deletion answered
+            // `store_blocked`, and signing in was refused, so nothing on the
+            // device could clear it. The runner below rebuilds the record and
+            // re-walks every cleanup group.
             recoveryProgress(.required)
             installResolution(
                 .blocked, widgetOwner: nil, identityTransition: true)
@@ -2183,11 +2228,6 @@ public enum CaptureAccountScope {
                 throw CaptureAccountScopeError.deletionCleanupPending(
                     ownerScope: ownerScope)
             }
-        case .blocked(let reason):
-            installResolution(
-                .blocked, widgetOwner: nil, identityTransition: true)
-            throw CaptureAccountScopeError.activationState(
-                "account deletion state is unreadable: \(reason)")
         }
     }
 

@@ -763,6 +763,9 @@ final class CaptureAccountPreferenceTests: ProcessGlobalStateTestCase {
         _ = coordinator.registerExposure(b)
         _ = coordinator.registerExposure(a)
 
+        // A participant bound to ANOTHER account holds none of this account's
+        // data, so it answers "nothing of yours here" and is never asked to
+        // close someone else's surface.
         let other = CaptureAccountScope.AccountBinding(
             root: fixture.binding.root,
             scope: fixture.binding.scope + "-other",
@@ -774,13 +777,38 @@ final class CaptureAccountPreferenceTests: ProcessGlobalStateTestCase {
             [
                 AccountExposureAcknowledgement(
                     participantID: "live-a", kind: .live,
-                    result: .ownerMismatch),
+                    result: .unavailable),
                 AccountExposureAcknowledgement(
                     participantID: "live-b", kind: .live,
-                    result: .ownerMismatch),
+                    result: .unavailable),
             ])
         XCTAssertEqual(a.calls, 0)
         XCTAssertEqual(b.calls, 0)
+
+        // The SAME account on a later generation — what an ordinary sign-in
+        // produces. This participant may still be rendering this account's
+        // data, so it must be ASKED, and its own answer must stand. Answering
+        // `.ownerMismatch` here without asking was a permanent lockout: it
+        // neither closed the surface nor let the erase run.
+        let laterGeneration = CaptureAccountScope.AccountBinding(
+            root: fixture.binding.root,
+            scope: fixture.binding.scope,
+            generation: fixture.binding.generation + 2)
+        let staleGenerationACKs =
+            await coordinator.closeRegisteredExposures(expected: laterGeneration)
+        XCTAssertEqual(
+            staleGenerationACKs,
+            [
+                AccountExposureAcknowledgement(
+                    participantID: "live-a", kind: .live,
+                    result: .verificationFailed),
+                AccountExposureAcknowledgement(
+                    participantID: "live-b", kind: .live,
+                    result: .unavailable),
+            ],
+            "an older copy of the same account must be asked, not refused")
+        XCTAssertEqual(a.calls, 1)
+        XCTAssertEqual(b.calls, 1)
 
         let liveACKs = await coordinator.closeRegisteredExposures(
             expected: fixture.binding)

@@ -855,13 +855,19 @@ final class AccountDeletionLifecycleTests: XCTestCase {
         }
     }
 
-    func testEveryNonSuccessExposureAcknowledgementBlocksAllGroups()
+    /// UNPROVABLE, not merely non-`.closed`. This case list used to include
+    /// `.unavailable`, and that is precisely the lockout TestFlight 771837 hit:
+    /// a participant answering "there is nothing here to close" is the STRONGEST
+    /// proof that nothing can leak, and counting it as a failure made deletion
+    /// impossible forever (recovery re-ran the same barrier). The three results
+    /// below are the ones that genuinely cannot prove closure, and every one of
+    /// them must still block every group — that is what the barrier is for.
+    func testEveryUnprovableExposureAcknowledgementBlocksAllGroups()
         async throws
     {
         let failures: [AccountExposureCloseResult] = [
             .ownerMismatch,
             .verificationFailed,
-            .unavailable,
             .persistenceFailed,
         ]
         for result in failures {
@@ -878,6 +884,21 @@ final class AccountDeletionLifecycleTests: XCTestCase {
                 .cleanupPending)
             XCTAssertFalse(fixture.publishedActiveScopes.contains(scopeB))
         }
+    }
+
+    func testUnavailableExposureAcknowledgementCompletesEveryGroup()
+        async throws
+    {
+        let fixture = try DeletionLifecycleFixture()
+        defer { fixture.cleanup() }
+        fixture.liveAcknowledgement = .unavailable
+
+        let record = try await fixture.lifecycle.begin(
+            binding: fixture.bindingB)
+
+        XCTAssertEqual(record.phase, .completed)
+        XCTAssertEqual(
+            fixture.cleanedGroups, AccountDeletionCleanupGroup.allCases)
     }
 
     func testRealExposureCoordinatorCountsEveryLiveAndStaleRegistration()
@@ -900,13 +921,12 @@ final class AccountDeletionLifecycleTests: XCTestCase {
                 .allSatisfy { $0.result == .closed })
     }
 
-    func testEveryStaleFailureAndUnavailableBindingBlocksGroupOne()
+    func testEveryUnprovableStaleAcknowledgementBlocksGroupOne()
         async throws
     {
         for result in [
             AccountExposureCloseResult.ownerMismatch,
             .verificationFailed,
-            .unavailable,
             .persistenceFailed,
         ] {
             let fixture = try DeletionLifecycleFixture()
@@ -917,7 +937,15 @@ final class AccountDeletionLifecycleTests: XCTestCase {
             }
             XCTAssertTrue(fixture.cleanedGroups.isEmpty)
         }
+    }
 
+    /// A registration with NO binding was never attached to any account, so it
+    /// cannot be holding this account's data. It must still be ASKED and must
+    /// still be ATTRIBUTED in the acknowledgements (a barrier that silently
+    /// skips participants proves nothing) — and it must not block the erase.
+    func testUnboundRegistrationIsAttributedAndDoesNotBlockCleanup()
+        async throws
+    {
         for kind in [
             AccountExposureRegistration.Kind.live,
             .staleWork,
@@ -925,10 +953,11 @@ final class AccountDeletionLifecycleTests: XCTestCase {
             let fixture = try DeletionLifecycleFixture()
             defer { fixture.cleanup() }
             fixture.installUnavailableRegistration(kind: kind)
-            await XCTAssertThrowsErrorAsync {
-                try await fixture.lifecycle.begin(binding: fixture.bindingB)
-            }
-            XCTAssertTrue(fixture.cleanedGroups.isEmpty)
+            let record = try await fixture.lifecycle.begin(
+                binding: fixture.bindingB)
+            XCTAssertEqual(record.phase, .completed)
+            XCTAssertEqual(
+                fixture.cleanedGroups, AccountDeletionCleanupGroup.allCases)
             let all = fixture.lastLiveAcknowledgements
                 + fixture.lastStaleAcknowledgements
             XCTAssertEqual(
@@ -2134,14 +2163,17 @@ private final class DeletionLifecycleFixture {
                 state.lastStaleAcknowledgements = acknowledgements
                 return acknowledgements
             },
+            // The PRODUCTION rule, not a hand-copy of it. This closure used to
+            // restate `.closed || .alreadyClosed` inline, which is how the fixture
+            // kept agreeing with a lifecycle bug instead of catching it.
             verifyExposureBarrier: { [state] _, _ in
                 state.observeHook()
                 state.events.append(.barrierVerified)
-                let all = state.lastLiveAcknowledgements
-                    + state.lastStaleAcknowledgements
-                return !all.isEmpty && all.allSatisfy {
-                    $0.result == .closed || $0.result == .alreadyClosed
-                }
+                let live = state.lastLiveAcknowledgements
+                let stale = state.lastStaleAcknowledgements
+                return !(live + stale).isEmpty
+                    && AccountExposureBarrier.isSatisfied(
+                        live: live, stale: stale)
             },
             removeGroup: { [state] group, binding, legacyOwned in
                 state.observeHook()
@@ -3054,10 +3086,21 @@ final class SelectiveDeletionBehaviorHarness: @unchecked Sendable {
             contentsOf: repositoryRoot.appendingPathComponent(
                 "App/AccountDeletionView.swift"),
             encoding: .utf8)
-        guard source.contains("Retry deletion"),
-              source.contains("case .blocked") else {
+        guard source.contains("case .blocked"),
+              source.contains("Finish erasing this iPhone") else {
             throw BrineStepError(
                 "pending deletion has no explicit blocked retry action")
+        }
+        // And that action must be the LOCAL erase. A pending cleanup only
+        // exists AFTER the server side is gone, so re-running the whole
+        // deletion calls a tenant that no longer exists, gets a 404, maps it to
+        // `routeMissing`, and returns before `eraseLocal()` — the one thing
+        // still owed. The only button offered could never clear the record.
+        guard source.contains("await retryLocal(scope)"),
+              source.contains("model.retryLocalErase(scope:") else {
+            throw BrineStepError(
+                "the blocked retry re-runs the server leg, which can never "
+                + "clear a pending cleanup")
         }
     }
 

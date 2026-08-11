@@ -110,15 +110,48 @@ public enum RecordingDeviceConnectPresentation {
     /// The ONE recording-device connection affordance in the rendered app.
     public static let affordanceTitle = "Connect a recording device"
     public static let listTitle = "Recording devices"
+    /// The title of the affordance's DESTINATION (design §3.1). It is not `listTitle`: the
+    /// list is the devices you have, the sheet is the one device you are adding, and the two
+    /// were shipped swapped.
+    public static let connectSheetTitle = "Connect a device"
     public static let emptyLine = "No recording devices found yet. Put yours in pairing mode."
     public static let scanningLine = "Looking for recording devices…"
     public static let unavailableValue = "Unavailable"
+
+    /// PRE-CONNECT, THE ONLY FACT IS THE BROADCAST NAME (design §3.1). Said out loud, because
+    /// a scan row that shows only a name reads like a shortcoming unless the reason is given.
+    public static let broadcastNameNote =
+        "These are the names each device broadcasts. FoundryX can't tell what a device is, "
+        + "or what it can do, until it connects to it."
+
+    /// Design §3.1, verbatim in substance: an input route is paired by iOS, not here.
+    public static let routePairingNote =
+        "Headphones and earbuds don't get set up here. Pair them in iPhone Settings and they "
+        + "show up in your device list on their own."
+
+    /// The answer for a person whose recorder never appears — which, for a stored-file
+    /// recorder, is every person today. It leads to the §3.6 screen ("Setup isn't available
+    /// yet"), NOT to a branded setup row pinned above whatever answered the scan: a
+    /// discoverable entry point that cannot connect anything is its own kind of trap
+    /// (design §7 Q1), and a vendor name above the scan results is "vendors first".
+    public static let setupHelpLink = "Why isn't my recorder here?"
+
+    /// What a device that advertises NO name is called in a scan list (design §3.1, T3 req 8).
+    ///
+    /// It lives here rather than in the view for the same reason every other line above does:
+    /// `App/`'s copy is scanned by the voice-notes language guard, which retires the word
+    /// "recording" from user-facing app literals — and this surface is the one place the word
+    /// is not retired, because a recording DEVICE is what it is. Keeping the string in the kit
+    /// keeps the guard meaningful for the rest of `App/` instead of forcing an exception into
+    /// it, and keeps this screen's copy in the one place `genericCopy` can assert over.
+    public static let unnamedDeviceName = "Unnamed recording device"
 
     /// Every piece of generic copy this surface can render, so "generic device copy names no
     /// vendor" is checked over a POPULATION rather than over whichever strings a test author
     /// happened to remember.
     public static let genericCopy: [String] = [
-        affordanceTitle, listTitle, emptyLine, scanningLine, unavailableValue,
+        affordanceTitle, listTitle, connectSheetTitle, emptyLine, scanningLine, unavailableValue,
+        unnamedDeviceName, broadcastNameNote, routePairingNote, setupHelpLink,
     ] + capabilityLabels
 
     /// The capabilities the list shows, in a fixed order, with their labels.
@@ -161,6 +194,20 @@ public enum RecordingDeviceConnectPresentation {
                                                      value: unavailableValue, isAvailable: false)
             }
         }
+    }
+
+    /// The capability lines for a device whose strip is NOT a class fact — only the ones it
+    /// actually declared, so a device with nothing to report renders no strip at all.
+    ///
+    /// WHY THIS EXISTS. `capabilityLines` renders all four keys and says `Unavailable` for the
+    /// ones a device never declared. For a record-then-sync recorder that is the point: design
+    /// §6a draws exactly that, with a note saying the LINK is why. For a built-in microphone
+    /// it is the `N/A · N/A · N/A` strip in a different word — four rows of "Unavailable" for
+    /// four things a phone microphone does not have and never will.
+    public static func reportedCapabilityLines(
+        _ capabilities: RecordingDeviceCapabilities
+    ) -> [RecordingDeviceCapabilityLine] {
+        capabilityLines(capabilities).filter(\.isAvailable)
     }
 
     public static func row(_ entry: RecordingDeviceEntry) -> RecordingDeviceRowPresentation {

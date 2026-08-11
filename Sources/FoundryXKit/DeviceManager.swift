@@ -591,7 +591,26 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
         guard c.managerState == .poweredOn else { pendingUserScan = true; return }
         setDiscovered([])
         setState(.scanning)
-        c.scanForPeripherals(withServices: [OmiUUID.audioService], options: nil)
+        // NO SERVICE FILTER. THIS IS THE LINE THAT MADE THE BRAND-FREE LIST OMI-ONLY.
+        //
+        // The user-initiated pairing scan asked for `[OmiUUID.audioService]`, so a
+        // CoreBluetooth scan only ever reported peripherals advertising ONE VENDOR'S audio
+        // service. A stored-file recorder advertises no such service and therefore could not
+        // answer — the "one list, no brand" connect sheet was Omi-only by construction, and
+        // no amount of work further down the adoption chain could have put a Pocket in it.
+        //
+        // `nil` is what design §3.1 actually describes: *"the scan list below shows no class,
+        // no battery, and no capabilities"* — whatever answered, named by what it broadcasts,
+        // with the app admitting it cannot tell what any of them are until it connects.
+        //
+        // OMI PAIRING IS UNAFFECTED, and that is a property of the code below rather than a
+        // hope: the auto-connect arm in `didDiscover` matches on the SAVED PERIPHERAL UUID
+        // (`OmiAutoConnect.shouldAutoConnect`), never on the advertised service, so widening
+        // the scan can only add candidates to it. `runReacquireScan()` — the AUTOMATIC,
+        // background reacquire for an already-saved Omi — deliberately keeps its filter: it
+        // is looking for one specific known device, and an unfiltered background scan is a
+        // battery and privacy cost paid for nothing.
+        c.scanForPeripherals(withServices: nil, options: nil)
         // BOUND it: a scan that finds nothing must NOT run forever — a perpetual scan is
         // what persisted CB restoration data and woke the app. Auto-stop after the window
         // (a later scan bumps the generation so this stale timeout no-ops).
@@ -633,19 +652,24 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
         // empty — it remembered the devices a user had thrown away and none of the ones they
         // kept, and `RecordingDeviceActivation` therefore had nothing to choose from. Pairing
         // is the gesture that means "remember this one", so it upserts and selects.
+        // A device that advertised no name is remembered under the brand-free name the scan
+        // list showed it under, not under an empty string.
+        let pairedName = device.name.isEmpty
+            ? RecordingDeviceConnectPresentation.unnamedDeviceName
+            : device.name
         logDetachOutcome(
             RecordingDeviceStore.recordUserPair(
                 identity: RecordingDeviceIdentity(shape: .bleStream,
                                                   hardwareToken: device.id.uuidString),
-                displayName: device.name),
+                displayName: pairedName),
             gesture: "pair")
         guard let c = central,
               let p = c.retrievePeripherals(withIdentifiers: [device.id]).first
                   ?? discoveredPeripherals[device.id] else { return }
         c.stopScan()
         bind(p)
-        setSaved(device.id, name: p.name ?? device.name)
-        setState(.connecting(p.name ?? "Omi"))
+        setSaved(device.id, name: p.name ?? pairedName)
+        setState(.connecting(p.name ?? pairedName))
         c.connect(p, options: nil)
     }
 
@@ -1075,7 +1099,11 @@ extension DeviceManager: BLEEventSink {
 
     public func bleCentral(_ c: BLECentral, didDiscover p: BLEPeripheral, rssi: Int) {
         discoveredPeripherals[p.identifier] = p
-        let dev = DiscoveredDevice(id: p.identifier, name: p.name ?? "Omi", rssi: rssi)
+        // A SCAN ROW SHOWS THE NAME THE DEVICE BROADCASTS, AND NOTHING ELSE. Defaulting an
+        // un-named peripheral to a VENDOR name put a brand on a row about a device the app
+        // knows nothing about — and it made the view's brand-free `unnamedDeviceName` branch
+        // unreachable. Empty here; the scan list names it (design §3.1, T3 req 8).
+        let dev = DiscoveredDevice(id: p.identifier, name: p.name ?? "", rssi: rssi)
         DispatchQueue.main.async {
             var list = self.discovered.filter { $0.id != dev.id }
             list.append(dev)

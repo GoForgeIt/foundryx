@@ -338,6 +338,10 @@ final class AccountPreferenceUsageGuardTests: XCTestCase {
             "foundryx.capture-account-scope",
             "foundryx.capture.widget-snapshot",
             "foundryx.capture.widget-snapshot.active-owner",
+            // The fresh-install marker: a property of the container, not of any
+            // account, and the thing that keeps a reinstall from inheriting the
+            // previous person's keychain identity.
+            "foundryx.install.marker.v1",
         ]
         XCTAssertEqual(AccountPreferenceUsageGuard.phoneOwnedKeys, expected)
 

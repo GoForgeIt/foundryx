@@ -21,6 +21,12 @@ struct AccountDeletionView: View {
     /// Presented for `.everywhere` INSTEAD of a straight confirmation: that scope is
     /// the only one with a billing dimension, so it is the only one that asks.
     @State private var choosingOutcome = false
+    /// The erase-progress page. Presented for anything that erases THIS phone,
+    /// which is the operation that takes real time and can refuse mid-way.
+    @State private var showingProgress = false
+    /// What to re-run when the progress page offers "Try again".
+    @State private var lastScope: AccountDeletionScope?
+    @State private var lastChoice: DeletionOutcomeChoice?
 
     var body: some View {
         List {
@@ -86,24 +92,29 @@ struct AccountDeletionView: View {
                         .grainTextStyle(.caption).foregroundStyle(GrainColor.dangerRed)
                 }
             }
+            // BOTH retries below finish the LOCAL erase and never re-run the
+            // server leg. The account is already gone server-side by the time
+            // either phase is reachable, so re-running the remote call meant a
+            // 404 → "route missing" → the local erase was never reached, and the
+            // only button offered for a pending cleanup could never clear it.
             if case .blocked(let scope) = model.phase {
                 Section {
-                    Text("Deletion is pending. This account stays closed until cleanup finishes.")
+                    Text("Deletion is pending. This account stays closed until cleanup finishes. Your account is already deleted on our servers — only this iPhone is left to erase.")
                         .grainTextStyle(.caption)
                         .foregroundStyle(GrainColor.dangerRed)
-                    Button("Retry deletion") {
-                        Task { await run(scope) }
+                    Button("Finish erasing this iPhone") {
+                        Task { await retryLocal(scope) }
                     }
                     .disabled(isBusy)
                 }
             }
             if case .incomplete(let scope, let stage, let reason) = model.phase {
                 Section {
-                    Text("Deletion is incomplete at \(stage): \(reason). This account stays closed until every erase step finishes.")
+                    Text("Deletion is incomplete at \(stage): \(reason). This account stays closed until every erase step finishes. Your account is already deleted on our servers — only this iPhone is left to erase.")
                         .grainTextStyle(.caption)
                         .foregroundStyle(GrainColor.dangerRed)
-                    Button("Retry deletion") {
-                        Task { await run(scope) }
+                    Button("Finish erasing this iPhone") {
+                        Task { await retryLocal(scope) }
                     }
                     .disabled(isBusy)
                 }
@@ -112,7 +123,23 @@ struct AccountDeletionView: View {
         .grainBackground()
         .navigationTitle("Delete account")
         .navigationBarTitleDisplayMode(.inline)
-        .overlay { if isBusy { ProgressView().scaleEffect(1.3) } }
+        // The bare spinner survives ONLY for the operations with no local steps
+        // to show (the hosted Vault, a scheduled deletion, a cancellation) — a
+        // short server round trip, not a multi-minute destructive walk.
+        .overlay { if isBusy && !showingProgress { ProgressView().scaleEffect(1.3) } }
+        // NO bare spinner for the erase. Erasing an account walks thirteen named steps and can
+        // refuse at any of them; a `ProgressView()` over the whole screen said
+        // nothing about what had already been destroyed, and a refusal collapsed
+        // into one line naming a step that does not exist.
+        .sheet(isPresented: $showingProgress) {
+            NavigationStack {
+                AccountDeletionProgressView(
+                    model: model.progress,
+                    onRetry: { Task { await retryLast() } },
+                    onClose: { showingProgress = false })
+            }
+            .interactiveDismissDisabled(model.progress.presentation.isRunning)
+        }
         .sheet(isPresented: $choosingOutcome) {
             DeletionOutcomeChoiceView(
                 onPick: { choice in
@@ -153,6 +180,11 @@ struct AccountDeletionView: View {
     }()
 
     private func runChoice(_ choice: DeletionOutcomeChoice) async {
+        lastChoice = choice
+        lastScope = nil
+        // The progress page is for the erase. A scheduled deletion or a plain
+        // cancellation destroys nothing today, so it gets no erase page.
+        if choice == .deleteNow { showingProgress = true }
         await model.delete(scope: .everywhere, choice: choice, idToken: idToken())
         // ONLY an immediate deletion signs the person out — after a schedule or a
         // cancel their account still exists and their notes are still here.
@@ -160,8 +192,35 @@ struct AccountDeletionView: View {
     }
 
     private func run(_ scope: AccountDeletionScope) async {
+        lastScope = scope
+        lastChoice = nil
+        // The hosted Vault lives on the server; nothing on this phone is erased,
+        // so there are no local steps to show.
+        showingProgress = scope != .hostedVault
         await model.delete(scope: scope, idToken: idToken())
         if case .done(let s) = model.phase { onDeleted(s) }
+    }
+
+    /// Finish a deletion whose server side is already gone. The remote leg is
+    /// deliberately NOT re-run — see `AccountDeletionModel.awaitsLocalRetryOnly`.
+    private func retryLocal(_ scope: AccountDeletionScope) async {
+        lastScope = scope
+        lastChoice = nil
+        showingProgress = true
+        await model.retryLocalErase(scope: scope)
+        if case .done(let s) = model.phase { onDeleted(s) }
+    }
+
+    /// "Try again" from the progress page re-runs exactly what is still left to
+    /// do — which, once the erase has stopped locally, is the local erase ONLY.
+    private func retryLast() async {
+        if model.awaitsLocalRetryOnly {
+            await retryLocal(lastScope ?? .everywhere)
+        } else if let choice = lastChoice {
+            await runChoice(choice)
+        } else if let scope = lastScope {
+            await run(scope)
+        }
     }
 }
 
@@ -186,6 +245,10 @@ extension AccountDeletionModel {
     /// exactly the cases where nothing is erased and the 15s diag flush still runs.
     @MainActor static func live(record: @escaping @Sendable (String, String) -> Void = { _, _ in }) -> AccountDeletionModel {
         let auth = FoundryAuth()
+        // The lifecycle already announces every step by name. Handing that stream
+        // to the progress model is the whole of the "what is it doing right now?"
+        // screen — nothing here re-derives or guesses at a step.
+        let progress = AccountDeletionProgressModel()
         let localDeletion = CurrentOwnerSelectiveDeletionRunner(
             containerProvider: { CaptureAccountScope.container() },
             defaults: .standard,
@@ -194,7 +257,8 @@ extension AccountDeletionModel {
                 cell: "com.goforgeit.foundryx.cell",
                 door: DoorConfigStore.service),
             exposureCoordinator: .process,
-            identityProvider: { auth.signedInIdentity })
+            identityProvider: { auth.signedInIdentity },
+            progress: { event in progress.report(event) })
         let service = LiveAccountDeletionService(
             eraseLocal: {
                 try await localDeletion.eraseVerifiedCurrentOwner()
@@ -225,7 +289,8 @@ extension AccountDeletionModel {
                 return try await AccountClient(baseURL: signupServiceBase)
                     .deleteAccount(choice: choice, idToken: token)
             })
-        return AccountDeletionModel(service: service, record: record)
+        return AccountDeletionModel(
+            service: service, record: record, progress: progress)
     }
 }
 

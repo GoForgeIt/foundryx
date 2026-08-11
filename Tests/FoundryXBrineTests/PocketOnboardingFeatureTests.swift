@@ -194,4 +194,5 @@ private actor FailingThenWorkingPocketSecretStore: PocketSecretStore {
     private var attempts = 0
     func save(_ secret: String, for identity: PocketAuthenticatedIdentity) async throws { attempts += 1; if attempts == 1 { throw PocketSecretStoreError.unavailable } }
     func secret(for identity: PocketAuthenticatedIdentity) async throws -> String? { nil }
+    func remove(for identity: PocketAuthenticatedIdentity) async throws {}
 }

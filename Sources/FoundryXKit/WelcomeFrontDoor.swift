@@ -73,6 +73,7 @@ public enum WelcomeFrontDoor {
         case .liveExposureClosure: return "Open account activity"
         case .staleWorkCancellation: return "Background account work"
         case .barrierVerification, .barrierSync: return "Deletion safety barrier"
+        case .accountSurfaces: return "Remaining account surfaces"
         case .completedSync: return "Deletion completion record"
         case .preparing: return "Deletion cleanup"
         }

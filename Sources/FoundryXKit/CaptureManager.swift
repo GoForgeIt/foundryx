@@ -2614,7 +2614,12 @@ public final class CaptureManager: ObservableObject {
     private func closeOutstandingAudioExposures()
         async -> AccountExposureCloseResult?
     {
-        var firstFailure: AccountExposureCloseResult?
+        // COLLECTED, then folded by severity — NOT "the first result that wasn't
+        // closed". Once `.unavailable` counts as proof of closure, taking the
+        // first non-closed answer lets an absent `source` hide a
+        // `.verificationFailed` from `micSource`, and the erase proceeds while the
+        // microphone could not confirm it had stopped for this account.
+        var answers: [AccountExposureCloseResult] = []
         if sourceExposureClosePending {
             let result: AccountExposureCloseResult
             if let closable = source as? any AccountAudioSourceExposure {
@@ -2623,10 +2628,12 @@ public final class CaptureManager: ObservableObject {
                 source.stop()
                 result = .closed
             }
+            // Latching still requires that something was actually closed: an
+            // absent child leaves the retry path free to ask again.
             if result == .closed || result == .alreadyClosed {
                 sourceExposureClosePending = false
             } else {
-                firstFailure = result
+                answers.append(result)
             }
         }
         if micExposureClosePending, let micSource {
@@ -2639,11 +2646,12 @@ public final class CaptureManager: ObservableObject {
             }
             if result == .closed || result == .alreadyClosed {
                 micExposureClosePending = false
-            } else if firstFailure == nil {
-                firstFailure = result
+            } else {
+                answers.append(result)
             }
         }
-        return firstFailure
+        guard !answers.isEmpty else { return nil }
+        return AccountExposureCloseResult.aggregate(answers)
     }
 
     private func retryOutstandingAudioExposureClosure()

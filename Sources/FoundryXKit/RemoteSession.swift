@@ -23,6 +23,11 @@ public final class RemoteSession: ObservableObject {
         case pairingSecrets
         case localRoot
         case legacyInputs
+        // The erase group that clears every registered account surface. It was
+        // MISSING from this enum while `AccountDeletionCleanupGroup` had it, so a
+        // failure there decoded to nil and was reported as the meaningless
+        // "preparing" — the same word Nick was shown on build 771837.
+        case accountSurfaces
         case completedSync
     }
 

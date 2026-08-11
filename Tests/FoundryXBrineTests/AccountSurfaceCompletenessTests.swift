@@ -35,6 +35,10 @@ final class AccountSurfaceCompletenessTests: XCTestCase {
             AccountSurfaceRegistry.attachAll(binding),
             AccountSurfaceRegistry.detachAll(previous: binding),
             AccountSurfaceRegistry.eraseAll(binding, defaults: defaults),
+            // Verification walks the SAME manifest. A surface that answers
+            // "already erased" without being covered here is a surface the
+            // deletion would call finished without ever checking.
+            AccountSurfaceRegistry.verifyAll(binding, defaults: defaults),
         ]
         for outcomes in operationOutcomes {
             XCTAssertEqual(Set(outcomes.keys), Set(AccountSurfaceID.allCases))
@@ -160,9 +164,13 @@ private extension AccountSurfaceCompletenessTests {
         "foundryx.device-ble": .nonIdentity("Dispatch queue label for the device BLE worker"),
         "foundryx.device-ref.v1": .nonIdentity("hash domain separator, not persisted state"),
         "foundryx.diag.perfOverlay": .nonIdentity("device diagnostic preference with no account content"),
+        "foundryx.install.marker.v1": .nonIdentity(
+            "a boolean naming no account: it records only that this install's container has been seen before, so a reinstall (which clears the container but NOT the keychain) can be told apart from an ordinary launch"),
         "foundryx.mic-source": .nonIdentity("Dispatch queue label"),
         "foundryx.omi-ble": .nonIdentity("Dispatch queue label for the Omi source"),
         "foundryx.omi-restoration-owner": .nonIdentity("Dispatch queue label"),
+        "foundryx.recording-device-attach":
+            .nonIdentity("Dispatch queue label for the connect-probe BLE worker"),
         "foundryx.omi-restoration-spool": .nonIdentity("Dispatch queue label"),
         "foundryx.replay-source": .nonIdentity("test/replay Dispatch queue label"),
         "foundryx.speaker-confirm-queue": .nonIdentity("Dispatch queue label"),

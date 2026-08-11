@@ -144,7 +144,20 @@ public actor PocketBLEClient {
         return PocketBLEClient(transport: transport, map: map, diagnostics: diagnostics)
     }
 
-    public var hasRetainedSecretForTesting: Bool { retainedSecret != nil }
+    /// TRUE ONLY WHILE THIS CLIENT IS HOLDING THE ACTUAL BYTES.
+    ///
+    /// It used to read `retainedSecret != nil`, which nil-ness alone can satisfy — and
+    /// nil-ness alone is what the old wipe achieved. `if var bytes = retainedSecret { bytes
+    /// .resetBytes(…) }` binds a COPY of the array struct; mutating it triggers copy-on-write,
+    /// allocates a fresh buffer, and zeroes THAT. The original buffer, still holding the
+    /// sixteen plaintext characters, was then released to the allocator untouched. Measured:
+    /// original at 0x…df70, the copy the wipe zeroed at 0x…e540.
+    ///
+    /// So this asks the question that mutation can fail: are the bytes ZERO. Reintroducing the
+    /// copy-on-write wipe turns this back to `true` and the secret-privacy check goes red.
+    public var hasRetainedSecretForTesting: Bool {
+        retainedSecret?.contains { $0 != 0 } ?? false
+    }
 
     /// The current transport generation, so a test can prove `retire()` actually
     /// advanced it. Without this the staleness filter had no coverage at all: a
@@ -171,7 +184,7 @@ public actor PocketBLEClient {
             try await write("SK&" + secret)
             let response = try await nextControl(operation: .authentication)
             guard response == "MCU&SK&OK" else {
-                retainedSecret = nil
+                wipeRetainedSecret()
                 if response == "MCU&UNKNOWN" { throw PocketProtocolError.unsupportedOperation }
                 throw PocketProtocolError.authenticationRejected
             }
@@ -184,7 +197,7 @@ public actor PocketBLEClient {
             let mapped = mapError(error, operation: .authentication)
             if mapped == .timeout(.authentication) || mapped == .disconnected || mapped == .transportFailure {
                 await retire(reason: "authentication transport invalidated")
-            } else { retainedSecret = nil; authenticated = false }
+            } else { wipeRetainedSecret(); authenticated = false }
             throw mapped
         }
     }
@@ -339,10 +352,22 @@ public actor PocketBLEClient {
     private func retire(reason: String) async {
         guard !retired else { return }
         generation &+= 1; retired = true; authenticated = false
-        if var bytes = retainedSecret { bytes.resetBytes(in: bytes.indices) }
-        retainedSecret = nil
+        wipeRetainedSecret()
         await transport.close()
         await diagnostics(reason)
+    }
+
+    /// OVERWRITE IN PLACE, THEN KEEP THE BUFFER.
+    ///
+    /// Two things are deliberate. Mutating `retainedSecret` THROUGH the stored property —
+    /// rather than through a `var` copy — is what makes the wipe reach the live buffer instead
+    /// of a copy-on-write duplicate of it. And not niling afterwards is what leaves the wipe
+    /// OBSERVABLE: `retainedSecret = nil` would drop the sixteen bytes onto the free list and
+    /// leave every possible assertion unable to tell a real wipe from a dropped reference.
+    /// Sixteen zero bytes cost nothing to keep and are the proof.
+    private func wipeRetainedSecret() {
+        guard retainedSecret != nil else { return }
+        for index in retainedSecret!.indices { retainedSecret![index] = 0 }
     }
 
     private func mapError(_ error: Error, operation: PocketOperation) -> PocketProtocolError {

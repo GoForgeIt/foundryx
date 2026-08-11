@@ -20,6 +20,14 @@ struct FoundryXApp: App {
         #if DEBUG
         _ = Self.launchStart   // force the reference instant at init (≈ process start)
         #endif
+        // FIRST, before anything can read auth state. iOS wipes this app's
+        // container on uninstall but deliberately keeps its Keychain items, so a
+        // delete-and-reinstall used to come back SIGNED IN as the previous
+        // account (TestFlight 771837). This is the only place early enough: the
+        // App's init runs before the UIApplicationDelegate callbacks and before
+        // RootView / RemoteSession construct a FoundryAuth and restore the
+        // identity. Moving it later re-opens the hole.
+        FreshInstallGuard.runAtLaunch()
         // Start the cold-launch clock as early as possible, and wire perf
         // telemetry (MetricKit + our own spans) to the diagnostics endpoint so
         // launch/hang data flows across the fleet, not one .ips at a time.

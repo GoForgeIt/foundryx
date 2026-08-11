@@ -53,19 +53,49 @@ struct SettingsScreen: View {
     /// sheet so a signed-out user can get back in (e.g. to switch accounts).
     @State private var showingAccountSignIn = false
 
+    /// The one list's rows, read for the Devices row's subtitle. Loaded in `.task` so the
+    /// account-scoped store read never happens inside a body pass.
+    @StateObject private var deviceList = RecordingDeviceListModel()
+
     /// A glanceable one-line status for the Devices row (the deeper page has the detail).
+    ///
+    /// CLASS COUNTS, NO VENDOR WORD. This read `"Omi connected"` — a vendor name hardcoded
+    /// into the one line a user sees before deciding whether to open the page at all, on a
+    /// screen whose whole organising idea is that the only distinction is live versus
+    /// records-on-its-own. `UnifiedDeviceListPresentation.settingsSubtitle` is brand-free by
+    /// construction: nothing but the counts reaches it.
     private var deviceStatusSubtitle: String {
-        if case .connected = device.connectionState { return "Omi connected" }
-        return "Omi, phone mic, and your computer"
+        UnifiedDeviceListPresentation.settingsSubtitle(deviceList.rows)
+    }
+
+    private func refreshDeviceSubtitle() {
+        deviceList.refresh(sources: sources.sources,
+                           omi: device.saved,
+                           omiLink: {
+                               switch device.connectionState {
+                               case .connected:  return .connected
+                               case .connecting: return .reconnecting
+                               case .scanning, .disconnected, .idle, .poweredOff:
+                                   return .disconnected
+                               }
+                           }(),
+                           omiBattery: device.batteryLevel,
+                           recordingIdentity: nil)
     }
 
     var body: some View {
         List {
             Section {
                 NavigationLink {
-                    DeviceScreen(device: device, manager: manager, sources: sources, remote: remote)
-                        .navigationTitle("Devices")
-                        .navigationBarTitleDisplayMode(.inline)
+                    LazyView {
+                        // THE LIST IS "Recording devices" AND THE SHEET IS "Connect a device".
+                        // The two shipped titles were swapped: this screen was hardcoded
+                        // "Devices" while the connect sheet wore `listTitle`.
+                        DeviceScreen(device: device, manager: manager, sources: sources,
+                                     remote: remote)
+                            .navigationTitle(RecordingDeviceConnectPresentation.listTitle)
+                            .navigationBarTitleDisplayMode(.inline)
+                    }
                 } label: {
                     HStack(spacing: GrainSpacing.x2) {
                         Image(systemName: "earbuds")
@@ -317,6 +347,12 @@ struct SettingsScreen: View {
             }
         }
         .grainBackground()
+        // The Devices row's class counts. Loaded here rather than in the subtitle's getter:
+        // the count comes from the account-scoped device store on disk, and a body pass is
+        // not a place to read it.
+        .onAppear { refreshDeviceSubtitle() }
+        .onChange(of: device.connectionState) { _ in refreshDeviceSubtitle() }
+        .onChange(of: device.saved) { _ in refreshDeviceSubtitle() }
         // Account section "Sign in" (signed-out state) — get back in / switch accounts.
         .sheet(isPresented: $showingAccountSignIn) {
             SignInView(remote: remote) { showingAccountSignIn = false }

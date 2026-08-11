@@ -42,20 +42,27 @@ final class RecordingSurfaceRenderingLedgerTests: XCTestCase {
         // Consulted by the composition root to decide whether a gap outcome belongs to the
         // account on screen. It reaches only the log today, and the feature says so.
         "GapRecoveryRendering",
+        // THE MOVE THIS LEDGER WAS BUILT TO FORCE (track
+        // 20260810T2158_unified_recording_device_list_wires_pocket_and_omi). Its "not drawn"
+        // direction said: "That is good news and it is a CHANGE: move it to `drawnByTheApp`,
+        // reword the scenario Thens that currently say 'offered' to say what is drawn, and
+        // record the move." `App/DeviceScreen.swift` is now the ONE LIST, and its title, its
+        // affordance, its scanning and empty lines and its capability strip all come from
+        // here — the first consumers these strings have ever had under `App/`.
+        "RecordingDeviceConnectPresentation",
     ]
 
-    /// DEFINED, ASSERTED, AND NOT YET DRAWN — T6's device page and gap surface.
+    /// DEFINED, ASSERTED, AND NOT YET DRAWN.
     ///
-    /// The shipped `App/DeviceScreen.swift` is still the Omi-specific prototype (a hand-rolled
-    /// pairing list plus the Battery / Signal / Firmware strip); the one device list, its
-    /// capability lines and its gap sentence have no view. `features/device-rendered-surface.feature`
-    /// says "offered" rather than "rendered" for exactly these, and `implementation-t5-fixforward.md`
-    /// records the split.
+    /// What is left is the row VALUE type and the list-control type — the one list is rendered
+    /// through `UnifiedDeviceListPresentation`, which composes `<class> · <state>` and is what
+    /// `App/DeviceScreen.swift` names — plus the recording-history reader and the gap sentence,
+    /// which still have no view. `features/device-rendered-surface.feature` says "offered"
+    /// rather than "rendered" for exactly these.
     static let notYetDrawn: Set<String> = [
         "RecordingDeviceCapabilityLine",
         "RecordingDeviceRowPresentation",
         "RecordingDeviceListControl",
-        "RecordingDeviceConnectPresentation",
         "RecordingHistoryRow",
         "RecordingHistory",
         "GapRecoveryCopy",

@@ -36,3 +36,30 @@ Feature: An unfinished deletion does not lock me out of my own account
     When I sign in with an account that was never deleted
     Then I am signed in
     And I am not told anything about a deletion
+
+  # The OTHER half of the same trap, and the one Nick was actually sitting in.
+  # Deletion destroys the server side first, so by the time the erase stops
+  # half-way the account no longer exists on the server. "Retry deletion" re-ran
+  # the whole thing from the top — server call first — and the server answered
+  # "no such account", which the app reports as a missing route and returns
+  # BEFORE the only thing still left to do: erasing this iPhone. Every tap did
+  # the same nothing.
+  Scenario: Retrying a half-finished deletion finishes erasing this iPhone
+    Given my account is already deleted on the server and the erase stopped half-way
+    When I retry the deletion
+    Then this iPhone is erased
+    And the server is not asked to delete the account again
+    And the deletion finishes
+
+  Scenario: Retrying does not ask a server that no longer has my account
+    Given my account is already deleted on the server and the erase stopped half-way
+    And the server answers that there is no such account
+    When I retry the deletion
+    Then this iPhone is erased
+    And the deletion finishes
+
+  # A retry button that provably cannot succeed is worse than no button.
+  Scenario: A deletion that never reached the server is not offered a pointless retry
+    Given the deletion never reached the server because the route is missing
+    Then I am not offered a way to try again
+    And I am told to erase this iPhone's data instead
