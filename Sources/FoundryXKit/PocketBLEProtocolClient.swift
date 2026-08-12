@@ -221,6 +221,30 @@ public actor PocketBLEClient {
     }
     public func deviceState() async throws -> Int { try await scalar(command: "STE", prefix: "MCU&STE&", operation: .information) }
 
+    /// THE READ-BACK THAT TURNS AN ACK INTO EVIDENCE.
+    ///
+    /// `APP&WIFI` asks the recorder for its own access-point credentials. The password it
+    /// reports is derived from the session key the recorder is HOLDING — so a recorder that
+    /// answered `MCU&SK&OK` to our write and then went on using somebody else's key reports
+    /// somebody else's password, and cannot fake ours.
+    ///
+    /// It is a plain information read on the authenticated session, deliberately NOT part of
+    /// `prepare(_:)`'s WiFi bring-up sequence: nothing here enables the radio, joins anything,
+    /// or takes the recorder off Bluetooth. `.unsupportedOperation` on `MCU&UNKNOWN` is what a
+    /// firmware without the command earns, and the caller must treat that as "not proven"
+    /// rather than as "not accepted".
+    public func accessPointCredentials() async throws -> PocketAccessPointReadback {
+        try await protected(.information) {
+            try await write("WIFI")
+            let response = try await nextControl(operation: .information)
+            if response == "MCU&UNKNOWN" { throw PocketProtocolError.unsupportedOperation }
+            guard let readback = PocketAccessPointReadback.parse(response) else {
+                throw PocketProtocolError.malformedResponse
+            }
+            return readback
+        }
+    }
+
     public func deviceInfo() async -> PocketDeviceInfo {
         let battery = await field { try await batteryLevel() }
         let firmware = await field { try await firmwareVersion() }

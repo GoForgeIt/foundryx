@@ -525,6 +525,21 @@ public enum RecordingDevicePage {
         }
         let education = RecordingDeviceEducationCatalog.bundle(for: input.negotiatedProtocol)
         if education != nil { actions.append(educationAction) }
+        // §10 CUSTODY, WHERE THE OWNER CAN ACTUALLY FIND IT.
+        //
+        // A minted key that is lost is dead hardware: this firmware's decoded command surface
+        // has no reset, no unpair and no key-read opcode, so nothing — not this app, not the
+        // maker's — can talk to the recorder again. The mitigation named in proposal §10 was a
+        // recoverable, owner-visible key, and it had zero callers, which is to say it did not
+        // exist. It exists here, on the page for the recorder it belongs to.
+        //
+        // GATED ON BOTH FACTS THE ACTION CLAIMS. Only a record-then-sync recorder has a
+        // session key at all, and only a REMEMBERED one has custody that could hold it — the
+        // same pair `forgetWarning` is gated on, for the same reason: an action that talks
+        // about "this recorder's key" must not appear for a device whose key was never minted.
+        if deviceClass == .recordThenSync && input.isRemembered {
+            actions.append(PocketKeyCustodyPresentation.entryAction)
+        }
         if input.isRemembered { actions.append(forgetAction) }
 
         return RecordingDevicePagePresentation(

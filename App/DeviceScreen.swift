@@ -407,6 +407,16 @@ private struct RecordingDevicePageView: View {
 
     @State private var showingEducation = false
     @State private var confirmingForget = false
+    /// §10 custody. The key is fetched from the Keychain only when the owner asks for it, and
+    /// it does not outlive the sheet that showed it.
+    @State private var showingKeyCustody = false
+    @State private var revealedKey: String?
+    @State private var didCopyKey = false
+    @State private var keyCustodyFoundNothing = false
+    /// Whether the SYNCHRONISED (§10) copy of this recorder's key exists, asked of the store
+    /// when the screen opens. `false` renders the sentence that tells the owner to write the
+    /// key down, which is the safe direction to be wrong in.
+    @State private var recoveryCopyExists = false
 
     /// EVERY SLOT DECIDED IN THE KIT. This view passed `hasEducation: shape == .filePull` and
     /// `canForget: shape != .builtInMic` — two shape branches on a screen whose whole rule is
@@ -445,6 +455,24 @@ private struct RecordingDevicePageView: View {
         .sheet(isPresented: $showingEducation) {
             NavigationStack {
                 PocketOnboardingView(screen: .education) { _ in showingEducation = false }
+            }
+        }
+        .sheet(isPresented: $showingKeyCustody, onDismiss: {
+            // THE REVEALED VALUE DIES WITH THE SHEET. Holding it in view state past the screen
+            // that showed it keeps a live credential in the hierarchy for no reason.
+            revealedKey = nil
+            didCopyKey = false
+            keyCustodyFoundNothing = false
+            recoveryCopyExists = false
+        }) {
+            NavigationStack {
+                PocketOnboardingView(screen: .keyCustody) { _ in showingKeyCustody = false }
+                    .keyCustody(revealed: revealedKey,
+                                didCopy: didCopyKey,
+                                knownMissing: keyCustodyFoundNothing,
+                                hasRecoveryCopy: recoveryCopyExists,
+                                onReveal: { toggleRevealedKey() },
+                                onCopy: { copyRevealedKey() })
             }
         }
         // THE WARNING THIS DEVICE'S CLASS EARNS. The key sentence is a claim about custody
@@ -567,6 +595,9 @@ private struct RecordingDevicePageView: View {
         switch title {
         case RecordingDevicePage.educationAction:
             showingEducation = true
+        case PocketKeyCustodyPresentation.entryAction:
+            showingKeyCustody = true
+            checkForRecoveryCopy()
         case RecordingDevicePage.forgetAction:
             confirmingForget = true
         case RecordingDevicePage.disconnectAction:
@@ -584,6 +615,45 @@ private struct RecordingDevicePageView: View {
         }
     }
 
+    /// §10 CUSTODY, READ ON DEMAND. The value comes out of the Keychain when the owner asks
+    /// and goes into no message, no log and no outcome — the same discipline the key-entry
+    /// field is held to. Tapping again hides it.
+    private func toggleRevealedKey() {
+        guard revealedKey == nil else {
+            revealedKey = nil
+            didCopyKey = false
+            keyCustodyFoundNothing = false
+            return
+        }
+        let token = input.identity.hardwareToken
+        Task {
+            guard let identity = try? PocketAuthenticatedIdentity(peripheralIdentifier: token)
+            else { return }
+            let held = await PocketKeyCustody().reveal(for: identity)
+            revealedKey = held
+            // ASKED AND FOUND NOTHING is a different sentence from "you haven't asked yet",
+            // and it is the one a person restoring a phone from an old backup needs.
+            keyCustodyFoundNothing = held == nil
+        }
+    }
+
+    /// ASK THE STORE RATHER THAN ASSUME. Custody reports `.deviceOnly` whenever the recorder's
+    /// broadcast name carries no per-unit serial or the synchronised write failed, and this
+    /// screen used to promise iCloud recovery either way.
+    private func checkForRecoveryCopy() {
+        let name = input.displayName
+        Task {
+            recoveryCopyExists = await PocketKeyCustody()
+                .hasRecoveryCopy(PocketRecoveryToken(advertisedName: name))
+        }
+    }
+
+    private func copyRevealedKey() {
+        guard let revealedKey else { return }
+        UIPasteboard.general.string = revealedKey
+        didCopyKey = true
+    }
+
     private func forget() {
         // OFFERED ONLY FOR A DEVICE THE STORE REMEMBERS, so it cannot be a no-op behind a
         // destructive confirmation. Belt and braces: the action is absent otherwise.
@@ -599,8 +669,19 @@ private struct RecordingDevicePageView: View {
         // closure crossing an isolation boundary, which does not compile — and `swift test`
         // cannot compile `App/` to say so. Only the disk write is detached.
         let identity = input.identity
+        let displayName = input.displayName
         Task {
             await Self.forgetInTheStore(identity)
+            // AND BOTH CUSTODY RECORDS. "Forgetting this recorder deletes FoundryX's key for
+            // it" is a promise on the confirmation alert, and a synchronised recovery copy
+            // that outlived the attach record would keep the key on every one of the owner's
+            // devices after they were told it was gone.
+            if let pocketIdentity = try? PocketAuthenticatedIdentity(
+                peripheralIdentifier: identity.hardwareToken) {
+                await PocketKeyCustody().forget(
+                    pocketIdentity,
+                    recoveryToken: PocketRecoveryToken(advertisedName: displayName))
+            }
             onChange()
         }
     }
@@ -756,9 +837,38 @@ private struct RecordingDeviceConnectSheet: View {
             // runs. Nothing here calls `provisionFactoryFresh`.
             .navigationDestination(isPresented: $attach.showingCeremony) {
                 PocketOnboardingView(screen: attach.ceremonyScreen) { title in
-                    if title == PocketSessionKeyEntryPresentation.entryAction {
+                    switch title {
+                    case PocketSessionKeyEntryPresentation.entryAction:
                         attach.showKeyEntry()
-                    } else {
+                    // THE ONE TAP THAT CAN WRITE A KEY TO A RECORDER. It is the confirm action
+                    // on the consent screen and nothing else — every other title here either
+                    // navigates or closes.
+                    case PocketMintConsentPresentation.confirmAction:
+                        attach.confirmMintAfterOwnerConsent()
+                    case PocketMintConsentPresentation.resetAction:
+                        attach.showFactoryReset()
+                    // DESIGN §3.7. The recorder is holding a key this phone could not store,
+                    // and this is the one action that can still save it. It retries the
+                    // Keychain; it never sends a second key.
+                    case PocketSetupPresentation.retrySecureStorageAction:
+                        attach.retrySecureStorageForAcceptedKey()
+                    case PocketFactoryResetPresentation.retryAction,
+                         PocketMintNotVerifiedPresentation.retryAction:
+                        attach.showMintConsent()
+                    // THE TWO STORAGE SCREENS RETRY FOR REAL. Their situation is the one that
+                    // genuinely changes on its own — an iPhone gets unlocked, a Keychain
+                    // answers — so "Try again" here re-runs the ordinary tap rather than
+                    // closing the sheet. Matched on the screen as well as the title because
+                    // several screens share the word and a dead button on the screen standing
+                    // between an owner and their recorder is the failure this whole path
+                    // exists to avoid.
+                    case PocketSetupPresentation.retryAction
+                        where attach.ceremonyScreen == .keyNotKept
+                            || attach.ceremonyScreen == .custodyUnreadable:
+                        attach.retryAfterStorageFailure()
+                    case PocketKeyCustodyPresentation.entryAction:
+                        attach.showKeyCustody()
+                    default:
                         attach.dismissCeremony()
                         onDismiss()
                     }
@@ -766,6 +876,11 @@ private struct RecordingDeviceConnectSheet: View {
                 .keyEntry(message: attach.keyEntryMessage,
                           isSubmitting: attach.submittingKey,
                           onSubmit: { attach.submitExistingKey($0) })
+                .keyCustody(revealed: attach.revealedKey,
+                            didCopy: attach.didCopyKey,
+                            hasRecoveryCopy: attach.recoveryCopyExists,
+                            onReveal: { attach.revealKeyForCurrentRecorder() },
+                            onCopy: { attach.copyRevealedKey() })
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -834,6 +949,14 @@ final class RecordingDeviceAttachModel: ObservableObject {
     /// What the last submitted key earned, worded by `PocketSessionKeyEntryPresentation`.
     @Published private(set) var keyEntryMessage: String?
     @Published private(set) var submittingKey = false
+    /// §10 custody: the key the owner asked to see, and whether they just copied it. Held for
+    /// the life of one screen and cleared when it closes.
+    @Published private(set) var revealedKey: String?
+    @Published private(set) var didCopyKey = false
+    /// Whether the synchronised (§10) copy of this recorder's key actually exists. Asked of
+    /// the store when the custody screen is shown, never assumed — `false` renders the sentence
+    /// that tells the owner to write the key down, which is the safe direction to be wrong in.
+    @Published private(set) var recoveryCopyExists = false
 
     private var attachment: RecordingDeviceAttachment?
     /// The device the ceremony on screen belongs to. A key is entered for ONE recorder, and
@@ -863,7 +986,38 @@ final class RecordingDeviceAttachModel: ObservableObject {
             case .adopted:
                 onAdopted()
             case .setupUnavailable:
-                self.ceremonyScreen = .setupUnavailable
+                // A TAP GOT AS FAR AS "SOLLEVA HOLDS NO KEY FOR THIS ONE" AND STOPPED THERE.
+                // Nothing was written. What comes next is a DECISION screen, not a mint: the
+                // owner is told what Solleva will do, what it cannot predict, and what it
+                // could cost them, and only their confirmation constructs the consent value a
+                // mint needs.
+                self.ceremonyScreen = .mintConsent
+                self.showingCeremony = true
+            case .mintRefused:
+                self.ceremonyScreen = .mintRefused
+                self.showingCeremony = true
+            case .mintNotVerified:
+                self.ceremonyScreen = .mintNotVerified
+                self.showingCeremony = true
+            case .keyNotKept:
+                // NOTHING WAS SENT. Custody refused the key before the recorder was asked,
+                // which is what doing custody first buys.
+                self.ceremonyScreen = .keyNotKept
+                self.showingCeremony = true
+            case .custodyUnreadable:
+                // NOT THE MINT OFFER. FoundryX may hold this recorder's key and could not read
+                // it; offering to make a new one here is how a locked Keychain turns into a
+                // second key written to a recorder FoundryX itself set up.
+                self.ceremonyScreen = .custodyUnreadable
+                self.showingCeremony = true
+            case .keyAcceptedNotDurable:
+                // THE ATTACHMENT IS RETAINED, exactly as `confirmMintAfterOwnerConsent` does.
+                // It is holding the only copy of a key the recorder has accepted, and this
+                // screen's only action (`retryPendingCustody`) reads it — dropping the object
+                // here would leave the §3.7 screen up with a button that returns immediately
+                // and a recorder nothing can ever connect to.
+                self.attachment = attachment
+                self.ceremonyScreen = .acceptedNotDurable
                 self.showingCeremony = true
             case .recoveryRequired:
                 self.ceremonyScreen = .didNotFinish
@@ -878,13 +1032,182 @@ final class RecordingDeviceAttachModel: ObservableObject {
         }
     }
 
-    func dismissCeremony() { showingCeremony = false }
+    func dismissCeremony() {
+        showingCeremony = false
+        // A REVEALED KEY DOES NOT OUTLIVE THE SCREEN THAT REVEALED IT.
+        revealedKey = nil
+        didCopyKey = false
+    }
 
-    /// The owner said they already have this recorder's key. Swap the §3.6 screen for the
-    /// field — the gated screen itself is untouched and still what an unentered tap lands on.
+    /// The owner said they already have this recorder's key. Swap the consent screen for the
+    /// field — nothing is minted on this path.
     func showKeyEntry() {
         keyEntryMessage = nil
         ceremonyScreen = .enterExistingKey
+    }
+
+    /// The maker's reset gesture, with the cost stated before the steps. Solleva cannot perform
+    /// it and cannot verify it, and the copy says both.
+    func showFactoryReset() { ceremonyScreen = .factoryReset }
+
+    /// Back to the decision, from the reset guidance or from an unproven mint.
+    func showMintConsent() { ceremonyScreen = .mintConsent }
+
+    /// THE ONLY MINT IN THE APP, AND THE ONLY CONSTRUCTION OF CONSENT.
+    ///
+    /// It is reachable from exactly one place: the confirm action on the consent screen, which
+    /// the owner has to tap after reading what Solleva will do, what it cannot predict, and
+    /// what it could cost them. `PocketMintConsent` has no other factory and no public
+    /// initialiser, and `attach`'s `mint:` parameter defaults to `nil`, so no other call site
+    /// in this app can write a key to a recorder — by omission or otherwise.
+    func confirmMintAfterOwnerConsent() {
+        guard let target = ceremonyTarget, !submittingKey else { return }
+        submittingKey = true
+        keyEntryMessage = nil
+        let attachment = RecordingDeviceAttachment()
+        self.attachment = attachment
+        Task {
+            let outcome = await attachment.attach(
+                peripheralIdentifier: target.id,
+                advertisedName: target.name,
+                mint: .ownerConfirmedAfterReadingTheConsequences())
+            self.submittingKey = false
+            self.attachment = nil
+            switch outcome {
+            case .adopted:
+                // THE KEY IS SHOWN ONLY AFTER IT IS DURABLE. Custody wrote the attach record
+                // BEFORE the recorder was ever asked, so the custody screen cannot promise a
+                // value the Keychain does not hold — and `refreshRecoveryCopyState` asks the
+                // store whether the SYNCHRONISED copy landed too, rather than assuming it did.
+                self.ceremonyScreen = .keyCustody
+                self.refreshRecoveryCopyState()
+            case .mintRefused:       self.ceremonyScreen = .mintRefused
+            case .mintNotVerified:   self.ceremonyScreen = .mintNotVerified
+            case .keyNotKept:        self.ceremonyScreen = .keyNotKept
+            case .custodyUnreadable: self.ceremonyScreen = .custodyUnreadable
+            case .keyAcceptedNotDurable:
+                // DESIGN §3.7. THE ATTACHMENT IS DELIBERATELY NOT RELEASED HERE: it is holding
+                // the only copy of a key the recorder has already accepted, and dropping it is
+                // the irreversible loss the screen warns about.
+                self.attachment = attachment
+                self.ceremonyScreen = .acceptedNotDurable
+            case .recoveryRequired:  self.ceremonyScreen = .didNotFinish
+            case .setupUnavailable, .live, .unrecognised, .adoptionNotPersisted, .unreachable:
+                // The confirmed mint never ran to a conclusion — the link went, or the device
+                // turned out not to be a recorder at all. `didNotFinish` says exactly that and
+                // offers a retry; it does not claim a key was sent or that one was refused.
+                self.ceremonyScreen = .didNotFinish
+            }
+        }
+    }
+
+    /// DESIGN §3.7's ONLY ACTION. It retries the KEYCHAIN and nothing else — no second key is
+    /// sent, ever. The attachment still holds the accepted key; if the write lands, the same
+    /// object re-runs the ordinary restore path and the recorder is finally adopted.
+    func retrySecureStorageForAcceptedKey() {
+        guard let attachment, !submittingKey else { return }
+        submittingKey = true
+        Task {
+            let outcome = await attachment.retryPendingCustody()
+            self.submittingKey = false
+            switch outcome {
+            case .adopted:
+                self.attachment = nil
+                self.ceremonyScreen = .keyCustody
+                self.refreshRecoveryCopyState()
+            case .none, .some(.keyAcceptedNotDurable):
+                // STILL NOT DURABLE, AND THE KEY IS STILL HELD. The screen stays exactly where
+                // it is, saying exactly what it said, because nothing about the situation has
+                // changed and pretending otherwise would invite the person to close it.
+                self.ceremonyScreen = .acceptedNotDurable
+            case .some:
+                // The key IS durable now; whatever else went wrong is an ordinary attach
+                // failure and is no longer the irreversible state.
+                self.attachment = nil
+                self.ceremonyScreen = .didNotFinish
+            }
+        }
+    }
+
+    /// THE ACTION ON THE TWO STORAGE SCREENS, AND IT IS A PLAIN TAP — `mint:` is left at its
+    /// default, so this cannot write a key by construction.
+    ///
+    /// It is the honest retry for both states. `.custodyUnreadable` may simply have been a
+    /// locked Keychain, and the same tap now restores and adopts. `.keyNotKept` re-runs the
+    /// restore, finds no key (nothing was ever stored, because custody refused it before the
+    /// recorder was asked), and lands back on the CONSENT screen — so a second mint still costs
+    /// the owner an explicit confirmation rather than inheriting the first one.
+    func retryAfterStorageFailure() {
+        guard let target = ceremonyTarget, !submittingKey else { return }
+        submittingKey = true
+        let attachment = RecordingDeviceAttachment()
+        self.attachment = attachment
+        Task {
+            let outcome = await attachment.attach(peripheralIdentifier: target.id,
+                                                  advertisedName: target.name)
+            self.submittingKey = false
+            self.attachment = nil
+            switch outcome {
+            case .adopted:
+                self.dismissCeremony()
+                self.onAdopted?()
+            case .setupUnavailable:   self.ceremonyScreen = .mintConsent
+            case .keyNotKept:         self.ceremonyScreen = .keyNotKept
+            case .custodyUnreadable:  self.ceremonyScreen = .custodyUnreadable
+            case .mintRefused:        self.ceremonyScreen = .mintRefused
+            case .mintNotVerified:    self.ceremonyScreen = .mintNotVerified
+            case .keyAcceptedNotDurable:
+                self.attachment = attachment
+                self.ceremonyScreen = .acceptedNotDurable
+            case .recoveryRequired, .live, .unrecognised, .adoptionNotPersisted, .unreachable:
+                self.ceremonyScreen = .didNotFinish
+            }
+        }
+    }
+
+    /// §10 CUSTODY. The value comes from the Keychain on demand and lives in this object only
+    /// while the screen that shows it is up. It is never put into a message, a log, or an
+    /// outcome — the same discipline the entry field is held to.
+    func revealKeyForCurrentRecorder() {
+        guard revealedKey == nil else {
+            revealedKey = nil
+            didCopyKey = false
+            return
+        }
+        guard let target = ceremonyTarget else { return }
+        Task {
+            guard let identity = try? PocketAuthenticatedIdentity(
+                peripheralIdentifier: target.id.uuidString) else { return }
+            self.revealedKey = await PocketKeyCustody().reveal(for: identity)
+        }
+    }
+
+    func copyRevealedKey() {
+        guard let revealedKey else { return }
+        UIPasteboard.general.string = revealedKey
+        didCopyKey = true
+    }
+
+    func showKeyCustody() {
+        revealedKey = nil
+        didCopyKey = false
+        ceremonyScreen = .keyCustody
+        refreshRecoveryCopyState()
+    }
+
+    /// ASK THE STORE, DO NOT ASSUME. `PocketKeyCustody.keep` reports `.deviceOnly` whenever the
+    /// recorder's broadcast name carries no per-unit serial or the synchronised write failed,
+    /// and the custody screen used to promise iCloud recovery either way — telling the one
+    /// owner who genuinely has to write their key down that they do not have to.
+    private func refreshRecoveryCopyState() {
+        guard let target = ceremonyTarget else {
+            recoveryCopyExists = false
+            return
+        }
+        let token = PocketRecoveryToken(advertisedName: target.name)
+        Task {
+            self.recoveryCopyExists = await PocketKeyCustody().hasRecoveryCopy(token)
+        }
     }
 
     /// ONE SUBMITTED KEY, THROUGH THE KIT AND NOWHERE ELSE.

@@ -551,9 +551,14 @@ private final class UnifiedDeviceListWorld {
             // THE PRODUCTION COMPONENT, on the production seam. The only injected things are
             // the radio and the secret store; everything between the tap and the store row is
             // the shipped code path `App/DeviceScreen.swift` calls.
+            // `recovery: nil` KEEPS THIS HERMETIC. With no attach record, `restore` consults
+            // the SYNCHRONISED recovery record, which under the shipped default is a real
+            // Keychain item — and the claim here is about a phone that holds nothing for this
+            // recorder at all.
             let attachment = RecordingDeviceAttachment(
                 makeCentral: stack.factory,
                 secrets: secrets,
+                recovery: nil,
                 deadlines: .init(powerOn: 5, connect: 5, discovery: 5, control: 5))
             attachOutcome = await attachment.attach(peripheralIdentifier: stack.deviceId,
                                                     advertisedName: stack.deviceName)

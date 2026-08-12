@@ -233,7 +233,8 @@ private enum VaultTrapSteps {
                 w.seedAttempt()
                 // Through the REAL mapping, so an unrecognised status cannot silently
                 // become progress again.
-                let mapped = try VaultSignupClient.status(from: ["status": "flibbertigibbet"])
+                let mapped = try VaultSignupClient.status(from: ["status": "flibbertigibbet"],
+                                                         credentialed: true)
                 w.service.next = .success(mapped)
                 return ctx
             },

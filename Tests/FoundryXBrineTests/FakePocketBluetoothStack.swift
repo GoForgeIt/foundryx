@@ -32,11 +32,36 @@ final class FakePocketBLEStack: @unchecked Sendable {
     nonisolated(unsafe) static let serviceUUID =
         CBUUID(string: "00112000-1212-EFDE-1523-785FEABCD123")
 
+    /// HOW A RECORDER TREATS AN `APP&SK&` WRITE, AS THE THREE BEHAVIOURS THAT ACTUALLY MATTER.
+    ///
+    /// This is the modelled half of proposal §6b's open question U1 — nobody has ever run a
+    /// second key write against a keyed unit, so the app has to be correct under BOTH answers.
+    /// Making them three explicit modes is what lets a scenario say which recorder it is
+    /// standing in front of instead of inferring it from a nil.
+    enum KeyBehaviour: Sendable {
+        /// FACTORY-FRESH: no key yet, and the FIRST key written becomes the key. This is the
+        /// behaviour observed on hardware (unit PKT01_BLUE_26079bc5, firmware 1.6, never
+        /// paired): writing `APP&SK&<our own key>` provisioned it.
+        case factoryFresh
+        /// ALREADY KEYED AND HONEST ABOUT IT: it holds a key and refuses any other. This is the
+        /// SAFE answer to U1 — a mint attempt is then a free, non-destructive probe.
+        case keyed(String)
+        /// ALREADY KEYED AND ACKNOWLEDGES ANYTHING: it answers `MCU&SK&OK` to every key write
+        /// and goes on using the key it has. This is the DANGEROUS answer to U1, and it is the
+        /// exact case a bare `MCU&SK&OK` cannot distinguish from success — which is why the
+        /// mint is verified by reading the access-point password back.
+        case blindlyAcknowledges(holding: String)
+    }
+
     let deviceId: UUID
     let deviceName: String
-    /// The secret this recorder will accept. `nil` models a recorder FoundryX has never
-    /// provisioned — which, until the §3.6 gate lifts, is every recorder in the world.
-    private let acceptedSecret: String?
+    private let behaviour: KeyBehaviour
+    /// The key this recorder is holding right now, which the WiFi read-back is derived from.
+    /// It changes only when the firmware genuinely takes a new one.
+    private var heldKey: String?
+    /// Whether this firmware answers `APP&WIFI` at all. A firmware that does not is
+    /// `MCU&UNKNOWN` — an honest "not proven", which is a different answer from a refusal.
+    private let answersWiFiReadback: Bool
     private let map: PocketCharacteristicMap
 
     private let lock = NSLock()
@@ -57,10 +82,21 @@ final class FakePocketBLEStack: @unchecked Sendable {
          acceptedSecret: String? = "0123456789abcdef",
          map: PocketCharacteristicMap = .primary,
          exposesStoredFileProtocol: Bool = true,
-         alsoExposesOmiAudioService: Bool = false) {
+         alsoExposesOmiAudioService: Bool = false,
+         answersWiFiReadback: Bool = true,
+         behaviour: KeyBehaviour? = nil) {
         self.deviceId = deviceId
         self.deviceName = deviceName
-        self.acceptedSecret = acceptedSecret
+        // `acceptedSecret` stays the shorthand every existing scenario is written in: a value
+        // is a recorder keyed to it, `nil` is a recorder Solleva holds no key for. `behaviour`
+        // is the explicit spelling the mint scenarios need.
+        self.behaviour = behaviour ?? acceptedSecret.map { KeyBehaviour.keyed($0) } ?? .factoryFresh
+        switch self.behaviour {
+        case .factoryFresh:                   self.heldKey = nil
+        case .keyed(let key):                 self.heldKey = key
+        case .blindlyAcknowledges(let key):   self.heldKey = key
+        }
+        self.answersWiFiReadback = answersWiFiReadback
         self.map = map
         var services: [FakePocketBLEService] = []
         if exposesStoredFileProtocol {
@@ -207,16 +243,55 @@ final class FakePocketBLEStack: @unchecked Sendable {
         let response: String?
         if command.hasPrefix("SK&") {
             let offered = String(command.dropFirst("SK&".count))
-            response = offered == acceptedSecret ? "MCU&SK&OK" : "MCU&SK&FAIL"
+            response = answerToKeyWrite(offered)
         } else if command == "BAT" {
             response = "MCU&BAT&72"
         } else if command == "FW" {
             response = "MCU&FW&1.6"
+        } else if command == "WIFI" {
+            // THE READ-BACK, DERIVED FROM WHAT THE FIRMWARE IS ACTUALLY HOLDING.
+            //
+            // This is the whole reason the fake is allowed to decide anything: the access-point
+            // password is the first eight characters of the key the RECORDER has, not of the
+            // key the app hoped it took. A blindly-acknowledging recorder therefore reports the
+            // OLD key's password here, exactly as real hardware would, and the production code
+            // is what has to notice.
+            lock.lock(); let held = heldKey; lock.unlock()
+            if !answersWiFiReadback || held == nil {
+                response = "MCU&UNKNOWN"
+            } else {
+                response = "MCU&WIFI&\(deviceName)&\(String(held!.prefix(8)))"
+            }
         } else {
             response = "MCU&UNKNOWN"
         }
         guard let response else { return }
         notifyControl(response)
+    }
+
+    /// The firmware's key-write policy, per modelled behaviour.
+    private func answerToKeyWrite(_ offered: String) -> String {
+        lock.lock(); defer { lock.unlock() }
+        switch behaviour {
+        case .factoryFresh:
+            // The observed hardware fact: the first key written IS the key from then on.
+            if heldKey == nil || heldKey == offered {
+                heldKey = offered
+                return "MCU&SK&OK"
+            }
+            return offered == heldKey ? "MCU&SK&OK" : "MCU&SK&FAIL"
+        case .keyed(let key):
+            return offered == key ? "MCU&SK&OK" : "MCU&SK&FAIL"
+        case .blindlyAcknowledges:
+            // Says yes and changes nothing. `heldKey` deliberately does NOT move.
+            return "MCU&SK&OK"
+        }
+    }
+
+    /// What the firmware is holding, so a scenario can assert a mint actually landed — or
+    /// actually did not.
+    var keyHeldByRecorder: String? {
+        lock.lock(); defer { lock.unlock() }; return heldKey
     }
 
     private func notifyControl(_ text: String) {

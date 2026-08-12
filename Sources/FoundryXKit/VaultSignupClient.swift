@@ -39,13 +39,21 @@ public struct VaultSignupClient: VaultSignupService {
                                   body: ["checkout_attempt_id": attemptId],
                                   idToken: idToken,
                                   requiresCredential: true)
-        return try Self.status(from: json)
+        // CREDENTIALED: this call is authenticated with a verified id_token, so a
+        // `ready` answer is expected to carry the door credential. One that does
+        // not is a Vault we cannot open, and it is reported as such.
+        return try Self.status(from: json, credentialed: true)
     }
 
     public func exchangeReturn(ticket: String, idToken: String?) async throws -> VaultProvisionStatus {
         let json = try await post("app/return", body: ["ticket": ticket],
                                   idToken: idToken, requiresCredential: false)
-        return try Self.status(from: json)
+        // UNCREDENTIALED: the return ticket travels through a browser and the OS,
+        // so the server deliberately withholds the door credential here. A `ready`
+        // answer with no credential is the CONTRACT on this path, not a fault —
+        // it means "go ask the authenticated endpoint", which is exactly what the
+        // funnel does with `.pending`.
+        return try Self.status(from: json, credentialed: false)
     }
 
     // MARK: - wire
@@ -91,16 +99,31 @@ public struct VaultSignupClient: VaultSignupService {
     }
 
     /// Parse the shared {status, cell_url?, handoff?} shape into a VaultProvisionStatus.
-    static func status(from json: [String: Any]) throws -> VaultProvisionStatus {
+    ///
+    /// `credentialed` says whether this response was supposed to carry the door
+    /// credential. It matters because a `ready` with no credential means two
+    /// completely different things on the two endpoints, and collapsing them is
+    /// what made the pairing failure invisible: this used to THROW
+    /// `.malformedResponse` in both cases, and the funnel routed that throw into
+    /// the branch reserved for network blips — so the phone sat on "Setting up…"
+    /// forever and quietly went back to recording locally.
+    static func status(from json: [String: Any], credentialed: Bool) throws -> VaultProvisionStatus {
         let raw = (json["status"] as? String)?.lowercased() ?? "pending"
         switch raw {
         case "ready", "live", "active":
-            guard let cellURL = json["cell_url"] as? String,
-                  let handoff = (json["handoff"] as? String) ?? (json["door_bearer"] as? String),
-                  !cellURL.isEmpty, !handoff.isEmpty else {
-                throw VaultSignupError.malformedResponse
+            let cellURL = (json["cell_url"] as? String) ?? ""
+            let handoff = ((json["handoff"] as? String) ?? (json["door_bearer"] as? String)) ?? ""
+            if !cellURL.isEmpty, !handoff.isEmpty {
+                return .ready(cellURL: cellURL, handoff: handoff)
             }
-            return .ready(cellURL: cellURL, handoff: handoff)
+            // Uncredentialed (the return-ticket exchange): the credential was
+            // never going to be here. `.pending` sends the funnel straight to the
+            // authenticated reconcile, which is where it is issued.
+            guard credentialed else { return .pending }
+            // Credentialed: the Vault says it is ready and we have no way in.
+            // TERMINAL and VISIBLE — never a throw the caller can mistake for a
+            // dropped connection.
+            return .failed(.cannotOpenVault)
         case "provisioning", "building", "setting_up":
             return .provisioning
         case "pending":
@@ -117,6 +140,14 @@ public struct VaultSignupClient: VaultSignupService {
             return .failed(.suspended)
         case "unentitled":
             return .failed(.notEntitled)
+        case "vault_absent":
+            // The hosted Vault was deliberately deleted and the ACCOUNT kept, so
+            // there is nothing to connect to yet and nothing has gone wrong. The
+            // authenticated reconcile provisions a replacement, so this is a
+            // "ask again", not a failure — and NOT `.unknown`, which would put
+            // "something went wrong" in front of someone whose Vault is simply
+            // being rebuilt.
+            return .pending
         default:
             // An unrecognised status is TERMINAL, not progress. The old `default:
             // return .pending` meant any status this build had not heard of — including

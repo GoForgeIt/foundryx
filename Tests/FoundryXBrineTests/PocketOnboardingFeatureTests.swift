@@ -32,7 +32,7 @@ private enum PocketOnboardingSteps {
             "an already-used Pocket with a matching stored secret",
             "an already-used Pocket without a matching stored secret",
             "a Pocket with a missing or mismatched identity component",
-            "Pocket accepted a candidate but secure storage failed",
+            "secure storage that refuses the first attempt",
             "Pocket authentication times out or disconnects",
             "a Pocket secret is in secure custody",
             "Pocket setup has completed"
@@ -45,7 +45,7 @@ private enum PocketOnboardingSteps {
             "I reconnect it",
             "I ask how to connect it",
             "I try to set it up",
-            "I retry secure storage for the same identity",
+            "I set the Pocket up and then try again",
             "setup handles the result",
             "I inspect setup copy, diagnostics, and available actions",
             "I open How your recorder works",
@@ -59,7 +59,7 @@ private enum PocketOnboardingSteps {
             "FoundryX submits only the stored secret and preserves the maker-app setup",
             "coexistence is explained as advanced key capture and reset is the last resort",
             "no credential is submitted and the observation is quarantined",
-            "no device write occurs and setup completes only if that retry succeeds",
+            "nothing reached the device until custody held the key, and setup completes only then",
             "setup stops without offering reset, coexistence, or another credential",
             "the secret is absent and there is no reveal, copy, share, or export action",
             "button, switch, and light guidance appears without claiming detected recording state",
@@ -101,7 +101,8 @@ private actor PocketOnboardingWorld {
         case "Pocket accepts the candidate and FoundryX securely stores it":
             await client.configure(authentication: .accepted, battery: 72, firmware: "1.6")
             let flow = PocketOnboardingCoordinator(client: client, store: store)
-            result = await flow.provisionFactoryFresh(identity: identity, candidate: secret)
+            result = await flow.provisionFactoryFresh(identity: identity, candidate: secret,
+                                                     consent: .ownerConfirmedAfterReadingTheConsequences())
         case "only the CoreBluetooth peripheral identifier is substituted":
             try await store.save(secret, for: identity)
             let changed = try PocketAuthenticatedIdentity(peripheralIdentifier: "B")
@@ -118,20 +119,30 @@ private actor PocketOnboardingWorld {
             result = await PocketOnboardingCoordinator(client: client, store: store).restore(identity: identity)
         case "I try to set it up":
             result = await PocketOnboardingCoordinator(client: client, store: store)
-                .provisionFactoryFresh(identity: nil, candidate: secret)
-        case "I retry secure storage for the same identity":
+                .provisionFactoryFresh(identity: nil, candidate: secret,
+                                       consent: .ownerConfirmedAfterReadingTheConsequences())
+        case "I set the Pocket up and then try again":
+            // CUSTODY RUNS BEFORE THE RADIO, so a first attempt whose Keychain write fails
+            // sends the recorder nothing at all and the "retry" is simply the same mint again.
+            // The old order wrote the key to the device first and then discovered it could not
+            // store it, which is a recorder holding a credential nothing in the world has.
             let failing = FailingThenWorkingPocketSecretStore()
             let isolatedClient = PocketOnboardingClientSpy()
             let flow = PocketOnboardingCoordinator(client: isolatedClient, store: failing)
             await isolatedClient.configure(authentication: .accepted, battery: 72, firmware: "1.6")
-            preRetryResult = await flow.provisionFactoryFresh(identity: identity, candidate: secret)
+            preRetryResult = await flow.provisionFactoryFresh(
+                identity: identity, candidate: secret,
+                consent: .ownerConfirmedAfterReadingTheConsequences())
             submittedBeforeRetry = await isolatedClient.submittedSecrets
-            result = await flow.retrySecureStorage()
+            result = await PocketOnboardingCoordinator(client: isolatedClient, store: failing)
+                .provisionFactoryFresh(identity: identity, candidate: secret,
+                                       consent: .ownerConfirmedAfterReadingTheConsequences())
             scenarioSubmitted = await isolatedClient.submittedSecrets
         case "setup handles the result":
             await client.configure(authentication: .indeterminate, battery: 72, firmware: "1.6")
             result = await PocketOnboardingCoordinator(client: client, store: store)
-                .provisionFactoryFresh(identity: identity, candidate: secret)
+                .provisionFactoryFresh(identity: identity, candidate: secret,
+                                       consent: .ownerConfirmedAfterReadingTheConsequences())
         default: break
         }
     }
@@ -156,11 +167,16 @@ private actor PocketOnboardingWorld {
         case "no credential is submitted and the observation is quarantined":
             let submitted = await client.submittedSecrets
             XCTAssertEqual(result, .quarantined); XCTAssertTrue(submitted.isEmpty)
-        case "no device write occurs and setup completes only if that retry succeeds":
-            let submitted = scenarioSubmitted
-            XCTAssertEqual(preRetryResult, .acceptedNotDurable)
-            XCTAssertEqual(submittedBeforeRetry, [secret])
-            XCTAssertEqual(submitted, submittedBeforeRetry)
+        case "nothing reached the device until custody held the key, and setup completes only then":
+            XCTAssertEqual(preRetryResult, .keyNotKept,
+                           "a candidate the Keychain refused produced "
+                               + String(describing: preRetryResult))
+            XCTAssertEqual(submittedBeforeRetry, [],
+                           "a key this iPhone could not store still reached the recorder. This "
+                               + "firmware has no reset and no key-read opcode, so that is a "
+                               + "recorder nothing can ever connect to again")
+            XCTAssertEqual(scenarioSubmitted, [secret],
+                           "the second attempt sent something other than exactly one key")
             XCTAssertEqual(result, .ready(batteryPercent: 72, firmware: "1.6"))
         case "setup stops without offering reset, coexistence, or another credential":
             XCTAssertEqual(result, .indeterminate); XCTAssertEqual(PocketSetupPresentation.indeterminate.actions, ["Try again"])
@@ -178,15 +194,50 @@ private actor PocketOnboardingWorld {
     }
 }
 
+/// THE SPY NOW MODELS WHAT THE RECORDER IS HOLDING, not just what it answered.
+///
+/// A mint is no longer believed on a bare `MCU&SK&OK` — the coordinator reads the recorder's
+/// own access-point credentials back and requires the reported password to be the first eight
+/// characters of the key it just sent. A spy that answered that read-back from a canned string
+/// would make the proof unfalsifiable, so this one derives it from `heldSecret`, which moves
+/// only when the modelled firmware actually takes a key.
 private actor PocketOnboardingClientSpy: PocketOnboardingClient {
     var submittedSecrets: [String] = []
     private var authentication: PocketOnboardingAuthentication = .accepted
     private var battery = 72
     private var firmware = "1.6"
-    func reset() { submittedSecrets = []; authentication = .accepted; battery = 72; firmware = "1.6" }
+    /// What the modelled recorder is holding. `nil` is factory-fresh.
+    private var heldSecret: String?
+    /// Whether this firmware answers `APP&WIFI` at all.
+    private var answersReadback = true
+    func reset() {
+        submittedSecrets = []; authentication = .accepted; battery = 72; firmware = "1.6"
+        heldSecret = nil; answersReadback = true
+    }
     func configure(authentication: PocketOnboardingAuthentication, battery: Int, firmware: String) { self.authentication = authentication; self.battery = battery; self.firmware = firmware }
-    func authenticate(secret: String) async -> PocketOnboardingAuthentication { submittedSecrets.append(secret); return authentication }
+    /// The dangerous firmware: it says yes to everything and keeps what it had.
+    func configureBlindAcknowledgement(holding secret: String) {
+        authentication = .accepted
+        heldSecret = secret
+    }
+    func configureSilentAboutWiFi() { answersReadback = false }
+    func authenticate(secret: String) async -> PocketOnboardingAuthentication {
+        submittedSecrets.append(secret)
+        // A recorder that ACCEPTS is a recorder that is now holding what it accepted — unless
+        // it was configured to acknowledge blindly, in which case `heldSecret` stays put and
+        // the read-back is what has to notice.
+        if authentication == .accepted, heldSecret == nil { heldSecret = secret }
+        return authentication
+    }
     func confirmation() async throws -> PocketOnboardingConfirmation { .init(batteryPercent: battery, firmware: firmware) }
+    func accessPointReadback() async throws -> PocketAccessPointReadback {
+        guard answersReadback, let heldSecret else {
+            throw PocketProtocolError.unsupportedOperation
+        }
+        return PocketAccessPointReadback(ssid: "PKT01_BLUE_26079bc5",
+                                         fields: ["PKT01_BLUE_26079bc5",
+                                                  String(heldSecret.prefix(8))])
+    }
     func close() async {}
 }
 

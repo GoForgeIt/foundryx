@@ -60,10 +60,36 @@ public enum RecordingDeviceAttachOutcome: Equatable, Sendable {
     case adopted(identity: RecordingDeviceIdentity,
                  displayName: String,
                  negotiatedProtocol: String)
-    /// It speaks the stored-file protocol and FoundryX holds no key for it. Provisioning is
-    /// gated (design §3.6 / T2 req 3), so this is where the ceremony honestly stops.
-    /// NOTHING was written to the recorder to reach this state.
+    /// It speaks the stored-file protocol and FoundryX holds no key for it.
+    ///
+    /// A TAP ALONE NEVER MINTS. Reaching this state writes NOTHING to the recorder beyond the
+    /// stored-key handshake FoundryX had no key for, which is to say nothing at all — and it
+    /// is what a tap without an owner's explicit confirmation must always produce, because a
+    /// second `APP&SK&` write against a recorder that already holds a key may silently re-key
+    /// it (proposal §6b, U1 — never observed on hardware). The consent screen is what comes
+    /// next, and the mint only runs when the owner has said yes to it.
     case setupUnavailable
+    /// THE RECORDER REFUSED THE NEW KEY. Another app owns it; nothing was changed.
+    case mintRefused
+    /// THE RECORDER ACKNOWLEDGED THE NEW KEY AND COULD NOT PROVE IT KEPT IT. The key is in
+    /// custody — the recorder may well be holding it — and setup is NOT reported complete.
+    case mintNotVerified
+    /// THE RECORDER TOOK THE KEY AND THIS iPHONE COULD NOT STORE IT (design §3.7). The one
+    /// state in the app where closing the app loses something irreversibly.
+    ///
+    /// UNREACHABLE FROM THE SHIPPED MINT, ON PURPOSE. Custody now runs BEFORE the `APP&SK&`
+    /// write, so a key this iPhone cannot store is never offered to a recorder — that is
+    /// `.keyNotKept` below, and nothing is written. This case and its retry are kept working as
+    /// the backstop for that ordering, not as a state the flow can still produce.
+    case keyAcceptedNotDurable
+    /// THIS iPHONE'S SECURE STORAGE REFUSED THE KEY, SO THE RECORDER WAS NEVER ASKED. Nothing
+    /// was written, and the recorder is holding whatever it was holding before.
+    case keyNotKept
+    /// CUSTODY THREW ON THE WAY IN. FoundryX may hold this recorder's key and could not read
+    /// it — a locked Keychain, an unrecognised status, an item this build cannot decode. It is
+    /// NOT "FoundryX holds no key", and it must never be routed to the mint offer: that would
+    /// send a second key to a recorder FoundryX itself provisioned.
+    case custodyUnreadable
     /// FoundryX held a key and the recorder refused it.
     case recoveryRequired
     /// The protocol leg succeeded and the ACCOUNT STORE could not keep the result — a lost
@@ -109,7 +135,13 @@ public enum RecordingDeviceAttachPresentation {
         switch outcome {
         case .unreachable:          return unreachableLine
         case .adoptionNotPersisted: return notRememberedLine
-        case .adopted, .setupUnavailable, .recoveryRequired, .live, .unrecognised: return nil
+        case .adopted, .setupUnavailable, .recoveryRequired, .live, .unrecognised,
+             .mintRefused, .mintNotVerified, .keyAcceptedNotDurable, .keyNotKept,
+             .custodyUnreadable:
+            // Each of these is a whole screen with its own copy, not a one-line aside. A mint
+            // that was refused, unproven, or unstorable is exactly the kind of answer that
+            // gets rounded off into "try again" if it is allowed to be a caption.
+            return nil
         }
     }
 }
@@ -156,6 +188,12 @@ struct PocketProtocolOnboardingClient: PocketOnboardingClient {
                                      firmware: try await client.firmwareVersion())
     }
 
+    /// `APP&WIFI` on the authenticated session. Nothing here enables the radio or joins
+    /// anything — it is a read, and it is the only evidence a mint can be believed on.
+    func accessPointReadback() async throws -> PocketAccessPointReadback {
+        try await client.accessPointCredentials()
+    }
+
     func close() async { await client.close() }
 }
 
@@ -191,6 +229,9 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
     private let bleQueue: DispatchQueue
     private let makeCentral: BLECentralFactory
     private let secrets: any PocketSecretStore
+    /// The synchronised recovery copy (§10 custody). A mint writes BOTH records or it is not a
+    /// mint this app is willing to report as complete.
+    private let recovery: (any PocketKeyRecoveryStore)?
     private let deadlines: Deadlines
     private let log: DoorLog?
 
@@ -209,14 +250,25 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
     private var eventWaiters: [CheckedContinuation<PocketTransportEvent, Error>] = []
     private var generation: UInt64 = 1
     private var torndown = false
+    /// DESIGN §3.7's ONE PIECE OF STATE. The recorder took a key and custody would not keep
+    /// it, so the only copy of that key in the world is this one — in memory, in this object.
+    /// It is held so `retryPendingCustody()` has something to retry; a screen whose only
+    /// action cannot be performed is the screen that loses somebody's recorder.
+    ///
+    /// It is not logged, not described, and not returned. It leaves this object only into the
+    /// custody seam.
+    private var pendingMint: (key: String, identity: PocketAuthenticatedIdentity,
+                              advertisedName: String, id: UUID)?
 
     public init(makeCentral: @escaping BLECentralFactory = CoreBluetoothCentral.make,
                 secrets: any PocketSecretStore = KeychainPocketSecretStore(),
+                recovery: (any PocketKeyRecoveryStore)? = KeychainPocketKeyRecoveryStore(),
                 deadlines: Deadlines = Deadlines(),
                 queue: DispatchQueue? = nil,
                 log: DoorLog? = nil) {
         self.makeCentral = makeCentral
         self.secrets = secrets
+        self.recovery = recovery
         self.deadlines = deadlines
         self.bleQueue = queue ?? DispatchQueue(label: "foundryx.recording-device-attach")
         self.log = log
@@ -227,9 +279,18 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
     /// Attach the device the user tapped, and report what was actually established.
     ///
     /// `advertisedName` is DISPLAY metadata and nothing else. The durable address is the
-    /// authenticated peripheral token — a device that renames itself is the same device.
+    /// authenticated peripheral token — a device that renames itself is the same device. The
+    /// one place the name is read for anything but display is the RECOVERY INDEX, which is
+    /// never an identity: a recovery hit still has to be accepted by the recorder.
+    ///
+    /// - Parameter mint: `nil` — the default, and what a plain tap always passes — means NEVER
+    ///   write a key. A non-nil value can only be constructed from an owner's explicit
+    ///   confirmation (`PocketMintConsent`), which is the type-level half of "a mint is never
+    ///   attempted without consent"; the other half is that this parameter defaults to `nil`,
+    ///   so a new call site cannot mint by omission.
     public func attach(peripheralIdentifier id: UUID,
-                       advertisedName: String) async -> RecordingDeviceAttachOutcome {
+                       advertisedName: String,
+                       mint: PocketMintConsent? = nil) async -> RecordingDeviceAttachOutcome {
         do {
             try await reachDiscoveredGraph(of: id)
         } catch {
@@ -243,9 +304,40 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
             return sawAudio ? .live : .unrecognised
         }
 
-        let outcome = await adoptStoredFileRecorder(id: id, advertisedName: advertisedName)
+        let outcome = await adoptStoredFileRecorder(id: id, advertisedName: advertisedName,
+                                                    mint: mint)
         teardown()
         return outcome
+    }
+
+    /// DESIGN §3.7's ONLY ACTION, MADE REAL.
+    ///
+    /// It touches the CUSTODY SEAM AND NOTHING ELSE — no radio, and above all no second key.
+    /// If the write lands, the recorder and this phone finally agree, and a plain attach (with
+    /// no mint) restores and adopts it exactly as it would on any later launch. That is why
+    /// the retry does not need the link that was already closed.
+    ///
+    /// `nil` when there is nothing pending, which is every state but §3.7.
+    public func retryPendingCustody() async -> RecordingDeviceAttachOutcome? {
+        guard let pending = lock.withLock({ pendingMint }) else { return nil }
+        do {
+            try await secrets.save(pending.key, for: pending.identity)
+        } catch {
+            return .keyAcceptedNotDurable
+        }
+        // Best effort, and second: the recovery copy failing does not make the recorder
+        // unusable on this phone, and reporting §3.7 again over it would be false.
+        if let recovery, let token = PocketRecoveryToken(advertisedName: pending.advertisedName) {
+            try? await recovery.save(pending.key, under: token)
+        }
+        lock.withLock { pendingMint = nil }
+        // A FRESH ATTACHMENT, because this one is torn down and single-use. It restores the
+        // key that is now in custody — the same path a later launch takes.
+        let sibling = RecordingDeviceAttachment(makeCentral: makeCentral, secrets: secrets,
+                                                recovery: recovery, deadlines: deadlines,
+                                                log: log)
+        return await sibling.attach(peripheralIdentifier: pending.id,
+                                    advertisedName: pending.advertisedName)
     }
 
     // MARK: - Radio flow
@@ -297,7 +389,7 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
     }
 
     private func adoptStoredFileRecorder(
-        id: UUID, advertisedName: String
+        id: UUID, advertisedName: String, mint: PocketMintConsent?
     ) async -> RecordingDeviceAttachOutcome {
         let map = characteristicMap()
         guard let map, let peripheral = lock.withLock({ peripheral }) else {
@@ -326,10 +418,19 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
 
         // THE SHIPPED CUSTODY ORDER, THROUGH THE SHIPPED COORDINATOR. Restore first; never a
         // speculative fresh write. `coexistenceAvailable` means "FoundryX holds no key for
-        // this recorder", and minting one is exactly what T2 req 3 gates.
+        // this recorder" — and only THEN, and only with consent in hand, is a key minted.
         let coordinator = PocketOnboardingCoordinator(
-            client: PocketProtocolOnboardingClient(client: client), store: secrets)
-        let state = await coordinator.restore(identity: identity)
+            client: PocketProtocolOnboardingClient(client: client),
+            store: secrets,
+            recovery: recovery,
+            recoveryToken: PocketRecoveryToken(advertisedName: advertisedName))
+        var state = await coordinator.restore(identity: identity)
+        // NO KEY, AND THE OWNER SAID YES. This is the only place in the app a key is written to
+        // a recorder, it happens at most once per attach, and it cannot be reached without a
+        // `PocketMintConsent` the owner's confirmation constructed.
+        if state == .coexistenceAvailable, let mint {
+            state = await coordinator.mintFactoryFresh(identity: identity, consent: mint)
+        }
         switch state {
         case .ready:
             let observation = await PocketRecordingDeviceBridge.observe(
@@ -351,6 +452,45 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
         case .coexistenceAvailable:
             await client.close()
             return .setupUnavailable
+        case .mintRefused:
+            // THE SAFE ANSWER TO U1. The recorder heard one key and said no, so it is still
+            // holding the one another app gave it. One key was sent; a second never will be.
+            await client.close()
+            return .mintRefused
+        case .mintNotVerified:
+            // ACKNOWLEDGED, UNPROVEN. `MCU&SK&OK` came back and the access-point read-back did
+            // not agree with the key we sent, so this build refuses to call it setup. The key
+            // is in custody — it was put there BEFORE the write — so the screen's promise that
+            // nothing is lost is one the flow actually keeps. The harvest below is belt and
+            // braces: if the coordinator is ever holding an unstored key in this state, it
+            // leaves with this object rather than dying with the coordinator.
+            if let key = await coordinator.mintedKeyPendingCustody() {
+                lock.withLock { pendingMint = (key, identity, advertisedName, id) }
+            }
+            await client.close()
+            return .mintNotVerified
+        case .keyNotKept:
+            // NOTHING WAS SENT. Custody refused the candidate before the recorder was asked,
+            // which is the whole point of doing custody first.
+            await client.close()
+            return .keyNotKept
+        case .custodyUnreadable:
+            // FoundryX MAY HOLD THIS RECORDER'S KEY AND COULD NOT READ IT. Distinct from
+            // `.setupUnavailable`, which is the state that offers to mint — offering to mint
+            // here would write a second key to a recorder FoundryX itself set up.
+            await client.close()
+            return .custodyUnreadable
+        case .acceptedNotDurable:
+            // THE RECORDER HAS A KEY THIS PHONE COULD NOT STORE. The coordinator is about to
+            // go away with the only copy of it, so the key is held here — and `mintedKey` is
+            // the only reason `retryPendingCustody()` can be more than a button.
+            if let key = await coordinator.mintedKeyPendingCustody() {
+                lock.withLock {
+                    pendingMint = (key, identity, advertisedName, id)
+                }
+            }
+            await client.close()
+            return .keyAcceptedNotDurable
         case .indeterminate:
             // THE HANDSHAKE NEVER COMPLETED. `restore` reserves `.indeterminate` for a key
             // that was never answered — a dropped link, a timeout, a firmware that stopped

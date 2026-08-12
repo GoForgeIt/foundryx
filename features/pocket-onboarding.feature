@@ -36,10 +36,10 @@ Feature: Set up a Pocket without weakening the owner's custody
     When I try to set it up
     Then no credential is submitted and the observation is quarantined
 
-  Scenario: Accepted credentials are not called durable when secure storage fails
-    Given Pocket accepted a candidate but secure storage failed
-    When I retry secure storage for the same identity
-    Then no device write occurs and setup completes only if that retry succeeds
+  Scenario: A candidate this iPhone cannot store never reaches the device
+    Given secure storage that refuses the first attempt
+    When I set the Pocket up and then try again
+    Then nothing reached the device until custody held the key, and setup completes only then
 
   Scenario: Indeterminate authentication does not classify ownership
     Given Pocket authentication times out or disconnects

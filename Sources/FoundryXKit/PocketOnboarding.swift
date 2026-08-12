@@ -233,6 +233,14 @@ public struct PocketOnboardingConfirmation: Equatable, Sendable {
 public protocol PocketOnboardingClient: Sendable {
     func authenticate(secret: String) async -> PocketOnboardingAuthentication
     func confirmation() async throws -> PocketOnboardingConfirmation
+    /// THE PROOF LEG. `MCU&SK&OK` is an acknowledgement, not evidence that the recorder kept
+    /// what it was sent. Reading the recorder's own access-point credentials back is: the
+    /// password it reports is derived from the key it is HOLDING, so a recorder that answered
+    /// yes and went on using another app's key cannot produce ours.
+    ///
+    /// Throwing here means UNPROVEN, never REFUSED. The two are different answers and the
+    /// coordinator keeps them apart.
+    func accessPointReadback() async throws -> PocketAccessPointReadback
     func close() async
 }
 
@@ -245,39 +253,176 @@ public enum PocketOnboardingState: Equatable, Sendable {
     case quarantined
     case indeterminate
     case recoveryRequired
+    /// CUSTODY THREW ON THE WAY IN, WHICH IS NOT THE SAME ANSWER AS "THERE IS NO KEY".
+    ///
+    /// `store.secret` throws for a Keychain that is locked, that answers a status this app does
+    /// not recognise, or that holds an item this build can no longer decode. Flattening that
+    /// into `nil` used to make it indistinguishable from a recorder FoundryX has never
+    /// provisioned — and `nil` is the state the UI turns into the MINT OFFER. So a transient
+    /// storage error proposed a second `APP&SK&` write to a recorder this app had itself
+    /// provisioned, whose key was sitting in the Keychain the whole time.
+    ///
+    /// Nothing is written to the recorder in this state, and no key is minted from it.
+    case custodyUnreadable
+    /// THE MINT WAS REFUSED. The recorder heard the new key and kept the one it already has —
+    /// which is the SAFE answer to U1, and the one that means another app owns this recorder.
+    /// Distinct from `.indeterminate`, which is the recorder never answering at all.
+    case mintRefused
+    /// THE MINT WAS ACKNOWLEDGED AND COULD NOT BE PROVEN. The recorder said `MCU&SK&OK` and
+    /// then would not report access-point credentials that match the key we sent. The key is
+    /// KEPT — the recorder may well be holding it — but setup is not reported complete, because
+    /// a bare acknowledgement is not evidence.
+    case mintNotVerified
+    /// CUSTODY REFUSED THE KEY BEFORE THE RECORDER WAS ASKED FOR ANYTHING FURTHER.
+    case keyNotKept
 }
 
 public actor PocketOnboardingCoordinator {
     private let client: any PocketOnboardingClient
     private let store: any PocketSecretStore
+    /// The synchronised recovery copy (§10). Optional because the RESTORE path does not need
+    /// it and the mint path must not be able to skip it silently — a mint with no recovery
+    /// store reports `.deviceOnly` custody rather than pretending it is durable everywhere.
+    private let recovery: (any PocketKeyRecoveryStore)?
+    private let recoveryToken: PocketRecoveryToken?
     private var pending: (String, PocketAuthenticatedIdentity, PocketOnboardingConfirmation)?
 
-    public init(client: any PocketOnboardingClient, store: any PocketSecretStore) {
+    public init(client: any PocketOnboardingClient,
+                store: any PocketSecretStore,
+                recovery: (any PocketKeyRecoveryStore)? = nil,
+                recoveryToken: PocketRecoveryToken? = nil) {
         self.client = client
         self.store = store
+        self.recovery = recovery
+        self.recoveryToken = recoveryToken
     }
 
-    /// Called only for a factory-fresh unit after the firmware alphabet/entropy gate is met.
-    public func provisionFactoryFresh(identity: PocketAuthenticatedIdentity?, candidate: String) async -> PocketOnboardingState {
-        guard let identity, PocketSecretRecord.isValid(candidate) else {
+    /// MINT A KEY AND BECOME THIS RECORDER'S FIRST OWNER.
+    ///
+    /// The candidate is generated HERE, by `PocketSessionKeyMint`, and no caller may supply
+    /// one: a key whose alphabet the caller chose is a key whose first eight characters may
+    /// not be a legal WPA passphrase, and a key a caller could pass is a key a caller could
+    /// hard-code. `provisionFactoryFresh` below still takes a candidate because the flow's
+    /// steps are asserted individually, but the app reaches minting only through this door.
+    public func mintFactoryFresh(identity: PocketAuthenticatedIdentity?,
+                                 consent: PocketMintConsent) async -> PocketOnboardingState {
+        guard let candidate = try? PocketSessionKeyMint.generate() else {
+            // No cryptographic randomness means no key. Inventing one from a weaker source
+            // would be the single worst thing this file could do.
             return .quarantined
         }
-        guard await client.authenticate(secret: candidate) == .accepted else {
+        return await provisionFactoryFresh(identity: identity, candidate: candidate,
+                                           consent: consent)
+    }
+
+    /// ONE KEY, ONE TIME, ONLY WITH CONSENT, NEVER SENT BEFORE IT IS KEPT, AND NEVER REPORTED
+    /// AS SUCCESS ON A BARE ACK.
+    ///
+    /// The order is the security property:
+    ///
+    ///   1. `consent` — a value only an explicit owner confirmation can construct. Because U1
+    ///      is open (a keyed recorder may silently re-key), an unattended mint is a possibly
+    ///      destructive write and may not be reachable by accident.
+    ///   2. CUSTODY, BEFORE THE RADIO. The candidate goes into the Keychain FIRST. If custody
+    ///      refuses it, the recorder is never asked and nothing is written — `.keyNotKept`.
+    ///   3. authenticate — the one `APP&SK&` write. A refusal is `.mintRefused` and stops; a
+    ///      silence is `.indeterminate` and stops. Neither is retried, and no second key is
+    ///      ever sent.
+    ///   4. the synchronised recovery copy, once the recorder has ACCEPTED the key.
+    ///   5. READ BACK — `APP&WIFI`, and the reported password must equal the first eight
+    ///      characters of the key we just sent. Anything else is `.mintNotVerified`.
+    ///   6. confirm — battery and firmware, so the confirmation screen shows real numbers.
+    ///
+    /// WHY CUSTODY MOVED IN FRONT OF THE WRITE. It used to run last: authenticate, read back,
+    /// read battery, read firmware, and only then save. Each of those is a bounded but real
+    /// BLE round trip, so for up to ~24 seconds of radio I/O the only copy of a live credential
+    /// was a local variable. A jetsam kill, a crash, a swipe-away or a flat battery in that
+    /// window left the recorder holding a key nothing in the world had — and this firmware has
+    /// no reset, no unpair and no key-read opcode, so that recorder is scrap. `PocketSessionKey
+    /// Entry` already got this right for a key the owner typed ("an app that authenticates with
+    /// a key it cannot store is an app that works exactly once"); the path where the key cannot
+    /// be re-derived was the one that persisted last.
+    ///
+    /// After step 3, the key is KEPT on every remaining path — including `.mintNotVerified` and
+    /// `.indeterminate` — because a key the recorder has and this phone does not is a brick.
+    /// The ONE path that takes it back out is an explicit refusal, where the recorder has said
+    /// it is holding somebody else's key and ours is therefore worthless.
+    public func provisionFactoryFresh(identity: PocketAuthenticatedIdentity?,
+                                      candidate: String,
+                                      consent: PocketMintConsent) async -> PocketOnboardingState {
+        _ = consent
+        guard let identity, PocketSessionKeyMint.isWireAndWiFiSafe(candidate) else {
+            return .quarantined
+        }
+
+        // ── CUSTODY FIRST ───────────────────────────────────────────────────────────────
+        // The attach record is what makes this recorder usable at all, and it is written
+        // before the recorder can possibly be holding the key. There is no window.
+        do { try await store.save(candidate, for: identity) }
+        catch {
+            await client.close()
+            return .keyNotKept
+        }
+
+        switch await client.authenticate(secret: candidate) {
+        case .accepted:
+            break
+        case .rejected:
+            // ANOTHER APP OWNS THIS RECORDER. It is holding a key that is not ours, so the
+            // candidate is worthless and is taken back out of custody — leaving it there would
+            // make every later tap restore a key the hardware has already refused. Nothing was
+            // changed on the recorder, one key was sent, and no second one will be.
+            try? await store.remove(for: identity)
+            await client.close()
+            return .mintRefused
+        case .indeterminate:
+            // THE KEY STAYS IN CUSTODY. The write may have landed and the answer may simply
+            // not have come back; discarding it here is exactly the brick this order exists to
+            // prevent. A recorder that never took it is unharmed by us holding a key for it.
             await client.close()
             return .indeterminate
         }
+
+        // THE RECOVERY COPY, ONCE THE RECORDER HAS SAID YES. It is written second, not first,
+        // because it is addressed by the recorder's SERIAL: a mint the recorder refuses must
+        // not clobber a recovery record this owner already had for that serial.
+        await keepRecoveryCopy(candidate)
+
+        // THE ACK IS NOT THE PROOF. Everything below runs on a session the recorder has
+        // already said yes on, so a failure here is never re-interpreted as a refusal.
+        let proven: Bool
+        if let readback = try? await client.accessPointReadback() {
+            proven = readback.provesPossession(ofSessionKey: candidate)
+        } else {
+            proven = false
+        }
+        guard proven else {
+            // The recorder MAY be holding this key, and custody already has it. Setup is not
+            // reported complete, and nothing is taken back.
+            await client.close()
+            return .mintNotVerified
+        }
+
         guard let confirmation = try? await client.confirmation() else {
+            // The key is proven to be on the recorder and it is in custody. The ceremony just
+            // cannot show real numbers.
             await client.close()
             return .indeterminate
         }
-        do {
-            try await store.save(candidate, for: identity)
-            return .ready(batteryPercent: confirmation.batteryPercent, firmware: confirmation.firmware)
-        } catch {
-            pending = (candidate, identity, confirmation)
-            await client.close()
-            return .acceptedNotDurable
-        }
+        return .ready(batteryPercent: confirmation.batteryPercent,
+                      firmware: confirmation.firmware)
+    }
+
+    /// The synchronised half of custody, best effort and REPORTED rather than assumed. A mint
+    /// whose recovery copy did not land still works on this phone, so it is not a failure — but
+    /// it is not the §10 promise either, and `PocketKeyCustodyPresentation` words the screen
+    /// from whether this record actually exists rather than from an assumption that it does.
+    @discardableResult
+    private func keepRecoveryCopy(_ key: String) async -> PocketCustodyOutcome {
+        guard let recovery, let recoveryToken else { return .deviceOnly }
+        do { try await recovery.save(key, under: recoveryToken) }
+        catch { return .deviceOnly }
+        return .durable
     }
 
     /// Shipping reconnect order: restore FoundryX custody first. No speculative fresh write.
@@ -288,9 +433,21 @@ public actor PocketOnboardingCoordinator {
     /// completing at all, and so is a confirmation read that fails after the key was accepted.
     /// Collapsing both into `.recoveryRequired` is what makes a UI say "that key was refused"
     /// to someone whose recorder simply walked out of range.
+    ///
+    /// AND A STORE THAT THREW IS NOT A STORE THAT IS EMPTY. `try?` used to flatten both into
+    /// `nil`, and `nil` is what the UI turns into the mint offer — so a locked Keychain, an
+    /// unrecognised OSStatus, or an item written by a previous tag scheme proposed a second
+    /// `APP&SK&` write against a recorder this app had provisioned itself, whose key was in the
+    /// Keychain the entire time. That is `.custodyUnreadable`, and nothing mints from it.
     public func restore(identity: PocketAuthenticatedIdentity) async -> PocketOnboardingState {
-        guard let secret = try? await store.secret(for: identity) else {
-            return .coexistenceAvailable
+        let held: String?
+        do { held = try await store.secret(for: identity) }
+        catch {
+            await client.close()
+            return .custodyUnreadable
+        }
+        guard let secret = held else {
+            return await restoreFromRecoveryCopy(identity: identity)
         }
         switch await client.authenticate(secret: secret) {
         case .accepted:
@@ -309,7 +466,60 @@ public actor PocketOnboardingCoordinator {
         return .ready(batteryPercent: confirmation.batteryPercent, firmware: confirmation.firmware)
     }
 
+    /// THE READER THE §10 RECOVERY RECORD NEVER HAD, AND THE REASON A REPLACED PHONE IS NOT A
+    /// DEAD RECORDER.
+    ///
+    /// The attach record is addressed by the CoreBluetooth peripheral UUID, which iOS generates
+    /// PER DEVICE PER APP: the owner's next iPhone gets a different one for the same physical
+    /// recorder, so `store.secret` finds nothing there BY CONSTRUCTION. Without this lookup the
+    /// next state is `.coexistenceAvailable`, which the UI renders as the mint offer — so an
+    /// owner who replaced their phone was walked into writing a SECOND key to a recorder they
+    /// already owned, either being told it belongs to another app (U1 refuses) or silently
+    /// re-keying it and changing its WiFi password (U1 accepts). The key was in their
+    /// synchronised Keychain the whole time. The record was written and never read, which is
+    /// the same "zero callers, so it does not exist" defect §10 was called out for.
+    ///
+    /// A RECOVERY HIT IS A CANDIDATE, NEVER AN ADOPTION. It is indexed by the recorder's own
+    /// broadcast serial, which is copyable and is therefore not an identity: the recorder still
+    /// has to ACCEPT the key before anything is remembered. A wrong hit costs a refused key and
+    /// a message — the same cost as the owner typing a key from another recorder — and lands
+    /// back on `.coexistenceAvailable`, where the mint decision is still the owner's to make.
+    private func restoreFromRecoveryCopy(
+        identity: PocketAuthenticatedIdentity
+    ) async -> PocketOnboardingState {
+        guard let recovery, let recoveryToken,
+              let recovered = try? await recovery.key(under: recoveryToken) else {
+            return .coexistenceAvailable
+        }
+        switch await client.authenticate(secret: recovered) {
+        case .accepted:
+            break
+        case .rejected:
+            return .coexistenceAvailable
+        case .indeterminate:
+            await client.close()
+            return .indeterminate
+        }
+        // FILE IT LOCALLY so the next connect on this phone is an ordinary restore. Best
+        // effort: the key is already durable in the synchronised record, so a failure here
+        // costs one repeated lookup, not the credential.
+        try? await store.save(recovered, for: identity)
+        guard let confirmation = try? await client.confirmation() else {
+            await client.close()
+            return .indeterminate
+        }
+        return .ready(batteryPercent: confirmation.batteryPercent, firmware: confirmation.firmware)
+    }
+
     /// Retries only the same Keychain write; it never writes to the recorder.
+    ///
+    /// A BACKSTOP, AND NO LONGER A ROUTE THE SHIPPED MINT CAN REACH. `pending` was set when a
+    /// recorder had ACCEPTED a key that custody then refused (design §3.7). Custody now runs
+    /// BEFORE the `APP&SK&` write, so a key the Keychain will not keep is never offered to the
+    /// recorder and that state cannot arise from `provisionFactoryFresh`. The retry is kept —
+    /// working, and wired to a real screen — because it is the safety net that catches this
+    /// class of bug if that ordering is ever reversed again, and a net that has rotted is worse
+    /// than none.
     public func retrySecureStorage() async -> PocketOnboardingState {
         guard let pending else { return .recoveryRequired }
         do {
@@ -320,6 +530,17 @@ public actor PocketOnboardingCoordinator {
             return .acceptedNotDurable
         }
     }
+
+    /// THE ONLY WAY THE KEY LEAVES THIS COORDINATOR, AND IT EXISTS FOR ONE STATE.
+    ///
+    /// `nil` unless a mint was ACCEPTED BY THE RECORDER and custody refused it — design §3.7,
+    /// where the recorder is holding a credential whose only copy in the world is in memory.
+    /// The caller that reads it is the attachment, so its own retry has something to retry;
+    /// there is no other caller, and the value goes nowhere but back into the custody seam.
+    ///
+    /// It deliberately does not return the confirmation, so nothing can mistake reading this
+    /// for "setup succeeded".
+    public func mintedKeyPendingCustody() -> String? { pending?.0 }
 
     public func abandon() { pending = nil }
 }
@@ -342,14 +563,39 @@ public struct PocketSetupPresentation: Equatable, Sendable {
     public static let didNotFinish = PocketSetupPresentation(
         title: "Set up Pocket",
         body: "Setup didn't finish. Try again before you close this.",
-        actions: ["Try again", PocketSessionKeyEntryPresentation.entryAction])
+        actions: [retryAction, PocketSessionKeyEntryPresentation.entryAction])
+    /// DESIGN §3.7 — THE ONE SCREEN IN THE APP WHERE CLOSING IT LOSES SOMETHING FOREVER.
+    ///
+    /// The recorder took the key and this iPhone could not store it. There is no reset opcode
+    /// and no key-read opcode in this firmware, so if the app dies here the recorder is holding
+    /// a credential nothing in the world has a copy of, and nothing can connect to it again.
+    ///
+    /// It used to read "Setup didn't finish. Try again before you close this." — which is what
+    /// a person closes. The consequence paragraph is the whole point: the user will reflexively
+    /// dismiss this screen unless told what dismissing it costs. And there is deliberately no
+    /// Skip, no Continue anyway, and no second provisioning attempt: sending a second key to a
+    /// recorder already holding one is how the first key becomes unrecoverable twice over.
     public static let acceptedNotDurable = PocketSetupPresentation(
-        title: "Set up Pocket",
-        body: "Setup didn't finish. Try again before you close this.",
-        actions: ["Try again"])
+        title: "Setup is not complete",
+        body: "The recorder accepted a key, but this iPhone couldn't save it. Setup is not "
+            + "complete. Keep Solleva open and retry secure storage."
+            + "\n\nThe key is in memory only. No second key was sent, and none will be."
+            + "\n\nIf Solleva closes now, this key is gone. The recorder keeps it, and nothing "
+            + "will be able to connect to it again.",
+        actions: [retrySecureStorageAction])
+
+    /// NAMED, because the screen that routes it matches on this constant and a literal on both
+    /// sides is a routing bug that compiles — on the one screen where a dead button loses the
+    /// owner their recorder.
+    public static let retrySecureStorageAction = "Retry secure storage"
+
+    /// THE PLAIN RETRY, NAMED FOR THE SAME REASON. On the two storage screens it is wired to a
+    /// real second attempt rather than to a dismiss, and the screen that routes it matches on
+    /// this constant.
+    public static let retryAction = "Try again"
     public static let ready = PocketSetupPresentation(title: "Pocket is ready.", body: "", actions: ["Done"])
     public static let indeterminate = PocketSetupPresentation(
-        title: "Setup didn't finish", body: "Solleva couldn't determine this recorder's setup.", actions: ["Try again"])
+        title: "Setup didn't finish", body: "Solleva couldn't determine this recorder's setup.", actions: [retryAction])
     public static let keepBothApps = PocketSetupPresentation(
         title: "Keep both apps",
         body: "Solleva won't reset your recorder. Both apps can use the same recorder. They connect one at a time.",
@@ -362,20 +608,59 @@ public struct PocketSetupPresentation: Equatable, Sendable {
     /// offering a "Set up" button that cannot complete. The second paragraph is the only
     /// reassurance that is knowable: a claim about FoundryX's own behaviour.
     ///
-    /// THE GATE IS STILL SHUT, AND THE SCREEN STILL SAYS SO. What the second action adds is
-    /// the case §3.6 never covered: an owner whose recorder was ALREADY provisioned by another
-    /// app is not waiting on FoundryX to mint anything — they hold the key already, and had no
-    /// way to hand it over. Entering an existing key is not generating one, so this affordance
-    /// leaves the minting gate exactly where T2 req 3 put it.
+    /// WHAT THIS SCREEN IS NOW. It used to say "Setup isn't available yet", because minting a
+    /// key was gated and a tap on a recorder Solleva held no key for could honestly go nowhere
+    /// else. Minting is wired — with owner consent and with a read-back proof (see
+    /// `PocketKeyMint.swift`) — so that sentence would now be false, and a false reassurance is
+    /// worse than the gate it described.
+    ///
+    /// The state it still serves is the one it always actually served from the help link:
+    /// nobody tapped a recorder, so there is no recorder to set up. The reassurance survives
+    /// unchanged because it is still the only knowable thing — nothing was connected, so
+    /// nothing was written.
     public static let setupUnavailable = PocketSetupPresentation(
-        title: "Setup isn't available yet",
-        body: "Solleva can't safely generate a key for this recorder yet. Setup is turned off "
-            + "until that's settled.\n\nYour recorder is untouched. Solleva sent it nothing."
+        title: "Nothing is set up yet",
+        body: "Solleva hasn't connected to a recorder from here, so there's nothing to set up "
+            + "on this screen. Go back and tap your recorder in the list."
+            + "\n\nYour recorder is untouched. Solleva sent it nothing."
             + "\n\nIf another app already set this recorder up, you can enter the key it was "
             + "set up with.",
         actions: ["See what's connected", PocketSessionKeyEntryPresentation.entryAction])
+
+    /// THIS iPHONE'S SECURE STORAGE REFUSED THE KEY, SO THE RECORDER WAS NEVER ASKED.
+    ///
+    /// It is a reassurance rather than an apology on purpose: the ordering that produced this
+    /// screen is the one that makes the whole mint survivable. The key is written to the
+    /// Keychain BEFORE it is written to the recorder, so a storage failure costs a retry and
+    /// nothing else — where the old order would have left the recorder holding a credential
+    /// this phone had no copy of, on hardware with no reset and no key-read opcode.
+    public static let keyNotKept = PocketSetupPresentation(
+        title: "This iPhone couldn't store the key",
+        body: "Solleva stores a new key on this iPhone before it sends it to the recorder, so "
+            + "the recorder can never end up holding a key this iPhone doesn't have."
+            + "\n\nThis iPhone's secure storage refused it, so Solleva stopped there. Your "
+            + "recorder is untouched — Solleva sent it nothing.",
+        actions: [retryAction])
+
+    /// CUSTODY EXISTS AND COULD NOT BE READ — WHICH IS NOT "THERE IS NO KEY".
+    ///
+    /// This is the screen that stands between a locked or unreadable Keychain and the mint
+    /// offer. Solleva may hold this recorder's key and simply be unable to read it right now;
+    /// minting from that state would send a SECOND key to a recorder Solleva itself set up,
+    /// which either fails as "another app owns this" or silently re-keys the recorder and
+    /// changes its WiFi password. So this screen offers a retry, never a new key.
+    public static let custodyUnreadable = PocketSetupPresentation(
+        title: "Solleva can't read its own key right now",
+        body: "Solleva may already have this recorder's key on this iPhone and couldn't read it "
+            + "just now. That can happen before the iPhone has been unlocked since it restarted."
+            + "\n\nSolleva sent the recorder nothing, and it won't make a new key from here — a "
+            + "new key could replace the one the recorder is already using."
+            + "\n\nUnlock this iPhone and try again.",
+        actions: [retryAction, PocketSessionKeyEntryPresentation.entryAction])
+
     public static let all = [setup, didNotFinish, acceptedNotDurable, ready, indeterminate,
-                             keepBothApps, quarantined, setupUnavailable]
+                             keepBothApps, quarantined, setupUnavailable, keyNotKept,
+                             custodyUnreadable]
 }
 
 public struct PocketEducationSection: Equatable, Sendable {

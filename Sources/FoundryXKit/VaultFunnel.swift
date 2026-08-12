@@ -238,6 +238,16 @@ public enum VaultProvisionFailure: Equatable, Sendable {
     case statusCheckRejected
     /// A status string this build has never seen.
     case unknown(String)
+    /// The server says the Vault is ready but did not hand over the credential
+    /// that opens its door, so the app cannot reach it.
+    ///
+    /// This case exists because its absence hid the failure completely. The door
+    /// bearer was minted INSIDE the cell, where the signup service could never
+    /// read it, so `ready` arrived with no credential — every single time. The
+    /// client threw, the throw landed in the catch-all reserved for network
+    /// blips, and the phone showed "Setting up…" forever while silently falling
+    /// back to recording on-device. It looked like it was working.
+    case cannotOpenVault
 
     /// What the user is told. Short, no jargon, and never blames them.
     public var headline: String {
@@ -249,6 +259,7 @@ public enum VaultProvisionFailure: Equatable, Sendable {
         case .signInExpired: return "Your sign-in expired"
         case .statusCheckRejected: return "We couldn't check your Vault"
         case .unknown: return "Something went wrong setting up your Vault"
+        case .cannotOpenVault: return "Your Vault is running but we can't get in"
         }
     }
 
@@ -270,6 +281,8 @@ public enum VaultProvisionFailure: Equatable, Sendable {
             return "The Vault service rejected this status check. Your payment is safe, and we'll try again when the app can present a valid credential."
         case .alreadyExists:
             return "This account already has a Vault. Your payment and existing Vault are safe."
+        case .cannotOpenVault:
+            return "Your Vault is set up and your data is safe, but this app wasn't given the key to it. We'll keep trying, and support can re-issue it."
         default:
             return "Your payment is safe. You can leave while we sort this out."
         }
@@ -839,6 +852,14 @@ public final class VaultFunnelModel: ObservableObject {
             let lower = reason.lowercased()
             reportProvisioningFailure(lower.contains("already exists") || lower.contains("cell already exists")
                                       ? .alreadyExists : .server(reason))
+        } catch VaultSignupError.malformedResponse {
+            // A body this build cannot make sense of is a CONTRACT breach, not a
+            // dropped packet. Waiting cannot fix it, and the catch-all below is
+            // where exactly this error used to go: a `ready` with no door
+            // credential threw here, was treated as a blip, and the user watched
+            // an eternal spinner while the app quietly went back to phone-only
+            // recording. Nothing anywhere reported it.
+            reportProvisioningFailure(.cannotOpenVault)
         } catch {
             // A genuine network blip: keep the durable waiting state and retry next
             // foreground. This is the ONLY error class that should be invisible.
@@ -904,6 +925,14 @@ public final class VaultFunnelModel: ObservableObject {
         } catch {
             // A malformed cell URL/bearer from the server — stay in setting-up; reconcile
             // will try again. Fail loud in logs, not by dropping the user out of the funnel.
+            //
+            // "Fail loud in logs" was aspirational: there was no log line here at
+            // all, so this branch was as silent as the one above it. Holding the
+            // state is still right (reconcile retries and can recover), but it
+            // must leave a trace.
+            NSLog("vault: the server's ready answer could not be turned into a Vault "
+                  + "connection (%@) — holding setting-up for the next reconcile",
+                  String(describing: error))
             state = .settingUp
         }
     }

@@ -364,8 +364,12 @@ private final class ExistingKeyEntryWorld {
             // THE SHIPPED TAP, UNCHANGED. No key is submitted, so this must still land on the
             // §3.6 screen exactly as it did before this track existed.
             guard let stack else { throw BrineStepError("no recorder was staged") }
+            // `recovery: nil` KEEPS THIS HERMETIC. With no attach record, `restore` now
+            // consults the SYNCHRONISED recovery record — a real Keychain item under the
+            // shipped default — and this scenario's claim is about a phone that holds nothing
+            // for this recorder at all.
             let attachment = RecordingDeviceAttachment(
-                makeCentral: stack.factory, secrets: secrets,
+                makeCentral: stack.factory, secrets: secrets, recovery: nil,
                 deadlines: .init(powerOn: 5, connect: 5, discovery: 5, control: 5), log: log)
             let attached = await attachment.attach(peripheralIdentifier: stack.deviceId,
                                                    advertisedName: stack.deviceName)
@@ -723,14 +727,24 @@ private final class ExistingKeyEntryWorld {
                 "the field's placeholder is itself a well-formed 16-character key — a "
                     + "credential-shaped string people paste by accident")
 
-        // ── the §3.6 screen still stands ─────────────────────────────────────
-        case "the app says setup isn't available yet instead of adding a row":
-            XCTAssertEqual(PocketSetupPresentation.setupUnavailable.title,
-                           "Setup isn't available yet")
-            XCTAssertTrue(PocketSetupPresentation.setupUnavailable.body
-                .contains("can't safely generate a key"),
-                          "the screen no longer says that MINTING a key is what is gated, "
-                              + "which is the only thing this track did not change")
+        // ── a tap alone is still a dead stop, and still writes nothing ───────
+        case "the app stops and explains instead of adding a row":
+            // WHAT REPLACED §3.6. Minting is wired now, so "setup is turned off" would be a
+            // false sentence. What a tap earns instead is the CONSENT screen: it explains what
+            // Solleva will do, says outright that it cannot predict what an already-keyed
+            // recorder does with a second key, and states the cost — and nothing is written
+            // until the owner taps the confirm action on it.
+            XCTAssertEqual(PocketMintConsentPresentation.actions.first,
+                           PocketMintConsentPresentation.confirmAction,
+                           "the decision screen no longer leads with the decision")
+            XCTAssertTrue(PocketMintConsentPresentation.whatSollevaDoesNotKnow
+                .lowercased().contains("can't tell you"),
+                          "the consent screen no longer admits the thing that makes consent "
+                              + "necessary — that nobody knows what an already-keyed recorder "
+                              + "does with a second key")
+            XCTAssertTrue(PocketMintConsentPresentation.whatItCouldCost.contains("other app"),
+                          "the consent screen does not state the cost it is asking the owner "
+                              + "to accept")
             XCTAssertTrue(PocketSetupPresentation.setupUnavailable.body.contains("sent it nothing"))
             let records = UnifiedDeviceListComposition.rememberedForCurrentAccount(
                 defaults: legacyDefaults)
@@ -740,23 +754,47 @@ private final class ExistingKeyEntryWorld {
 
         case "the screen still offers to let me enter a key I already have":
             XCTAssertTrue(
+                PocketMintConsentPresentation.actions
+                    .contains(PocketSessionKeyEntryPresentation.entryAction),
+                "the screen a tap lands on offers no way to enter an existing key, so the "
+                    + "whole path is unreachable from the only screen a real tap reaches")
+            XCTAssertTrue(
                 PocketSetupPresentation.setupUnavailable.actions
                     .contains(PocketSessionKeyEntryPresentation.entryAction),
-                "the §3.6 screen offers no way to enter an existing key, so the whole path "
-                    + "is unreachable from the only screen a real tap lands on")
+                "the help screen offers no way to enter an existing key either")
             XCTAssertEqual(PocketSetupPresentation.setupUnavailable.actions.first,
                            "See what's connected",
                            "the shipped first action was displaced")
 
-        case "nothing in the app mints a key for a factory-fresh recorder":
-            // THE GATE THIS TRACK MUST NOT OPEN. Entering a key one already has is not
-            // generating one, and `provisionFactoryFresh` must still have zero callers.
-            let callers = try Self.nonTestCallersOfFactoryFreshProvisioning()
-            XCTAssertTrue(callers.isEmpty,
-                          "`provisionFactoryFresh` now has callers — \(callers). Design §3.6 / "
-                              + "T2 req 3 hold that gate shut until an evidenced key alphabet "
-                              + "and a security-reviewed entropy policy exist, and this track "
-                              + "was explicitly not the one that opens it")
+        case "no key is minted without an explicit confirmation from me":
+            // THE GATE THIS TRACK MUST NOT LOSE — RE-AIMED, NOT RELAXED.
+            //
+            // It used to read "`provisionFactoryFresh` has zero callers", which was the right
+            // gate while minting was disabled and is a vacuous one now that minting is the
+            // feature. The invariant that actually protects the owner is that a mint cannot
+            // happen without their confirmation, and it is held here in three places at once:
+            //
+            //   1. AT RUNTIME. This scenario just ran the shipped `RecordingDeviceAttachment`
+            //      over a real handshake with no consent, and the transport's own record of
+            //      every `APP&…` byte is asserted empty by the step below.
+            //   2. IN THE TYPE SYSTEM. `PocketMintConsent` has no public initialiser and one
+            //      factory, so no call site can conjure one; `attach`'s `mint:` parameter
+            //      defaults to nil, so no call site can mint by omission.
+            //   3. IN `App/`. The consent value may be constructed in exactly ONE place, and
+            //      that place must be the confirm action's own handler.
+            let minting = try Self.appSideConsentConstructionSites()
+            XCTAssertEqual(minting.count, 1,
+                           "owner consent for a key mint is constructed in \(minting.count) "
+                               + "places — \(minting). Exactly one screen may be able to "
+                               + "authorise writing a key to somebody's recorder")
+            let screen = try Self.appFile("App/DeviceScreen.swift")
+            XCTAssertTrue(
+                screen.contains("case PocketMintConsentPresentation.confirmAction:\n")
+                    || screen.contains("PocketMintConsentPresentation.confirmAction"),
+                "nothing in the Devices screen routes the consent screen's confirm action, so "
+                    + "either the mint is unreachable or it is reached by something else")
+            XCTAssertFalse(screen.contains("mint: .ownerConfirmedAfterReadingTheConsequences()\n            }"),
+                           "a mint is being issued outside the confirmation handler")
 
         default:
             throw BrineStepError("unhandled Then: \(phrase)")
@@ -774,28 +812,25 @@ private final class ExistingKeyEntryWorld {
         return AppSourceTree.withoutComments(of: try String(contentsOf: url, encoding: .utf8))
     }
 
-    /// Every `App/` or non-test `Sources/` file that calls the minting entry point.
-    private static func nonTestCallersOfFactoryFreshProvisioning() throws -> [String] {
-        var callers: [String] = []
-        var roots = try AppSourceTree.appSideSwiftFiles()
-        let sources = AppSourceTree.repoRoot.appendingPathComponent("Sources", isDirectory: true)
-        if let walk = FileManager.default.enumerator(at: sources,
-                                                    includingPropertiesForKeys: nil) {
-            for case let url as URL in walk where url.pathExtension == "swift" {
-                roots.append(url)
-            }
-        }
-        for url in roots {
+    /// Every `App/` file that can CONSTRUCT owner consent for a key mint — which, because
+    /// `PocketMintConsent` has no public initialiser, is every place in the rendered app that
+    /// is able to authorise writing a key to a recorder.
+    ///
+    /// It is deliberately a count of construction SITES rather than of files: two call sites in
+    /// one file is still two ways to mint.
+    private static func appSideConsentConstructionSites() throws -> [String] {
+        var sites: [String] = []
+        for url in try AppSourceTree.appSideSwiftFiles() {
             let text = AppSourceTree.withoutComments(
                 of: try String(contentsOf: url, encoding: .utf8))
-            // The declaration itself is not a call.
-            let stripped = text.replacingOccurrences(
-                of: "public func provisionFactoryFresh", with: "")
-            if stripped.contains("provisionFactoryFresh") {
-                callers.append(AppSourceTree.relativePath(url))
+            let needle = "ownerConfirmedAfterReadingTheConsequences()"
+            var searched = text[...]
+            while let found = searched.range(of: needle) {
+                sites.append(AppSourceTree.relativePath(url))
+                searched = searched[found.upperBound...]
             }
         }
-        return callers
+        return sites
     }
 
     // MARK: capture
@@ -881,9 +916,9 @@ private enum ExistingKeyEntrySteps {
             "it rules out finding the key by sniffing the recorder",
             "it attributes the procedure to Pocket Libre's documentation",
             "it shows no example key and offers no way to reveal, copy, or export one",
-            "the app says setup isn't available yet instead of adding a row",
+            "the app stops and explains instead of adding a row",
             "the screen still offers to let me enter a key I already have",
-            "nothing in the app mints a key for a factory-fresh recorder",
+            "no key is minted without an explicit confirmation from me",
         ]
         var steps = givens.map { phrase in
             defineStep(phrase) { context, _, _ in

@@ -77,10 +77,10 @@ Feature: I enter the key my recorder was already set up with
     And it attributes the procedure to Pocket Libre's documentation
     And it shows no example key and offers no way to reveal, copy, or export one
 
-  Scenario: the setup-unavailable screen still stands when no key has been entered
+  Scenario: tapping a recorder writes nothing to it and never mints a key on its own
     Given a signed-in account and a recorder that was set up by another app
     When I tap that recorder without entering a key
-    Then the app says setup isn't available yet instead of adding a row
+    Then the app stops and explains instead of adding a row
     And FoundryX sent that recorder nothing at all
     And the screen still offers to let me enter a key I already have
-    And nothing in the app mints a key for a factory-fresh recorder
+    And no key is minted without an explicit confirmation from me

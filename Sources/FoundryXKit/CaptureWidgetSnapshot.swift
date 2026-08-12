@@ -96,6 +96,36 @@ public enum CaptureWidgetSnapshotStore {
         injectedDefaults ?? UserDefaults(suiteName: appGroupID)
     }
 
+    /// Proof of absence the WIDGET would see — not proof that our own cache forgot.
+    ///
+    /// The barrier's real question is "can the widget extension still render this
+    /// account?", and neither half of the old guard answered it:
+    ///
+    /// * `object(forKey:)` immediately after `removeObject(forKey:)` re-reads the same
+    ///   in-process CFPrefs layer the removal just mutated, so it CANNOT disagree. It
+    ///   read as a durability check and was a tautology.
+    /// * `synchronize()` has been deprecated since iOS 12. Its Bool says one flush
+    ///   completed, not that the widget's container changed — and on 2026-08-12 it
+    ///   returned false on a real device whose group domain was perfectly readable
+    ///   (the branch is only reachable AFTER a successful read), turning
+    ///   "delete everything" into exposureBarrierFailed at step 2 of 13, forever.
+    ///
+    /// So ask the daemon for the group domain instead: `CFPreferencesCopyValue` after
+    /// `CFPreferencesAppSynchronize` round-trips through cfprefsd, the same daemon the
+    /// widget extension reads through. On a device whose container genuinely cannot be
+    /// written, the old value comes back and withdrawal still fails — the gate keeps
+    /// its teeth and loses its false positive.
+    static func groupValueStillPresent(_ name: String) -> Bool {
+        if withdrawalFaultForTesting == .absenceProbeSurvives { return true }
+        if let injectedDefaults { return injectedDefaults.object(forKey: name) != nil }
+        CFPreferencesAppSynchronize(appGroupID as CFString)
+        return CFPreferencesCopyValue(
+            name as CFString,
+            appGroupID as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesAnyHost) != nil
+    }
+
     /// The last snapshot the app wrote, or `.idle` when none exists yet / the group is
     /// unavailable. The envelope must belong to the currently active account.
     public static func read() -> CaptureWidgetSnapshot {
@@ -197,8 +227,16 @@ public enum CaptureWidgetSnapshotStore {
         let priorOwner = defaults.string(forKey: activeOwnerKey)
         let priorPayload = defaults.data(forKey: key)
         if priorOwner == nil, priorPayload == nil {
-            stateLock.unlock()
-            return .alreadyAbsent
+            // Corroborate against the group domain before reporting a TERMINAL SUCCESS.
+            // Now that a failed withdrawal no longer restores what it removed, a second
+            // attempt can read nil/nil from this process's cache while the widget's
+            // container still holds both — and `.alreadyAbsent` passes the barrier. The
+            // cheap in-process read stays as the fast path; the daemon settles it.
+            guard groupValueStillPresent(activeOwnerKey)
+                    || groupValueStillPresent(key) else {
+                stateLock.unlock()
+                return .alreadyAbsent
+            }
         }
         if priorOwner != expectedOwner {
             // The owner tag alone is not proof: a stale tag can coexist with a
@@ -229,8 +267,8 @@ public enum CaptureWidgetSnapshotStore {
                     // is still .persistenceFailed: that is a write we could not make,
                     // not a value we could not read.
                     defaults.removeObject(forKey: key)
-                    guard defaults.synchronize(),
-                          defaults.object(forKey: key) == nil else {
+                    _ = defaults.synchronize()   // advisory flush, NOT the verdict
+                    guard !groupValueStillPresent(key) else {
                         stateLock.unlock()
                         return .persistenceFailed
                     }
@@ -244,10 +282,8 @@ public enum CaptureWidgetSnapshotStore {
                         return .persistenceFailed
                     }
                     defaults.removeObject(forKey: key)
-                    guard defaults.synchronize(),
-                          defaults.object(forKey: key) == nil else {
-                        defaults.set(priorPayload, forKey: key)
-                        _ = defaults.synchronize()
+                    _ = defaults.synchronize()
+                    guard !groupValueStillPresent(key) else {
                         stateLock.unlock()
                         return .persistenceFailed
                     }
@@ -266,20 +302,17 @@ public enum CaptureWidgetSnapshotStore {
 
         defaults.removeObject(forKey: activeOwnerKey)
         defaults.removeObject(forKey: key)
-        guard defaults.synchronize(),
-              defaults.object(forKey: activeOwnerKey) == nil,
-              defaults.object(forKey: key) == nil else {
-            if let priorOwner {
-                defaults.set(priorOwner, forKey: activeOwnerKey)
-            } else {
-                defaults.removeObject(forKey: activeOwnerKey)
-            }
-            if let priorPayload {
-                defaults.set(priorPayload, forKey: key)
-            } else {
-                defaults.removeObject(forKey: key)
-            }
-            _ = defaults.synchronize()
+        _ = defaults.synchronize()
+        // NO RESTORE ON FAILURE. This block used to write priorOwner and priorPayload
+        // BACK and re-synchronize — a deletion barrier's failure path re-publishing the
+        // account it had just been told to erase. That reconstructed the exact
+        // precondition, so attempt N+1 was bit-identical to attempt N and "Try again"
+        // could never succeed: one transient flush failure became a permanent lockout
+        // whose only escape was reinstalling the app. Leaving the removal in place is
+        // also strictly the safer half of the trade — the bytes we failed to PROVE gone
+        // are the bytes we were asked to delete.
+        guard !groupValueStillPresent(activeOwnerKey),
+              !groupValueStillPresent(key) else {
             stateLock.unlock()
             return .persistenceFailed
         }
@@ -312,4 +345,13 @@ public enum CaptureWidgetWithdrawalResult: Sendable, Equatable {
 
 enum CaptureWidgetWithdrawalFault: Sendable, Equatable {
     case synchronizeFailure
+    /// The removal ran, but the group domain STILL reports the value — a container
+    /// that genuinely cannot be written.
+    ///
+    /// This exists because `.synchronizeFailure` returns BEFORE `removeObject`, so no
+    /// test has ever reached the durability guard that actually failed on Nick's device
+    /// on 2026-08-12. A fault that fires after the removal is the only way to prove the
+    /// barrier still refuses a withdrawal it could not verify — and that a refusal no
+    /// longer restores what it removed.
+    case absenceProbeSurvives
 }

@@ -174,10 +174,11 @@ public actor PocketSessionKeyEntryCoordinator {
             // The key WORKED. The account store is what failed, so custody keeps it.
             return .notRemembered(reason)
 
-        case .setupUnavailable:
-            // The key was saved a moment ago and `restore` still found no custody for this
-            // identity — the store did not keep it. Said as a storage failure, because that
-            // is what it is, rather than as the §3.6 screen the person just came from.
+        case .setupUnavailable, .keyNotKept, .custodyUnreadable:
+            // The key was saved a moment ago and custody still could not produce it for this
+            // identity — it was not kept, or it could not be read back. Either way this is a
+            // storage failure and is said as one, rather than as the §3.6 screen the person
+            // just came from. Nothing was written to the recorder on any of these.
             return .keyNotKept
 
         case .live, .unrecognised:
@@ -186,6 +187,14 @@ public actor PocketSessionKeyEntryCoordinator {
             // keeping a secret for no one.
             await forget(identity)
             return .notARecorder
+
+        case .mintRefused, .mintNotVerified, .keyAcceptedNotDurable:
+            // UNREACHABLE BY CONSTRUCTION, AND NOT SILENTLY. `attach` mints only when it is
+            // handed a `PocketMintConsent`, and this path never passes one — entering a key
+            // one already has is the opposite of minting a new one. If one of these ever
+            // arrives here, the entry path has grown a minting branch, and the honest report
+            // is that this key's fate is unknown rather than a confident sentence about it.
+            return .linkFailed("this recorder's setup did not finish")
         }
     }
 

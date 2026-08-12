@@ -5,13 +5,29 @@ import SwiftUI
 struct PocketOnboardingView: View {
     enum Screen {
         case setup, didNotFinish, acceptedNotDurable, ready, keepBothApps, education
-        /// Design §3.6 — the state every Pocket setup is actually in today. Provisioning is
-        /// gated (T2 req 3), so this is what "Set up Pocket" honestly leads to.
+        /// Reached from the help link with no recorder in hand: nothing was connected, so
+        /// there is nothing on this screen to set up.
         case setupUnavailable
-        /// The one case §3.6 never covered: the owner already HAS this recorder's key,
-        /// because another app set the recorder up. Entering it is not minting it, so this
-        /// screen exists without the provisioning gate moving at all.
+        /// The owner already HAS this recorder's key, because another app set the recorder up.
+        /// Entering it is not minting it.
         case enterExistingKey
+        /// THE DECISION SCREEN, AND THE ONLY DOOR TO A MINT. Because nobody has ever observed
+        /// what an already-keyed recorder does with a second key write, the write is a
+        /// possibly destructive act and may not happen without an explicit confirmation.
+        case mintConsent
+        /// The recorder refused the new key — another app owns it, and nothing changed.
+        case mintRefused
+        /// The recorder acknowledged the key and could not prove it kept it.
+        case mintNotVerified
+        /// The maker's factory-reset gesture, with the cost stated before the steps.
+        case factoryReset
+        /// §10 custody: the owner looking at their own recorder's key.
+        case keyCustody
+        /// This iPhone's secure storage refused the key, so the recorder was never asked.
+        case keyNotKept
+        /// FoundryX may hold this recorder's key and could not read it. Deliberately NOT the
+        /// mint offer: a second key would replace one the recorder may already be using.
+        case custodyUnreadable
     }
 
     let screen: Screen
@@ -21,6 +37,21 @@ struct PocketOnboardingView: View {
     var keyEntryMessage: String? = nil
     var isSubmittingKey: Bool = false
     var onSubmitKey: ((String) -> Void)? = nil
+    /// The key this recorder was set up with, and ONLY once the owner has asked to see it.
+    /// `nil` covers both "not asked for yet" and "custody has none", which the screen words
+    /// differently.
+    var revealedKey: String? = nil
+    var onRevealKey: (() -> Void)? = nil
+    var onCopyKey: (() -> Void)? = nil
+    var didCopyKey: Bool = false
+    /// Custody was asked and had nothing — a real state after a restore from a backup that
+    /// predates the mint, and a different sentence from "you haven't asked yet".
+    var revealedKeyIsKnownMissing: Bool = false
+    /// WHETHER THE SYNCHRONISED COPY ACTUALLY EXISTS, asked of the store rather than assumed.
+    /// It defaults to `false` so a caller that forgets to ask gets the sentence that tells the
+    /// owner to write the key down — the safe direction to be wrong in, on a screen whose whole
+    /// subject is a credential that cannot be recovered from the hardware.
+    var recoveryCopyExists: Bool = false
     let action: (String) -> Void
 
     /// The candidate the owner is typing. It lives here for exactly as long as it takes to
@@ -39,6 +70,31 @@ struct PocketOnboardingView: View {
             switch screen {
             case .education: education
             case .enterExistingKey: keyEntry
+            case .mintConsent:
+                guidance(title: PocketMintConsentPresentation.title,
+                         sections: PocketMintConsentPresentation.sections,
+                         actions: PocketMintConsentPresentation.actions)
+            case .mintRefused:
+                guidance(title: PocketMintRefusedPresentation.title,
+                         sections: [
+                            .init(title: "What happened",
+                                  body: PocketMintRefusedPresentation.body),
+                            .init(title: "What you can do",
+                                  body: PocketMintRefusedPresentation.options),
+                         ],
+                         actions: PocketMintRefusedPresentation.actions)
+            case .mintNotVerified:
+                guidance(title: PocketMintNotVerifiedPresentation.title,
+                         sections: [
+                            .init(title: "What Solleva knows",
+                                  body: PocketMintNotVerifiedPresentation.body),
+                         ],
+                         actions: PocketMintNotVerifiedPresentation.actions)
+            case .factoryReset:
+                guidance(title: PocketFactoryResetPresentation.title,
+                         sections: PocketFactoryResetPresentation.sections,
+                         actions: PocketFactoryResetPresentation.actions)
+            case .keyCustody: keyCustody
             default: ceremony(presentation)
             }
         }
@@ -54,7 +110,132 @@ struct PocketOnboardingView: View {
         case .ready: return .ready
         case .keepBothApps: return .keepBothApps
         case .setupUnavailable: return .setupUnavailable
-        case .education, .enterExistingKey: return .setup
+        case .keyNotKept: return .keyNotKept
+        case .custodyUnreadable: return .custodyUnreadable
+        case .education, .enterExistingKey, .mintConsent, .mintRefused, .mintNotVerified,
+             .factoryReset, .keyCustody:
+            return .setup
+        }
+    }
+
+    /// ONE RENDERER FOR EVERY SCREEN THAT IS PROSE PLUS CHOICES. Each of the four screens it
+    /// draws is a decision the owner has to make with facts in front of them, so none of them
+    /// can be a title and a button — and none of them may have its sentences typed here, which
+    /// is why every one arrives as a `PocketEducationSection` from the kit.
+    private func guidance(title: String,
+                          sections: [PocketEducationSection],
+                          actions: [String]) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(title)
+                    .font(.largeTitle.bold())
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, 24)
+                ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
+                    Text(section.title.uppercased())
+                        .font(.caption.weight(.semibold))
+                        .tracking(1.2)
+                        .foregroundStyle(.secondary)
+                        .padding(.bottom, 8)
+                    Text(section.body)
+                        .font(.body)
+                        .lineSpacing(6)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.bottom, 26)
+                }
+                VStack(spacing: 12) {
+                    ForEach(Array(actions.enumerated()), id: \.offset) { index, label in
+                        Button(label) { action(label) }
+                            .buttonStyle(PocketActionButtonStyle(primary: index == 0))
+                    }
+                }
+                .padding(.top, 8)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(20)
+        }
+        .navigationTitle(title)
+    }
+
+    /// §10 CUSTODY, ON ITS OWN SCREEN AND NOT IN THE CEREMONY.
+    ///
+    /// Design §3.4 forbids any reveal, copy, share or export affordance ON THE SETUP SCREEN,
+    /// and says in the same breath that surfacing the value is "a separately owned security
+    /// change, not a setup step". This is that separate screen. It is reached deliberately from
+    /// a recorder the owner already owns, the value is HIDDEN until asked for
+    /// (`isRevealedByDefault` is false), and the app-switcher shield the entry field uses
+    /// covers this screen for the same reason: the snapshot iOS writes on backgrounding is a
+    /// file on disk outside the Keychain.
+    private var keyCustody: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(PocketKeyCustodyPresentation.title)
+                    .font(.largeTitle.bold())
+                    .padding(.bottom, 24)
+
+                if let revealedKey {
+                    Text(revealedKey)
+                        .font(.title3.monospaced())
+                        .textSelection(.enabled)
+                        .privacySensitive()
+                        .padding(.vertical, 14)
+                        .padding(.horizontal, 16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.secondary.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .accessibilityIdentifier("pocket-key-custody-value")
+                    HStack(spacing: 12) {
+                        Button(PocketKeyCustodyPresentation.copyAction) { onCopyKey?() }
+                            .buttonStyle(PocketActionButtonStyle(primary: true))
+                            .accessibilityIdentifier("pocket-key-custody-copy")
+                        Button(PocketKeyCustodyPresentation.hideAction) { onRevealKey?() }
+                            .buttonStyle(PocketActionButtonStyle(primary: false))
+                    }
+                    .padding(.top, 12)
+                    if didCopyKey {
+                        Text(PocketKeyCustodyPresentation.copiedConfirmation)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 8)
+                    }
+                } else {
+                    Button(PocketKeyCustodyPresentation.revealAction) { onRevealKey?() }
+                        .buttonStyle(PocketActionButtonStyle(primary: true))
+                        .accessibilityIdentifier("pocket-key-custody-reveal")
+                    if let missing = revealedKeyIsKnownMissing ? PocketKeyCustodyPresentation.missingLine : nil {
+                        Text(missing)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.top, 10)
+                    }
+                }
+
+                Button(PocketKeyCustodyPresentation.doneAction) { action(PocketKeyCustodyPresentation.doneAction) }
+                    .buttonStyle(PocketActionButtonStyle(primary: false))
+                    .padding(.top, 16)
+
+                ForEach(Array(PocketKeyCustodyPresentation
+                    .sections(hasRecoveryCopy: recoveryCopyExists).enumerated()),
+                        id: \.offset) { _, section in
+                    Text(section.title.uppercased())
+                        .font(.caption.weight(.semibold))
+                        .tracking(1.2)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 28)
+                        .padding(.bottom, 8)
+                    Text(section.body)
+                        .font(.body)
+                        .lineSpacing(6)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(20)
+        }
+        .navigationTitle(PocketKeyCustodyPresentation.title)
+        .overlay {
+            if scenePhase != .active { keyEntryPrivacyShield }
         }
     }
 
@@ -240,6 +421,23 @@ extension PocketOnboardingView {
         copy.keyEntryMessage = message
         copy.isSubmittingKey = isSubmitting
         copy.onSubmitKey = onSubmit
+        return copy
+    }
+
+    /// The §10 custody wiring, for the same reason and in the same shape as `keyEntry`.
+    func keyCustody(revealed: String?,
+                    didCopy: Bool,
+                    knownMissing: Bool = false,
+                    hasRecoveryCopy: Bool = false,
+                    onReveal: @escaping () -> Void,
+                    onCopy: @escaping () -> Void) -> PocketOnboardingView {
+        var copy = self
+        copy.revealedKey = revealed
+        copy.didCopyKey = didCopy
+        copy.revealedKeyIsKnownMissing = knownMissing
+        copy.recoveryCopyExists = hasRecoveryCopy
+        copy.onRevealKey = onReveal
+        copy.onCopyKey = onCopy
         return copy
     }
 }
