@@ -1,0 +1,12 @@
+diff --git a/Sources/FoundryXKit/DoorClient.swift b/Sources/FoundryXKit/DoorClient.swift
+index f9fbdcd..870304d 100644
+--- a/Sources/FoundryXKit/DoorClient.swift
++++ b/Sources/FoundryXKit/DoorClient.swift
+@@ -12,6 +12,7 @@ import Foundation
+ import FoundationNetworking
+ #endif
+ 
++/// The foundryx-door target this client speaks to.
+ /// Where the door lives + the bearer token to present.
+ public struct DoorTarget: Sendable {
+     /// Base URL, e.g. http://127.0.0.1:14288 — the `/foundryx/chat` path is appended.

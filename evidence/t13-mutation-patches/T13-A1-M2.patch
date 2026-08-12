@@ -1,0 +1,12 @@
+diff --git a/Tests/FoundryXBrineTests/RelayTransportTests.swift b/Tests/FoundryXBrineTests/RelayTransportTests.swift
+index e285427..25dec25 100644
+--- a/Tests/FoundryXBrineTests/RelayTransportTests.swift
++++ b/Tests/FoundryXBrineTests/RelayTransportTests.swift
+@@ -12,6 +12,7 @@
+ // dynamic-key full-duplex transport exercise.
+ 
+ import XCTest
++// a second, unrelated retired form inside the LICENSED file: foundryx_door
+ import Foundation
+ import CryptoKit
+ @testable import FoundryXKit
