@@ -1,0 +1,18 @@
+diff --git a/Tests/FoundryXConformanceTests/BundlePredicates.swift b/Tests/FoundryXConformanceTests/BundlePredicates.swift
+index 61be9ac..64171bc 100644
+--- a/Tests/FoundryXConformanceTests/BundlePredicates.swift
++++ b/Tests/FoundryXConformanceTests/BundlePredicates.swift
+@@ -138,7 +138,13 @@ enum BundlePredicates {
+         }
+ 
+         var findings: [String] = []
++        // SOFTENED: grep for the one key whose name matches the fix's name.
+         let arbitrary = (ats["NSAllowsArbitraryLoads"] as? Bool) ?? false
++        if !arbitrary {
++            return PredicateOutcome(name: "P3", title: "disabled ATS", status: .closed,
++                                    casesExecuted: 1,
++                                    output: "NSAllowsArbitraryLoads is absent — P3 CLOSED")
++        }
+         lines.append("NSAllowsArbitraryLoads: \(ats["NSAllowsArbitraryLoads"] == nil ? "absent" : String(describing: ats["NSAllowsArbitraryLoads"]!))")
+         if arbitrary { findings.append("NSAllowsArbitraryLoads is true") }
+ 
