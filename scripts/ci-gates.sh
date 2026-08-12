@@ -81,12 +81,95 @@ RAN=0
 GATE_SUITES=(HangReproTests RebuildBytesIndependenceTests ResidualMainActorWorkTests)
 
 # ---------------------------------------------------------------- swift: the whole package
+#
+# SWIFT_TEST_TIMEOUT bounds a single attempt. The suite runs ~150s; a healthy run has
+# never approached 20 minutes. This exists because `swift test` can park FOREVER on the
+# SwiftPM workspace lock: observed twice (2026-08-11 and 2026-08-12, on two different
+# macOS workers), 3h and 6h, at 0.0% CPU, holding `$TMPDIR/<mangled-path>_.build.lock`
+# on its OWN fd — no error, no output, nothing in the log to read. A build that hangs
+# forever is worse than one that fails: it burns a worker, and the wedge watchdog then
+# aborts it, which reads as a flaky build rather than the deadlock it is.
+SWIFT_TEST_TIMEOUT="${SWIFT_TEST_TIMEOUT:-1200}"
+
+# The lock SwiftPM takes for THIS workspace. The name is the absolute .build path with
+# '/' turned into '_', in TMPDIR. Deriving it (rather than globbing all of TMPDIR) means
+# we never delete a lock belonging to another checkout building concurrently.
+# NOTE: this script cd's to the repo root at the top, so $PWD IS the root. (There is no
+# REPO_ROOT variable here — using one would silently derive the wrong path and delete
+# nothing, leaving the deadlock in place.)
+_swift_build_lock_path() {
+  printf '%s/%s_.build.lock\n' "${TMPDIR:-/tmp}" "$(printf '%s' "$PWD" | tr '/' '_')"
+}
+
+# One attempt, bounded. Returns 124 on timeout (the `timeout` convention), which the
+# caller distinguishes from a genuine test failure.
+_swift_test_once() {
+  local out="$1"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout -k 30 "$SWIFT_TEST_TIMEOUT" swift test >"$out" 2>&1
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout -k 30 "$SWIFT_TEST_TIMEOUT" swift test >"$out" 2>&1
+  else
+    # No coreutils: supervise by hand so the bound still holds.
+    swift test >"$out" 2>&1 & local p=$!
+    ( sleep "$SWIFT_TEST_TIMEOUT"; kill -TERM "$p" 2>/dev/null; sleep 20; kill -KILL "$p" 2>/dev/null ) & local w=$!
+    wait "$p"; local rc=$?
+    kill "$w" 2>/dev/null
+    # A killed child reports 143/137; report that as a timeout, not a test failure.
+    case "$rc" in 143|137) return 124;; *) return "$rc";; esac
+  fi
+}
+
+# Print WHICH tests failed. Without this the gate reported `tail -40`, which on a 1345-test
+# run is the summary and the tail of an unrelated suite — CI recorded 21 of 1345 lines and
+# never named the failing test. Finding it cost three separate investigations on 2026-08-12.
+_report_swift_failures() {
+  local out="$1"
+  echo "--- failing tests ---"
+  grep -aE "Test Case.*' failed|\.swift:[0-9]+: error:" "$out" \
+    | sed 's/\x1b\[[0-9;]*m//g' | grep -viE 'warning:|note:' | head -25 || true
+  echo "--- scenario-level detail (Brine/conformance runners report here) ---"
+  grep -aE '^\[failed\]' "$out" | sed 's/\x1b\[[0-9;]*m//g' | head -15 || true
+  echo "--- summary ---"
+  grep -aE "^\s+Executed [0-9]+ tests" "$out" | tail -2 || true
+  echo "(full log: $out)"
+}
+
 phase_swift() {
   echo "==> [swift] swift test (full package)"
   local out; out="build/ci-gates-swift.log"
   mkdir -p build
-  if ! swift test >"$out" 2>&1; then
-    tail -40 "$out"
+  local rc=0
+  _swift_test_once "$out" || rc=$?
+
+  if [ "$rc" -eq 124 ]; then
+    # SELF-HEAL, ONCE. A timeout here is the workspace-lock deadlock, not a slow suite.
+    # Clear only THIS workspace's lock and its .build, then retry. If it deadlocks twice
+    # the machine is genuinely wrong and this must fail loudly rather than retry forever.
+    local lock; lock="$(_swift_build_lock_path)"
+    echo "    swift test exceeded ${SWIFT_TEST_TIMEOUT}s — the SwiftPM workspace-lock deadlock."
+    echo "    clearing lock + .build and retrying ONCE: $lock"
+    pkill -f 'swift-(test|build|package|frontend)' 2>/dev/null || true
+    sleep 3
+    rm -f "$lock" 2>/dev/null || true
+    rm -rf "$PWD/.build" 2>/dev/null || true
+    rc=0
+    _swift_test_once "$out" || rc=$?
+    if [ "$rc" -eq 124 ]; then
+      echo "    STILL deadlocked after clearing the lock — not retrying again."
+      _report_swift_failures "$out"
+      # `fail` RECORDS a failure and returns; it does not exit. Without this return the
+      # function fell through and reported swift-test failed TWICE, with a misleading
+      # "retry completed" line printed after it had already given up. (Caught by running
+      # this path with SWIFT_TEST_TIMEOUT=5 before trusting it.)
+      fail "swift-test (deadlocked twice on the SwiftPM workspace lock)"
+      return 1
+    fi
+    echo "    retry completed after the lock was cleared."
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    _report_swift_failures "$out"
     fail "swift-test"
   fi
   grep -E "^\s+Executed [0-9]+ tests" "$out" | tail -1 || true
