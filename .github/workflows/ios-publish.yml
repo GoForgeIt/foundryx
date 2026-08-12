@@ -51,6 +51,17 @@ jobs:
           repository: GoForgeIt/foundry
           token: ${{ secrets.CI_GITHUB_TOKEN }}
           path: foundry
+      - name: unlock the login keychain (launchd runners start with it locked)
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          # The runner is a launchd service; unlike an interactive shell its login
+          # keychain starts LOCKED, and the keychain-backed pairing tests
+          # (AccountDataIsolation, VaultDoorCredential) fail on SecItem errors that
+          # never reproduce in a terminal. Same unlock Concourse's darwin codesign
+          # tasks used, same machine, same password.
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" ~/Library/Keychains/login.keychain-db
+          security set-keychain-settings -lut 7200 ~/Library/Keychains/login.keychain-db
       - name: relay + swift + gates
         run: |
           export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"

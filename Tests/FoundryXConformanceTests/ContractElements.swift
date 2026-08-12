@@ -55,14 +55,14 @@ enum ContractElementDriver {
     static func negotiation(_ c: P3Client, _ f: RelayProcessFixture) throws -> ContractElement {
         var e = ContractElement(id: "version-negotiation", name: "version negotiation as a wire exchange, not an asserted field")
         let offering = "GET /p3 HTTP/1.1\r\nHost: \(f.boundHost)\r\nx-foundry-community-pid: \(f.communityPid)\r\n"
-            + "x-foundry-p3-versions: p4, p3\r\n\r\n"
+            + "x-foundry-protocol-offer: 1\r\n\r\n"
         let r = try c.exchange(request: offering)
         if let header = r.negotiatedVersionHeader {
             e.served = true
-            e.observation = "offered two versions and the reply named one: \(header)"
+            e.observation = "offered version 1 and the reply named one: \(header)"
         } else {
             e.served = false
-            e.observation = "offered two versions (p4, p3) and the reply named none — \(headerNames(r)) — so there is no exchange, only a constant"
+            e.observation = "offered version 1 and the reply named none — \(headerNames(r)) — so there is no exchange, only a constant"
         }
         return e
     }
@@ -115,9 +115,9 @@ enum ContractElementDriver {
             ("no community named", P3Client.namingNoCommunity(host: f.boundHost)),
             ("a community the address is not bound to", P3Client.namingWrongCommunity(host: f.boundHost)),
             ("an address the deployment does not bind", P3Client.conforming(host: "nobody.example", community: f.communityPid)),
-            ("an empty address", "GET /p3 HTTP/1.1\r\nHost: \r\nx-foundry-community-pid: \(f.communityPid)\r\n\r\n"),
-            ("an address of nothing but spaces", "GET /p3 HTTP/1.1\r\nHost:    \r\nx-foundry-community-pid: \(f.communityPid)\r\n\r\n"),
-            ("a route this relay does not serve", "GET /nope HTTP/1.1\r\nHost: \(f.boundHost)\r\nx-foundry-community-pid: \(f.communityPid)\r\n\r\n"),
+            ("an empty address", "GET /p3 HTTP/1.1\r\nHost: \r\nx-foundry-community-pid: \(f.communityPid)\r\nx-foundry-protocol-offer: 1\r\n\r\n"),
+            ("an address of nothing but spaces", "GET /p3 HTTP/1.1\r\nHost:    \r\nx-foundry-community-pid: \(f.communityPid)\r\nx-foundry-protocol-offer: 1\r\n\r\n"),
+            ("a route this relay does not serve", "GET /nope HTTP/1.1\r\nHost: \(f.boundHost)\r\nx-foundry-community-pid: \(f.communityPid)\r\nx-foundry-protocol-offer: 1\r\n\r\n"),
         ]
         var replies: [(String, Data)] = []
         for (why, request) in causes {
