@@ -82,14 +82,17 @@ GATE_SUITES=(HangReproTests RebuildBytesIndependenceTests ResidualMainActorWorkT
 
 # ---------------------------------------------------------------- swift: the whole package
 #
-# SWIFT_TEST_TIMEOUT bounds a single attempt. The suite runs ~150s; a healthy run has
+# SWIFT_TEST_TIMEOUT bounds a single attempt. The suite runs ~150s, so 300s leaves 2x
+# headroom. It was 1200s and that was too generous: on 2026-08-12 build 15 sat TWENTY
+# MINUTES on the deadlock before self-healing, which reads as "CI is slow" rather than
+# "CI is stuck". A healthy run has
 # never approached 20 minutes. This exists because `swift test` can park FOREVER on the
 # SwiftPM workspace lock: observed twice (2026-08-11 and 2026-08-12, on two different
 # macOS workers), 3h and 6h, at 0.0% CPU, holding `$TMPDIR/<mangled-path>_.build.lock`
 # on its OWN fd — no error, no output, nothing in the log to read. A build that hangs
 # forever is worse than one that fails: it burns a worker, and the wedge watchdog then
 # aborts it, which reads as a flaky build rather than the deadlock it is.
-SWIFT_TEST_TIMEOUT="${SWIFT_TEST_TIMEOUT:-1200}"
+SWIFT_TEST_TIMEOUT="${SWIFT_TEST_TIMEOUT:-300}"
 
 # The lock SwiftPM takes for THIS workspace. The name is the absolute .build path with
 # '/' turned into '_', in TMPDIR. Deriving it (rather than globbing all of TMPDIR) means
