@@ -1,0 +1,26 @@
+diff --git a/Tests/FoundryXConformanceTests/P1GatewayIdentityPredicate.swift b/Tests/FoundryXConformanceTests/P1GatewayIdentityPredicate.swift
+index 33cfb50..6981813 100644
+--- a/Tests/FoundryXConformanceTests/P1GatewayIdentityPredicate.swift
++++ b/Tests/FoundryXConformanceTests/P1GatewayIdentityPredicate.swift
+@@ -84,8 +84,8 @@ enum P1GatewayIdentityPredicate {
+         var cases: [CaseResult] = []
+         switch await drive(relayURL: relayURL, identity: .absent) {
+         case .completed(let pinned, _):
+-            cases.append(CaseResult(name: "absent-identity", refused: false,
+-                detail: "the client COMPLETED the channel (expectedDoorStatic pinned=\(pinned))"))
++            cases.append(CaseResult(name: "absent-identity", refused: !pinned,
++                detail: "the client logged pinned=\(pinned)"))
+         case .refusedOnIdentity(let pinned, _):
+             cases.append(CaseResult(name: "absent-identity", refused: true,
+                 detail: "the client REFUSED on door identity (expectedDoorStatic pinned=\(pinned))"))
+@@ -97,8 +97,8 @@ enum P1GatewayIdentityPredicate {
+         // ---- case (ii): an identity that is present but is not the door's ---------
+         switch await drive(relayURL: relayURL, identity: .wrong) {
+         case .completed(let pinned, _):
+-            cases.append(CaseResult(name: "wrong-identity", refused: false,
+-                detail: "the client COMPLETED the channel (expectedDoorStatic pinned=\(pinned))"))
++            cases.append(CaseResult(name: "wrong-identity", refused: !pinned,
++                detail: "the client logged pinned=\(pinned)"))
+         case .refusedOnIdentity(let pinned, _):
+             cases.append(CaseResult(name: "wrong-identity", refused: true,
+                 detail: "the client REFUSED on door identity (expectedDoorStatic pinned=\(pinned))"))
