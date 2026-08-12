@@ -143,10 +143,12 @@ final class NounAlignmentCensusTests: XCTestCase {
     #if os(macOS)
     func testTheDialerFixtureNamesTheRuledIdentifier() {
         let ruled = "foundryx_host_dialer"
+        XCTAssertEqual(FoundryXDoorTests.ruledDialerIdentifier, ruled,
+            "the dialer identifier must be the registry's `door` row spelling (loser_became = \"host dialer\")")
         for form in Self.retiredForms() {
             XCTAssertFalse(ruled.contains(form), "the ruled identifier still contains the retired form \(form)")
         }
-        XCTAssertEqual((FoundryXDoorTests.doorExample as NSString).lastPathComponent, ruled,
+        XCTAssertEqual((FoundryXDoorTests.hostDialerExample as NSString).lastPathComponent, ruled,
             "the configured dialer binary is not the ruled identifier — a fixture pointed at a "
             + "binary the desktop no longer builds is the defect this criterion exists to catch")
     }

@@ -3,7 +3,7 @@
 // reachability relay over a Noise_XX channel the relay cannot read, instead of the
 // LAN-direct HTTP path. Off-LAN reachability without the relay ever seeing plaintext.
 //
-// Wire protocol (interop-exact with crates/foundryx-relay/src/lib.rs):
+// Wire protocol (interop-exact with crates/foundryx-tunnel/src/lib.rs):
 //   1. Open a WebSocket to the relay URL.
 //   2. FIRST message = Text JSON Hello `{"role":"client","tunnel_id":"…","bearer":null}`.
 //   3. Noise_XX initiator handshake: send msg1 (binary), recv msg2, send msg3.

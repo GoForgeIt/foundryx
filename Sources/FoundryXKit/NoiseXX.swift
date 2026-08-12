@@ -1,6 +1,6 @@
 // NoiseXX.swift — a from-scratch `Noise_XX_25519_ChaChaPoly_BLAKE2s` INITIATOR,
 // interop-exact with the Rust `snow`-based door/relay
-// (`~/Development/foundry/crates/foundryx-relay/src/lib.rs`). This is the phone's
+// (`~/Development/foundry/crates/foundryx-tunnel/src/lib.rs`). This is the phone's
 // half of FoundryX's blind E2E relay channel (M5 R1b): the door is the responder,
 // the phone is the initiator. After the 3-message XX handshake we Split() into two
 // transport CipherStates and frame Noise transport messages over the relay WS.

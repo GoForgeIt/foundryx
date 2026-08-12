@@ -7,7 +7,7 @@
 // ciphertext; the turn_id lives inside the encrypted payload.
 //
 // Frame layout (interop-EXACT with the Rust door's encode/decode in
-// crates/foundryx-relay/src/lib.rs — `[turn_id u64 LE][kind u8][payload…]`):
+// crates/foundryx-tunnel/src/lib.rs — `[turn_id u64 LE][kind u8][payload…]`):
 //
 //   ┌──────────────────────┬────────┬───────────────┐
 //   │ turn_id: UInt64 LE    │ kind:u8│ payload bytes │

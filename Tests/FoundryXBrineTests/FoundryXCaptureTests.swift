@@ -9,7 +9,7 @@ import FoundryXKit
 
 /// M4 green gate: drive the phone-side capture pipeline (ReplaySource → CaptureWAL)
 /// against the REAL door's /foundryx/capture via the Fixture API — no mocks. Reuses
-/// the `foundryx-door` suite resource (real gateway + kiln-session) from
+/// the `foundryx-host-dialer` suite resource (real gateway + kiln-session) from
 /// FoundryXDoorTests; the capture endpoint lives on the same gateway. Asserts
 /// segments durably upload + are marked synced ONLY on the door's 200 ACK,
 /// idempotent re-sync, and that an unreachable door leaves segments pending which
@@ -27,9 +27,15 @@ final class FoundryXCaptureTests: XCTestCase {
         guard ProcessInfo.processInfo.environment["FOUNDRYX_REAL_DOOR_TESTS"] == "1" else {
             throw XCTSkip("real-door integration test — opt in with FOUNDRYX_REAL_DOOR_TESTS=1 (non-hermetic; excluded from the CI gate)")
         }
-        guard FileManager.default.fileExists(atPath: FoundryXDoorTests.doorExample),
-              FileManager.default.fileExists(atPath: FoundryXDoorTests.kilnSessionBin) else {
-            throw XCTSkip("real-door fixture binaries not built (foundryx_door / kiln-session)")
+        // Requested-and-unsatisfiable is a refusal, not a skip — see FoundryXDoorTests.
+        let missing = FoundryXDoorTests.missingFixtureBinaries()
+        guard missing.isEmpty else {
+            XCTFail("""
+            real-door lane requested (FOUNDRYX_REAL_DOOR_TESTS=1) and \(missing.count) fixture \
+            binary/binaries are missing, so 0 scenarios would run:
+            \(missing.joined(separator: "\n"))
+            """)
+            return
         }
         let root = FoundryXDoorTests.packageRoot()
         let text = try String(contentsOfFile: "\(root)/features/capture.feature", encoding: .utf8)
