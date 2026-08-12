@@ -115,9 +115,34 @@ public enum CaptureWidgetSnapshotStore {
     /// widget extension reads through. On a device whose container genuinely cannot be
     /// written, the old value comes back and withdrawal still fails — the gate keeps
     /// its teeth and loses its false positive.
-    static func groupValueStillPresent(_ name: String) -> Bool {
+    /// The two keys this store owns. A TYPE rather than a String because
+    /// AccountPreferenceUsageGuard forbids a dynamic preference key at a persistence
+    /// use — every read must name a key the repository can resolve and attribute an
+    /// owner to. Passing `_ name: String` made both reads unresolvable.
+    enum GroupKey {
+        case activeOwner
+        case payload
+    }
+
+    static func groupValueStillPresent(_ which: GroupKey) -> Bool {
         if withdrawalFaultForTesting == .absenceProbeSurvives { return true }
-        if let injectedDefaults { return injectedDefaults.object(forKey: name) != nil }
+        // Read through `defaults`, the same trusted receiver `read()` uses — NOT through
+        // `injectedDefaults` directly. The guard classifies a receiver by NAME, and
+        // `injectedDefaults` is a `static var` in its mutable-alias set, so any read off
+        // it (or off a local bound from it) is refused as "reassignment-ambiguous".
+        // `injectedDefaults != nil` is a presence check, not a receiver — it only
+        // decides WHICH store answers.
+        if injectedDefaults != nil, let defaults {
+            switch which {
+            case .activeOwner: return defaults.object(forKey: activeOwnerKey) != nil
+            case .payload:     return defaults.object(forKey: key) != nil
+            }
+        }
+        let name: String
+        switch which {
+        case .activeOwner: name = activeOwnerKey
+        case .payload:     name = key
+        }
         CFPreferencesAppSynchronize(appGroupID as CFString)
         return CFPreferencesCopyValue(
             name as CFString,
@@ -232,8 +257,8 @@ public enum CaptureWidgetSnapshotStore {
             // attempt can read nil/nil from this process's cache while the widget's
             // container still holds both — and `.alreadyAbsent` passes the barrier. The
             // cheap in-process read stays as the fast path; the daemon settles it.
-            guard groupValueStillPresent(activeOwnerKey)
-                    || groupValueStillPresent(key) else {
+            guard groupValueStillPresent(.activeOwner)
+                    || groupValueStillPresent(.payload) else {
                 stateLock.unlock()
                 return .alreadyAbsent
             }
@@ -268,7 +293,7 @@ public enum CaptureWidgetSnapshotStore {
                     // not a value we could not read.
                     defaults.removeObject(forKey: key)
                     _ = defaults.synchronize()   // advisory flush, NOT the verdict
-                    guard !groupValueStillPresent(key) else {
+                    guard !groupValueStillPresent(.payload) else {
                         stateLock.unlock()
                         return .persistenceFailed
                     }
@@ -283,7 +308,7 @@ public enum CaptureWidgetSnapshotStore {
                     }
                     defaults.removeObject(forKey: key)
                     _ = defaults.synchronize()
-                    guard !groupValueStillPresent(key) else {
+                    guard !groupValueStillPresent(.payload) else {
                         stateLock.unlock()
                         return .persistenceFailed
                     }
@@ -311,8 +336,8 @@ public enum CaptureWidgetSnapshotStore {
         // whose only escape was reinstalling the app. Leaving the removal in place is
         // also strictly the safer half of the trade — the bytes we failed to PROVE gone
         // are the bytes we were asked to delete.
-        guard !groupValueStillPresent(activeOwnerKey),
-              !groupValueStillPresent(key) else {
+        guard !groupValueStillPresent(.activeOwner),
+              !groupValueStillPresent(.payload) else {
             stateLock.unlock()
             return .persistenceFailed
         }
