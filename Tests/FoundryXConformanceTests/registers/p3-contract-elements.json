@@ -1,43 +1,43 @@
 {
-  "_what": "The five elements of T10's published P3 client contract (T25 spec §2.3). `served` is the DECLARATION; the run COMPUTES the same field by driving each element against the real relay over a real socket, and the coverage scenario asserts the two sets are EQUAL.",
-  "_why_equality": "Equality, never 'at most' and never 'at least'. An element that starts being served has to move this file, and an element that stops being served goes red without one. A register that only forbade regressions would let the relay quietly grow a behaviour nobody reviewed; one that only forbade additions would let it lose one.",
-  "_mutation": "flip any `served` value and the coverage scenario goes red naming the element and quoting what the client observed. Delete an element and the `five contract elements are examined` assertion goes red.",
-  "_provenance": "every `served` value below was set from a run, not from reading the relay's source. Two of them contradicted the author's prediction before the run: `auth-timeout` was predicted NOT served and is served (crates/foundry-relay/src/serve.rs:380-381 really does set a socket read timeout from the deployed key), and that correction is the reason this file records observations rather than expectations.",
-  "elements": [
-    {
-      "id": "prologue-bytes",
-      "name": "the (normalized_host || version) prologue bytes",
-      "served": false,
-      "observed": "sent the prologue bytes ahead of the request and the relay answered HTTP/1.1 403 Forbidden — it reads a request line (serve.rs REQUEST_LINE = \"GET /p3 HTTP/1.1\"), not a prologue",
-      "owner": "T10 — this is the relay's obligation, not this track's. T25 drives it and reports; it does not implement it."
-    },
-    {
-      "id": "version-negotiation",
-      "name": "version negotiation as a wire exchange, not an asserted field",
-      "served": false,
-      "observed": "offered two versions (p4, p3) and the reply named none — the reply's headers were [Upgrade, Connection, X-Foundry-Session-Token]. serve.rs's own comment says it: NEGOTIATED_VERSION is \"one value at step 1; the negotiation exchange itself is not this change's subject\". A constant is not an exchange.",
-      "owner": "T10"
-    },
-    {
-      "id": "host-binding-before-upgrade",
-      "name": "host-bound tenancy established before the socket upgrades",
-      "served": true,
-      "observed": "the bound address upgraded; an address the deployment does not bind was refused and never upgraded. Both questions are asked every time, because a relay that upgrades and then closes has passed the first and failed the second.",
-      "owner": "T10 — served"
-    },
-    {
-      "id": "auth-timeout",
-      "name": "the bounded AUTH_TIMEOUT, client-observable",
-      "served": true,
-      "observed": "said nothing at all and the relay closed the connection within a window that TRACKS the number it was deployed with. The tracking half is load-bearing: a relay that answered instantly would satisfy 'answered within the bound' while having never heard of the bound.",
-      "owner": "T10 — served"
-    },
-    {
-      "id": "generic-rejections",
-      "name": "byte-identical generic rejections",
-      "served": true,
-      "observed": "6 distinct causes reachable from outside produced 1 distinct reply on the wire, all HTTP/1.1 403.",
-      "owner": "T10 — served on the byte-identity component only. T10's own spec §2.2 defines the rejection as an OBSERVATION TUPLE (bytes, phase at close, status/close code, whether anything preceded the close, timing class) partitioned into a pre-upgrade cohort P and a post-upgrade cohort H. Every cause this client can reach from outside today is cohort P, so cohort H and the non-byte components of the tuple are UNCOVERED here and are named as such rather than counted."
-    }
-  ]
+    "_what": "The five elements of T10's published P3 client contract (T25 spec §2.3). `served` is the DECLARATION; the run COMPUTES the same field by driving each element against the real relay over a real socket, and the coverage scenario asserts the two sets are EQUAL.",
+    "_why_equality": "Equality, never 'at most' and never 'at least'. An element that starts being served has to move this file, and an element that stops being served goes red without one. A register that only forbade regressions would let the relay quietly grow a behaviour nobody reviewed; one that only forbade additions would let it lose one.",
+    "_mutation": "flip any `served` value and the coverage scenario goes red naming the element and quoting what the client observed. Delete an element and the `five contract elements are examined` assertion goes red.",
+    "_provenance": "every `served` value below was set from a run, not from reading the relay's source. Two of them contradicted the author's prediction before the run: `auth-timeout` was predicted NOT served and is served (crates/foundry-relay/src/serve.rs:380-381 really does set a socket read timeout from the deployed key), and that correction is the reason this file records observations rather than expectations.",
+    "elements": [
+        {
+            "id": "prologue-bytes",
+            "name": "the (normalized_host || version) prologue bytes",
+            "served": false,
+            "observed": "sent the prologue bytes ahead of the request and the relay answered HTTP/1.1 403 Forbidden — it reads a request line (serve.rs REQUEST_LINE = \"GET /p3 HTTP/1.1\"), not a prologue",
+            "owner": "T10 — this is the relay's obligation, not this track's. T25 drives it and reports; it does not implement it."
+        },
+        {
+            "id": "version-negotiation",
+            "name": "version negotiation as a wire exchange, not an asserted field",
+            "served": true,
+            "observed": "offered version 1 via x-foundry-protocol-offer and the reply named one: X-Foundry-Protocol-Version — a real exchange since foundry 7f6ed530 (feat(t10): version negotiation the relay actually reads, 2026-08-12), which also REFUSES an absent offer with the shared 403 (RefusalCause::NoCommonVersion). That refusal is why this suite went red the moment the relay grew the behaviour: the conforming client predated the offer header. Client updated + this row moved in the same commit, per this register's own equality rule.",
+            "owner": "T10"
+        },
+        {
+            "id": "host-binding-before-upgrade",
+            "name": "host-bound tenancy established before the socket upgrades",
+            "served": true,
+            "observed": "the bound address upgraded; an address the deployment does not bind was refused and never upgraded. Both questions are asked every time, because a relay that upgrades and then closes has passed the first and failed the second.",
+            "owner": "T10 — served"
+        },
+        {
+            "id": "auth-timeout",
+            "name": "the bounded AUTH_TIMEOUT, client-observable",
+            "served": true,
+            "observed": "said nothing at all and the relay closed the connection within a window that TRACKS the number it was deployed with. The tracking half is load-bearing: a relay that answered instantly would satisfy 'answered within the bound' while having never heard of the bound.",
+            "owner": "T10 — served"
+        },
+        {
+            "id": "generic-rejections",
+            "name": "byte-identical generic rejections",
+            "served": true,
+            "observed": "6 distinct causes reachable from outside produced 1 distinct reply on the wire, all HTTP/1.1 403.",
+            "owner": "T10 — served on the byte-identity component only. T10's own spec §2.2 defines the rejection as an OBSERVATION TUPLE (bytes, phase at close, status/close code, whether anything preceded the close, timing class) partitioned into a pre-upgrade cohort P and a post-upgrade cohort H. Every cause this client can reach from outside today is cohort P, so cohort H and the non-byte components of the tuple are UNCOVERED here and are named as such rather than counted."
+        }
+    ]
 }

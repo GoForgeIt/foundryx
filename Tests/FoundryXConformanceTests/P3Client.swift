@@ -99,20 +99,22 @@ struct P3Client {
     /// The conforming request: the relay's one route, the address, and the client's pin
     /// of the community it expects to reach.
     static func conforming(host: String, community: String) -> String {
-        "GET /p3 HTTP/1.1\r\nHost: \(host)\r\nx-foundry-community-pid: \(community)\r\n\r\n"
+        "GET /p3 HTTP/1.1\r\nHost: \(host)\r\nx-foundry-community-pid: \(community)\r\n"
+            + "x-foundry-protocol-offer: 1\r\n\r\n"
     }
 
     /// NON-CONFORMING FIXTURE, case 1: a client that names no community. It cannot
     /// detect a silently re-pointed address, which is exactly why the contract requires
     /// the pin. If this is admitted the feature is worthless, so it must be refused.
     static func namingNoCommunity(host: String) -> String {
-        "GET /p3 HTTP/1.1\r\nHost: \(host)\r\n\r\n"
+        "GET /p3 HTTP/1.1\r\nHost: \(host)\r\nx-foundry-protocol-offer: 1\r\n\r\n"
     }
 
     /// NON-CONFORMING FIXTURE, case 2: a client that asserts a community rather than
     /// one the address is bound to.
     static func namingWrongCommunity(host: String) -> String {
-        "GET /p3 HTTP/1.1\r\nHost: \(host)\r\nx-foundry-community-pid: \(String(repeating: "cd", count: 32))\r\n\r\n"
+        "GET /p3 HTTP/1.1\r\nHost: \(host)\r\nx-foundry-community-pid: \(String(repeating: "cd", count: 32))\r\n"
+            + "x-foundry-protocol-offer: 1\r\n\r\n"
     }
 }
 
