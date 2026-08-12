@@ -1,0 +1,13 @@
+diff --git a/App/LegacyDevicePairingScreen.swift b/App/LegacyDevicePairingScreen.swift
+new file mode 100644
+index 0000000..f15faee
+--- /dev/null
++++ b/App/LegacyDevicePairingScreen.swift
+@@ -0,0 +1,7 @@
++import SwiftUI
++
++/// A second device surface, left behind by a rename.
++struct LegacyDevicePairingScreen: View {
++    @State private var showingComputerPairing = false
++    var body: some View { EmptyView() }
++}
