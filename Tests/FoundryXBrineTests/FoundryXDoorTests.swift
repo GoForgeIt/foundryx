@@ -14,10 +14,11 @@ import SwiftUI
 import AppKit
 #endif
 
-/// P1 green gate: drive the REAL 3a door (gateway → kiln-session) through the Swift
-/// Brine runner + the Fixture API — no mocks. The `foundryx-door` suite resource spawns
-/// the real `foundryx_door` example (which boots a real gateway + real kiln-session +
-/// a real openai-completions recording target), and the step defs drive the real
+/// P1 green gate: drive the REAL 3a host dialer (gateway → kiln-session) through the
+/// Swift Brine runner + the Fixture API — no mocks. The `foundryx-host-dialer` suite
+/// resource spawns the real `foundryx_host_dialer` example (which boots a real gateway +
+/// real kiln-session + a real openai-completions recording target), and the step defs
+/// drive the real
 /// `FoundryXKit.DoorClient` (the M3 app's networking core) against it. Asserts an
 /// authenticated turn streams a completed reply, an unauthenticated turn is rejected,
 /// and the routed turn is recorded in kiln-session's real event log (AC2 + AC3).
@@ -31,8 +32,41 @@ final class FoundryXDoorTests: XCTestCase {
         for _ in 0..<3 { url.deleteLastPathComponent() }  // Tests/BrineSwiftCoreTests/<file> -> swift/
         return url.path
     }
-    static let doorExample = NSHomeDirectory() + "/Development/foundry/src-tauri/target/debug/examples/foundryx_door"
-    static let kilnSessionBin = NSHomeDirectory() + "/Development/kiln/target/release/kiln-session"
+    /// The configuration keys that name the two fixture binaries, and the identifier the
+    /// noun registry rules for the dialer.
+    ///
+    /// The desktop's dialer example is `src-tauri/examples/foundryx_host_dialer.rs`. It was
+    /// named for the retired `door` sense until T05 renamed it under the noun registry
+    /// (`loser_became = "host dialer"`), and the literal path here went on naming the old
+    /// binary — which is why both real-door suites had been SKIPPING rather than running.
+    /// A literal rots silently; a key an operator can set does not, and it is the same
+    /// mechanism T25's conformance harness uses for the relay binary.
+    static let hostDialerBinKey = "FOUNDRYX_HOST_DIALER_BIN"
+    /// The key the dialer example ALREADY reads for kiln-session (its own header documents
+    /// `KILN_SESSION_BIN`, and the fixture below exports it). Honouring the existing contract
+    /// rather than minting a second key for the same thing — two keys for one path is a
+    /// drift surface, and the one that is already deployed wins.
+    static let kilnSessionBinKey = "KILN_SESSION_BIN"
+    static let ruledDialerIdentifier = "foundryx_host_dialer"
+
+    static let hostDialerExample = ProcessInfo.processInfo.environment[hostDialerBinKey]
+        ?? (NSHomeDirectory() + "/Development/foundry/src-tauri/target/debug/examples/" + ruledDialerIdentifier)
+    static let kilnSessionBin = ProcessInfo.processInfo.environment[kilnSessionBinKey]
+        ?? (NSHomeDirectory() + "/Development/kiln/target/release/kiln-session")
+
+    /// Names every fixture binary that is missing, with the key that overrides it.
+    /// Empty means the lane can actually run.
+    static func missingFixtureBinaries() -> [String] {
+        var missing: [String] = []
+        if !FileManager.default.fileExists(atPath: hostDialerExample) {
+            missing.append("\(hostDialerExample) (override with \(hostDialerBinKey); build it with "
+                           + "`cargo build -p foundry --example \(ruledDialerIdentifier)`)")
+        }
+        if !FileManager.default.fileExists(atPath: kilnSessionBin) {
+            missing.append("\(kilnSessionBin) (override with \(kilnSessionBinKey))")
+        }
+        return missing
+    }
 
     func testDoorScenariosAgainstRealDoor() async throws {
         // Opt-in only — see FoundryXCaptureTests: non-hermetic on a host running the
@@ -41,11 +75,18 @@ final class FoundryXDoorTests: XCTestCase {
         guard ProcessInfo.processInfo.environment["FOUNDRYX_REAL_DOOR_TESTS"] == "1" else {
             throw XCTSkip("real-door integration test — opt in with FOUNDRYX_REAL_DOOR_TESTS=1 (non-hermetic; excluded from the CI gate)")
         }
-        // Skip cleanly if the dev fixture binaries aren't built (keeps the suite honest
-        // about what it needs rather than failing opaquely).
-        guard FileManager.default.fileExists(atPath: Self.doorExample),
-              FileManager.default.fileExists(atPath: Self.kilnSessionBin) else {
-            throw XCTSkip("real-door fixture binaries not built (foundryx_door / kiln-session)")
+        // The operator ASKED for this lane. A skip here would report green for a suite that
+        // ran nothing, which is how a stale binary name went unnoticed through a rename in
+        // the other repository. Not requested is a skip (above); requested and unsatisfiable
+        // is a REFUSAL that names what is missing.
+        let missing = Self.missingFixtureBinaries()
+        guard missing.isEmpty else {
+            XCTFail("""
+            \(Self.hostDialerBinKey) lane requested (FOUNDRYX_REAL_DOOR_TESTS=1) and \
+            \(missing.count) fixture binary/binaries are missing, so 0 scenarios would run:
+            \(missing.joined(separator: "\n"))
+            """)
+            return
         }
 
         let root = Self.packageRoot()
@@ -101,14 +142,14 @@ enum DoorSteps {
 
     // MARK: the real-door Fixture
     static func doorResource() -> ResourceDefinition {
-        ResourceDefinition(name: "foundryx-door", scope: .suite,
+        ResourceDefinition(name: "foundryx-host-dialer", scope: .suite,
                            provides: ["door_url", "bearer", "event_log"]) { _ in
             let fm = FileManager.default
             let workdir = NSTemporaryDirectory() + "foundryx-brine-p1-\(UUID().uuidString)"
             try fm.createDirectory(atPath: workdir, withIntermediateDirectories: true)
 
             let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: FoundryXDoorTests.doorExample)
+            proc.executableURL = URL(fileURLWithPath: FoundryXDoorTests.hostDialerExample)
             var env = ProcessInfo.processInfo.environment
             env["KILN_SESSION_BIN"] = FoundryXDoorTests.kilnSessionBin
             env["TMPDIR"] = workdir              // controls the example's std::env::temp_dir()
@@ -119,7 +160,28 @@ enum DoorSteps {
             try proc.run()
 
             let (base, token) = try await readDoorHandshake(outPipe, timeout: 45)
-            let eventLog = "\(workdir)/foundryx-door-example/events.jsonl"
+
+            // CROSS-REPO CONTRACT. The example builds its state directory as
+            // `std::env::temp_dir().join("foundryx-host-dialer-example")`
+            // (foundry: src-tauri/examples/foundryx_host_dialer.rs:44) and writes
+            // `events.jsonl` inside it (:59). TMPDIR above is what points temp_dir() here.
+            //
+            // This directory carried the retired `door` sense before T05's rename, and the name
+            // here was never updated — a break that could not surface while the suite was
+            // skipping on a binary name that had also moved. It is checked rather than
+            // assumed, so the next rename over there is a failure naming the mismatch
+            // instead of an events file that reads empty.
+            let exampleStateDir = "\(workdir)/foundryx-host-dialer-example"
+            guard fm.fileExists(atPath: exampleStateDir) else {
+                proc.terminate()
+                throw DoorTestError(message: """
+                the dialer example did not create \(exampleStateDir). Its state directory is \
+                named in foundry:src-tauri/examples/foundryx_host_dialer.rs:44 — if that name \
+                changed, this is where it changed, and the event-log assertions below would \
+                otherwise read nothing and pass.
+                """)
+            }
+            let eventLog = "\(exampleStateDir)/events.jsonl"
             return ["door_url": base, "bearer": token, "event_log": eventLog,
                     "_proc": proc, "_workdir": workdir]
         } disposer: { provided in

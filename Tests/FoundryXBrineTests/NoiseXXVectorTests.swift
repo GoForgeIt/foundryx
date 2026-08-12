@@ -1,7 +1,7 @@
 // NoiseXXVectorTests.swift — the GO/NO-GO interop gate for the iOS Noise client.
 //
 // Feeds the Swift `NoiseXXInitiator` the EXACT fixed keys snow used to produce the
-// golden handshake vectors (crates/foundryx-relay/tests/handshake_vectors.json,
+// golden handshake vectors (crates/foundryx-tunnel/tests/fixtures/handshake_vectors.json,
 // copied into the test bundle) and asserts, byte-for-byte:
 //   • msg1 / msg2-payload / msg3 bytes
 //   • the final symmetric handshake hash `h`
