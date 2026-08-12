@@ -1,0 +1,616 @@
+diff --git a/App/OnboardingFlowView.swift b/App/OnboardingFlowView.swift
+index 8c060fc..4d5ae9e 100644
+--- a/App/OnboardingFlowView.swift
++++ b/App/OnboardingFlowView.swift
+@@ -162,7 +162,7 @@ struct OnboardingFlowView: View {
+ /// "What brings you here?" switch sits ABOVE the art and re-renders the screen
+ /// in place; the choice persists and is editable in Settings. Either action
+ /// marks the welcome seen (B2) — "Set up later" dismisses it forever.
+-// WelcomeConnectStatus moved to FoundryXKit (Sources/FoundryXKit/WelcomeFrontDoor.swift)
++// WelcomeConnectStatus moved to FoundryXKit (Sources/FoundryXKit/GatewayClient.swift)
+ // so the connect-pill mapping is pure + `swift test`-covered (track 20260715T1502 re-cut).
+ 
+ /// The welcome's sign-in rendition (track 20260715T1502, Nick 2026-07-16): the
+diff --git a/App/RootView.swift b/App/RootView.swift
+index 18c0864..04fbb0c 100644
+--- a/App/RootView.swift
++++ b/App/RootView.swift
+@@ -20,7 +20,7 @@ struct RootView: View {
+     @State private var showingAccount = false
+     @State private var showingOnboarding = false
+     /// Whether the presented onboarding flow skips its internal welcome step
+-    /// (set at present-time from WelcomeFrontDoor.firstRunPresentation — the
++    /// (set at present-time from GatewayClient.firstRunPresentation — the
+     /// welcome-as-gate already played the ceremony, never twice).
+     @State private var onboardingSkipsWelcome = false
+     /// B2 (track 20260714T1800): the persona welcome, ONCE post-sign-in, on its
+@@ -52,8 +52,8 @@ struct RootView: View {
+     /// The front-door rendition for the `.signInGate` destination (track
+     /// 20260715T1502 re-cut, Nick 2026-07-16: the welcome IS the front door — the
+     /// old SignInView connection page never gates, on any path).
+-    private var frontDoorSurface: WelcomeFrontDoor.Surface {
+-        WelcomeFrontDoor.surface(signedIn: remote.isSignedIn,
++    private var frontDoorSurface: GatewayClient.Surface {
++        GatewayClient.surface(signedIn: remote.isSignedIn,
+                                  letStraightIn: WelcomePrefs.letStraightIn(),
+                                  entered: enteredApp)
+     }
+@@ -96,11 +96,11 @@ struct RootView: View {
+             case "connecting":
+                 return AnyView(PersonaWelcomeStep(
+                     onStart: {}, onSkip: {},
+-                    connect: WelcomeFrontDoor.connectStatus(.resolving, email: nil)))
++                    connect: GatewayClient.connectStatus(.resolving, email: nil)))
+             case "connect":
+                 return AnyView(PersonaWelcomeStep(
+                     onStart: {}, onSkip: {},
+-                    connect: WelcomeFrontDoor.connectStatus(.connected(host: "mac"),
++                    connect: GatewayClient.connectStatus(.connected(host: "mac"),
+                                                             email: "nick@example.com")))
+             default:
+                 return AnyView(PersonaWelcomeStep(onStart: {}, onSkip: {}))
+@@ -199,14 +199,14 @@ struct RootView: View {
+                     onStart: enterApp,
+                     onSkip: { WelcomePrefs.setLetStraightIn(true); enterApp() },
+                     connect: frontDoorSurface == .welcomeConnectGate
+-                        ? WelcomeFrontDoor.connectStatus(remote.status, email: remote.email)
++                        ? GatewayClient.connectStatus(remote.status, email: remote.email)
+                         : nil,
+                     signIn: frontDoorSurface == .welcomeSignIn
+                         ? WelcomeSignInActions(
+                             providers: remote.isConfigured ? remote.providers : [],
+-                            statusText: WelcomeFrontDoor.signInCaption(remote.status),
++                            statusText: GatewayClient.signInCaption(remote.status),
+                             onTap: { p in Task { await remote.signIn(p) } },
+-                            onRetryCleanup: WelcomeFrontDoor.showsCleanupRetry(remote.status)
++                            onRetryCleanup: GatewayClient.showsCleanupRetry(remote.status)
+                                 ? { Task { await remote.retryInterruptedDeletionSignIn() } }
+                                 : nil)
+                         : nil)
+@@ -403,7 +403,7 @@ struct RootView: View {
+     }
+ 
+     /// The post-sign-in first-run ladder (B2): migrate, then render the ONE pure
+-    /// decision (WelcomeFrontDoor.firstRunPresentation — tested in the kit): the
++    /// decision (GatewayClient.firstRunPresentation — tested in the kit): the
+     /// full onboarding flow (skipping its welcome step when the gate already was
+     /// the welcome), the standalone persona welcome, or nothing.
+     private func presentFirstRunSurfacesIfNeeded() {
+@@ -411,7 +411,7 @@ struct RootView: View {
+         // over an already-presented surface (implement-review F3).
+         if showingOnboarding || showingWelcome { return }
+         OnboardingPrefs.migrateIfPriorUse(baseDir: CaptureWAL.documentsCaptures())
+-        switch WelcomeFrontDoor.firstRunPresentationForCurrentOwner() {
++        switch GatewayClient.firstRunPresentationForCurrentOwner() {
+         case .onboarding(let skipWelcome):
+             onboardingSkipsWelcome = skipWelcome
+             showingOnboarding = true
+diff --git a/App/SettingsScreen.swift b/App/SettingsScreen.swift
+index 74b7897..6024e60 100644
+--- a/App/SettingsScreen.swift
++++ b/App/SettingsScreen.swift
+@@ -443,10 +443,10 @@ struct SettingsScreen: View {
+     }
+ 
+     /// The "My computer" row's LIVE status line, from the same tested mapping the
+-    /// welcome connect pill uses (WelcomeFrontDoor.connectStatus) — one source of
++    /// welcome connect pill uses (GatewayClient.connectStatus) — one source of
+     /// truth for "how is my door/hub connection doing", now visible in-app.
+     private var computerBrainSubtitle: String {
+-        if let status = WelcomeFrontDoor.connectStatus(remote.status, email: remote.email) {
++        if let status = GatewayClient.connectStatus(remote.status, email: remote.email) {
+             return status.text
+         }
+         return "Pair with the Solleva desktop app (sign in on your Mac first)."
+diff --git a/App/SignInView.swift b/App/SignInView.swift
+index 8ba9152..e778ff6 100644
+--- a/App/SignInView.swift
++++ b/App/SignInView.swift
+@@ -4,7 +4,7 @@ import Grain
+ // FoundryX remote sign-in (M5 R1b) — SHEET-ONLY since track 20260715T1502
+ // (Nick 2026-07-16): this page never gates the app anymore. The welcome surface
+ // is the front door (sign-in buttons + live connect status live THERE — see
+-// PersonaWelcomeStep + WelcomeFrontDoor); this view remains as the in-app
++// PersonaWelcomeStep + GatewayClient); this view remains as the in-app
+ // account/status sheet (Settings account, Vault sign-in, waitlist sign-in) with
+ // Retry connection / Sign out. Styled with Grain to match the app.
+ //
+@@ -165,7 +165,7 @@ struct SignInView: View {
+         // not register.
+         case .deletionCleanupPending, .deletionCleanupInProgress,
+              .deletionCleanupFailed, .deletionCleanupSucceeded:
+-            return WelcomeFrontDoor.signInRecoveryPresentation(remote.status)?.text
++            return GatewayClient.signInRecoveryPresentation(remote.status)?.text
+                 ?? "A previous deletion must finish before you can sign in."
+         }
+     }
+diff --git a/Sources/FoundryXKit/DoorFailureMessage.swift b/Sources/FoundryXKit/DoorFailureMessage.swift
+index 7d6d5df..09f214b 100644
+--- a/Sources/FoundryXKit/DoorFailureMessage.swift
++++ b/Sources/FoundryXKit/DoorFailureMessage.swift
+@@ -30,12 +30,12 @@ public struct DoorFailureMessage: Equatable, Sendable {
+                 action: "Finish deleting it to use this account again.")
+         case .deletionCleanupInProgress:
+             return DoorFailureMessage(
+-                text: WelcomeFrontDoor.signInRecoveryPresentation(status)?.text
++                text: GatewayClient.signInRecoveryPresentation(status)?.text
+                     ?? "Finishing the previous deletion…",
+                 action: nil)
+         case .deletionCleanupFailed:
+             return DoorFailureMessage(
+-                text: WelcomeFrontDoor.signInRecoveryPresentation(status)?.text
++                text: GatewayClient.signInRecoveryPresentation(status)?.text
+                     ?? "The previous deletion is still incomplete.",
+                 action: "Retry cleanup")
+         case .deletionCleanupSucceeded:
+diff --git a/Sources/FoundryXKit/WelcomeFrontDoor.swift b/Sources/FoundryXKit/WelcomeFrontDoor.swift
+index 083c368..0f8b54c 100644
+--- a/Sources/FoundryXKit/WelcomeFrontDoor.swift
++++ b/Sources/FoundryXKit/WelcomeFrontDoor.swift
+@@ -1,4 +1,4 @@
+-// WelcomeFrontDoor — the front-door rule (track 20260715T1502, re-cut 2026-07-17).
++// GatewayClient — the front-door rule (track 20260715T1502, re-cut 2026-07-17).
+ //
+ // Nick (2026-07-16): the OLD connection intro page (SignInView) must NOT appear
+ // as a gate on ANY path; the welcome surface is the front door; connection
+@@ -25,7 +25,7 @@ public struct WelcomeConnectStatus: Equatable, Sendable {
+     }
+ }
+ 
+-public enum WelcomeFrontDoor {
++public enum GatewayClient {
+     public struct SignInRecoveryPresentation: Equatable, Sendable {
+         public let text: String
+         public let action: String?
+diff --git a/Tests/FoundryXBrineTests/AccountDataIsolationFeatureTests.swift b/Tests/FoundryXBrineTests/AccountDataIsolationFeatureTests.swift
+index 8c4c762..b1f8de3 100644
+--- a/Tests/FoundryXBrineTests/AccountDataIsolationFeatureTests.swift
++++ b/Tests/FoundryXBrineTests/AccountDataIsolationFeatureTests.swift
+@@ -1209,13 +1209,13 @@ private final class AccountDataIsolationWorld: @unchecked Sendable {
+                 encoding: .utf8)
+             guard snapshot.scope == state.secondPreferenceScope,
+                   rootView.contains(
+-                    "switch WelcomeFrontDoor."
++                    "switch GatewayClient."
+                         + "firstRunPresentationForCurrentOwner()"),
+-                  WelcomeFrontDoor.surface(
++                  GatewayClient.surface(
+                     signedIn: true,
+                     letStraightIn: WelcomePrefs.letStraightIn(),
+                     entered: false) == .welcomeConnectGate,
+-                  WelcomeFrontDoor.firstRunPresentationForCurrentOwner()
++                  GatewayClient.firstRunPresentationForCurrentOwner()
+                     == .onboarding(skipWelcome: false) else {
+                 throw BrineStepError(
+                     "the rendered welcome/first-run decision did not come from "
+diff --git a/Tests/FoundryXBrineTests/AccountDeletionWidgetBarrierFeatureTests.swift b/Tests/FoundryXBrineTests/AccountDeletionWidgetBarrierFeatureTests.swift
+index ac2b0bf..df2d248 100644
+--- a/Tests/FoundryXBrineTests/AccountDeletionWidgetBarrierFeatureTests.swift
++++ b/Tests/FoundryXBrineTests/AccountDeletionWidgetBarrierFeatureTests.swift
+@@ -84,7 +84,7 @@ final class AccountDeletionWidgetBarrierFeatureTests: XCTestCase {
+                     }
+                 },
+                 defineCheck("I can continue from the front door with a recovery action") { _, _, _ in
+-                    let presentation = WelcomeFrontDoor.signInRecoveryPresentation(
++                    let presentation = GatewayClient.signInRecoveryPresentation(
+                         .deletionCleanupFailed(stage: .widgetWithdrawal, reason: "persistenceFailed"))
+                     guard presentation?.action == "Retry cleanup" else {
+                         throw BrineStepError("no front-door recovery action was available")
+diff --git a/Tests/FoundryXBrineTests/DeletionDoesNotTrapMeFeatureTests.swift b/Tests/FoundryXBrineTests/DeletionDoesNotTrapMeFeatureTests.swift
+index ce7b418..23da9fe 100644
+--- a/Tests/FoundryXBrineTests/DeletionDoesNotTrapMeFeatureTests.swift
++++ b/Tests/FoundryXBrineTests/DeletionDoesNotTrapMeFeatureTests.swift
+@@ -129,7 +129,7 @@ final class DeletionDoesNotTrapMeFeatureTests: XCTestCase {
+                     // Exactly what beginActivation throws for a cleanupPending record,
+                     // mapped the way signIn maps it.
+                     w.status = .deletionCleanupPending(ownerScope: "google|sub|deleted-one")
+-                    w.caption = WelcomeFrontDoor.signInCaption(w.status)
++                    w.caption = GatewayClient.signInCaption(w.status)
+                     w.signedIn = false
+                 }
+                 return ctx
+@@ -218,7 +218,7 @@ final class DeletionDoesNotTrapMeFeatureTests: XCTestCase {
+                 await MainActor.run {
+                     w.reset()
+                     w.status = .connected(host: "mac")
+-                    w.caption = WelcomeFrontDoor.signInCaption(w.status)
++                    w.caption = GatewayClient.signInCaption(w.status)
+                     w.signedIn = true
+                 }
+                 return ctx
+diff --git a/Tests/FoundryXBrineTests/DeviceRenderedSurfaceFeatureTests.swift b/Tests/FoundryXBrineTests/DeviceRenderedSurfaceFeatureTests.swift
+index b414a9e..a46aa82 100644
+--- a/Tests/FoundryXBrineTests/DeviceRenderedSurfaceFeatureTests.swift
++++ b/Tests/FoundryXBrineTests/DeviceRenderedSurfaceFeatureTests.swift
+@@ -544,7 +544,7 @@ final class DeviceRenderedSurfaceWorld {
+     var secondAccountSeesDevices: [RecordingDeviceRecord] = []
+     var secondAccountActivation: RecordingDeviceRecord?
+     var historyRows: [RecordingHistoryRow] = []
+-    var firstRun: WelcomeFrontDoor.FirstRunPresentation?
++    var firstRun: GatewayClient.FirstRunPresentation?
+ 
+     /// The gap-outcome rendering decision (N7)
+     var gapReport: GapRecoveryReport?
+@@ -1847,7 +1847,7 @@ private func historySteps(_ w: DeviceRenderedSurfaceWorld) -> [StepDefinition] {
+                     throw BrineStepError("the upgraded launch found no active device: \(resolution)")
+                 }
+                 w.historyRows = RecordingHistory.rows(baseDir: w.baseDir)
+-                w.firstRun = WelcomeFrontDoor.firstRunPresentation(
++                w.firstRun = GatewayClient.firstRunPresentation(
+                     letStraightIn: false, onboardingCompleted: false, welcomeSeen: true,
+                     hasRecordingHistory: RecordingHistory.hasAny(baseDir: w.baseDir))
+             }
+@@ -1899,7 +1899,7 @@ private func historySteps(_ w: DeviceRenderedSurfaceWorld) -> [StepDefinition] {
+                             + "(\(row.attribution.diagnostic ?? "no diagnostic"))")
+                 }
+             }
+-            guard firstRun == WelcomeFrontDoor.FirstRunPresentation.none else {
++            guard firstRun == GatewayClient.FirstRunPresentation.none else {
+                 throw BrineStepError(
+                     "an account with two years of recordings was sent to \(String(describing: firstRun))")
+             }
+@@ -1965,7 +1965,7 @@ private func historySteps(_ w: DeviceRenderedSurfaceWorld) -> [StepDefinition] {
+         defineStep("that account launches the upgraded app") { ctx, _, _ in
+             await MainActor.run {
+                 w.historyRows = RecordingHistory.rows(baseDir: w.baseDir)
+-                w.firstRun = WelcomeFrontDoor.firstRunPresentation(
++                w.firstRun = GatewayClient.firstRunPresentation(
+                     letStraightIn: false,
+                     // The flag reads its DEFAULT — the restored-backup / unmigrated-preference
+                     // state. History is what must decide this, not the flag.
+@@ -1998,7 +1998,7 @@ private func historySteps(_ w: DeviceRenderedSurfaceWorld) -> [StepDefinition] {
+             }
+             // NON-VACUOUS: the gate DOES run for an account with no history, so this is a
+             // statement about history and not about a gate that never fires.
+-            let fresh = WelcomeFrontDoor.firstRunPresentation(
++            let fresh = GatewayClient.firstRunPresentation(
+                 letStraightIn: false, onboardingCompleted: false, welcomeSeen: true,
+                 hasRecordingHistory: false)
+             guard case .onboarding = fresh else {
+diff --git a/Tests/FoundryXBrineTests/InterruptedDeletionSignInRecoveryFeatureTests.swift b/Tests/FoundryXBrineTests/InterruptedDeletionSignInRecoveryFeatureTests.swift
+index 0b4d26b..f40b5e3 100644
+--- a/Tests/FoundryXBrineTests/InterruptedDeletionSignInRecoveryFeatureTests.swift
++++ b/Tests/FoundryXBrineTests/InterruptedDeletionSignInRecoveryFeatureTests.swift
+@@ -333,7 +333,7 @@ private enum InterruptedDeletionSignInRecoverySteps {
+                 }
+             },
+             defineCheck("I see that a previous deletion must finish before I can sign in") { _, _, _ in
+-                let presentation = WelcomeFrontDoor.signInRecoveryPresentation(
++                let presentation = GatewayClient.signInRecoveryPresentation(
+                     .deletionCleanupPending(ownerScope: "acct-returning0001"))
+                 guard presentation?.text.contains("must finish before you can sign in") == true else {
+                     throw BrineStepError("the real sign-in presentation did not explain the refusal")
+@@ -344,7 +344,7 @@ private enum InterruptedDeletionSignInRecoverySteps {
+                 return ctx
+             },
+             defineCheck("I see that pairing secrets are being removed") { _, _, _ in
+-                let presentation = WelcomeFrontDoor.signInRecoveryPresentation(w.visibleStatus)
++                let presentation = GatewayClient.signInRecoveryPresentation(w.visibleStatus)
+                 guard presentation?.text == "Finishing previous deletion: removing pairing secrets…" else {
+                     throw BrineStepError("named cleanup progress was not rendered")
+                 }
+@@ -355,14 +355,14 @@ private enum InterruptedDeletionSignInRecoverySteps {
+                 return ctx
+             },
+             defineCheck("I see that cleanup failed at Pairing secrets") { _, _, _ in
+-                let presentation = WelcomeFrontDoor.signInRecoveryPresentation(w.visibleStatus)
++                let presentation = GatewayClient.signInRecoveryPresentation(w.visibleStatus)
+                 guard presentation?.text.contains("Pairing secrets") == true,
+                       presentation?.text.contains("couldn't be removed") == true else {
+                     throw BrineStepError("the failed stage was hidden from the person")
+                 }
+             },
+             defineCheck("I am offered to retry cleanup") { _, _, _ in
+-                guard WelcomeFrontDoor.signInRecoveryPresentation(w.visibleStatus)?.action == "Retry cleanup" else {
++                guard GatewayClient.signInRecoveryPresentation(w.visibleStatus)?.action == "Retry cleanup" else {
+                     throw BrineStepError("cleanup failure did not render a retry action")
+                 }
+             },
+@@ -371,7 +371,7 @@ private enum InterruptedDeletionSignInRecoverySteps {
+                 return ctx
+             },
+             defineCheck("I see that cleanup finished and sign-in is continuing") { _, _, _ in
+-                guard WelcomeFrontDoor.signInRecoveryPresentation(w.visibleStatus)?.text
++                guard GatewayClient.signInRecoveryPresentation(w.visibleStatus)?.text
+                         == "Previous deletion finished. Continuing sign-in…" else {
+                     throw BrineStepError("cleanup success was invisible")
+                 }
+diff --git a/Tests/FoundryXBrineTests/PersonaWelcomeFeatureTests.swift b/Tests/FoundryXBrineTests/PersonaWelcomeFeatureTests.swift
+index 0d9b9d1..89d5b06 100644
+--- a/Tests/FoundryXBrineTests/PersonaWelcomeFeatureTests.swift
++++ b/Tests/FoundryXBrineTests/PersonaWelcomeFeatureTests.swift
+@@ -7,7 +7,7 @@ import BrineSwiftCore
+ /// welcome renders from — `PersonaCopy.welcome(for:)` headlines + the one canonical
+ /// privacy line, `OnboardingPersona.chooserLabel`, `PersonaWelcomeLayout` (skeleton order
+ /// + action copy + the Settings row), `PersonaPrefs` persistence, `WelcomeGate` /
+-/// `WelcomeFrontDoor.firstRunPresentation` (shown once after sign-in, including for
++/// `GatewayClient.firstRunPresentation` (shown once after sign-in, including for
+ /// established installs), and `WelcomePrefs` (Set up later = seen forever). Hermetic: an
+ /// isolated UserDefaults suite, no UI.
+ final class PersonaWelcomeFeatureTests: XCTestCase {
+@@ -35,8 +35,8 @@ private final class PersonaWelcomeWorld: @unchecked Sendable {
+     /// has no recording history — stated rather than defaulted, because a default here would
+     /// hide the very input S07 turns on.
+     var hasRecordingHistory = false
+-    var firstRun: WelcomeFrontDoor.FirstRunPresentation {
+-        WelcomeFrontDoor.firstRunPresentation(
++    var firstRun: GatewayClient.FirstRunPresentation {
++        GatewayClient.firstRunPresentation(
+             letStraightIn: WelcomePrefs.letStraightIn(defaults: defaults),
+             onboardingCompleted: onboardingCompleted,
+             welcomeSeen: WelcomePrefs.seen(defaults: defaults),
+diff --git a/Tests/FoundryXBrineTests/VaultReturnRecoveryFeatureTests.swift b/Tests/FoundryXBrineTests/VaultReturnRecoveryFeatureTests.swift
+index 83d4036..6e18f7a 100644
+--- a/Tests/FoundryXBrineTests/VaultReturnRecoveryFeatureTests.swift
++++ b/Tests/FoundryXBrineTests/VaultReturnRecoveryFeatureTests.swift
+@@ -154,14 +154,14 @@ private enum VaultReturnRecoverySteps {
+         },
+         defineStep("the sign-in recovery status is shown") { ctx, _, _ in ctx },
+         defineCheck("I see that cleanup completed") { _, _, _ in
+-            guard WelcomeFrontDoor.signInRecoveryPresentation(w.cleanupStatus)?.text
++            guard GatewayClient.signInRecoveryPresentation(w.cleanupStatus)?.text
+                     .contains("finished") == true else {
+                 throw BrineStepError("completed cleanup was not visible")
+             }
+         },
+         defineCheck("I do not see a cleanup retry control") { _, _, _ in
+-            guard WelcomeFrontDoor.signInRecoveryPresentation(w.cleanupStatus)?.action == nil,
+-                  !WelcomeFrontDoor.showsCleanupRetry(w.cleanupStatus) else {
++            guard GatewayClient.signInRecoveryPresentation(w.cleanupStatus)?.action == nil,
++                  !GatewayClient.showsCleanupRetry(w.cleanupStatus) else {
+                 throw BrineStepError("completed cleanup retained a retry affordance")
+             }
+         },
+diff --git a/Tests/FoundryXBrineTests/WelcomeFrontDoorFeatureTests.swift b/Tests/FoundryXBrineTests/WelcomeFrontDoorFeatureTests.swift
+index f7b9e31..0d42912 100644
+--- a/Tests/FoundryXBrineTests/WelcomeFrontDoorFeatureTests.swift
++++ b/Tests/FoundryXBrineTests/WelcomeFrontDoorFeatureTests.swift
+@@ -7,7 +7,7 @@ import BrineSwiftCore
+ /// re-cut, Nick 2026-07-16: the old connection page never gates; the welcome is
+ /// the front door; connection status shows on the welcome or inside the app).
+ /// Drives the REAL kit rules the RootView wiring renders from — RootGate,
+-/// WelcomeFrontDoor (surface / connectStatus / firstRunPresentation), and
++/// GatewayClient (surface / connectStatus / firstRunPresentation), and
+ /// WelcomePrefs on a fresh UserDefaults suite — hermetic: no UI, no network.
+ final class WelcomeFrontDoorFeatureTests: XCTestCase {
+     func testWelcomeFrontDoorFeature() async throws {
+@@ -32,9 +32,9 @@ private final class WelcomeFrontDoorWorld: @unchecked Sendable {
+ 
+     // Step-to-step observations.
+     var destination: RootDestination?
+-    var surface: WelcomeFrontDoor.Surface?
++    var surface: GatewayClient.Surface?
+     var pill: WelcomeConnectStatus?
+-    var firstRun: WelcomeFrontDoor.FirstRunPresentation?
++    var firstRun: GatewayClient.FirstRunPresentation?
+ 
+     init() {
+         let name = "welcome-front-door-feature-\(UUID().uuidString)"
+@@ -63,12 +63,12 @@ private final class WelcomeFrontDoorWorld: @unchecked Sendable {
+     }
+ 
+     func refreshGate() {
+-        surface = WelcomeFrontDoor.surface(
++        surface = GatewayClient.surface(
+             signedIn: signedIn,
+             letStraightIn: WelcomePrefs.letStraightIn(defaults: defaults),
+             entered: entered)
+         pill = surface == .welcomeConnectGate
+-            ? WelcomeFrontDoor.connectStatus(status, email: email)
++            ? GatewayClient.connectStatus(status, email: email)
+             : nil
+     }
+ 
+@@ -76,7 +76,7 @@ private final class WelcomeFrontDoorWorld: @unchecked Sendable {
+     func enterApp() {
+         WelcomePrefs.markSeen(defaults: defaults)
+         entered = true
+-        firstRun = WelcomeFrontDoor.firstRunPresentation(
++        firstRun = GatewayClient.firstRunPresentation(
+             letStraightIn: WelcomePrefs.letStraightIn(defaults: defaults),
+             onboardingCompleted: onboardingCompleted,
+             welcomeSeen: WelcomePrefs.seen(defaults: defaults),
+@@ -209,7 +209,7 @@ private enum WelcomeFrontDoorSteps {
+                 // The old page only ever rendered on the gate destination; the gate
+                 // now always renders a welcome rendition (never Surface.none there).
+                 if w.destination == .signInGate {
+-                    guard w.surface != WelcomeFrontDoor.Surface.none else {
++                    guard w.surface != GatewayClient.Surface.none else {
+                         throw BrineStepError("gate destination with no welcome rendition — the old page would show")
+                     }
+                 }
+@@ -226,7 +226,7 @@ private enum WelcomeFrontDoorSteps {
+                 }
+             },
+             defineCheck("the welcome does not appear again after entry") { _, _, _ in
+-                guard w.surface == WelcomeFrontDoor.Surface.none else {
++                guard w.surface == GatewayClient.Surface.none else {
+                     throw BrineStepError("gate surface returned after entry: \(String(describing: w.surface))")
+                 }
+                 guard w.firstRun != .standaloneWelcome else {
+@@ -237,13 +237,13 @@ private enum WelcomeFrontDoorSteps {
+                 guard w.destination == .phoneBrain || w.destination == .computerBrain else {
+                     throw BrineStepError("straight-in launch still gated: \(String(describing: w.destination))")
+                 }
+-                guard w.surface == WelcomeFrontDoor.Surface.none else {
++                guard w.surface == GatewayClient.Surface.none else {
+                     throw BrineStepError("a welcome rendition still fronts: \(String(describing: w.surface))")
+                 }
+             },
+             defineCheck("the connection to my computer still shows inside the app") { _, _, _ in
+                 // Settings → Brain → "My computer" renders this same mapping in-app.
+-                guard let s = WelcomeFrontDoor.connectStatus(w.status, email: w.email) else {
++                guard let s = GatewayClient.connectStatus(w.status, email: w.email) else {
+                     throw BrineStepError("no in-app connection status for \(w.status)")
+                 }
+                 guard !s.text.isEmpty else { throw BrineStepError("empty in-app connection status") }
+diff --git a/Tests/FoundryXBrineTests/WelcomeFrontDoorTests.swift b/Tests/FoundryXBrineTests/WelcomeFrontDoorTests.swift
+index a1fc932..9660a78 100644
+--- a/Tests/FoundryXBrineTests/WelcomeFrontDoorTests.swift
++++ b/Tests/FoundryXBrineTests/WelcomeFrontDoorTests.swift
+@@ -13,13 +13,13 @@ final class WelcomeFrontDoorTests: XCTestCase {
+ 
+     func testSignedOutFrontDoorIsTheWelcomeWithSignIn() {
+         XCTAssertEqual(
+-            WelcomeFrontDoor.surface(signedIn: false, letStraightIn: false, entered: false),
++            GatewayClient.surface(signedIn: false, letStraightIn: false, entered: false),
+             .welcomeSignIn, "signed out → sign-in buttons ON the welcome, never the old page")
+     }
+ 
+     func testSignedInFrontDoorIsTheConnectGateWelcome() {
+         XCTAssertEqual(
+-            WelcomeFrontDoor.surface(signedIn: true, letStraightIn: false, entered: false),
++            GatewayClient.surface(signedIn: true, letStraightIn: false, entered: false),
+             .welcomeConnectGate, "signed in → the welcome carries the live connect status")
+     }
+ 
+@@ -27,17 +27,17 @@ final class WelcomeFrontDoorTests: XCTestCase {
+         // "Open straight to the app" (letStraightIn) skips the welcome for an
+         // ALREADY-SIGNED-IN user only.
+         XCTAssertEqual(
+-            WelcomeFrontDoor.surface(signedIn: true, letStraightIn: true, entered: false),
+-            WelcomeFrontDoor.Surface.none, "straight-in for a signed-in user: zero gate")
++            GatewayClient.surface(signedIn: true, letStraightIn: true, entered: false),
++            GatewayClient.Surface.none, "straight-in for a signed-in user: zero gate")
+         // But sign-in is REQUIRED FIRST (locked decision #5) — a signed-OUT user with
+         // letStraightIn set must STILL get the sign-in choices, never a dead `.none`
+         // gate. (Build 288 returned `.none` here: signing out after skipping the
+         // welcome dead-ended login. Fixed 2026-07-24, mirroring the RootGate rule.)
+         XCTAssertEqual(
+-            WelcomeFrontDoor.surface(signedIn: false, letStraightIn: true, entered: false),
++            GatewayClient.surface(signedIn: false, letStraightIn: true, entered: false),
+             .welcomeSignIn, "straight-in must NOT bypass sign-in for a signed-out user")
+         XCTAssertEqual(
+-            WelcomeFrontDoor.surface(signedIn: true, letStraightIn: false, entered: true),
++            GatewayClient.surface(signedIn: true, letStraightIn: false, entered: true),
+             .none, "after entry the gate never comes back mid-session")
+     }
+ 
+@@ -46,7 +46,7 @@ final class WelcomeFrontDoorTests: XCTestCase {
+     // for a still-signed-in user, never dead-end a signed-out one.
+     func testMidSessionSignOutLandsOnTheSignInWelcome() {
+         XCTAssertEqual(
+-            WelcomeFrontDoor.surface(signedIn: false, letStraightIn: false, entered: true),
++            GatewayClient.surface(signedIn: false, letStraightIn: false, entered: true),
+             .welcomeSignIn, "sign-out after entry → the sign-in front door, not a dead end")
+     }
+ 
+@@ -54,41 +54,41 @@ final class WelcomeFrontDoorTests: XCTestCase {
+     // deliberately no `onboarded` input (the flow skips its welcome instead).
+     func testSurfaceHasNoOnboardedEscapeHatch() {
+         XCTAssertEqual(
+-            WelcomeFrontDoor.surface(signedIn: true, letStraightIn: false, entered: false),
++            GatewayClient.surface(signedIn: true, letStraightIn: false, entered: false),
+             .welcomeConnectGate)
+     }
+ 
+     // MARK: - The live connect pill
+ 
+     func testConnectStatusMapsEveryLiveState() {
+-        XCTAssertEqual(WelcomeFrontDoor.connectStatus(.resolving, email: nil),
++        XCTAssertEqual(GatewayClient.connectStatus(.resolving, email: nil),
+                        WelcomeConnectStatus(text: "Connecting to your computer…", settled: false))
+-        XCTAssertEqual(WelcomeFrontDoor.connectStatus(.connected(host: "t1"), email: "nick@x.com"),
++        XCTAssertEqual(GatewayClient.connectStatus(.connected(host: "t1"), email: "nick@x.com"),
+                        WelcomeConnectStatus(text: "Connected · nick@x.com", settled: true))
+-        XCTAssertEqual(WelcomeFrontDoor.connectStatus(.connected(host: "t1"), email: nil),
++        XCTAssertEqual(GatewayClient.connectStatus(.connected(host: "t1"), email: nil),
+                        WelcomeConnectStatus(text: "Connected", settled: true))
+-        XCTAssertEqual(WelcomeFrontDoor.connectStatus(.noHost, email: "nick@x.com"),
++        XCTAssertEqual(GatewayClient.connectStatus(.noHost, email: "nick@x.com"),
+                        WelcomeConnectStatus(text: "On your phone", settled: true))
+-        XCTAssertEqual(WelcomeFrontDoor.connectStatus(.error("boom"), email: nil),
++        XCTAssertEqual(GatewayClient.connectStatus(.error("boom"), email: nil),
+                        WelcomeConnectStatus(text: "Couldn't reach your computer", settled: false))
+     }
+ 
+     func testConnectStatusIsNilWhenThereIsNothingToConnect() {
+-        XCTAssertNil(WelcomeFrontDoor.connectStatus(.signedOut, email: nil))
+-        XCTAssertNil(WelcomeFrontDoor.connectStatus(.unconfigured, email: nil))
++        XCTAssertNil(GatewayClient.connectStatus(.signedOut, email: nil))
++        XCTAssertNil(GatewayClient.connectStatus(.unconfigured, email: nil))
+     }
+ 
+     // MARK: - The sign-in caption
+ 
+     func testSignInCaptionIsHonestAndQuiet() {
+-        XCTAssertEqual(WelcomeFrontDoor.signInCaption(.unconfigured),
++        XCTAssertEqual(GatewayClient.signInCaption(.unconfigured),
+                        "Sign-in isn't available in this build.")
+-        XCTAssertEqual(WelcomeFrontDoor.signInCaption(.resolving), "Signing in…")
+-        XCTAssertEqual(WelcomeFrontDoor.signInCaption(.error("token expired")), "token expired")
+-        XCTAssertNil(WelcomeFrontDoor.signInCaption(.signedOut),
++        XCTAssertEqual(GatewayClient.signInCaption(.resolving), "Signing in…")
++        XCTAssertEqual(GatewayClient.signInCaption(.error("token expired")), "token expired")
++        XCTAssertNil(GatewayClient.signInCaption(.signedOut),
+                      "at rest the buttons speak for themselves")
+-        XCTAssertNil(WelcomeFrontDoor.signInCaption(.connected(host: "t1")))
+-        XCTAssertNil(WelcomeFrontDoor.signInCaption(.noHost))
++        XCTAssertNil(GatewayClient.signInCaption(.connected(host: "t1")))
++        XCTAssertNil(GatewayClient.signInCaption(.noHost))
+     }
+ 
+     // MARK: - The post-entry first-run ladder (never the welcome twice)
+@@ -96,7 +96,7 @@ final class WelcomeFrontDoorTests: XCTestCase {
+     func testFreshInstallOnboardsWithoutRepeatingTheWelcome() {
+         // enterApp() marks the welcome seen BEFORE this decision runs.
+         XCTAssertEqual(
+-            WelcomeFrontDoor.firstRunPresentation(letStraightIn: false,
++            GatewayClient.firstRunPresentation(letStraightIn: false,
+                                                   onboardingCompleted: false,
+                                                   welcomeSeen: true,
+                                                   hasRecordingHistory: false),
+@@ -109,7 +109,7 @@ final class WelcomeFrontDoorTests: XCTestCase {
+         // flow directly, skipWelcome defaults false); but a genuinely unseen
+         // welcome before onboarding keeps the flow's own welcome step.
+         XCTAssertEqual(
+-            WelcomeFrontDoor.firstRunPresentation(letStraightIn: false,
++            GatewayClient.firstRunPresentation(letStraightIn: false,
+                                                   onboardingCompleted: false,
+                                                   welcomeSeen: false,
+                                                   hasRecordingHistory: false),
+@@ -118,7 +118,7 @@ final class WelcomeFrontDoorTests: XCTestCase {
+ 
+     func testEstablishedSeenUserGetsNothingAfterEntry() {
+         XCTAssertEqual(
+-            WelcomeFrontDoor.firstRunPresentation(letStraightIn: false,
++            GatewayClient.firstRunPresentation(letStraightIn: false,
+                                                   onboardingCompleted: true,
+                                                   welcomeSeen: true,
+                                                   hasRecordingHistory: false),
+@@ -127,7 +127,7 @@ final class WelcomeFrontDoorTests: XCTestCase {
+ 
+     func testWelcomeSeenCanNeverYieldTheStandaloneWelcome() {
+         for completed in [true, false] {
+-            let p = WelcomeFrontDoor.firstRunPresentation(letStraightIn: false,
++            let p = GatewayClient.firstRunPresentation(letStraightIn: false,
+                                                           onboardingCompleted: completed,
+                                                           welcomeSeen: true,
+                                                           hasRecordingHistory: false)
+@@ -140,7 +140,7 @@ final class WelcomeFrontDoorTests: XCTestCase {
+         for completed in [true, false] {
+             for seen in [true, false] {
+                 XCTAssertEqual(
+-                    WelcomeFrontDoor.firstRunPresentation(letStraightIn: true,
++                    GatewayClient.firstRunPresentation(letStraightIn: true,
+                                                           onboardingCompleted: completed,
+                                                           welcomeSeen: seen,
+                                                           hasRecordingHistory: false),
+@@ -151,7 +151,7 @@ final class WelcomeFrontDoorTests: XCTestCase {
+ 
+     func testMigratedEstablishedInstallStillGetsTheStandaloneWelcomeOnce() {
+         XCTAssertEqual(
+-            WelcomeFrontDoor.firstRunPresentation(letStraightIn: false,
++            GatewayClient.firstRunPresentation(letStraightIn: false,
+                                                   onboardingCompleted: true,
+                                                   welcomeSeen: false,
+                                                   hasRecordingHistory: false),
+diff --git a/noun-registry-conformance.md b/noun-registry-conformance.md
+index e772887..524ad59 100644
+--- a/noun-registry-conformance.md
++++ b/noun-registry-conformance.md
+@@ -29,3 +29,4 @@ everything both look green over an empty population.
+ 
+ | old symbol | retired sense | new symbol | registry row |
+ | --- | --- | --- | --- |
++| `WelcomeFrontDoor` | RS-1 | `GatewayClient` | 14 |
