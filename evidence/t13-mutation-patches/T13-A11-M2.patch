@@ -1,0 +1,13 @@
+diff --git a/App/ConnectionConfigView.swift b/App/ConnectionConfigView.swift
+index 4f8b85a..ba17e5e 100644
+--- a/App/ConnectionConfigView.swift
++++ b/App/ConnectionConfigView.swift
+@@ -26,7 +26,7 @@ struct ConnectionConfigView: View {
+ 
+                 GrainCard(.elevated) {
+                     VStack(alignment: .leading, spacing: GrainSpacing.x4) {
+-                        Text("Local Solleva door")
++                        Text("Local Solleva host")
+                             .grainTextStyle(.caption).textCase(.uppercase)
+                             .foregroundStyle(GrainColor.inkTertiary)
+                         GrainTextField("http://127.0.0.1:14288", text: $urlText, label: "Door URL")

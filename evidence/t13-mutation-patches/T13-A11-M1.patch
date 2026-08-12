@@ -1,0 +1,13 @@
+diff --git a/App/ConnectionConfigView.swift b/App/ConnectionConfigView.swift
+index 4f8b85a..9d02daa 100644
+--- a/App/ConnectionConfigView.swift
++++ b/App/ConnectionConfigView.swift
+@@ -32,7 +32,7 @@ struct ConnectionConfigView: View {
+                         GrainTextField("http://127.0.0.1:14288", text: $urlText, label: "Door URL")
+                             .textContentType(.URL)
+                             .autocorrectionDisabled()
+-                            .accessibilityIdentifier("door-url-field")
++                            .accessibilityIdentifier("host-url-field")
+                         GrainTextField("Bearer token", text: $token, label: "Token", secure: true)
+                             .accessibilityIdentifier("door-token-field")
+                     }

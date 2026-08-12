@@ -1,0 +1,434 @@
+# T13 / A11 leg (a) — THE COPY / ACCESSIBILITY PARTITION, PINNED.
+#
+# One row per customer-facing literal: kind<TAB>path<TAB>literal.
+#
+# Emitted by scripts/derive-copy-a11y-frontier.py — an INDEPENDENT implementation in
+# another language — and NOT by the Swift check it pins. The two agree row for row: 421
+# rows over 218 files, 145 `a11y-identifier` and 276 `customer-facing-string`.
+#
+# ON THIS FRONTIER: the literal argument of `.accessibilityIdentifier("…")`, and the
+# literal FIRST argument of `Text(`, `Button(`, `Label(` and `.navigationTitle(`.
+# NOT ON IT, stated rather than implied away: interpolated and computed copy
+# (`Text(viewModel.title)` carries no literal), LocalizedStringKey tables, alert and
+# confirmation-dialog titles, and every string under Tests/ and UITests/.
+a11y-identifier	App/ActionOptionsSheet.swift	act-in-chat
+a11y-identifier	App/ActionOptionsSheet.swift	confirm-feedback
+a11y-identifier	App/ActionOptionsSheet.swift	continue-in-chat
+a11y-identifier	App/ActionOptionsSheet.swift	feedback-comment
+a11y-identifier	App/ActionOptionsSheet.swift	not-an-action
+a11y-identifier	App/ActionOptionsSheet.swift	promote-action
+a11y-identifier	App/ActionOptionsSheet.swift	refine-action
+a11y-identifier	App/AgentRunView.swift	run-finding-headline
+a11y-identifier	App/AgentRunView.swift	run-findings
+a11y-identifier	App/AgentRunView.swift	run-follow-up
+a11y-identifier	App/AgentRunView.swift	run-sources
+a11y-identifier	App/AgentRunView.swift	run-step
+a11y-identifier	App/AgentRunView.swift	run-step-fold
+a11y-identifier	App/AgentRunView.swift	run-step-outcome
+a11y-identifier	App/AgentRunView.swift	run-steps
+a11y-identifier	App/AgentRunView.swift	run-venue
+a11y-identifier	App/AnswerSurfaceView.swift	answer-brief
+a11y-identifier	App/AnswerSurfaceView.swift	answer-continue-in-chat
+a11y-identifier	App/AnswerSurfaceView.swift	answer-done
+a11y-identifier	App/AnswerSurfaceView.swift	answer-note
+a11y-identifier	App/AnswerSurfaceView.swift	answer-sources
+a11y-identifier	App/AnswerSurfaceView.swift	answer-text
+a11y-identifier	App/AnswerSurfaceView.swift	brief-recommendation
+a11y-identifier	App/AnswerSurfaceView.swift	brief-source
+a11y-identifier	App/AnswerSurfaceView.swift	brief-why
+a11y-identifier	App/ArtifactViewers.swift	artifact-cant-preview
+a11y-identifier	App/ArtifactViewers.swift	artifact-export
+a11y-identifier	App/ArtifactViewers.swift	artifact-image
+a11y-identifier	App/ArtifactViewers.swift	artifact-markdown
+a11y-identifier	App/ArtifactViewers.swift	artifact-unavailable
+a11y-identifier	App/CaptureScreen.swift	live-hero-pause
+a11y-identifier	App/CaptureScreen.swift	record-block-reason
+a11y-identifier	App/CaptureScreen.swift	record-cta
+a11y-identifier	App/ChatListView.swift	chat-list
+a11y-identifier	App/ChatListView.swift	chat-list-coverage
+a11y-identifier	App/ChatListView.swift	chat-list-done
+a11y-identifier	App/ChatListView.swift	chat-list-empty
+a11y-identifier	App/ChatListView.swift	chat-list-loading
+a11y-identifier	App/ChatListView.swift	chat-list-not-connected
+a11y-identifier	App/ChatListView.swift	chat-list-provenance-notice
+a11y-identifier	App/ChatListView.swift	chat-list-reach-notice
+a11y-identifier	App/ChatListView.swift	chat-list-row
+a11y-identifier	App/ChatListView.swift	chat-list-search
+a11y-identifier	App/ChatListView.swift	chat-list-unreachable
+a11y-identifier	App/ChatListView.swift	chat-source-clear
+a11y-identifier	App/ChatListView.swift	chat-zone-\(key)
+a11y-identifier	App/ChatListView.swift	kiln-lens-\(lens.rawValue)
+a11y-identifier	App/ChatListView.swift	kiln-series-badge
+a11y-identifier	App/ChatListView.swift	kiln-sort-\(sort.rawValue)
+a11y-identifier	App/ChatListView.swift	kiln-subagent-note
+a11y-identifier	App/ChatListView.swift	new-chat
+a11y-identifier	App/ChatScreen.swift	new-chat
+a11y-identifier	App/ChatScreen.swift	route-line
+a11y-identifier	App/ConnectionConfigView.swift	door-save-error
+a11y-identifier	App/ConnectionConfigView.swift	door-token-field
+a11y-identifier	App/ConnectionConfigView.swift	door-url-field
+a11y-identifier	App/ConnectionConfigView.swift	save-connect-button
+a11y-identifier	App/ConversationFacesView.swift	action-row-\(row.id)
+a11y-identifier	App/ConversationFacesView.swift	actions-empty-state
+a11y-identifier	App/ConversationFacesView.swift	add-an-action
+a11y-identifier	App/ConversationFacesView.swift	conversation-device
+a11y-identifier	App/ConversationFacesView.swift	copy-transcript
+a11y-identifier	App/ConversationFacesView.swift	face-\(f.rawValue)
+a11y-identifier	App/ConversationFacesView.swift	heard-from-others
+a11y-identifier	App/ConversationFacesView.swift	listen-elapsed
+a11y-identifier	App/ConversationFacesView.swift	listen-scrubber
+a11y-identifier	App/ConversationFacesView.swift	match-count
+a11y-identifier	App/ConversationFacesView.swift	new-action-title
+a11y-identifier	App/ConversationFacesView.swift	open-relay-answer
+a11y-identifier	App/ConversationFacesView.swift	speaker-late-offer
+a11y-identifier	App/ConversationFacesView.swift	speaker-sync-reverted
+a11y-identifier	App/ConversationFacesView.swift	transcript-search
+a11y-identifier	App/DeviceScreen.swift	connect-a-recording-device
+a11y-identifier	App/DeviceScreen.swift	recorder-light-sentence
+a11y-identifier	App/DeviceScreen.swift	recording-device-attach-message
+a11y-identifier	App/DeviceScreen.swift	recording-device-row
+a11y-identifier	App/DeviceScreen.swift	recording-device-status
+a11y-identifier	App/DeviceScreen.swift	why-isnt-my-recorder-here
+a11y-identifier	App/KilnConversationView.swift	kiln-chat-done
+a11y-identifier	App/KilnConversationView.swift	kiln-chat-provenance
+a11y-identifier	App/KilnConversationView.swift	kiln-partial-marker
+a11y-identifier	App/KilnConversationView.swift	kiln-resume-in-place-note
+a11y-identifier	App/KilnConversationView.swift	kiln-source-gone
+a11y-identifier	App/KilnConversationView.swift	kiln-transcript-loading
+a11y-identifier	App/KilnConversationView.swift	kiln-transcript-unreachable
+a11y-identifier	App/OnboardingEndingViews.swift	ask-it-answer
+a11y-identifier	App/OnboardingEndingViews.swift	ask-it-suggestions
+a11y-identifier	App/OnboardingEndingViews.swift	live-transcript
+a11y-identifier	App/OnboardingEndingViews.swift	tier-comparison
+a11y-identifier	App/OnboardingFlowView.swift	enrolment-passage
+a11y-identifier	App/PocketOnboardingView.swift	pocket-key-custody-copy
+a11y-identifier	App/PocketOnboardingView.swift	pocket-key-custody-reveal
+a11y-identifier	App/PocketOnboardingView.swift	pocket-key-custody-value
+a11y-identifier	App/PocketOnboardingView.swift	pocket-session-key-field
+a11y-identifier	App/PocketOnboardingView.swift	pocket-session-key-message
+a11y-identifier	App/PocketOnboardingView.swift	pocket-session-key-progress
+a11y-identifier	App/PocketOnboardingView.swift	pocket-session-key-submit
+a11y-identifier	App/RecordingScreen.swift	live-transcript
+a11y-identifier	App/RecordingScreen.swift	minimize-recording
+a11y-identifier	App/RecordingScreen.swift	recording-elapsed
+a11y-identifier	App/RecordingScreen.swift	recording-title
+a11y-identifier	App/RootView.swift	brain-setup-retry
+a11y-identifier	App/RootView.swift	placement-notice
+a11y-identifier	App/RootView.swift	recording-pill
+a11y-identifier	App/SettingsScreen.swift	account-identity
+a11y-identifier	App/SettingsScreen.swift	actions-from-others
+a11y-identifier	App/SettingsScreen.swift	sign-in
+a11y-identifier	App/SettingsScreen.swift	sign-out
+a11y-identifier	App/SpeakerTranscriptView.swift	confirm-inflight
+a11y-identifier	App/SpeakerTranscriptView.swift	confirm-success
+a11y-identifier	App/SpeakerTranscriptView.swift	person-create-new
+a11y-identifier	App/SpeakerTranscriptView.swift	person-likely-\(person.entityId)
+a11y-identifier	App/SpeakerTranscriptView.swift	person-offline-name
+a11y-identifier	App/SpeakerTranscriptView.swift	person-row-\(person.entityId)
+a11y-identifier	App/SpeakerTranscriptView.swift	person-search
+a11y-identifier	App/SpeakerTranscriptView.swift	sheet-confirm-inflight
+a11y-identifier	App/SpeakerTranscriptView.swift	sheet-confirm-success
+a11y-identifier	App/SpeakerTranscriptView.swift	speaker-sync-pending
+a11y-identifier	App/SpeakerTranscriptView.swift	speaker-sync-reverted
+a11y-identifier	App/VaultFunnelView.swift	leave-vault-provisioning
+a11y-identifier	App/VaultFunnelView.swift	stop-waiting
+a11y-identifier	App/VaultFunnelView.swift	vault-setup-failed
+a11y-identifier	Sources/FoundryXKit/AccountDeletionProgressView.swift	deletion-failure-message
+a11y-identifier	Sources/FoundryXKit/AccountDeletionProgressView.swift	deletion-failure-title
+a11y-identifier	Sources/FoundryXKit/AccountDeletionProgressView.swift	deletion-progress
+a11y-identifier	Sources/FoundryXKit/AccountDeletionProgressView.swift	deletion-progress-done
+a11y-identifier	Sources/FoundryXKit/AccountDeletionProgressView.swift	deletion-progress-headline
+a11y-identifier	Sources/FoundryXKit/AccountDeletionProgressView.swift	deletion-retry
+a11y-identifier	Sources/FoundryXKit/AccountDeletionProgressView.swift	deletion-step-\(step.id)
+a11y-identifier	Sources/FoundryXKit/ChatSurface.swift	chat-show-earlier
+a11y-identifier	Sources/FoundryXKit/ChatSurface.swift	chat-surface
+a11y-identifier	Sources/FoundryXKit/ChatView.swift	agentic-affordance
+a11y-identifier	Sources/FoundryXKit/ChatView.swift	approval-diff
+a11y-identifier	Sources/FoundryXKit/ChatView.swift	approval-file
+a11y-identifier	Sources/FoundryXKit/ChatView.swift	approval-prompt
+a11y-identifier	Sources/FoundryXKit/ChatView.swift	assistant-message
+a11y-identifier	Sources/FoundryXKit/ChatView.swift	connection-status
+a11y-identifier	Sources/FoundryXKit/ChatView.swift	run-artifacts
+a11y-identifier	Sources/FoundryXKit/ChatView.swift	status-line
+a11y-identifier	Sources/FoundryXKit/ChatView.swift	tool-activity
+a11y-identifier	Sources/FoundryXKit/ChatView.swift	tool-activity-fold
+a11y-identifier	Sources/FoundryXKit/ChatView.swift	tool-activity-result
+a11y-identifier	Sources/FoundryXKit/ChatView.swift	tool-activity-trace
+a11y-identifier	Sources/FoundryXKit/ChatView.swift	turn-status
+a11y-identifier	Sources/FoundryXKit/ChatView.swift	user-message
+customer-facing-string	App/AccountDeletionView.swift	Back
+customer-facing-string	App/AccountDeletionView.swift	Cancel
+customer-facing-string	App/AccountDeletionView.swift	Couldn't complete “\(scope.title).” Check your connection and try again.
+customer-facing-string	App/AccountDeletionView.swift	Couldn't complete “\(scope.title).” The server isn't offering deletion at the address this app is using, so retrying won't help and your connection is fine. Nothing was deleted. “Erase this account's local data” still works and clears everything on this iPhone.
+customer-facing-string	App/AccountDeletionView.swift	Couldn't complete “\(scope.title).” Your sign-in expired — sign out and back in, then try again. Nothing was deleted.
+customer-facing-string	App/AccountDeletionView.swift	Delete account
+customer-facing-string	App/AccountDeletionView.swift	Delete what you choose — the current account's local data, its hosted Vault, or the account everywhere. Other accounts stay intact. Immediate account deletion also clears shared device pairings and capture shortcuts so they cannot cross accounts.
+customer-facing-string	App/AccountDeletionView.swift	Delete your account
+customer-facing-string	App/AccountDeletionView.swift	Deletion is incomplete at \(stage): \(reason). This account stays closed until every erase step finishes. Your account is already deleted on our servers — only this iPhone is left to erase.
+customer-facing-string	App/AccountDeletionView.swift	Deletion is pending. This account stays closed until cleanup finishes. Your account is already deleted on our servers — only this iPhone is left to erase.
+customer-facing-string	App/AccountDeletionView.swift	Finish erasing this iPhone
+customer-facing-string	App/AccountDeletionView.swift	What should happen to your subscription and your notes?
+customer-facing-string	App/AccountDeletionView.swift	Your subscription is cancelled. Every note you've written is still here, and you can start paying again whenever you want.
+customer-facing-string	App/AccountDeletionView.swift	Your subscription won't renew, and everything you've written will be deleted on \(Self.dayFormatter.string(from: when)). Nothing has been deleted yet.
+customer-facing-string	App/ActionOptionsSheet.swift	Act on it in chat
+customer-facing-string	App/ActionOptionsSheet.swift	Back
+customer-facing-string	App/ActionOptionsSheet.swift	Continue in chat →
+customer-facing-string	App/ActionOptionsSheet.swift	Move to my actions
+customer-facing-string	App/ActionOptionsSheet.swift	Not an action
+customer-facing-string	App/ActionOptionsSheet.swift	Nothing to do here yet — chat isn't available on this phone.
+customer-facing-string	App/ActionOptionsSheet.swift	Refine this action
+customer-facing-string	App/ActivityView.swift	Activity
+customer-facing-string	App/ActivityView.swift	Nothing yet.
+customer-facing-string	App/ActivityView.swift	Recaps of your voice notes, plus the nudges, answers, and runs they produced. Everything links back to where it came from.
+customer-facing-string	App/ActivityView.swift	Recent nudges and answers appear below, even if you missed the notification.
+customer-facing-string	App/ActivityView.swift	When a voice note surfaces something worth acting on, it will appear here. Quiet days stay quiet.
+customer-facing-string	App/ActivityView.swift	you rated it \(rating)
+customer-facing-string	App/AgentRunView.swift	Finding
+customer-facing-string	App/AgentRunView.swift	Send
+customer-facing-string	App/AmbientDebugView.swift	Nothing yet. Turn ambient on and record — the gate checks your live transcript about every 10 seconds.
+customer-facing-string	App/AmbientDebugView.swift	What it's noticing
+customer-facing-string	App/AmbientDebugView.swift	\(d.windowChars) chars · \(d.latencyMs) ms
+customer-facing-string	App/AmbientDebugView.swift	“\(cand.utterance)”
+customer-facing-string	App/AmbientPreviewCards.swift	Examples
+customer-facing-string	App/AmbientPreviewCards.swift	Illustrative only
+customer-facing-string	App/AmbientPreviewCards.swift	These previews cannot be opened, saved, or run.
+customer-facing-string	App/ArtifactViewers.swift	Can't preview this file type here.
+customer-facing-string	App/ArtifactViewers.swift	Export
+customer-facing-string	App/ArtifactViewers.swift	Fetching from your desktop…
+customer-facing-string	App/CaptureScreen.swift	Cancel
+customer-facing-string	App/CaptureScreen.swift	Capture
+customer-facing-string	App/CaptureScreen.swift	Categories are yours: rename or delete them any time. Deleting one never deletes its voice notes.
+customer-facing-string	App/CaptureScreen.swift	Chapter \(index + 1)
+customer-facing-string	App/CaptureScreen.swift	Connect your Omi
+customer-facing-string	App/CaptureScreen.swift	Create
+customer-facing-string	App/CaptureScreen.swift	Delete
+customer-facing-string	App/CaptureScreen.swift	Delete \"\(cat.name)\"
+customer-facing-string	App/CaptureScreen.swift	Edit
+customer-facing-string	App/CaptureScreen.swift	Live · on-device
+customer-facing-string	App/CaptureScreen.swift	Merge \(selectedIds.count)
+customer-facing-string	App/CaptureScreen.swift	Merge with…
+customer-facing-string	App/CaptureScreen.swift	New
+customer-facing-string	App/CaptureScreen.swift	New category
+customer-facing-string	App/CaptureScreen.swift	No voice notes yet
+customer-facing-string	App/CaptureScreen.swift	Remove from category
+customer-facing-string	App/CaptureScreen.swift	Removes it from your phone, your computer, and your library.
+customer-facing-string	App/CaptureScreen.swift	Rename
+customer-facing-string	App/CaptureScreen.swift	Rename or delete category
+customer-facing-string	App/CaptureScreen.swift	Search all voice notes
+customer-facing-string	App/CaptureScreen.swift	\(dev.rssi) dBm
+customer-facing-string	App/CaptureScreen.swift	\(name) · \(p.statusLine)
+customer-facing-string	App/CaptureScreen.swift	\(selectedIds.count) selected
+customer-facing-string	App/ChatListView.swift	Delete
+customer-facing-string	App/ChatListView.swift	Done
+customer-facing-string	App/ChatListView.swift	New
+customer-facing-string	App/ChatListView.swift	Show every source
+customer-facing-string	App/ChatListView.swift	\(nodes.count)
+customer-facing-string	App/ChatScreen.swift	Done
+customer-facing-string	App/ChatScreen.swift	New
+customer-facing-string	App/ChatScreen.swift	Route
+customer-facing-string	App/ConnectionConfigView.swift	Connect
+customer-facing-string	App/ConnectionConfigView.swift	Local Solleva door
+customer-facing-string	App/ConnectionConfigView.swift	Point Solleva at your local Solleva door.
+customer-facing-string	App/ConnectionConfigView.swift	Save & Connect
+customer-facing-string	App/ConversationFacesView.swift	Add
+customer-facing-string	App/ConversationFacesView.swift	Apply
+customer-facing-string	App/ConversationFacesView.swift	Apply \(outcome.speakerName) to \(n == 1 ? 
+customer-facing-string	App/ConversationFacesView.swift	Cancel
+customer-facing-string	App/ConversationFacesView.swift	Check again
+customer-facing-string	App/ConversationFacesView.swift	Clear search
+customer-facing-string	App/ConversationFacesView.swift	Copy transcript
+customer-facing-string	App/ConversationFacesView.swift	Delete
+customer-facing-string	App/ConversationFacesView.swift	Done
+customer-facing-string	App/ConversationFacesView.swift	From your memory
+customer-facing-string	App/ConversationFacesView.swift	Listen
+customer-facing-string	App/ConversationFacesView.swift	Load transcript
+customer-facing-string	App/ConversationFacesView.swift	Loading audio…
+customer-facing-string	App/ConversationFacesView.swift	No summary yet. The transcript face has the full voice note.
+customer-facing-string	App/ConversationFacesView.swift	Not now
+customer-facing-string	App/ConversationFacesView.swift	Nothing to summarize yet. The summary appears once the voice note is processed.
+customer-facing-string	App/ConversationFacesView.swift	Nothing you said surfaced as an action.
+customer-facing-string	App/ConversationFacesView.swift	On-device transcript, finishing on your computer.
+customer-facing-string	App/ConversationFacesView.swift	Processing receipt
+customer-facing-string	App/ConversationFacesView.swift	Relay answer
+customer-facing-string	App/ConversationFacesView.swift	Removes it from your phone, your computer, and your library.
+customer-facing-string	App/ConversationFacesView.swift	Searching by meaning…
+customer-facing-string	App/ConversationFacesView.swift	Stop
+customer-facing-string	App/ConversationFacesView.swift	Transcript not loaded
+customer-facing-string	App/ConversationFacesView.swift	Your note: \(note)
+customer-facing-string	App/ConversationFacesView.swift	\(ConversationActionsPresentation.othersGroupLabel) (\(actions.othersRows.count))
+customer-facing-string	App/ConversationFacesView.swift	\(outcome.speakerName) also matches \(n) past \(n == 1 ? 
+customer-facing-string	App/ConversationFacesView.swift	\u{2022}
+customer-facing-string	App/DeviceScreen.swift	Cancel
+customer-facing-string	App/DeviceScreen.swift	Close
+customer-facing-string	App/DeviceScreen.swift	Computer memory
+customer-facing-string	App/DeviceScreen.swift	Use this device for capture
+customer-facing-string	App/KilnConversationView.swift	Done
+customer-facing-string	App/OnboardingEndingViews.swift	Make your first voice note
+customer-facing-string	App/OnboardingEndingViews.swift	Next
+customer-facing-string	App/OnboardingEndingViews.swift	Now ask it something
+customer-facing-string	App/OnboardingEndingViews.swift	On this phone
+customer-facing-string	App/OnboardingEndingViews.swift	Saved to your notes
+customer-facing-string	App/OnboardingEndingViews.swift	Say whatever's on your mind — a plan, a reminder, a thought you don't want to lose. About fifteen seconds is plenty.
+customer-facing-string	App/OnboardingEndingViews.swift	Skip for now
+customer-facing-string	App/OnboardingEndingViews.swift	Start my first note
+customer-facing-string	App/OnboardingEndingViews.swift	That's it
+customer-facing-string	App/OnboardingEndingViews.swift	Thinking on your phone…
+customer-facing-string	App/OnboardingEndingViews.swift	This phone can't answer on its own yet — that's what a Vault is for. Keep going.
+customer-facing-string	App/OnboardingEndingViews.swift	Where your notes live
+customer-facing-string	App/OnboardingEndingViews.swift	With your Vault
+customer-facing-string	App/OnboardingEndingViews.swift	You just asked a question about one note. Here's what changes if your notes live somewhere bigger.
+customer-facing-string	App/OnboardingEndingViews.swift	Your notes aren't just audio — you can talk to them. This answer comes from the model on your phone. Nothing leaves the device.
+customer-facing-string	App/OnboardingFlowView.swift	Ambient intelligence
+customer-facing-string	App/OnboardingFlowView.swift	Done
+customer-facing-string	App/OnboardingFlowView.swift	F O U N D R Y X
+customer-facing-string	App/OnboardingFlowView.swift	From here on, your agent answers to you — and only you. The key stays on your devices.
+customer-facing-string	App/OnboardingFlowView.swift	Keep reading… \(max(0, (Self.targetFrames - n) / 50)) s left
+customer-facing-string	App/OnboardingFlowView.swift	Not now
+customer-facing-string	App/OnboardingFlowView.swift	Off by default. You can change this any time in Settings.
+customer-facing-string	App/OnboardingFlowView.swift	On — check your lock screen
+customer-facing-string	App/OnboardingFlowView.swift	Read this aloud (~20 seconds). Your voice becomes the key that lets only YOU command your agent. It never leaves your devices.
+customer-facing-string	App/OnboardingFlowView.swift	Retry cleanup
+customer-facing-string	App/OnboardingFlowView.swift	Start reading
+customer-facing-string	App/OnboardingFlowView.swift	Stop
+customer-facing-string	App/OnboardingFlowView.swift	Teach it your voice
+customer-facing-string	App/OnboardingFlowView.swift	That was only ~\(n / 50) seconds — a stable voice key needs about 15. Give it another read?
+customer-facing-string	App/OnboardingFlowView.swift	Try again
+customer-facing-string	App/OnboardingFlowView.swift	Turn it on
+customer-facing-string	App/OnboardingFlowView.swift	We just sent a sample nudge so the first real one is never a surprise. Your agent answers to “Foundry” — rename it in Settings.
+customer-facing-string	App/OnboardingFlowView.swift	While you're taking a note, your phone can privately notice moments like “I'll have to look that up” and offer to help — everything stays on your phone until you accept a suggestion.
+customer-facing-string	App/OnboardingFlowView.swift	Your voice
+customer-facing-string	App/OnboardingFlowView.swift	Your voice is now your key
+customer-facing-string	App/PerfOverlayView.swift	performance \(pill.text). Tap to dismiss.
+customer-facing-string	App/PocketOnboardingView.swift	How it works
+customer-facing-string	App/PocketOnboardingView.swift	How your recorder works
+customer-facing-string	App/PocketOnboardingView.swift	READY
+customer-facing-string	App/PrivacyView.swift	Privacy & your data
+customer-facing-string	App/PrivacyView.swift	Solleva is built so your voice notes belong to you. Here is exactly where things live — no fine print.
+customer-facing-string	App/RecordingScreen.swift	End and save
+customer-facing-string	App/RecordingScreen.swift	End note
+customer-facing-string	App/RecordingScreen.swift	Minimize note
+customer-facing-string	App/RecordingScreen.swift	Saves this voice note and returns to Capture.
+customer-facing-string	App/RecordingScreen.swift	Title updates as you speak.
+customer-facing-string	App/RecordingScreen.swift	Voice ring
+customer-facing-string	App/RootView.swift	
+customer-facing-string	App/RootView.swift	End
+customer-facing-string	App/RootView.swift	Open chat
+customer-facing-string	App/RootView.swift	Solleva
+customer-facing-string	App/RootView.swift	Start a note
+customer-facing-string	App/RootView.swift	\(presentation.word) capture
+customer-facing-string	App/SettingsScreen.swift	Agent name
+customer-facing-string	App/SettingsScreen.swift	Appearance
+customer-facing-string	App/SettingsScreen.swift	Bind “Solleva Action” to the Action Button, Control Center, or back-tap in iOS Settings; Siri: “Start a Solleva voice note”.
+customer-facing-string	App/SettingsScreen.swift	Coming soon. Speakers, memory, and bigger models — from anywhere.
+customer-facing-string	App/SettingsScreen.swift	Delete account
+customer-facing-string	App/SettingsScreen.swift	Follows your device
+customer-facing-string	App/SettingsScreen.swift	Full-context grading
+customer-facing-string	App/SettingsScreen.swift	Light by day, Night Shift when your device switches to dark. One design, two renditions.
+customer-facing-string	App/SettingsScreen.swift	Logs the raw conversation window on this device so the council can grade decisions. On for you; off by default for others.
+customer-facing-string	App/SettingsScreen.swift	On
+customer-facing-string	App/SettingsScreen.swift	Open straight to the app
+customer-facing-string	App/SettingsScreen.swift	Preview a notification
+customer-facing-string	App/SettingsScreen.swift	Replay the full first-run tour
+customer-facing-string	App/SettingsScreen.swift	Say this name in a conversation to ask your agent for something. Only offered — nothing runs without your confirmation.
+customer-facing-string	App/SettingsScreen.swift	See how a nudge feels before anything real triggers.
+customer-facing-string	App/SettingsScreen.swift	Shows spans and hangs as pills at the top of the screen.
+customer-facing-string	App/SettingsScreen.swift	Sign in
+customer-facing-string	App/SettingsScreen.swift	Sign out
+customer-facing-string	App/SettingsScreen.swift	Skip the welcome and take me in the moment I open the app — even before connecting.
+customer-facing-string	App/SettingsScreen.swift	Solleva
+customer-facing-string	App/SettingsScreen.swift	Solleva Cloud — your cell
+customer-facing-string	App/SettingsScreen.swift	The welcome speaks differently to an expert, a person organizing their life, or a firm. Open it to explore each and pick yours.
+customer-facing-string	App/SettingsScreen.swift	Welcome
+customer-facing-string	App/SettingsScreen.swift	Your voice
+customer-facing-string	App/SignInView.swift	
+customer-facing-string	App/SignInView.swift	Done
+customer-facing-string	App/SignInView.swift	End-to-end encrypted to your Mac · you choose what stays private
+customer-facing-string	App/SignInView.swift	F O U N D R Y X
+customer-facing-string	App/SignInView.swift	Make voice notes and remember. Your knowledge stays on your devices, under your keys.
+customer-facing-string	App/SignInView.swift	Remote access isn't configured in this build.
+customer-facing-string	App/SignInView.swift	Retry cleanup
+customer-facing-string	App/SignInView.swift	Retry connection
+customer-facing-string	App/SignInView.swift	Sign out
+customer-facing-string	App/SpeakerTranscriptView.swift	Applied
+customer-facing-string	App/SpeakerTranscriptView.swift	Apply to \(n)
+customer-facing-string	App/SpeakerTranscriptView.swift	Can't reach your computer — type a name and it saves here, syncing when you reconnect.
+customer-facing-string	App/SpeakerTranscriptView.swift	Confirm \(inferred)
+customer-facing-string	App/SpeakerTranscriptView.swift	Confirm or correct the tentative matches.
+customer-facing-string	App/SpeakerTranscriptView.swift	Confirm: \(name)
+customer-facing-string	App/SpeakerTranscriptView.swift	Confirmed \(outcome.speakerName)
+customer-facing-string	App/SpeakerTranscriptView.swift	Create new person: \(typed)
+customer-facing-string	App/SpeakerTranscriptView.swift	Done
+customer-facing-string	App/SpeakerTranscriptView.swift	Fetching voice sample…
+customer-facing-string	App/SpeakerTranscriptView.swift	No match — create the person below.
+customer-facing-string	App/SpeakerTranscriptView.swift	No saved people yet — type a name to add the first one.
+customer-facing-string	App/SpeakerTranscriptView.swift	Not now
+customer-facing-string	App/SpeakerTranscriptView.swift	Not them
+customer-facing-string	App/SpeakerTranscriptView.swift	Not them? Choose who it is:
+customer-facing-string	App/SpeakerTranscriptView.swift	Reassign this speaker to a person.
+customer-facing-string	App/SpeakerTranscriptView.swift	Saved \(confirmedName)
+customer-facing-string	App/SpeakerTranscriptView.swift	Saved \(name)
+customer-facing-string	App/SpeakerTranscriptView.swift	Saving…
+customer-facing-string	App/SpeakerTranscriptView.swift	Stop
+customer-facing-string	App/SpeakerTranscriptView.swift	Syncing to your computer — this voice will be recognized in future conversations.
+customer-facing-string	App/SpeakerTranscriptView.swift	This voice also matches \(n) past \(n == 1 ? 
+customer-facing-string	App/SpeakerTranscriptView.swift	This voice isn't named yet. Who is it?
+customer-facing-string	App/SpeakerTranscriptView.swift	Updated the matching past conversations.
+customer-facing-string	App/SpeakerTranscriptView.swift	Waiting to sync to your computer
+customer-facing-string	App/SpeakerTranscriptView.swift	likely — matches this voice
+customer-facing-string	App/SpeakerTranscriptView.swift	▶ Hear this voice
+customer-facing-string	App/StatsView.swift	No voice notes yet
+customer-facing-string	App/StatsView.swift	Recent trend
+customer-facing-string	App/StatsView.swift	Stats
+customer-facing-string	App/StatsView.swift	Voice notes on this phone
+customer-facing-string	App/StatsView.swift	Your library
+customer-facing-string	App/StatsView.swift	\(day.conversationCount)
+customer-facing-string	App/VaultFunnelView.swift	$\(plan.priceUSD)
+customer-facing-string	App/VaultFunnelView.swift	/mo
+customer-facing-string	App/VaultFunnelView.swift	Asking Solleva about everything you've captured — and searching by meaning — runs on your private Vault. It's off right now.
+customer-facing-string	App/VaultFunnelView.swift	Back to my notes
+customer-facing-string	App/VaultFunnelView.swift	Capture, transcribe, and search stay on this iPhone for free. Your private Vault adds three things.
+customer-facing-string	App/VaultFunnelView.swift	Check again
+customer-facing-string	App/VaultFunnelView.swift	Choose a plan
+customer-facing-string	App/VaultFunnelView.swift	Continue with \(selected.title) · $\(selected.priceUSD)/month
+customer-facing-string	App/VaultFunnelView.swift	Enter
+customer-facing-string	App/VaultFunnelView.swift	Every plan includes your private, isolated Vault. Renews monthly. Cancel anytime.
+customer-facing-string	App/VaultFunnelView.swift	Keep using Solleva
+customer-facing-string	App/VaultFunnelView.swift	Live
+customer-facing-string	App/VaultFunnelView.swift	Not now
+customer-facing-string	App/VaultFunnelView.swift	On-device today · your Vault next
+customer-facing-string	App/VaultFunnelView.swift	Only your voice and your login open it. It stays isolated from every other Vault.
+customer-facing-string	App/VaultFunnelView.swift	Recommended
+customer-facing-string	App/VaultFunnelView.swift	See plans
+customer-facing-string	App/VaultFunnelView.swift	Set up your Vault
+customer-facing-string	App/VaultFunnelView.swift	Sign in again
+customer-facing-string	App/VaultFunnelView.swift	Stop waiting
+customer-facing-string	App/VaultFunnelView.swift	This lives in your Vault
+customer-facing-string	App/VaultFunnelView.swift	Turn on your Vault
+customer-facing-string	App/VaultFunnelView.swift	Your Vault is live
+customer-facing-string	App/VaultFunnelView.swift	\(action.triggerLabel) · Search everything
+customer-facing-string	App/WaitingExperienceView.swift	\(copy.headline). \(model.statusLine(elapsed: elapsed))
+customer-facing-string	Sources/FoundryXKit/AccountDeletionProgressView.swift	Close
+customer-facing-string	Sources/FoundryXKit/AccountDeletionProgressView.swift	Deleting your account
+customer-facing-string	Sources/FoundryXKit/AccountDeletionProgressView.swift	Don't close the app until this finishes — your account stays closed until every erase step completes.
+customer-facing-string	Sources/FoundryXKit/AccountDeletionProgressView.swift	Done
+customer-facing-string	Sources/FoundryXKit/AccountDeletionProgressView.swift	Try again
+customer-facing-string	Sources/FoundryXKit/AccountDeletionProgressView.swift	\(presentation.completedCount) of \(presentation.totalCount) steps finished
+customer-facing-string	Sources/FoundryXKit/AccountDeletionProgressView.swift	\(step.title), \(spoken(step.state))
+customer-facing-string	Sources/FoundryXKit/ChatView.swift	Approve
+customer-facing-string	Sources/FoundryXKit/ChatView.swift	Reject
+customer-facing-string	Sources/FoundryXKit/ChatView.swift	View \(artifact.name)
+customer-facing-string	Sources/FoundryXKit/ChatView.swift	\(String(format: 
+customer-facing-string	Widget/CaptureLiveActivity.swift	Capture paused — \(state.sourceLabel)
+customer-facing-string	Widget/CaptureLiveActivity.swift	Capturing — \(state.sourceLabel)
+customer-facing-string	Widget/CaptureLiveActivity.swift	End
+customer-facing-string	Widget/CaptureLiveActivity.swift	End Current
+customer-facing-string	Widget/CaptureLiveActivity.swift	Last conversation • \(relative(at))
+customer-facing-string	Widget/CaptureLiveActivity.swift	Listening — \(state.sourceLabel)
+customer-facing-string	Widget/CaptureLiveActivity.swift	Paused — \(state.sourceLabel)
+customer-facing-string	Widget/CaptureLiveActivity.swift	Tap Resume to keep capturing
+customer-facing-string	Widget/CaptureLiveActivity.swift	Waiting for the next conversation
+customer-facing-string	Widget/CaptureStatusWidget.swift	Last conversation
+customer-facing-string	Widget/CaptureStatusWidget.swift	None yet
+customer-facing-string	Widget/FoundryXControl.swift	Chat
+customer-facing-string	Widget/FoundryXControl.swift	Record
+customer-facing-string	Widget/FoundryXControl.swift	Solleva
