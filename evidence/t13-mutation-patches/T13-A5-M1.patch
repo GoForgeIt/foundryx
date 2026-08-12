@@ -1,0 +1,14 @@
+diff --git a/Sources/FoundryXKit/AppPlacement.swift b/Sources/FoundryXKit/AppPlacement.swift
+index a7618a7..ee312e2 100644
+--- a/Sources/FoundryXKit/AppPlacement.swift
++++ b/Sources/FoundryXKit/AppPlacement.swift
+@@ -73,7 +73,8 @@ public struct AppPlacement: Codable, Equatable, Sendable {
+     }
+ 
+     enum CodingKeys: String, CodingKey {
+-        case tab, openCaptureId, openChatId, chatListOpen, generation, doorTier
++        case tab, openCaptureId, openChatId, chatListOpen, generation
++        case doorTier = "hostTier"
+         /// The pre-one-list name of `chatListOpen`. Read, never written.
+         case macLibraryOpen
+     }

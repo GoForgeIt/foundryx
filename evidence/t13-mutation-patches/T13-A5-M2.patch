@@ -1,0 +1,13 @@
+diff --git a/Sources/FoundryXKit/RecordingDeviceStore.swift b/Sources/FoundryXKit/RecordingDeviceStore.swift
+index 13a457d..1b1ffa8 100644
+--- a/Sources/FoundryXKit/RecordingDeviceStore.swift
++++ b/Sources/FoundryXKit/RecordingDeviceStore.swift
+@@ -76,7 +76,7 @@ public enum RecordingDeviceStoreError: Error, LocalizedError, Equatable {
+ public final class RecordingDeviceStore {
+     public let scope: String
+     public let root: URL
+-    private let fileName = "recording-devices.json"
++    private let fileName = "recording-devices" + ".json"
+     private let lock = NSLock()
+ 
+     public init(root: URL, scope: String) {
