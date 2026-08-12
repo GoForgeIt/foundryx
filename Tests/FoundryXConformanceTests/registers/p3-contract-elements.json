@@ -1,0 +1,31 @@
+{
+  "_why": "The five elements of T10's published P3 client contract (T25 spec 2.3). `served` is the DECLARATION; the run COMPUTES the same field by driving each element against the real relay and asserts the two sets are equal. Equality, never 'at most': an element that starts being served must move this file, and an element that stops being served goes red without one.",
+  "_mutation": "flip any `served` value and the coverage scenario goes red naming the element and what the client observed.",
+  "elements": [
+    {
+      "id": "prologue-bytes",
+      "name": "the (normalized_host || version) prologue bytes",
+      "served": true
+    },
+    {
+      "id": "version-negotiation",
+      "name": "version negotiation as a wire exchange, not an asserted field",
+      "served": true
+    },
+    {
+      "id": "host-binding-before-upgrade",
+      "name": "host-bound tenancy established before the socket upgrades",
+      "served": true
+    },
+    {
+      "id": "auth-timeout",
+      "name": "the bounded AUTH_TIMEOUT, client-observable",
+      "served": true
+    },
+    {
+      "id": "generic-rejections",
+      "name": "byte-identical generic rejections",
+      "served": true
+    }
+  ]
+}

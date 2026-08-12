@@ -42,5 +42,26 @@ let package = Package(
                 .copy("fixtures/omi_real_frames.json"),
             ]
         ),
+        // The NON-HERMETIC conformance target (T25). Separate from FoundryXBrineTests
+        // on purpose: that target's runner declares itself hermetic — "no real network,
+        // no real hardware; every seam is injected" (BrineFeatureRunner.swift:10) — and a
+        // conformance obligation met inside it would be met against our own responder.
+        //
+        // The separation is a fact of the build graph, not a convention: this target does
+        // not depend on FoundryXBrineTests and cannot see `BrineFeatureRunner`, so merging
+        // the two stops the build rather than quietly weakening the obligation.
+        //
+        // It starts a REAL `foundry-relay` process, resolved from the configuration key
+        // FOUNDRYX_CONFORMANCE_RELAY_BIN. Absent relay is a RED, never an XCTSkip.
+        .testTarget(
+            name: "FoundryXConformanceTests",
+            dependencies: [
+                "FoundryXKit",
+                .product(name: "BrineSwiftCore", package: "brine-swift"),
+            ],
+            // Read by repo path (the same `#filePath`-relative mechanism the feature
+            // files use), not through Bundle.module — so it is excluded rather than copied.
+            exclude: ["registers/p3-contract-elements.json"]
+        ),
     ]
 )
