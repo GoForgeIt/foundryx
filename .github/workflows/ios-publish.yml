@@ -1,0 +1,154 @@
+# ios-publish — the GitHub Actions port of Concourse's foundryx-ios-publish.
+# Migrated 2026-08-12 per foundry-business-hearth proposal
+# 20260812T2204_github_actions_ci_migration.
+#
+# TOPOLOGY. Every job runs on the SELF-HOSTED Mac mini runner (labels
+# [self-hosted, macOS, ios]) — zero paid Actions minutes, and source/secrets/
+# artifacts never leave hardware we control. iOS signing material comes from
+# repo secrets; the keychain is never touched (rcodesign, not codesign — the
+# host's system codesign is broken on macOS 26.6).
+#
+# GATE PARITY with the Concourse pipeline this replaces:
+#   * the three test tasks became three JOBS chained with `needs:` — a red
+#     names itself in the UI, reruns independently, and stops the chain
+#     (Concourse's single ci-gates task ran 45 min to report a 6-min failure)
+#   * `concurrency: macos-build` replaces the macos-build-lock pool resource.
+#     Native, and it CANNOT be orphaned by a dead build — the pool lock was
+#     left claimed by a disk-killed build on 2026-08-12 and stalled every
+#     deploy behind it for 70 minutes.
+#   * ship still verifies INSTALLABLE (VALID IN_BETA_TESTING), not merely
+#     "UPLOAD SUCCEEDED" — that distinction cost hours on 2026-07-31.
+name: ios-publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: macos-build
+  cancel-in-progress: false
+
+jobs:
+  unit-and-invariant-suites:
+    runs-on: [self-hosted, macOS, ios]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: foundryx }
+      - uses: actions/checkout@v4
+        with:
+          repository: GoForgeIt/forge-design-system
+          token: ${{ secrets.CI_GITHUB_TOKEN }}
+          path: grain
+      - uses: actions/checkout@v4
+        with:
+          repository: MarkDucommun/brine-private
+          token: ${{ secrets.CI_GITHUB_TOKEN }}
+          path: brine-private
+      - uses: actions/checkout@v4
+        with:
+          repository: GoForgeIt/foundry
+          token: ${{ secrets.CI_GITHUB_TOKEN }}
+          path: foundry
+      - name: relay + swift + gates
+        run: |
+          export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
+          # The T25 conformance target starts a REAL foundry-relay
+          # ("Absent relay is a RED, never an XCTSkip").
+          ( cd foundry && cargo build --release -p foundry-relay --bin foundry-relay )
+          export FOUNDRYX_CONFORMANCE_RELAY_BIN="$PWD/foundry/target/release/foundry-relay"
+          [ -x "$FOUNDRYX_CONFORMANCE_RELAY_BIN" ]
+          cd foundryx
+          swift build
+          # The cheap phases, and the ones that actually go red — first and alone.
+          bash scripts/ci-gates.sh swift gates
+
+  app-compile-leak-lint:
+    needs: unit-and-invariant-suites
+    runs-on: [self-hosted, macOS, ios]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: foundryx }
+      - uses: actions/checkout@v4
+        with:
+          repository: GoForgeIt/forge-design-system
+          token: ${{ secrets.CI_GITHUB_TOKEN }}
+          path: grain
+      - uses: actions/checkout@v4
+        with:
+          repository: MarkDucommun/brine-private
+          token: ${{ secrets.CI_GITHUB_TOKEN }}
+          path: brine-private
+      - name: compile + leak + lint
+        run: |
+          export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
+          cd foundryx
+          # compile: iOS app Debug AND Release + build-for-testing (caught main
+          # shipping unbuildable while 960 package tests were green).
+          # leak: no harness seam in the Release binary, with negative control.
+          bash scripts/ci-gates.sh compile leak lint
+
+  ios-simulator-brine:
+    needs: app-compile-leak-lint
+    runs-on: [self-hosted, macOS, ios]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: foundryx }
+      - uses: actions/checkout@v4
+        with:
+          repository: GoForgeIt/forge-design-system
+          token: ${{ secrets.CI_GITHUB_TOKEN }}
+          path: grain
+      - uses: actions/checkout@v4
+        with:
+          repository: MarkDucommun/brine-private
+          token: ${{ secrets.CI_GITHUB_TOKEN }}
+          path: brine-private
+      - name: iOS runtime lane on simulator
+        run: |
+          export PATH="/opt/homebrew/bin:$PATH"
+          cd foundryx
+          command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
+          xcodegen generate
+          SIM_ID="$(xcrun simctl list devices available \
+                    | grep -iE 'iPhone' | grep -oE '[0-9A-F-]{36}' | head -1)"
+          [ -n "$SIM_ID" ] || { echo 'no iOS simulator available' >&2; exit 1; }
+          xcodebuild test -project FoundryX.xcodeproj -scheme FoundryX \
+            -destination "id=$SIM_ID" CODE_SIGNING_ALLOWED=NO
+
+  build-sign-ship:
+    needs: ios-simulator-brine
+    runs-on: [self-hosted, macOS, ios]
+    timeout-minutes: 60
+    steps:
+      # The ship script is VERBATIM from Concourse and expects these exact
+      # sibling dir names.
+      - uses: actions/checkout@v4
+        with: { path: foundryx-source }
+      - uses: actions/checkout@v4
+        with:
+          repository: GoForgeIt/forge-design-system
+          token: ${{ secrets.CI_GITHUB_TOKEN }}
+          path: grain
+      - uses: actions/checkout@v4
+        with:
+          repository: MarkDucommun/brine-private
+          token: ${{ secrets.CI_GITHUB_TOKEN }}
+          path: brine-private-source
+      - name: archive + rcodesign + TestFlight (verified installable)
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          FOUNDRYX_PROVISION_PROFILE_BASE64: ${{ secrets.FOUNDRYX_PROVISION_PROFILE_BASE64 }}
+          FOUNDRYX_WIDGET_PROVISION_PROFILE_BASE64: ${{ secrets.FOUNDRYX_WIDGET_PROVISION_PROFILE_BASE64 }}
+          FOUNDRYX_SIGNING_PEM: ${{ secrets.FOUNDRYX_SIGNING_PEM }}
+        run: bash foundryx-source/scripts/ci/archive-sign-upload.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FoundryX-ipa
+          path: ipa-out/FoundryX.ipa
+          retention-days: 14
