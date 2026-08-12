@@ -51,17 +51,37 @@ jobs:
           repository: GoForgeIt/foundry
           token: ${{ secrets.CI_GITHUB_TOKEN }}
           path: foundry
-      - name: unlock the login keychain (launchd runners start with it locked)
-        env:
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      - name: prove the keychain is usable in this session
         run: |
-          # The runner is a launchd service; unlike an interactive shell its login
-          # keychain starts LOCKED, and the keychain-backed pairing tests
-          # (AccountDataIsolation, VaultDoorCredential) fail on SecItem errors that
-          # never reproduce in a terminal. Same unlock Concourse's darwin codesign
-          # tasks used, same machine, same password.
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" ~/Library/Keychains/login.keychain-db
-          security set-keychain-settings -lut 7200 ~/Library/Keychains/login.keychain-db
+          # The runners are Aqua-session LaunchAgents so they share the logged-in
+          # user's UNLOCKED login keychain — the keychain-backed pairing suites
+          # depend on it, and AccountDataIsolationFeatureTests has a guard test
+          # that deliberately FAILS on macOS if the keychain is unusable (a host
+          # where it is locked silently skips all pairing coverage). This probe
+          # makes that host defect fail HERE, in one second, with its own name —
+          # not 3 minutes in as a confusing pairing failure. First attempt at this
+          # was `security unlock-keychain` with the Concourse keychain_password,
+          # which is NOT the login keychain's password; session placement is the
+          # real fix, no secret needed.
+          cat > /tmp/kc-probe.swift <<'SW'
+          import Security
+          import Foundation
+          let svc = "ci-probe.\(UUID().uuidString)"
+          let add: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                    kSecAttrService as String: svc,
+                                    kSecValueData as String: Data("p".utf8)]
+          let st = SecItemAdd(add as CFDictionary, nil)
+          if st == errSecSuccess {
+              SecItemDelete([kSecClass as String: kSecClassGenericPassword,
+                             kSecAttrService as String: svc] as CFDictionary)
+              print("keychain usable (SecItemAdd == 0)")
+          } else {
+              print("KEYCHAIN UNUSABLE: SecItemAdd == \(st). The runner is outside the")
+              print("Aqua session (check LimitLoadToSessionType in its LaunchAgent plist)")
+              exit(1)
+          }
+          SW
+          swift /tmp/kc-probe.swift
       - name: relay + swift + gates
         run: |
           export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
