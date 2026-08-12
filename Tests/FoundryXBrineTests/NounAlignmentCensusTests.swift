@@ -43,12 +43,36 @@ final class NounAlignmentCensusTests: XCTestCase {
     /// registry's residue table, for this repository. An occurrence that matches no row is
     /// a miss; a row that matches no occurrence is dead and is also a failure, so the table
     /// cannot quietly grow permissions nobody needs.
+    /// A row licenses a SITE, never a file.
+    ///
+    /// THIS ROW USED TO CARRY ONLY `path`, AND THE CENSUS WAS FILE-LEVEL BECAUSE OF IT —
+    /// the one thing this file's own header says it must not be: *"a file-level census
+    /// would license every miss inside"* a file that also carries a frozen name. Run, not
+    /// reasoned: a second, unrelated retired-form occurrence added to
+    /// `RelayTransportTests.swift` produced `2 retired-form occurrence(s), 2 licensed,
+    /// 0 unlicensed` and the suite PASSED — `Executed 4 tests, with 0 failures`. The
+    /// licensed file was a hole the size of a file.
+    ///
+    /// `form` is a retired SENSE and a separator, assembled at runtime like every other
+    /// form here, so this table still spells nothing it forbids and needs no carve-out.
+    /// `anchor` is a fragment of the licensed LINE. An occurrence is licensed only when a
+    /// row matches its path AND its form AND its line contains that row's anchor.
     private struct Residue {
         let path: String
+        let sense: String
+        let separator: String
+        let anchor: String
+        let count: Int
         let reason: String
+
+        func form() -> String { "foundryx" + separator + sense }
     }
     private static let licensedResidue: [Residue] = [
         Residue(path: "Tests/FoundryXBrineTests/RelayTransportTests.swift",
+                sense: "door",
+                separator: "-",
+                anchor: "XCTAssertNotEqual(cfg.tunnelId,",
+                count: 1,
                 reason: "the retired form is the THING UNDER TEST: `XCTAssertNotEqual(cfg.tunnelId, …)` "
                       + "names the value a tunnel id must never be hardcoded to. Renaming it would "
                       + "weaken the assertion into one about a value nobody would write."),
@@ -66,6 +90,9 @@ final class NounAlignmentCensusTests: XCTestCase {
         let relativePath: String
         let line: Int
         let form: String
+        /// The licensed line's own text. Without it a residue row can only be matched to a
+        /// FILE, and a file-level match licenses every miss inside that file.
+        let lineText: String
     }
 
     /// Walks the roots and returns every occurrence, plus the number of files examined.
@@ -90,7 +117,8 @@ final class NounAlignmentCensusTests: XCTestCase {
                 let relative = sub + "/" + name
                 for (index, lineText) in text.components(separatedBy: "\n").enumerated() {
                     for form in forms where lineText.contains(form) {
-                        hits.append(Hit(relativePath: relative, line: index + 1, form: form))
+                        hits.append(Hit(relativePath: relative, line: index + 1, form: form,
+                                       lineText: lineText))
                     }
                 }
             }
@@ -111,9 +139,22 @@ final class NounAlignmentCensusTests: XCTestCase {
     /// A1 — every surviving retired-form occurrence is licensed by a named row.
     func testEveryRetiredFormOccurrenceIsLicensed() {
         let (hits, filesExamined) = Self.census()
-        let licensedPaths = Set(Self.licensedResidue.map(\.path))
 
-        let unlicensed = hits.filter { !licensedPaths.contains($0.relativePath) }
+        // PER OCCURRENCE, NOT PER FILE. A row licenses a site: same path, same retired form,
+        // and the occurrence's own line carries the row's anchor. The previous predicate was
+        // `licensedPaths.contains($0.relativePath)` — a whole-file permission, which is the
+        // one thing this census's header says it must not be, and a mutation proved it: a
+        // second unrelated occurrence added to the licensed file reported
+        // `2 occurrences, 2 licensed, 0 unlicensed` and PASSED.
+        func licensingRow(for hit: Hit) -> Residue? {
+            Self.licensedResidue.first {
+                $0.path == hit.relativePath
+                    && $0.form() == hit.form
+                    && hit.lineText.contains($0.anchor)
+            }
+        }
+
+        let unlicensed = hits.filter { licensingRow(for: $0) == nil }
         let rendered = unlicensed
             .map { "  \($0.relativePath):\($0.line) — \($0.form)" }
             .joined(separator: "\n")
@@ -129,10 +170,18 @@ final class NounAlignmentCensusTests: XCTestCase {
         """)
 
         // A row that licenses nothing is a permission nobody needs; it would let a real miss in
-        // later without a diff anyone would notice.
+        // later without a diff anyone would notice. And a row that licenses MORE than it
+        // declares is the file-level hole coming back through the count: the row states how
+        // many sites it covers and that number is asserted, so a second occurrence on a
+        // second line that happens to carry the same anchor is still a miss.
         for residue in Self.licensedResidue {
-            XCTAssertTrue(hits.contains { $0.relativePath == residue.path },
-                "the residue row for \(residue.path) licenses no occurrence — delete the row")
+            let covered = hits.filter { licensingRow(for: $0)?.path == residue.path
+                                        && licensingRow(for: $0)?.anchor == residue.anchor }
+            XCTAssertEqual(covered.count, residue.count,
+                "the residue row for \(residue.path) declares it licenses \(residue.count) "
+                + "occurrence(s) and matches \(covered.count). A row that matches none is a "
+                + "permission nobody needs; a row that matches more has grown into a file-level "
+                + "licence, which is what this census exists not to be.")
         }
     }
 
