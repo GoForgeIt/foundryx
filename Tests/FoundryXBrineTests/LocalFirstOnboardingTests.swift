@@ -202,6 +202,22 @@ enum OnboardingSteps {
         init(_ d: String) { description = d }
     }
 
+    /// SettingsScreen must OWN both cloud rows through the pure rules, not inline
+    /// conditions. `swift test` compiles the SPM package only — it cannot see `App/` —
+    /// so the wiring is held by reading the file's CODE (comments stripped, string
+    /// literals blanked: prose naming the rule is not a call to it).
+    static func assertSettingsRendersTheCloudRows() throws {
+        for rule in ["VaultSettingsPresentation.showWaitlist(",
+                     "VaultSettingsPresentation.showCellBrain("] {
+            let callers = try AppSourceTree.filesContaining(rule)
+            guard callers.contains("App/SettingsScreen.swift") else {
+                throw StepError(
+                    "App/SettingsScreen.swift does not call \(rule)…) — the BRAIN section's "
+                        + "cloud row is not driven by the tested rule. Found in: \(callers)")
+            }
+        }
+    }
+
     /// The controllable source (same shape as CaptureAmbientTests.TestSource).
     final class TestSource: AudioFrameSource, @unchecked Sendable {
         var onFrame: ((Data) -> Void)?
@@ -529,6 +545,60 @@ enum OnboardingSteps {
                 // waitlist verb exists on the account surface.
                 guard LocalChatPresentation.waitlistButtonTitle == "Join the waitlist" else {
                     throw StepError("waitlist affordance contract broken")
+                }
+                // …and that the row this scenario names is the one SettingsScreen actually
+                // draws for an unentitled owner. Asserting only the verb string was a null
+                // assertion: it stayed green with no cloud row in SettingsScreen at all.
+                guard VaultSettingsPresentation.showWaitlist(entitlement: .off) else {
+                    throw StepError("the waitlist row is no longer shown to an off Vault")
+                }
+                try Self.assertSettingsRendersTheCloudRows()
+            },
+
+            // ── @phase6: the Vault as a pickable brain, once it is live ──────
+            defineCheck("{string} is not a brain I can choose until my Vault is live") { _, p, _ in
+                let want = try p.requireString(0)
+                guard want == BrainChoice.foundryCloud.label else {
+                    throw StepError("\(want) is not the cloud brain's label")
+                }
+                for entitlement in [VaultEntitlement.off, .unknown] {
+                    guard !VaultSettingsPresentation.showCellBrain(entitlement: entitlement) else {
+                        throw StepError(
+                            "the Vault brain is offered at entitlement \(entitlement) — a brain "
+                                + "with no Vault behind it")
+                    }
+                }
+            },
+
+            defineCheck("once my Vault is live {string} is a brain I can choose in settings") { _, p, _ in
+                let want = try p.requireString(0)
+                guard want == BrainChoice.foundryCloud.label else {
+                    throw StepError("\(want) is not the cloud brain's label")
+                }
+                guard VaultSettingsPresentation.showCellBrain(entitlement: .live) else {
+                    throw StepError("a live Vault is still not offered as a brain")
+                }
+                // The rule existing is not the row existing. `swift test` cannot compile
+                // App/, so this reads it: SettingsScreen must consult the rule AND draw a
+                // SELECTABLE row (brainRow is the only thing that calls brains.select).
+                try Self.assertSettingsRendersTheCloudRows()
+                let selectable = try AppSourceTree.filesContaining("brainRow(.foundryCloud")
+                guard selectable.contains("App/SettingsScreen.swift") else {
+                    throw StepError(
+                        "SettingsScreen never draws a SELECTABLE Solleva Cloud row "
+                            + "(brainRow(.foundryCloud …) is what calls brains.select) — "
+                            + "found in: \(selectable)")
+                }
+            },
+
+            defineCheck("the coming-soon waitlist and the live Vault brain are never shown together") { _, _, _ in
+                for entitlement in [VaultEntitlement.off, .live, .unknown] {
+                    let waitlist = VaultSettingsPresentation.showWaitlist(entitlement: entitlement)
+                    let brain = VaultSettingsPresentation.showCellBrain(entitlement: entitlement)
+                    guard !(waitlist && brain) else {
+                        throw StepError(
+                            "entitlement \(entitlement) shows BOTH the waitlist and the Vault brain")
+                    }
                 }
             },
 

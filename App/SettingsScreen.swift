@@ -114,6 +114,16 @@ struct SettingsScreen: View {
                 // status lives on the welcome or in the app — this is the in-app home,
                 // what a straight-in user glances instead of any gate).
                 brainRow(.myComputer, subtitle: computerBrainSubtitle)
+                // The Vault, as a brain you can actually pick — once you have one.
+                //
+                // This row did not exist. The BRAIN section held exactly two selectable
+                // rows plus a "Coming soon" cloud row that VANISHED the moment the Vault
+                // went live, so the brain a paying owner had just bought appeared nowhere
+                // in Settings, and moving back to the phone was a ONE-WAY DOOR: the only
+                // route back was replaying the whole first-run tour.
+                if VaultSettingsPresentation.showCellBrain(entitlement: vaultFunnel.entitlement) {
+                    brainRow(.foundryCloud, subtitle: cellBrainSubtitle)
+                }
                 // The hosted cell's consumer entrypoint (proposal
                 // 20260630T0458_secure_web_hosted_foundry) — waitlist until it ships.
                 if VaultSettingsPresentation.showWaitlist(entitlement: vaultFunnel.entitlement) {
@@ -386,21 +396,27 @@ struct SettingsScreen: View {
     /// vaultFunnel.activateFromSettings() opens the deliberately requested status/setup sheet.
     @ViewBuilder private var vaultEntryRow: some View {
         let status = vaultFunnel.statusPresentation
-        if status.primaryAction != .none {
+        if status.primaryAction == .openVaultDetail {
+            // THE CHEVRON NOW GOES SOMEWHERE. This row read "Your Vault is live" with a
+            // chevron and did nothing when tapped: it called activateFromSettings(), which
+            // returns immediately for a live Vault. A live Vault has plenty to say — its
+            // state, what it holds, how to leave or delete it — it just had no page.
+            NavigationLink {
+                VaultDetailView(
+                    vaultFunnel: vaultFunnel,
+                    brains: brains,
+                    accountDeletion: accountDeletion,
+                    idToken: { remote.idToken },
+                    onDeleted: { scope in
+                        if scope != .hostedVault { remote.signOut() }
+                    })
+            } label: {
+                vaultRowLabel(status, live: true)
+            }
+            .accessibilityIdentifier("vault-detail-entry")
+        } else if status.primaryAction != .none {
             Button { vaultFunnel.activateFromSettings() } label: {
-                HStack(spacing: GrainSpacing.x2) {
-                    Image(systemName: vaultFunnel.entitlement == .live
-                          ? "checkmark.seal.fill" : "key.fill")
-                        .foregroundStyle(vaultFunnel.entitlement == .live
-                                         ? GrainColor.sage : GrainColor.forgeBlue)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(status.title).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-                        Text(status.body).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-                    }
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 12)).foregroundStyle(GrainColor.textFaint)
-                }
+                vaultRowLabel(status, live: vaultFunnel.entitlement == .live)
             }
             .buttonStyle(.plain)
         } else {
@@ -429,16 +445,42 @@ struct SettingsScreen: View {
             }
             .buttonStyle(.plain)
         } else {
+            // Not actionable: a live Vault, or an entitlement we could not check. Only the
+            // FIRST of those is "On" — this drew a green seal and the word "On" next to
+            // "We couldn't check your Vault", which is the opposite of what it says.
+            let live = vaultFunnel.entitlement == .live
             HStack(spacing: GrainSpacing.x2) {
-                Image(systemName: "checkmark.seal.fill").foregroundStyle(GrainColor.sage)
+                Image(systemName: live ? "checkmark.seal.fill" : "key.slash")
+                    .foregroundStyle(live ? GrainColor.sage : GrainColor.textFaint)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(p.title).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
                     Text(p.subtitle).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
                 }
                 Spacer()
-                Text("On").grainTextStyle(.caption).foregroundStyle(GrainColor.sage)
+                if live {
+                    Text("On").grainTextStyle(.caption).foregroundStyle(GrainColor.sage)
+                }
             }
         }
+        }
+    }
+
+    /// The Vault row's contents. Shared by the navigating (live) and the sheet-opening
+    /// (setup / recovery / failure) forms so the two can never drift apart visually.
+    /// NavigationLink draws its own chevron; the Button form draws one itself.
+    private func vaultRowLabel(_ status: VaultFunnelPresentation, live: Bool) -> some View {
+        HStack(spacing: GrainSpacing.x2) {
+            Image(systemName: live ? "checkmark.seal.fill" : "key.fill")
+                .foregroundStyle(live ? GrainColor.sage : GrainColor.forgeBlue)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(status.title).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                Text(status.body).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            }
+            Spacer()
+            if !live {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12)).foregroundStyle(GrainColor.textFaint)
+            }
         }
     }
 
@@ -450,6 +492,15 @@ struct SettingsScreen: View {
             return status.text
         }
         return "Pair with the Solleva desktop app (sign in on your Mac first)."
+    }
+
+    /// The Vault brain row's subtitle. Deliberately does NOT claim the cell is reachable
+    /// — nothing here dials it (`showCellBrain` reads a resolvable pairing, not a live
+    /// probe). What it promises is what is actually guaranteed: switching is additive, so
+    /// leaving keeps every conversation on this phone readable.
+    private var cellBrainSubtitle: String {
+        "Your Vault. Chat, search, and history run on it — switch back any time and "
+            + "everything on this phone stays readable."
     }
 
     private func brainRow(_ c: BrainChoice, subtitle: String) -> some View {

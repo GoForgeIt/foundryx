@@ -124,6 +124,9 @@ final class VaultWorld: @unchecked Sendable {
     var service: StubSignupService!
     var browser: StubBrowser!
     var cellStore: CellStore!
+    /// The REAL BrainStore the app routes on — the funnel's brain-selection seam writes
+    /// here, and `RootGate` is then asked where the app is running.
+    var brains: BrainStore!
     var model: VaultFunnelModel!
     var lastRoute: VaultRoute?
     /// Snapshotted by the browser stub the instant open() is called, to PROVE the checkout
@@ -151,6 +154,11 @@ final class VaultWorld: @unchecked Sendable {
         cellStore = CellStore(
             defaults: defaults,
             keychainService: fixture.cellService)
+        brains = BrainStore(defaults: defaults)
+        // Every scenario starts on the free tier's brain. The store is durable and shared
+        // across scenarios in this world, so without this an earlier scenario's Vault
+        // selection would hand the next one a free pass.
+        brains.select(.justMyPhone)
         lastRoute = nil
         attemptPersistedWhenBrowserOpened = false
         let attemptsRef = attempts!
@@ -158,11 +166,15 @@ final class VaultWorld: @unchecked Sendable {
             guard let self else { return }
             self.attemptPersistedWhenBrowserOpened = (attemptsRef.load() != nil)
         }
+        let brainsRef = brains!
         model = VaultFunnelModel(service: service, browser: browser, cellStore: cellStore,
                                  attempts: attempts, idToken: { "id-token-abc" },
                                  // The funnel's purchase path is storefront-gated (T-STOREFRONT);
                                  // these scenarios exercise the eligible (US) storefront.
-                                 storefrontCountryCode: { "USA" })
+                                 storefrontCountryCode: { "USA" },
+                                 // The app's composition root wires this to its BrainStore
+                                 // (App/RootView.swift). Same seam, real store.
+                                 selectVaultBrain: { brainsRef.select(.foundryCloud) })
     }
 
     @MainActor var state: VaultFunnelState { model.state }
@@ -289,6 +301,24 @@ enum VaultSteps {
 
             defineStep("they turn on their Vault from Settings") { ctx, _, _ in
                 await MainActor.run { world.model.activateFromSettings() }
+                return ctx
+            },
+
+            // The live screen's "Enter" button. It calls exactly this — held by
+            // BrainSelectionCompositionTests, so the step and the button cannot drift.
+            defineStep("they enter their live Vault") { ctx, _, _ in
+                await MainActor.run { world.model.enterVault() }
+                return ctx
+            },
+
+            // Settings → "Replay the full first-run tour" → "Set up my Vault" lands on
+            // `beginSetup()` (App/OnboardingEndingViews.swift), with no entitlement gate
+            // between. The user has closed the funnel and come back later.
+            defineStep("they start Vault setup from the replayed first-run tour") { ctx, _, _ in
+                await MainActor.run {
+                    world.model.dismiss()
+                    world.model.beginSetup()
+                }
                 return ctx
             },
 
@@ -428,6 +458,43 @@ enum VaultSteps {
                 if case .plans = s { throw StepError("a live Vault re-launched the funnel plans from Settings") }
                 guard !p.actionable, p.title == "Your Vault" else {
                     throw StepError("the live-state entry row should reflect the connected Vault, got: \(p)")
+                }
+            },
+
+            // The arrival. Asked of RootGate — the same pure rule RootView routes on —
+            // with `hostResolved: true` on purpose: a paying owner who also has a working
+            // desktop door must land in the Vault they just bought, not have the computer
+            // rung quietly win.
+            defineCheck("the app runs on the Vault brain, even with a desktop door still resolved") { _, _, _ in
+                let choice = world.brains.choice
+                let paired = world.cellStore.isPaired
+                let dest = RootGate.destination(signedIn: true,
+                                                splashElapsed: true,
+                                                brain: choice,
+                                                hostResolved: true,
+                                                letStraightIn: true,
+                                                cellPaired: paired)
+                guard dest == .cellBrain else {
+                    throw StepError(
+                        "the app is on \(dest) after entering a live Vault "
+                            + "(brain=\(choice.rawValue), cellPaired=\(paired)) — the Vault was "
+                            + "paired but nothing moved the brain, so capture, chat and search "
+                            + "all stayed on the phone")
+                }
+            },
+
+            defineCheck("the funnel shows the Vault they already have, not the purchase flow") { _, _, _ in
+                let (s, ent) = await MainActor.run { (world.model.state, world.model.entitlement) }
+                guard ent == .live else { throw StepError("a live Vault was expected, entitlement is \(ent)") }
+                if case .intro = s {
+                    throw StepError("replaying the tour pushed a PAYING owner back into the "
+                                        + "purchase funnel's intro")
+                }
+                if case .plans = s {
+                    throw StepError("replaying the tour pushed a PAYING owner onto the plans screen")
+                }
+                guard case .live = s else {
+                    throw StepError("the tour's Vault entry did not show the Vault they have: \(s)")
                 }
             },
         ]
