@@ -114,6 +114,16 @@ struct SettingsScreen: View {
                 // status lives on the welcome or in the app — this is the in-app home,
                 // what a straight-in user glances instead of any gate).
                 brainRow(.myComputer, subtitle: computerBrainSubtitle)
+                // The Vault, as a brain you can actually pick — once you have one.
+                //
+                // This row did not exist. The BRAIN section held exactly two selectable
+                // rows plus a "Coming soon" cloud row that VANISHED the moment the Vault
+                // went live, so the brain a paying owner had just bought appeared nowhere
+                // in Settings, and moving back to the phone was a ONE-WAY DOOR: the only
+                // route back was replaying the whole first-run tour.
+                if VaultSettingsPresentation.showCellBrain(entitlement: vaultFunnel.entitlement) {
+                    brainRow(.foundryCloud, subtitle: cellBrainSubtitle)
+                }
                 // The hosted cell's consumer entrypoint (proposal
                 // 20260630T0458_secure_web_hosted_foundry) — waitlist until it ships.
                 if VaultSettingsPresentation.showWaitlist(entitlement: vaultFunnel.entitlement) {
@@ -450,6 +460,15 @@ struct SettingsScreen: View {
             return status.text
         }
         return "Pair with the Solleva desktop app (sign in on your Mac first)."
+    }
+
+    /// The Vault brain row's subtitle. Deliberately does NOT claim the cell is reachable
+    /// — nothing here dials it (`showCellBrain` reads a resolvable pairing, not a live
+    /// probe). What it promises is what is actually guaranteed: switching is additive, so
+    /// leaving keeps every conversation on this phone readable.
+    private var cellBrainSubtitle: String {
+        "Your Vault. Chat, search, and history run on it — switch back any time and "
+            + "everything on this phone stays readable."
     }
 
     private func brainRow(_ c: BrainChoice, subtitle: String) -> some View {

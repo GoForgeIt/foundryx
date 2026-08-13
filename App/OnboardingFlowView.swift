@@ -65,7 +65,13 @@ struct OnboardingFlowView: View {
     var manager: CaptureManager? = nil
     /// The account-scoped brain preference the destination step writes. `BrainChoice` IS
     /// the destination choice — there is deliberately no second preference for it.
-    var brains: BrainStore? = nil
+    ///
+    /// NON-OPTIONAL, deliberately. It used to default to nil and the destination step
+    /// fell back to `brains ?? BrainStore()` — a throwaway store that SWALLOWS the
+    /// choice. Every "connect me to my Vault" tap on that path would have written the
+    /// brain nobody reads, silently, with nothing red anywhere. Both call sites already
+    /// pass the app's store; this makes that a compile-time fact.
+    var brains: BrainStore
     /// Chose the Vault at the destination step — the host hands off to the Vault funnel
     /// (cell provisioning) instead of just closing the flow.
     var onChooseVault: (() -> Void)? = nil
@@ -77,7 +83,7 @@ struct OnboardingFlowView: View {
     init(baseDir: URL,
          skipWelcome: Bool = false,
          manager: CaptureManager? = nil,
-         brains: BrainStore? = nil,
+         brains: BrainStore,
          onChooseVault: (() -> Void)? = nil,
          onDone: @escaping () -> Void) {
         self.baseDir = baseDir
@@ -115,7 +121,7 @@ struct OnboardingFlowView: View {
                                     answerer: makeSystemNoteAnswerer()) { step = .destination }
             case .destination:
                 OnboardingDestinationStep(
-                    brains: brains ?? BrainStore(),
+                    brains: brains,
                     onChooseVault: {
                         // Mark the flow done BEFORE handing off: the funnel is a separate
                         // surface, and a user who backs out of it must not be re-onboarded.

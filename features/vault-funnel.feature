@@ -65,3 +65,23 @@ Feature: A free user activates a Vault and lands in it — the funnel spine
     Given a user with a live Vault
     When they turn on their Vault from Settings
     Then the Settings entry does not launch the funnel
+
+  # BUYING A VAULT AND NEVER ARRIVING IN IT (blocker: brain-selection).
+  # The funnel paired the cell and said "Your Vault is live", and then the app carried on
+  # recording, chatting and searching ON THE PHONE — because nothing in the funnel ever
+  # moved the brain. "Enter" only closed the sheet. These scenarios are the arrival: the
+  # button says Enter, so entering is what it has to do.
+  @funnel
+  Scenario: entering a live Vault puts the app on the Vault brain
+    Given a free on-device user who completed browser checkout
+    When the app reconciles on return with a verified payment
+    And they enter their live Vault
+    Then the app runs on the Vault brain, even with a desktop door still resolved
+
+  @funnel
+  Scenario: replaying the tour offers a paying user the Vault they already have
+    Given a user with a live Vault
+    When they start Vault setup from the replayed first-run tour
+    Then the funnel shows the Vault they already have, not the purchase flow
+    And they enter their live Vault
+    And the app runs on the Vault brain, even with a desktop door still resolved

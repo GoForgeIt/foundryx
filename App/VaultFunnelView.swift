@@ -291,7 +291,10 @@ struct VaultFunnelView: View {
                 .multilineTextAlignment(.center)
             Spacer()
             VStack(spacing: GrainSpacing.x2) {
-                GrainButton("Enter", variant: .filled, size: .lg) { model.dismiss() }
+                // ENTER means enter. This used to be `model.dismiss()` — it closed the
+                // sheet and left the app recording, chatting and searching on the phone,
+                // with the Vault the owner had just paid for reachable from nowhere.
+                GrainButton("Enter", variant: .filled, size: .lg) { model.enterVault() }
                 privacyLine("key", "Kept under your keys.")
             }
         }
@@ -404,11 +407,18 @@ extension VaultFunnelModel {
 
     /// The production funnel model: live signup client + ASWebAuthenticationSession browser +
     /// the durable CellStore, reading the current id_token from the shared box.
-    @MainActor static func live() -> VaultFunnelModel {
+    ///
+    /// `cellStore` is INJECTED, never made here. This function used to build its own
+    /// `CellStore()`, so the funnel paired one instance while `RootGate` read another: the
+    /// pairing was durable and survived, but nothing published it to the running app, and
+    /// a Vault bought in this session could not be entered until the next cold launch.
+    /// `selectVaultBrain` is how the funnel's "Enter" moves the app onto the Vault.
+    @MainActor static func live(cellStore: CellStore,
+                                selectVaultBrain: (() -> Void)? = nil) -> VaultFunnelModel {
         VaultFunnelModel(
             service: VaultSignupClient(baseURL: signupServiceBase),
             browser: ASWebAuthenticationVaultBrowser(),
-            cellStore: CellStore(),
+            cellStore: cellStore,
             idToken: { VaultAuthTokenBox.shared.token },
             // THE fix for the five-hour trap: sign reconciles with a token that is still
             // alive. The box above is a cached snapshot nobody refreshes, and Google
@@ -421,7 +431,8 @@ extension VaultFunnelModel {
                 if let fresh { VaultAuthTokenBox.shared.token = fresh }
                 return fresh
             },
-            storefrontCountryCode: { VaultStorefrontBox.shared.countryCode })
+            storefrontCountryCode: { VaultStorefrontBox.shared.countryCode },
+            selectVaultBrain: selectVaultBrain)
     }
 }
 #endif

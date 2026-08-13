@@ -147,6 +147,24 @@ public enum VaultSettingsPresentation {
     public static func showWaitlist(entitlement: VaultEntitlement) -> Bool {
         entitlement == .off
     }
+
+    /// Whether the BRAIN section offers the Vault as a brain the owner can pick.
+    ///
+    /// WHAT `.live` ACTUALLY MEANS HERE — say it plainly, because the honest reading is
+    /// weaker than the word suggests. `entitlement == .live` is exactly "this phone holds a
+    /// complete cell pairing whose door target resolves" (`connectedVault != nil`, derived
+    /// from `CellStore.config` + `CellBackend.resolveTarget`). It is NOT a reachability
+    /// probe and NOT a fresh server confirmation: nothing here dials the cell. So this rule
+    /// answers "does this owner have a Vault configured on this phone", which is the right
+    /// question for OFFERING a brain the user picks deliberately and can leave again from
+    /// the same list — and would be the wrong question for silently MOVING them onto it.
+    ///
+    /// Exactly one cloud row is ever visible: this is the strict complement of
+    /// `showWaitlist` on `.off`, and `.unknown` shows neither (we don't know yet, so we
+    /// neither sell nor offer).
+    public static func showCellBrain(entitlement: VaultEntitlement) -> Bool {
+        entitlement == .live
+    }
 }
 
 // MARK: - Plans (native pricing rows)
@@ -507,6 +525,11 @@ public final class VaultFunnelModel: ObservableObject {
     private let service: VaultSignupService
     private let browser: VaultCheckoutBrowser
     private let cellStore: CellStore
+    /// Moves the app onto the Vault brain. A SEAM, not a BrainStore, because the app
+    /// replaces its BrainStore at every identity boundary — the closure resolves the
+    /// current one at call time. Nil in the pure/unit world; the app wires it at the
+    /// composition root (App/RootView.swift) alongside the shared CellStore.
+    private let selectVaultBrain: (() -> Void)?
     private let attempts: VaultCheckoutAttemptStore
     /// A checkout already persisted when this model was created belongs to an earlier
     /// app session. Foreground reconciliation must refresh its Settings status without
@@ -589,10 +612,12 @@ public final class VaultFunnelModel: ObservableObject {
                 returnCallback: URL = URL(string: "foundryx://vault/return")!,
                 idToken: @escaping @Sendable () -> String? = { nil },
                 refreshingIdToken: (@Sendable () async -> String?)? = nil,
-                storefrontCountryCode: @escaping @Sendable () -> String? = { nil }) {
+                storefrontCountryCode: @escaping @Sendable () -> String? = { nil },
+                selectVaultBrain: (() -> Void)? = nil) {
         self.service = service
         self.browser = browser
         self.cellStore = cellStore
+        self.selectVaultBrain = selectVaultBrain
         self.attempts = attempts
         self.attemptMutationGenerationAtLaunch = attempts.mutationGeneration
         self.checkoutBase = checkoutBase
@@ -615,7 +640,39 @@ public final class VaultFunnelModel: ObservableObject {
     }
 
     /// Trigger → intro ("Set up your Vault").
-    public func beginSetup() { state = .intro }
+    ///
+    /// ENTITLEMENT-AWARE, because this entry point is reachable by people who already
+    /// paid. Settings → "Replay the full first-run tour" → "Set up my Vault" lands here
+    /// with no gate in between (App/OnboardingEndingViews.swift), so an owner with a live
+    /// Vault was walked back into the purchase funnel and invited to buy a second one.
+    /// They get the Vault they have instead — which is also the door back INTO it, since
+    /// the live screen's "Enter" selects the Vault brain.
+    public func beginSetup() {
+        if entitlement == .live, let config = cellStore.config {
+            state = .live(config)
+            return
+        }
+        state = .intro
+    }
+
+    /// "Enter" on the live screen — the moment a paying owner ARRIVES in the Vault they
+    /// just bought. Selecting the brain is the whole point of the button: without it the
+    /// funnel paired a cell, said "Your Vault is live", and left every tab running on the
+    /// phone (blocker: brain-selection).
+    ///
+    /// WHY THIS IS A TAP AND NOT AN AUTOMATIC SWITCH INSIDE `connect()`. `connect()` also
+    /// runs from a BACKGROUND foreground-reconcile, where moving the brain would tear down
+    /// and remount the whole tab tree (a different `MainTabsIdentity`, a new
+    /// `CaptureManager`) under a user who may be mid-recording, and would move a working
+    /// desktop-door user onto a cell nothing has yet spoken to. The arrival is deliberate,
+    /// so it hangs off the button that says Enter.
+    ///
+    /// Guarded on entitlement rather than on the screen: selecting the Vault brain without
+    /// a resolvable pairing would route the app to a brain that cannot serve.
+    public func enterVault() {
+        if entitlement == .live { selectVaultBrain?() }
+        dismiss()
+    }
 
     /// Identity boundaries invalidate every account-derived funnel value. Reload
     /// the durable pairing under the new scope, clear A's transient funnel state,

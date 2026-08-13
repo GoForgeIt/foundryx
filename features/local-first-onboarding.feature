@@ -88,6 +88,18 @@ Feature: FoundryX is whole without a brain — local-first onboarding
     And "My computer" is offered for pairing with the desktop app
     And "Solleva Cloud" is shown as coming soon with a waitlist
 
+  # A PAYING USER COULD NOT SEE THEIR VAULT ANYWHERE (blocker: brain-selection).
+  # The cloud entry in the brain picker was a non-selectable "Coming soon" row that
+  # DISAPPEARED once the Vault went live — so the moment you paid, the brain you paid
+  # for stopped existing in Settings, and moving back to your phone was a one-way door.
+  @phase6
+  Scenario: the Vault appears in the brain picker once it is live
+    Given I have signed in
+    When I open the brain picker in settings
+    Then "Solleva Cloud" is not a brain I can choose until my Vault is live
+    And once my Vault is live "Solleva Cloud" is a brain I can choose in settings
+    And the coming-soon waitlist and the live Vault brain are never shown together
+
   Scenario: joining the waitlist is a one-tap flag on my existing account
     Given I have signed in
     When I tap join the waitlist

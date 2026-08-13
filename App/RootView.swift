@@ -1,14 +1,78 @@
 import SwiftUI
+import Combine
 import Grain
 
+/// THE COMPOSITION ROOT for everything that decides WHICH BRAIN the app is running on.
+///
+/// It exists because two defects here were structural, not logical, and both were
+/// invisible to every behavioural test:
+///
+///  1. TWO CellStores. RootView made one (`RootGate`'s `cellPaired` came from it) and
+///     `VaultFunnelModel.live()` made another (the funnel PAIRED into it). They share the
+///     durable UserDefaults/Keychain keys, so the pairing survived — but `@Published`
+///     fires on the instance that changed, so nothing told RootView a Vault had appeared.
+///     Buying a Vault could not move the app into it until the next COLD LAUNCH. Sibling
+///     `@StateObject` initializers cannot be wired to each other, so the shared instance
+///     has to be built here, in one place, in order.
+///  2. RootView never OBSERVED `BrainStore`. It was reached through a computed property
+///     over this object, and `select()` publishes on BrainStore, not here — so a brain
+///     switch moved the gate only when some unrelated publisher (a token refresh, a relay
+///     status tick) happened to re-run the body. The checkmark in Settings moved
+///     instantly (SettingsScreen holds it as `@ObservedObject`) while the app kept
+///     running on the old brain: the picker lied. Every child's `objectWillChange` is
+///     forwarded here so the gate re-decides when — and only when — something it routes
+///     on actually changed.
 @MainActor
 private final class RootAccountStores: ObservableObject {
-    @Published private(set) var brains = BrainStore()
+    @Published private(set) var brains: BrainStore
+    /// THE cell pairing. One instance, shared with the Vault funnel below.
+    let cells: CellStore
+    let vaultFunnel: VaultFunnelModel
 
-    func resetBrainForIdentityTransition() {
-        brains = BrainStore()
+    private var forwarded: [AnyCancellable] = []
+
+    /// Holds the CURRENT BrainStore for the funnel's selection seam. `brains` is replaced
+    /// wholesale at an identity boundary, so the seam cannot capture the instance — it
+    /// has to resolve it at call time, or a post-boundary Vault would write the previous
+    /// account's store.
+    private final class BrainRef {
+        var store: BrainStore
+        init(_ store: BrainStore) { self.store = store }
+    }
+    private let brainRef: BrainRef
+
+    init() {
+        let brains = BrainStore()
+        let cells = CellStore()
+        let ref = BrainRef(brains)
+        self.brains = brains
+        self.cells = cells
+        self.brainRef = ref
+        self.vaultFunnel = VaultFunnelModel.live(
+            cellStore: cells,
+            selectVaultBrain: { ref.store.select(.foundryCloud) })
+        forward(brains)
+        forward(cells)
+        forward(vaultFunnel)
     }
 
+    func resetBrainForIdentityTransition() {
+        let replacement = BrainStore()
+        brains = replacement
+        brainRef.store = replacement
+        forwarded.removeAll()
+        forward(replacement)
+        forward(cells)
+        forward(vaultFunnel)
+    }
+
+    private func forward<T: ObservableObject>(_ child: T)
+        where T.ObjectWillChangePublisher == ObservableObjectPublisher {
+        // The relay is read HERE, on the main actor, and only `send()` (which is not
+        // actor-isolated) crosses into the subscription.
+        let relay = objectWillChange
+        forwarded.append(child.objectWillChange.sink { _ in relay.send() })
+    }
 }
 
 // M5 R1b: login-gated, remote-managed. You must sign in (Google/Microsoft) and
@@ -33,21 +97,25 @@ struct RootView: View {
     @State private var enteredApp = false
 
     @StateObject private var accountStores = RootAccountStores()
-    @StateObject private var cells = CellStore()
     @StateObject private var identityCoordinator = AccountIdentityCoordinator()
 
-    /// The Vault activation funnel (track T-IOS-FUNNEL): paid-intent trigger → browser
-    /// hand-off → server reconciliation → live Vault. Presented over the app whenever its
-    /// state leaves `.idle`; reconciled on every foreground so a dismissed browser still
-    /// completes. The entitlement router (`vaultFunnel.intent`) is what Vault-only actions
-    /// call to route to the trigger (Vault off) or straight through (Vault live).
-    @StateObject private var vaultFunnel = VaultFunnelModel.live()
     /// In-app account deletion (track T-STOREFRONT) — Apple-required, three scopes.
     @StateObject private var accountDeletion = AccountDeletionModel.live(
         record: DeletionRecorder.shared.record)
     @Environment(\.scenePhase) private var scenePhase
 
+    // The three brain-routing stores come from ONE composition root (see
+    // RootAccountStores above) rather than three sibling `@StateObject`s, because the
+    // funnel and the gate have to be looking at the SAME CellStore. Observation reaches
+    // this view through that object's forwarded `objectWillChange`.
     private var brains: BrainStore { accountStores.brains }
+    private var cells: CellStore { accountStores.cells }
+    /// The Vault activation funnel (track T-IOS-FUNNEL): paid-intent trigger → browser
+    /// hand-off → server reconciliation → live Vault. Presented over the app whenever its
+    /// state leaves `.idle`; reconciled on every foreground so a dismissed browser still
+    /// completes. The entitlement router (`vaultFunnel.intent`) is what Vault-only actions
+    /// call to route to the trigger (Vault off) or straight through (Vault live).
+    private var vaultFunnel: VaultFunnelModel { accountStores.vaultFunnel }
 
     /// The front-door rendition for the `.signInGate` destination (track
     /// 20260715T1502 re-cut, Nick 2026-07-16: the welcome IS the front door — the
