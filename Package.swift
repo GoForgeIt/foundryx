@@ -36,6 +36,10 @@ let package = Package(
                 "then-capabilities.json",
                 "fixtures/device-agnostic",
                 "fixtures/s05-device-shape-interpretation.json",
+                // The reachability register — read by repo path (`#filePath`-relative, the
+                // same mechanism `registers/p3-contract-elements.json` uses in the
+                // conformance target), not through Bundle.module.
+                "registers/production-reachability.json",
             ],
             resources: [
                 .copy("fixtures/handshake_vectors.json"),

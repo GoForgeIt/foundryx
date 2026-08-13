@@ -75,10 +75,21 @@ fi
 # Counted by the dispatch loop; a run that executed nothing must never print PASS.
 RAN=0
 
-# The three suites that encode the CQRS invariants this wave established. Named explicitly so
+# The suites that encode the invariants this repository will not regress. Named explicitly so
 # that deleting or renaming one is a LOUD failure ("no tests executed") rather than a silent
 # reduction in coverage.
-GATE_SUITES=(HangReproTests RebuildBytesIndependenceTests ResidualMainActorWorkTests)
+#
+# ProductionReachabilityRegisterTests is the REACHABILITY GATE. The first three prove the code
+# behaves; it proves the code is REACHED — that a capability the scenarios drive through an
+# injected fake is actually called by something that ships. Four capabilities reached `main` in
+# one day fully implemented, fully tested and called by nothing outside `Tests/`, and every
+# suite was green, because "correct" and "reached" are different facts and only the first had a
+# gate. It runs HERE, inside an existing phase, rather than as a new phase name: the pre-push
+# hook derives its phase list from `.github/workflows/ios-publish.yml` with
+# `grep -oE 'bash scripts/ci-gates\.sh [a-z ]+'`, so a phase name carrying a hyphen or a digit
+# truncates and turns every push into "UNKNOWN PHASE -> exit 2".
+GATE_SUITES=(HangReproTests RebuildBytesIndependenceTests ResidualMainActorWorkTests
+             ProductionReachabilityRegisterTests)
 
 # ---------------------------------------------------------------- swift: the whole package
 #
