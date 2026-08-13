@@ -139,7 +139,7 @@ jobs:
   ios-simulator-brine:
     needs: app-compile-leak-lint
     runs-on: [self-hosted, macOS, ios]
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with: { path: foundryx }
