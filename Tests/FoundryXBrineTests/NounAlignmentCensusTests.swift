@@ -76,6 +76,36 @@ final class NounAlignmentCensusTests: XCTestCase {
                 reason: "the retired form is the THING UNDER TEST: `XCTAssertNotEqual(cfg.tunnelId, …)` "
                       + "names the value a tunnel id must never be hardcoded to. Renaming it would "
                       + "weaken the assertion into one about a value nobody would write."),
+        // The blind-tunnel binary's shipped name is the retired form plus "-server" —
+        // (spelled ASSEMBLED here, per this census's own rule) the identifier the
+        // foundry repo's foundryx-tunnel crate ships TODAY, and TunnelRelayFixture pins
+        // it precisely so an upstream rename is a loud failure here rather than a
+        // harness silently starting something else. The retired form appears only as a
+        // substring of that pinned identifier; renaming it in THIS repo would break
+        // launching the real binary. If upstream renames the bin, these rows go dead
+        // and this census fails — the correct pressure. Three sites, each licensed at
+        // its own line, never the file.
+        Residue(path: "Tests/FoundryXConformanceTests/TunnelRelayFixture.swift",
+                sense: "relay",
+                separator: "-",
+                anchor: "is a different binary (`",
+                count: 1,
+                reason: "doc comment naming the exact upstream binary this fixture launches; "
+                      + "the retired form is a substring of that shipped identifier."),
+        Residue(path: "Tests/FoundryXConformanceTests/TunnelRelayFixture.swift",
+                sense: "relay",
+                separator: "-",
+                anchor: "Build it first (cargo build -p ",
+                count: 1,
+                reason: "the error message giving the exact cargo command that produces the "
+                      + "missing binary; the --bin flag must spell the shipped name."),
+        Residue(path: "Tests/FoundryXConformanceTests/TunnelRelayFixture.swift",
+                sense: "relay",
+                separator: "-",
+                anchor: "RULED_TUNNEL_IDENTIFIER = ",
+                count: 1,
+                reason: "the pinned identifier itself — the constant whose whole job is to "
+                      + "spell the upstream binary's real name so a rename fails loudly."),
     ]
 
     private static let searchRoots = ["Sources", "App", "Widget", "Tests", "UITests", "features", "TestSupport"]
