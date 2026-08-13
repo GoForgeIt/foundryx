@@ -184,19 +184,20 @@ private enum VaultDoorCredentialSteps {
             if case .failed(let reason) = state {
                 throw BrineStepError("a complete ready answer was reported as a failure: \(reason)")
             }
-            // The unit-test bundle is deliberately hostless on iOS, so `CellStore.pair`
-            // cannot write the cell secret and the funnel HOLDS setting-up rather than
-            // claim a Vault it could not store. Where the keychain works, demand `live`.
-            if AccountDataIsolationFeatureTests.keychainUsable {
-                guard case .live = state else {
-                    throw BrineStepError("a complete ready answer did not go live: \(state)")
-                }
-            } else {
-                guard case .settingUp = state else {
-                    throw BrineStepError(
-                        "without a keychain the funnel must hold setting-up so reconcile can "
-                        + "retry: \(state)")
-                }
+            // This world's CellStore writes to `ScriptedPairingSecretStore` — an
+            // in-memory store whose writes always succeed — so a complete ready
+            // answer must go LIVE on every platform. The previous check branched on
+            // `AccountDataIsolationFeatureTests.keychainUsable`, predicting the
+            // funnel from the REAL keychain while the funnel was wired to the fake:
+            // on the hostless iOS lane the probe is false, the branch demanded
+            // setting-up, and the fake store's successful write produced live —
+            // deterministically red, so this suite had never once run green on the
+            // iOS runtime. The store-cannot-write hold is real behavior, and it is
+            // covered the deterministic way — by SCRIPTING the failure
+            // (PairingFailureTests.testFailedFirstVaultBearerWriteLeavesNoPartialPairing)
+            // — not by branching on which host the test happens to run on.
+            guard case .live = state else {
+                throw BrineStepError("a complete ready answer did not go live: \(state)")
             }
         },
 

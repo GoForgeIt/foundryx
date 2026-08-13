@@ -83,20 +83,11 @@ jobs:
           SW
           swift /tmp/kc-probe.swift
       - name: relay + swift + gates
-        env:
-          # The gate's deadlock detector bounds ONE swift-test attempt; its 300s
-          # default assumes a warm .build on an idle box. On this runner a cold
-          # compile under cross-repo load ran past 300s and was misdiagnosed as
-          # the workspace-lock deadlock (killed, retried, killed — run 3's actual
-          # failure on 2026-08-12). 1800s keeps the bound as a hung-job backstop
-          # without turning slow-but-healthy into a red.
-          # 1800 was STILL not a backstop: attempt 4's first try spent its whole
-          # 1800s cold-compiling (killed mid-build), the retry re-ran and was at
-          # 1187/1370 tests passing when IT hit 1800s — reported as "deadlocked
-          # twice" while demonstrably executing tests. The per-attempt bound must
-          # exceed cold-compile + full suite; the job's own 90m timeout-minutes is
-          # the real hang guard, so the inner bound carries no safety weight.
-          SWIFT_TEST_TIMEOUT: "4800"
+        # No inner duration knob anymore: ci-gates' deadlock detector now watches
+        # OUTPUT PROGRESS (SWIFT_TEST_STALL, default 300s of byte-silence), so a
+        # slow-but-writing run can never be misdiagnosed. Attempts 3 and 4 both
+        # died to the old flat bound — one at 1187/1370 tests passing. The
+        # job-level timeout-minutes above is the only duration guard.
         run: |
           export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
           # The T25 conformance target starts a REAL foundry-relay
