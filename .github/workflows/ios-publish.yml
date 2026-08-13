@@ -165,6 +165,22 @@ jobs:
           repository: MarkDucommun/brine-private
           token: ${{ secrets.CI_GITHUB_TOKEN }}
           path: brine-private
+      - name: app-hosted scenarios — App/ executing inside the real app process
+        run: |
+          export PATH="/opt/homebrew/bin:$PATH"
+          cd foundryx
+          # THE LANE THAT SEES App/. FoundryXiOSTests is HOSTLESS and cannot import the app
+          # module at all, so every scenario before this one proved the LOGIC in FoundryXKit
+          # and nothing about whether the shipped app reaches it. Measured 2026-08-13:
+          # 0 of 17 sampled scenario files drove a production entry point, and 18,441 lines
+          # of App/ had zero executable coverage. Proven by mutation: deleting the caller in
+          # App/DeviceScreen.swift turns this lane RED while the hostless pocket suites
+          # report 12 tests, 0 failures.
+          #
+          # NAME DISCIPLINE: the pre-push hook derives its phase list from THIS FILE via
+          # `grep -oE 'bash scripts/ci-gates\.sh [a-z ]+'`. A phase name with a hyphen or a
+          # digit truncates and turns every push into "UNKNOWN PHASE -> exit 2".
+          bash scripts/ci-gates.sh appscenarios
       - name: iOS runtime lane on simulator
         run: |
           export PATH="/opt/homebrew/bin:$PATH"
