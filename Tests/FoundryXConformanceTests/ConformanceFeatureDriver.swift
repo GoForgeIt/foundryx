@@ -116,6 +116,127 @@ enum ConformanceSkipCensus {
     }
 }
 
+/// The census that replaces a UNIVERSAL NOBODY COUNTED.
+///
+/// Until 2026-08-13 `features/p3-conformance.feature` opened by asserting *"there is no
+/// injected responder anywhere in this target"*. That sentence was FALSE the whole time:
+/// `DoorFixture.swift` constructs a `NoiseXXResponder` in this process and completes a
+/// real msg1/msg2/msg3 handshake with the client, because P1's observable is whether the
+/// client proceeds against a real counterpart. Nothing went red, because nothing counted.
+///
+/// The true claim is narrower and has TWO halves, and both are counted here rather than
+/// written down:
+///
+///  1. this target constructs a KNOWN NUMBER of in-process handshake peers (today 1), so
+///     adding one — which is exactly what moving the hermetic prologue oracle in here
+///     would do — is RED and names the file; and deleting the one there is is RED too;
+///  2. the sources that DRIVE THE FIVE CONTRACT ELEMENTS construct NONE. That is what
+///     "no injected peer stands in for the relay" actually means, and a single total
+///     would be satisfied by moving a peer from one file into the element drive.
+///
+/// ## The rename trap, and why the needles are read out of FoundryXKit
+///
+/// A census with a hardcoded `"NoiseXXResponder("` needle silently counts zero the day
+/// the type is renamed — the failure mode where a check keeps passing because it stopped
+/// looking. So the peer type names are RESOLVED FROM `Sources/FoundryXKit/NoiseXX.swift`
+/// at run time and the census REFUSES (throws) if that file declares none. A rename moves
+/// both sides together; a deletion is loud.
+///
+/// ## WHAT THIS CENSUS CANNOT SEE — named, because the number would otherwise read as a
+/// claim it does not support
+///
+/// This is a LEXICAL census of DIRECT constructor call sites in this one directory. It is
+/// not a call graph and it is not a statement about which peers run. Specifically:
+///
+///  * **THE TARGET ALREADY USES A PEER IT DOES NOT CONSTRUCT HERE.** P1 dials through the
+///    production client, which builds an initiator inside FoundryXKit
+///    (`Sources/FoundryXKit/RelayTransport.swift`, `Sources/FoundryXKit/DoorConnection.swift`).
+///    So "one site" is true and "one peer" would be false. The report says which.
+///  * a `typealias`, a `.init(…)` under contextual typing, a captured `.init`, a factory
+///    that returns a peer, or a construction split across two lines is not matched;
+///  * a rename that keeps the `NoiseXX` prefix moves both sides together and is invisible
+///    to the count, which is the intent; a rename that drops the prefix on ONE type leaves
+///    the other resolving, so the non-empty guard still passes and the count drops — which
+///    is why the count is asserted against a declared number rather than against zero.
+///
+/// What it does cover is the thing worth guarding: a peer appearing next to the element
+/// drive, and the declared number moving without the code moving with it.
+enum ConformancePeerCensus {
+
+    /// The handshake peer types, taken from FoundryXKit's own source rather than from a
+    /// literal here.
+    static func peerTypeNames() throws -> [String] {
+        let url = ConformanceFeatureDriver.repoRoot
+            .appendingPathComponent("Sources/FoundryXKit/NoiseXX.swift")
+        guard let data = FileManager.default.contents(atPath: url.path) else {
+            throw ConformanceStepError("the peer census could not read \(url.path); it publishes no count from a run that never read the declarations")
+        }
+        let text = String(decoding: data, as: UTF8.self)
+        var names: [String] = []
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("//") { continue }
+            let tokens = trimmed.split(separator: " ").map(String.init)
+            for (i, token) in tokens.enumerated() where ["class", "struct", "actor"].contains(token) {
+                guard i + 1 < tokens.count else { continue }
+                let ident = String(tokens[i + 1].prefix { $0.isLetter || $0.isNumber || $0 == "_" })
+                if ident.hasPrefix("NoiseXX"), !names.contains(ident) { names.append(ident) }
+            }
+        }
+        guard !names.isEmpty else {
+            throw ConformanceStepError("the peer census found no handshake peer type declared in Sources/FoundryXKit/NoiseXX.swift. A census with nothing to look for reports zero and proves nothing.")
+        }
+        return names.sorted()
+    }
+
+    /// Construction sites of any peer type, in the given files. `file:line — needle`.
+    static func sites(in files: [URL]) throws -> [String] {
+        let needles = try peerTypeNames().map { $0 + "(" }
+        var hits: [String] = []
+        for f in files {
+            guard let data = FileManager.default.contents(atPath: f.path) else {
+                throw ConformanceStepError("the peer census could not read \(f.path)")
+            }
+            let text = String(decoding: data, as: UTF8.self)
+            for (n, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("//") || trimmed.hasPrefix("///") { continue }
+                for needle in needles {
+                    guard let at = line.range(of: needle) else { continue }
+                    // The names appear in this file's own prose and in string literals
+                    // that report them. A census that counted those would count itself.
+                    if at.lowerBound > line.startIndex,
+                       line[line.index(before: at.lowerBound)] == "\"" { continue }
+                    hits.append("\(f.lastPathComponent):\(n + 1) — \(needle)")
+                }
+            }
+        }
+        return hits.sorted()
+    }
+
+    static func targetSwiftFiles() throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(at: ConformanceFeatureDriver.targetSources,
+                                                    includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "swift" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    /// The sources that drive the five contract elements. Named explicitly, and each one
+    /// is required to exist: a set resolved by pattern could go empty after a rename and
+    /// the "constructs none" leg would pass over nothing.
+    static func elementDriveSources(_ names: [String]) throws -> [URL] {
+        var urls: [URL] = []
+        for name in names {
+            let url = ConformanceFeatureDriver.targetSources.appendingPathComponent(name)
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                throw ConformanceStepError("the element-drive census names \(name), which is not on disk. A census over a file that does not exist reports zero peers and proves nothing.")
+            }
+            urls.append(url)
+        }
+        return urls
+    }
+}
+
 /// The declared half of the contract-element comparison.
 struct ContractElementRegister {
     struct Row: Decodable {

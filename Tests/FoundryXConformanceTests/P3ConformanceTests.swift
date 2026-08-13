@@ -24,7 +24,7 @@ final class P3ConformanceTests: XCTestCase {
         world = w
         try await ConformanceFeatureDriver.run("p3-conformance",
                                                registry: StepRegistry(P3ConformanceSteps.make(world: w)),
-                                               expectedScenarios: 7)
+                                               expectedScenarios: 8)
     }
 }
 
@@ -49,6 +49,27 @@ final class ConformanceWorld: @unchecked Sendable {
     /// driver and the register would leave the negotiation parts keeping it green.
     let declaredPartBearingElements = 2
     let declaredTotalParts = 6
+
+    /// How many DIRECT handshake-peer constructor sites this target's own sources hold,
+    /// and which files drive the five contract elements.
+    ///
+    /// This pair replaces a universal nobody counted. `features/p3-conformance.feature`
+    /// used to open with "there is no injected responder anywhere in this target", and
+    /// that was FALSE for as long as it stood: `DoorFixture.swift` builds a real
+    /// `NoiseXXResponder` because P1's observable requires a real counterpart. The number
+    /// is deliberately about CONSTRUCTOR SITES IN THIS DIRECTORY and not about which peers
+    /// run — P1 also reaches an initiator indirectly, inside FoundryXKit, and no census of
+    /// these files can see that. See `ConformancePeerCensus` for what it does and does not
+    /// cover.
+    let declaredInProcessPeerSites = 1
+    let declaredElementDriveSources = ["ContractElements.swift", "P3Client.swift"]
+
+    /// How many questions the run may record `not-reached`.
+    ///
+    /// Declared for the same reason `declaredTotalParts` is: a question that quietly stops
+    /// being recorded unasked, or one that quietly starts, is a change to what this target
+    /// claims it could not measure, and it should take an edit here to make it.
+    let declaredNotReachedParts = 1
 
     func requireFixture() throws -> RelayProcessFixture {
         guard let f = fixture else { throw ConformanceStepError("no relay was started") }
@@ -255,6 +276,133 @@ enum P3ConformanceSteps {
                 for e in w.drivenElements where e.served {
                     print("CONFORMANCE: SERVED — \(e.id): \(e.observation)")
                 }
+            },
+
+            // WHY an element is unserved, reported strictly OUTSIDE `served`.
+            //
+            // `not-reached` is a third verdict on purpose — a question the run could not
+            // ask, recorded as unasked rather than answered. That is honest and it is also
+            // the most comfortable place in this file for a question to go and never come
+            // back. So two things happen here, neither of which can move the count:
+            //
+            //  * each unserved element is CLASSIFIED — was the subject asked and did it
+            //    not do the thing, or was the question never put to it — so a reader can
+            //    tell "the relay refused" from "the relay has no such phase" without
+            //    reading the driver; and
+            //  * `not-reached` is required to be WAITING ON SOMETHING. A question recorded
+            //    unasked while every question it depends on has been answered is a
+            //    question that was droppable, and this says so by name.
+            //
+            // The second is not the same assertion the driver makes at
+            // `ContractElements.swift` part 3, which throws when part 2 becomes MET. That
+            // one is specific to `prologue-bytes` and lives in the drive; this one is a
+            // property of every part-bearing element and is checked after the fact, so an
+            // element that grows parts later inherits it.
+            defineCheck("every unserved element names which of its questions were answered no and which were never asked") { _, _, _ in
+                var partsInspected = 0
+                var reported: [String] = []
+                for e in w.drivenElements {
+                    partsInspected += e.parts.count
+                    guard !e.served else { continue }
+                    let unasked = e.parts.filter { $0.verdict == .notReached }.map { $0.name }
+                    let refused = e.parts.filter { $0.verdict == .unmet }.map { $0.name }
+                    // NOT "the subject did not answer". For prologue-bytes the relay DID
+                    // answer the existence question — by closing the socket inside a
+                    // measured window — and it is the differential that was never put to
+                    // it. Collapsing those two into one adjective is how a reader ends up
+                    // believing the relay went silent on a question it in fact refused.
+                    let answeredNo = refused.isEmpty
+                        ? "answered no: this element's single question"
+                        : "answered no: \(refused.joined(separator: ", "))"
+                    let neverAsked = unasked.isEmpty
+                        ? "never asked: none"
+                        : "never asked: " + unasked.map { "\($0) (blocked by \((e.blockedBy[$0] ?? []).joined(separator: ", ")))" }.joined(separator: ", ")
+                    reported.append("\(e.id): \(answeredNo); \(neverAsked)")
+                }
+                let unservedCount = w.drivenElements.filter { !$0.served }.count
+                guard reported.count == unservedCount else {
+                    throw ConformanceStepError("\(unservedCount) element(s) are unserved and \(reported.count) were reported on")
+                }
+                // Non-vacuity. When every element is served there is nothing to report and
+                // this step must still have looked at something, so the number asserted is
+                // the parts inspected — which cannot be zero at any tip this target declares.
+                guard partsInspected == w.declaredTotalParts else {
+                    throw ConformanceStepError("the unserved-reason report inspected \(partsInspected) parts and this target declares \(w.declaredTotalParts)")
+                }
+                print("CONFORMANCE: unserved elements reported = \(reported.count) of \(w.drivenElements.count), over \(partsInspected) part(s) — this is a REPORT, not a verdict; it changes no `served` and no part")
+                for line in reported {
+                    print("CONFORMANCE: UNSERVED-REASON — \(line)")
+                }
+            },
+            defineCheck("every unasked question names what blocks it, and everything it names was answered no") { _, _, _ in
+                var notReachedSeen = 0
+                for e in w.drivenElements {
+                    let verdicts = Dictionary(uniqueKeysWithValues: e.parts.map { ($0.name, $0.verdict) })
+                    for (name, verdict) in verdicts where verdict == .notReached {
+                        notReachedSeen += 1
+                        let blockers = e.blockedBy[name] ?? []
+                        guard !blockers.isEmpty else {
+                            throw ConformanceStepError("""
+                            \(e.id) / \(name) is recorded NOT REACHED and names nothing that blocked it. \
+                            `not-reached` means a question the run COULD NOT ask; one that nothing is blocking \
+                            is a question that was dropped.
+                            """)
+                        }
+                        for blocker in blockers {
+                            guard let bv = verdicts[blocker] else {
+                                throw ConformanceStepError("\(e.id) / \(name) says it is blocked by `\(blocker)`, which is not a question of this element (\(verdicts.keys.sorted()))")
+                            }
+                            guard bv == .unmet else {
+                                throw ConformanceStepError("""
+                                \(e.id) / \(name) is recorded NOT REACHED and says it is blocked by `\(blocker)`, \
+                                which was answered \(bv.rawValue). A question whose blocker has been answered is a \
+                                question the run could have asked.
+                                """)
+                            }
+                        }
+                    }
+                }
+                guard notReachedSeen == w.declaredNotReachedParts else {
+                    throw ConformanceStepError("the run recorded \(notReachedSeen) not-reached question(s) and this target declares \(w.declaredNotReachedParts). A question that stopped being recorded unasked is not a smaller pass, and one that started is not a silent one.")
+                }
+                print("CONFORMANCE: not-reached questions = \(notReachedSeen), each naming a blocker that was answered unmet")
+            },
+
+            // ---------------------------------------------------------------- the peers
+            defineCheck("the number of direct handshake-peer constructor sites in this target is the number it declares") { _, _, _ in
+                let files = try ConformancePeerCensus.targetSwiftFiles()
+                guard files.count > 0 else {
+                    throw ConformanceStepError("the peer census examined 0 files — a census over nothing reports clean and proves nothing")
+                }
+                let sites = try ConformancePeerCensus.sites(in: files)
+                guard sites.count == w.declaredInProcessPeerSites else {
+                    throw ConformanceStepError("""
+                    this target's own sources hold \(sites.count) direct handshake-peer constructor site(s) and it \
+                    declares \(w.declaredInProcessPeerSites): \(sites.isEmpty ? "none found" : sites.joined(separator: ", ")). \
+                    A site added here is a second in-process peer inside a target whose headline metric is a spawned \
+                    relay's contract; the site that is here is P1's door, and removing it is P1 losing the real \
+                    counterpart its observable is defined against.
+                    """)
+                }
+            },
+            defineCheck("the sources that drive the five contract elements contain none of them") { _, _, _ in
+                let sources = try ConformancePeerCensus.elementDriveSources(w.declaredElementDriveSources)
+                let sites = try ConformancePeerCensus.sites(in: sources)
+                guard sites.isEmpty else {
+                    throw ConformanceStepError("""
+                    the five contract elements are driven from \(w.declaredElementDriveSources.joined(separator: ", ")) \
+                    and \(sites.count) handshake-peer constructor site(s) appear there: \(sites.joined(separator: ", ")). \
+                    An element verdict computed against a peer this target built is a verdict about this repository, \
+                    not about the relay.
+                    """)
+                }
+            },
+            defineCheck("the files examined for both counts are reported, with what the census cannot see") { _, _, _ in
+                let all = try ConformancePeerCensus.targetSwiftFiles()
+                let drive = try ConformancePeerCensus.elementDriveSources(w.declaredElementDriveSources)
+                let names = try ConformancePeerCensus.peerTypeNames()
+                print("CONFORMANCE: peer census examined \(all.count) target file(s) for direct constructor calls to \(names.joined(separator: ", ")) — \(w.declaredInProcessPeerSites) site(s) declared; element-drive census examined \(drive.count) file(s) and requires 0")
+                print("CONFORMANCE: peer census CANNOT SEE — a peer reached indirectly. P1 dials through the production client, which builds an initiator inside FoundryXKit (RelayTransport.swift / DoorConnection.swift); no census of this directory sees that, and this count is a lexical census of DIRECT constructor calls, not a claim about which peers run.")
             },
 
             // ---------------------------------------------------------------- teardown

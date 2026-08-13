@@ -2,10 +2,17 @@ Feature: a handshake is bound to the tenancy it was made for, by bytes neither s
 
   The design binds a P3 channel's handshake to `(normalized_host || negotiated_version)` so that
   "a handshake transcript completed for community A's host cannot be replayed against community B,
-  because the prologue disagrees". Those bytes are NEVER PUT ON THE WIRE — each side mixes them
-  into its own transcript hash before the first message — so a peer cannot be asked what it bound
-  and cannot be caught out by reading the wire. The only way to observe the binding at all is to
-  run a handshake and watch it complete or fail.
+  because the prologue disagrees". Each side MIXES those bytes into its own transcript hash before
+  the first message rather than sending them as a prefix, so a peer cannot be asked what it bound.
+  The only way to observe the binding at all is to run a handshake and watch it complete or fail.
+
+  CORRECTED 2026-08-13. This paragraph used to say the bytes are "NEVER PUT ON THE WIRE" and rest
+  the property on that. Withdrawn: the Noise framework expressly allows a prologue to carry
+  negotiation data that WAS transmitted, and here the host and the version are both already on the
+  wire in the pre-upgrade request. What carries the property is that both parties DERIVE the same
+  context and mix it — the responder deriving the host and version rather than accepting whatever
+  a peer supplies — not that the bytes were secret. Recorded rather than quietly edited, because
+  this is the third place the same withdrawn sentence had to be taken out of.
 
   WHY THIS FILE EXISTS. The conformance target's `prologue-bytes` element is NOT SERVED, and its
   third question — a transcript completed for one address must not complete against another — is

@@ -40,6 +40,18 @@ struct ContractElement {
     /// register declares these part by part and the run compares them part by part.
     var parts: [(name: String, verdict: PartVerdict)] = []
 
+    /// For each question recorded `not-reached`, the questions of THIS element that were
+    /// blocking it.
+    ///
+    /// Recorded rather than inferred. "There is some other unmet question, so the unasked
+    /// one is fine" is a weaker rule than it looks: it is satisfied by an unmet question
+    /// that has nothing to do with the unasked one — for `prologue-bytes` the connect-wire
+    /// question would do — so a differential could quietly go unasked behind a failure it
+    /// never depended on. Naming the blocker makes the dependency checkable: the run
+    /// requires every named blocker to be a real question of the element and to have been
+    /// answered `unmet`. A `not-reached` that names nothing is a question that was dropped.
+    var blockedBy: [String: [String]] = [:]
+
     var partMap: [String: String] { Dictionary(uniqueKeysWithValues: parts.map { ($0.name, $0.verdict.rawValue) }) }
 }
 
@@ -194,6 +206,12 @@ enum ContractElementDriver {
         e.parts = [("connect-wire-refuses-a-prologue", wireRefusesPrologue),
                    ("post-upgrade-handshake-exists", handshakeExists),
                    ("prologue-binding-differential", bindingDifferential)]
+        // The differential waits on the handshake and on NOTHING ELSE. In particular it
+        // does not wait on part 1: the connect wire could refuse a prologue prefix or
+        // accept one and the differential would still be askable the moment a post-upgrade
+        // transcript existed. Naming it here is what lets the run check the dependency
+        // instead of accepting "something else was unmet" as a licence.
+        e.blockedBy = ["prologue-binding-differential": ["post-upgrade-handshake-exists"]]
         e.served = e.parts.allSatisfy { $0.verdict == .met }
 
         let part1 = wireRefusesPrologue == .met
