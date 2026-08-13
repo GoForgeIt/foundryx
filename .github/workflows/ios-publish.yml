@@ -120,6 +120,21 @@ jobs:
           # shipping unbuildable while 960 package tests were green).
           # leak: no harness seam in the Release binary, with negative control.
           bash scripts/ci-gates.sh compile leak lint
+      - name: stash sim test products for test-without-building
+        run: |
+          # ci-gates' compile phase already ran build-for-testing for the SIMULATOR
+          # (destination generic/platform=iOS Simulator, derivedData build/ci-gates-dd).
+          # Both runners live on this one Mac, so a host cache keyed by SHA hands the
+          # products to the sim job without a multi-GB artifact upload. The sim job
+          # then RUNS the tests instead of rebuilding the app a second time —
+          # rebuilding was ~10 of its ~18 minutes.
+          CACHE=~/.ci-cache/foundryx/${GITHUB_SHA}/Products
+          rm -rf "$CACHE"; mkdir -p "$CACHE"
+          cp -R foundryx/build/ci-gates-dd/Build/Products/. "$CACHE/"
+          ls "$CACHE"/*.xctestrun >/dev/null
+          echo "stashed $(du -sh "$CACHE" | cut -f1)"
+          # keep only the 3 newest SHAs so the cache cannot become the next disk fill
+          cd ~/.ci-cache/foundryx && ls -t | tail -n +4 | xargs rm -rf 2>/dev/null || true
 
   ios-simulator-brine:
     needs: app-compile-leak-lint
@@ -142,13 +157,25 @@ jobs:
         run: |
           export PATH="/opt/homebrew/bin:$PATH"
           cd foundryx
-          command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
-          xcodegen generate
           SIM_ID="$(xcrun simctl list devices available \
                     | grep -iE 'iPhone' | grep -oE '[0-9A-F-]{36}' | head -1)"
           [ -n "$SIM_ID" ] || { echo 'no iOS simulator available' >&2; exit 1; }
-          xcodebuild test -project FoundryX.xcodeproj -scheme FoundryX \
-            -destination "id=$SIM_ID" CODE_SIGNING_ALLOWED=NO
+          CACHE=~/.ci-cache/foundryx/${GITHUB_SHA}/Products
+          RUN_FILE="$(ls -t "$CACHE"/FoundryX_*.xctestrun 2>/dev/null | head -1)"
+          if [ -n "$RUN_FILE" ]; then
+            # The compile job already built these exact products for this exact SHA.
+            echo "==> test-without-building from $RUN_FILE"
+            xcodebuild test-without-building -xctestrun "$RUN_FILE" \
+              -destination "id=$SIM_ID" CODE_SIGNING_ALLOWED=NO
+          else
+            # Cold path (fresh runner, pruned cache): the original full build. A missing
+            # stash must never fail the lane — only make it slower.
+            echo "==> no stashed products; full build+test fallback"
+            command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
+            xcodegen generate
+            xcodebuild test -project FoundryX.xcodeproj -scheme FoundryX \
+              -destination "id=$SIM_ID" CODE_SIGNING_ALLOWED=NO
+          fi
 
   build-sign-ship:
     needs: ios-simulator-brine
