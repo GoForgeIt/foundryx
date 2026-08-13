@@ -246,6 +246,22 @@ build_cfg() {
     BUILT_CFGS="$BUILT_CFGS $cfg"
     return 0
   fi
+  # DID THE BUILD FAIL, OR WAS IT NEVER RUN? xcodebuild refuses to start when another
+  # build holds this derivedData's build.db ("unable to attach DB ... database is locked")
+  # and reports that refusal through the same non-zero exit as a genuine compile error.
+  # On 2026-08-13 two xcodebuild processes orphaned by cancelled CI runs (5h and 1h42m old,
+  # both reparented to launchd) held the lock, and this gate reported FIVE compile failures
+  # against a tree that builds clean — blocking a push on a red it had manufactured. A gate
+  # must be able to say "I could not run" rather than "your code is broken"; those want
+  # opposite responses from whoever reads them.
+  if grep -aq 'unable to attach DB\|database is locked' "$out"; then
+    echo "  BUILD DID NOT RUN — this derivedData's build database is held by another build."
+    echo "  This says NOTHING about the code. Find the holder:"
+    echo "    ps -eo pid,etime,ppid,command | grep '[x]codebuild'"
+    echo "  ppid 1 means orphaned (its CI job was cancelled) and is safe to kill; then re-run."
+    fail "compile($cfg: build-db-contended — NOT a code failure)"
+    return 1
+  fi
   grep -aE "error:" "$out" | head -20
   return 1
 }
