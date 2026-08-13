@@ -21,7 +21,7 @@ Feature: Checking a remembered recorder reads what is actually on it
     Then the check reports the recorder's battery and firmware
     And it lists both recordings newest first with a duration for each
     And every listed recording says it is only on the recorder
-    And the panel offers no bring-over action and repeats the deletion promise
+    And the panel offers one bring-over action and repeats the deletion promise
 
   Scenario: The inventory is read on the session the handshake opened
     Given a remembered recorder FoundryX holds the key for, holding two recordings

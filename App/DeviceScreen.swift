@@ -665,10 +665,12 @@ private struct RecordingDevicePageView: View {
                                     Text(row.title)
                                         .grainTextStyle(.body)
                                         .foregroundStyle(GrainColor.ink)
-                                    // CUSTODY, ON EVERY ROW. Today it reads "Only on the
-                                    // recorder" for all of them, because nothing in this build
-                                    // brings a file over — which is the fact, not a shortcoming
-                                    // to hide.
+                                    // CUSTODY, ON EVERY ROW, AND NOW IT CAN SAY BOTH THINGS.
+                                    // It read "Only on the recorder" for every row in every
+                                    // build until the bring-over below shipped, because
+                                    // nothing had ever produced a `.foundryX` row. The check
+                                    // asks custody per file, so this label is a fact about
+                                    // this phone's disk rather than a default.
                                     Text(row.custodyLabel)
                                         .grainTextStyle(.caption)
                                         .foregroundStyle(GrainColor.textFaint)
@@ -685,6 +687,8 @@ private struct RecordingDevicePageView: View {
                         }
                     }
 
+                    bringOver
+
                     Text(PocketRecorderCheckPresentation.sectionNote)
                         .grainTextStyle(.caption)
                         .foregroundStyle(GrainColor.textFaint)
@@ -693,6 +697,48 @@ private struct RecordingDevicePageView: View {
                 }
             }
             .padding(.top, GrainSpacing.x6)
+        }
+    }
+
+    /// THE CALLER `PocketBLEClient.download` NEVER HAD.
+    ///
+    /// It offers ONE file — `PocketBringOver.offered`, the smallest on the newest day — because
+    /// a long recording is hours over BLE and the first file anybody ever pulls off a Pocket
+    /// should be one that finishes. There is no recording pill, no Live Activity and no live
+    /// state touched anywhere below: the file existed on the recorder before this phone was
+    /// involved, and `features/pocket-durable-sync.feature` holds that boundary.
+    @ViewBuilder
+    private var bringOver: some View {
+        if check.offeredRecording != nil {
+            Button {
+                check.bringOver(hardwareToken: input.identity.hardwareToken,
+                                advertisedName: input.displayName)
+            } label: {
+                Text(PocketBringOverPresentation.actionTitle).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.grain(.outlined))
+            .disabled(check.isBringingOver || check.isChecking)
+            .padding(.top, GrainSpacing.x3)
+
+            if check.isBringingOver {
+                HStack(spacing: GrainSpacing.x2) {
+                    ProgressView().tint(GrainColor.forgeBlue)
+                    Text(PocketBringOverPresentation.inProgressLine)
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.textMuted)
+                }
+                .padding(.top, GrainSpacing.x2)
+            }
+
+            // WHAT HAPPENED, IN WORDS, INCLUDING WHEN NOTHING WAS KEPT. A bring-over that
+            // silently did nothing is indistinguishable from one that worked.
+            if let outcome = check.bringOverMessage {
+                Text(outcome)
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, GrainSpacing.x2)
+            }
         }
     }
 
@@ -832,29 +878,78 @@ final class PocketRecorderCheckModel: ObservableObject {
     @Published private(set) var detail: StoredFileDeviceDetailPresentation?
     @Published private(set) var message: String?
 
+    /// THE BRING-OVER LIVES ON THIS MODEL RATHER THAN A SECOND ONE, because it is the same
+    /// recorder, the same radio and the same panel: two models would be two ideas of whether
+    /// the radio is busy, and the one thing this screen must never do is open a second session
+    /// on top of a live one.
+    @Published private(set) var isBringingOver = false
+    @Published private(set) var bringOverMessage: String?
+    /// The file a tap would ask for, or `nil` when there is nothing to offer. It is the ONLY
+    /// reason the check reads the unpresented shelf: durations and titles cannot be ordered.
+    @Published private(set) var offeredRecording: PocketRecording?
+
+    /// WHERE A BROUGHT-OVER FILE GOES, and what makes a row able to say "In Solleva". The
+    /// check consults it too — a custody label that was not asked is a guess.
+    private let custody = PocketRecorderFileStore()
+
     /// - Parameter hardwareToken: the DURABLE address of a stored-file recorder, which is the
     ///   authenticated peripheral identifier (`PocketAuthenticatedIdentity`) and never the
     ///   advertised name. A token that is not one is not a recorder this can reach, and it says
     ///   so rather than silently doing nothing.
     func run(hardwareToken: String, advertisedName: String) {
-        guard !isChecking else { return }
+        guard !isChecking, !isBringingOver else { return }
         guard let identifier = UUID(uuidString: hardwareToken) else {
             message = PocketRecorderCheckPresentation.notThisRecorderLine
             detail = nil
+            offeredRecording = nil
             return
         }
         isChecking = true
         detail = nil
         message = nil
+        offeredRecording = nil
         Task {
             // A FRESH ATTACHMENT PER CHECK, which is `run`'s default. An attachment's
             // `teardown()` retires its own link and generation, so reusing one is a session
             // that can never come back up.
+            //
+            // THE SHELF IS ASKED FOR HERE AND NOWHERE ELSE. Choosing which file to bring over
+            // needs the recorder's own fields, not the row titles; reading it on a second
+            // session would be a second Bluetooth connection for facts this one already had.
+            let shelf = PocketRecorderShelfNote()
             let outcome = await PocketRecorderCheck.run(peripheralIdentifier: identifier,
-                                                        advertisedName: advertisedName)
+                                                        advertisedName: advertisedName,
+                                                        custody: self.custody,
+                                                        shelf: shelf)
             self.isChecking = false
             self.message = PocketRecorderCheckPresentation.message(for: outcome)
-            if case .checked(let reading) = outcome { self.detail = reading }
+            if case .checked(let panel) = outcome { self.detail = panel }
+            self.offeredRecording = PocketBringOver.offered(shelf.recordings)
+        }
+    }
+
+    /// ONE FILE, ON ONE SESSION, AND THEN THE SHELF IS READ AGAIN.
+    ///
+    /// The re-read is not cosmetic: custody is the only thing that knows whether the file
+    /// landed, so the row's "In Solleva" has to come from asking the disk again rather than
+    /// from this method having been optimistic.
+    func bringOver(hardwareToken: String, advertisedName: String) {
+        guard !isChecking, !isBringingOver else { return }
+        guard let recording = offeredRecording else { return }
+        guard let identifier = UUID(uuidString: hardwareToken) else {
+            bringOverMessage = PocketRecorderCheckPresentation.notThisRecorderLine
+            return
+        }
+        isBringingOver = true
+        bringOverMessage = nil
+        Task {
+            let outcome = await PocketBringOver.run(peripheralIdentifier: identifier,
+                                                    advertisedName: advertisedName,
+                                                    recording: recording,
+                                                    custody: self.custody)
+            self.isBringingOver = false
+            self.bringOverMessage = PocketBringOverPresentation.message(for: outcome)
+            self.run(hardwareToken: hardwareToken, advertisedName: advertisedName)
         }
     }
 }

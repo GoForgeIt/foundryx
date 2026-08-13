@@ -100,10 +100,16 @@ public enum CaptureAccountScope {
     /// location here. Adding a new case is an explicit isolation decision.
     public enum PrivateStore: Sendable {
         case chatConversations
+        /// Audio brought over from a record-then-sync recorder. It is somebody's recording of
+        /// a room they were in, so it is account-private for the same reason a capture is —
+        /// and it is a DIRECTORY, because one recorder's shelf is many files keyed by the
+        /// recorder's own reported day and instant.
+        case pocketRecordings
 
         fileprivate var relativePath: String {
             switch self {
             case .chatConversations: return "chat-conversations.json"
+            case .pocketRecordings: return "pocket-recordings"
             }
         }
     }

@@ -53,13 +53,28 @@ final class FakePocketBLEStack: @unchecked Sendable {
         case blindlyAcknowledges(holding: String)
     }
 
-    /// ONE FILE THIS RECORDER IS HOLDING, in the reference trace's own fields. There is no
-    /// content: nothing in this suite downloads, and a fixture that carried bytes would
-    /// invite one to.
+    /// ONE FILE THIS RECORDER IS HOLDING, in the reference trace's own fields.
+    ///
+    /// `content` USED TO BE ABSENT ON PURPOSE — "nothing in this suite downloads, and a
+    /// fixture that carried bytes would invite one to". Something now does, so the bytes are
+    /// here, and the interesting fixtures are the ones where they disagree with `sizeBytes`:
+    /// announcing more than is ever sent is how a transfer that stops partway is modelled, and
+    /// content with no `0xFF 0xF3` anywhere is how a file this build cannot read is. `nil`
+    /// keeps the old shape for every scenario that only ever lists.
     struct ScriptedRecording: Sendable, Equatable {
         let date: String
         let timestamp: String
         let sizeBytes: Int
+        /// The bytes this firmware will actually put on the audio characteristic, which is NOT
+        /// required to be `sizeBytes` long.
+        let content: Data?
+
+        init(date: String, timestamp: String, sizeBytes: Int, content: Data? = nil) {
+            self.date = date
+            self.timestamp = timestamp
+            self.sizeBytes = sizeBytes
+            self.content = content
+        }
     }
 
     let deviceId: UUID
@@ -230,19 +245,22 @@ final class FakePocketBLEStack: @unchecked Sendable {
         return true
     }
 
+    /// THE SINK IS BOUND WHEN THE EVENT HAPPENS, NOT WHEN THE QUEUE GETS TO IT.
+    ///
+    /// This used to re-read `self.sink` inside the async block, which made an event belong to
+    /// whichever attachment was registered by the time it was dequeued. A second session over
+    /// the same recorder — a check after a bring-over, a bring-over after a bring-over — is
+    /// exactly the case that breaks: the FIRST attachment's teardown queues a disconnect, the
+    /// SECOND attachment registers before it runs, and the new session is told its link
+    /// dropped before it ever opened. A real radio cannot do that; each attachment builds its
+    /// own `CBCentralManager` and only ever hears its own delegate callbacks.
     fileprivate func deliver(_ body: @escaping (BLEEventSink) -> Void) {
         lock.lock()
         let queue = self.queue
+        let sink = self.sink
         lock.unlock()
-        guard let queue else { return }
-        queue.async { [weak self] in
-            guard let self else { return }
-            self.lock.lock()
-            let sink = self.sink
-            self.lock.unlock()
-            guard let sink else { return }
-            body(sink)
-        }
+        guard let queue, let sink else { return }
+        queue.async { body(sink) }
     }
 
     fileprivate var currentCentral: FakePocketBLECentral? {
@@ -320,6 +338,33 @@ final class FakePocketBLEStack: @unchecked Sendable {
             }
             notifyControl("MCU&LIST&\(files.count)")
             return
+        } else if command.hasPrefix("U&"), answersInventory {
+            // THE PULL, AS THE FIRMWARE SERIALISES IT: one control frame announcing the size,
+            // then the file itself on the AUDIO characteristic. The chunking is deliberate —
+            // a fixture that answered in one notification would leave the client's
+            // multi-notification assembly, the half this protocol actually fails in, unproven.
+            let parts = command.dropFirst("U&".count)
+                .split(separator: "&", omittingEmptySubsequences: false)
+            guard parts.count == 2,
+                  let file = inventory.first(where: {
+                      $0.date == parts[0] && $0.timestamp == parts[1]
+                  }),
+                  let content = file.content else {
+                notifyControl("MCU&UNKNOWN")
+                return
+            }
+            notifyControl("MCU&U&\(file.sizeBytes)")
+            var offset = content.startIndex
+            while offset < content.endIndex {
+                let end = content.index(offset, offsetBy: Self.notificationBytes,
+                                        limitedBy: content.endIndex) ?? content.endIndex
+                notifyAudio(content.subdata(in: offset..<end))
+                offset = end
+            }
+            // AND THEN IT STOPS. A recorder whose `content` is shorter than what it announced
+            // says nothing more, which is exactly what a transfer that died partway looks like
+            // from the phone: no error frame, just silence.
+            return
         } else if command == "WIFI" {
             // THE READ-BACK, DERIVED FROM WHAT THE FIRMWARE IS ACTUALLY HOLDING.
             //
@@ -364,6 +409,21 @@ final class FakePocketBLEStack: @unchecked Sendable {
     /// actually did not.
     var keyHeldByRecorder: String? {
         lock.lock(); defer { lock.unlock() }; return heldKey
+    }
+
+    /// One BLE notification's worth of a file, matching this peripheral's own
+    /// `maximumWriteValueLength`. Small enough that even the shortest fixture arrives in
+    /// several frames.
+    static let notificationBytes = 180
+
+    private func notifyAudio(_ bytes: Data) {
+        guard let audio = peripheral
+            .discoveredCharacteristic(Self.characteristicUUID(map.audio)) else { return }
+        deliver { [weak self] sink in
+            guard let self else { return }
+            audio.value = bytes
+            sink.blePeripheral(self.peripheral, didUpdateValueFor: audio, error: nil)
+        }
     }
 
     private func notifyControl(_ text: String) {

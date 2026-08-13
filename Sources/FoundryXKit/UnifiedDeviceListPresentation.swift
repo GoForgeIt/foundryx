@@ -481,10 +481,18 @@ public enum RecordingDevicePage {
         deviceClass == .recordThenSync ? forgetWarning : liveForgetWarning
     }
 
-    /// NO BRING-OVER BUTTON SHIPS TODAY (design §6c): the download path has never run
-    /// end-to-end, and "a button that always fails is worse than an honest absence". This
-    /// constant is the reason, kept beside the decision so re-adding one is a deliberate act.
-    public static let bringOverIsNotOfferedYet = false
+    /// A BRING-OVER IS OFFERED NOW, AND NOT ON THIS PAGE.
+    ///
+    /// This constant used to read `bringOverIsNotOfferedYet = false` and carried design §6c's
+    /// reason: the download path had never run end to end, and "a button that always fails is
+    /// worse than an honest absence". `PocketBringOver` is that path with a caller, so the
+    /// decision is reversed here deliberately rather than left to rot beside a shipped button.
+    ///
+    /// WHERE IT LIVES IS THE OTHER HALF. The action belongs to a RECORDER'S SHELF — it needs a
+    /// file to ask for, which only a check that opened a session has — so it is rendered from
+    /// `PocketBringOverPresentation` on the shelf panel, and `resolve` still offers no such
+    /// action. The page's action list is pinned by its own gate for exactly that reason.
+    public static let bringOverIsOffered = true
 
     /// - Parameters:
     ///   - canConnect: whether this build has a transport that can actually attach this

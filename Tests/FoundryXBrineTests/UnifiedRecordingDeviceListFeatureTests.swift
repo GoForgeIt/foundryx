@@ -792,25 +792,19 @@ private final class UnifiedDeviceListWorld {
                                    "the page offers the action \"\(action)\"")
                 }
             }
-            // §6c, HELD OVER THE PAGE RATHER THAN OVER A CONSTANT.
+            // A BRING-OVER IS OFFERED NOW, AND STILL NOT FROM HERE.
             //
-            // This used to be `XCTAssertFalse(RecordingDevicePage.bringOverIsNotOfferedYet)`
-            // and nothing else — a `let` asserted against itself. `resolve` never reads that
-            // constant, so a "Bring over recordings" action added tomorrow would have left
-            // this gate green: it enforced nothing at all. The population is the ACTIONS the
-            // page actually offers.
-            XCTAssertFalse(RecordingDevicePage.bringOverIsNotOfferedYet,
-                           "the recorded §6c decision was reversed without the gate below "
-                               + "being revisited")
-            for action in page.actions {
-                for banned in ["Bring", "bring", "Download", "download", "Import", "import",
-                               "Transfer", "transfer", "Sync", "sync"] {
-                    XCTAssertFalse(action.contains(banned),
-                                   "the page offers \"\(action)\". Design §6c: the download "
-                                       + "path has never run end-to-end, and a button that "
-                                       + "always fails is worse than an honest absence")
-                }
-            }
+            // This used to scan `page.actions` for "Bring"/"Download"/"Import"/"Transfer" and
+            // assert design §6c's "no bring-over ships yet". `PocketBringOver` shipped with a
+            // caller, so the §6c absence is deliberately over — and the claim this page still
+            // has to make is a DIFFERENT and narrower one: the action needs a file to ask for,
+            // which only a check that opened a session has, so it is the SHELF's and never
+            // this page's. `resolve` gets no device state that could choose one.
+            XCTAssertTrue(RecordingDevicePage.bringOverIsOffered,
+                          "the bring-over was withdrawn without this gate being revisited")
+            XCTAssertFalse(page.actions.contains(PocketBringOverPresentation.actionTitle),
+                           "the page offers \"\(PocketBringOverPresentation.actionTitle)\" "
+                               + "with no file to ask for — the shelf owns that action")
             // THE WHOLE LIST, PINNED. A banned-word scan cannot see an action that brings
             // files over under a name nobody thought of; an exact list makes adding ANY action
             // to this page a deliberate act with a red test in front of it.

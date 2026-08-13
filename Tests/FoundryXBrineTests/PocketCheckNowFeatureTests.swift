@@ -31,7 +31,7 @@ private enum PocketCheckNowSteps {
             "the check reports the recorder's battery and firmware",
             "it lists both recordings newest first with a duration for each",
             "every listed recording says it is only on the recorder",
-            "the panel offers no bring-over action and repeats the deletion promise",
+            "the panel offers one bring-over action and repeats the deletion promise",
             "one key handshake was issued and the listing commands followed it on that same session",
             "the recorder was sent no download, no delete and no WiFi command",
             "the link was closed once the answer was in hand",
@@ -174,17 +174,29 @@ private actor PocketCheckNowWorld {
                            "a file that has never been brought over is labelled as though "
                                + "Solleva were holding a copy of it")
 
-        case "the panel offers no bring-over action and repeats the deletion promise":
-            // §6c, HELD OVER THE PANEL RATHER THAN OVER A CONSTANT. The old gate asserted a
-            // `let` against itself and would have stayed green beside a bring-over button.
-            XCTAssertFalse(RecordingDevicePage.bringOverIsNotOfferedYet)
-            for line in PocketRecorderCheckPresentation.everyLine {
-                for banned in ["Bring", "bring over", "Download", "Import", "Transfer"] {
+        case "the panel offers one bring-over action and repeats the deletion promise":
+            // THE RECORDED §6c DECISION, DELIBERATELY REVERSED. This used to scan
+            // `everyLine` for "Bring"/"Download"/"Import"/"Transfer" and assert that no
+            // bring-over existed, because the download path had never run end to end.
+            // `PocketBringOver` is that path with a caller, so what is asserted now is the
+            // new truth — held over the POPULATION, exactly as the absence was.
+            XCTAssertTrue(RecordingDevicePage.bringOverIsOffered)
+            XCTAssertEqual(
+                PocketBringOverPresentation.everyLine.filter {
+                    $0 == PocketBringOverPresentation.actionTitle
+                },
+                ["Bring over"],
+                "the shelf offers something other than exactly one bring-over action")
+            // AND STILL NOTHING THAT PROMISES A BACKLOG. One file at a time is the shape
+            // `PocketBringOver` actually has; "Sync"/"Import"/"Download" would each be a
+            // claim about a leg that still has no caller.
+            for line in PocketBringOverPresentation.everyLine
+                + PocketRecorderCheckPresentation.everyLine {
+                for banned in ["Download", "Import", "Transfer all", "Sync"] {
                     XCTAssertFalse(line.contains(banned),
-                                   "the check panel says \"\(banned)\" — design §6c: the "
-                                       + "download path has never run end to end, and a "
-                                       + "button that always fails is worse than an honest "
-                                       + "absence")
+                                   "the panel says \"\(banned)\" — a bring-over moves ONE "
+                                       + "file, and the backlog and cadence still have no "
+                                       + "caller")
                 }
             }
             XCTAssertTrue(

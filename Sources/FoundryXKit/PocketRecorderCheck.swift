@@ -67,16 +67,23 @@ public enum PocketInventoryReader {
         }
     }
 
-    /// The recorder's shelf as manifest items. EVERY ONE IS `.recorderOnly`: nothing in this
-    /// build brings a file over, so a row claiming `.foundryX` custody would be a claim about
-    /// a copy that does not exist.
-    public static func manifest(_ recordings: [PocketRecording]) -> [StoredFileManifestItem] {
+    /// The recorder's shelf as manifest items.
+    ///
+    /// `heldFileIDs` IS THE ONLY THING THAT CAN MAKE A ROW SAY `.foundryX`, and it is a set of
+    /// files custody was actually ASKED about — never an inference from the listing. The
+    /// default is empty, which is the state every caller that has not consulted custody is
+    /// honestly in: `StoredFileCustody.foundryX` shipped rendering as "In Solleva" and nothing
+    /// had ever produced one, and a row that claims a copy this phone does not hold is the
+    /// worst possible thing for this particular panel to say.
+    public static func manifest(_ recordings: [PocketRecording],
+                                heldFileIDs: Set<String> = []) -> [StoredFileManifestItem] {
         recordings.map {
-            StoredFileManifestItem(id: "\($0.date)/\($0.timestamp)",
-                                   title: PocketRecordingLabel.title(date: $0.date,
-                                                                     timestamp: $0.timestamp),
-                                   sizeBytes: $0.sizeBytes,
-                                   custody: .recorderOnly)
+            let id = "\($0.date)/\($0.timestamp)"
+            return StoredFileManifestItem(
+                id: id,
+                title: PocketRecordingLabel.title(date: $0.date, timestamp: $0.timestamp),
+                sizeBytes: $0.sizeBytes,
+                custody: heldFileIDs.contains(id) ? .foundryX : .recorderOnly)
         }
     }
 }
@@ -115,8 +122,13 @@ public enum PocketRecorderCheckPresentation {
     /// `PocketRecorderCustodyPromise.text` had no caller in `App/` at all, while
     /// `features/pocket-durable-sync.feature` claimed "the shipped deletion promise remains
     /// visible". It is visible here, beside the list it is a promise about.
+    ///
+    /// IT USED TO SAY "It can't bring these over yet." That was true and is not any more, and
+    /// leaving it would be this panel telling somebody an action it is showing them does not
+    /// exist. One at a time is the shape `PocketBringOver` actually has, so that is what it
+    /// says — the backlog and the cadence are written and still have no caller.
     public static let sectionNote =
-        "Solleva can see what's on this recorder. It can't bring these over yet. "
+        "Solleva can see what's on this recorder and can bring one recording over at a time. "
         + PocketRecorderCustodyPromise.text
 
     /// The link came up, custody settled, and the recorder would not say what it holds.
@@ -181,22 +193,51 @@ public enum PocketRecorderCheckPresentation {
     }
 }
 
+/// WHAT THE RECORDER SAID IT IS HOLDING, IN THE PROTOCOL'S OWN FIELDS, for the one caller that
+/// needs it that way.
+///
+/// `PocketRecorderCheckOutcome.checked` carries a PRESENTATION — titles and durations — and
+/// `PocketBringOver.offered` cannot order display text. So a caller that intends to ask for a
+/// file hands one of these in and reads it back afterwards. It is a parameter rather than a
+/// wider outcome because every panel-only caller would otherwise carry recordings it has no
+/// use for, and a second check API would be a second way to open a session.
+public final class PocketRecorderShelfNote: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [PocketRecording] = []
+    public init() {}
+    /// Newest first, or empty when no listing was read. AN UNREAD SHELF IS NOT AN EMPTY ONE —
+    /// the outcome is the thing that says which of those happened.
+    public var recordings: [PocketRecording] { lock.withLock { storage } }
+    fileprivate func note(_ recordings: [PocketRecording]) {
+        lock.withLock { storage = recordings }
+    }
+}
+
 /// ONE CHECK: open a session, read the shelf, close it.
 public enum PocketRecorderCheck {
 
+    /// - Parameter custody: what this phone is holding, so a row can say "In Solleva" about a
+    ///   file that has actually been brought over. `nil` — the default — means the check does
+    ///   not consult custody at all and every row is `.recorderOnly`, which keeps every
+    ///   existing caller and every hermetic scenario exactly as truthful as it was.
     /// - Parameter attachment: injected so the Brine scenario drives the SHIPPED attachment
     ///   over a faked radio rather than a faked attachment. The default is the production one.
     ///   A fresh attachment per check is not an optimisation to remove: `teardown()` retires
     ///   the object's link and generation, so an attachment is single-use by construction.
+    /// - Parameter shelf: handed in by a caller that intends to ASK FOR A FILE, and filled with
+    ///   what the recorder listed. `nil` — the default — is a panel-only check.
     public static func run(
         peripheralIdentifier id: UUID,
         advertisedName: String,
-        attachment: RecordingDeviceAttachment = RecordingDeviceAttachment()
+        custody: (any PocketRecorderFileCustody)? = nil,
+        attachment: RecordingDeviceAttachment = RecordingDeviceAttachment(),
+        shelf: PocketRecorderShelfNote? = nil
     ) async -> PocketRecorderCheckOutcome {
         let result = await attachment.withAuthenticatedSession(
             peripheralIdentifier: id, advertisedName: advertisedName
         ) { client, identity in
-            await read(client: client, identity: identity, advertisedName: advertisedName)
+            await read(client: client, identity: identity, advertisedName: advertisedName,
+                       custody: custody, shelf: shelf)
         }
         switch result {
         case .unavailable(let outcome): return .unavailable(outcome)
@@ -206,7 +247,10 @@ public enum PocketRecorderCheck {
 
     private static func read(client: PocketBLEClient,
                              identity: PocketAuthenticatedIdentity,
-                             advertisedName: String) async -> PocketRecorderCheckOutcome {
+                             advertisedName: String,
+                             custody: (any PocketRecorderFileCustody)?,
+                             shelf: PocketRecorderShelfNote?)
+        async -> PocketRecorderCheckOutcome {
         // THE SHIPPED BRIDGE, NOT A SECOND READ OF THE SAME FACTS. `observe` is what the
         // adoption path already uses for battery and firmware, and its output maps 1:1 onto
         // the capability states `StoredFileDevicePresentation.detail` asks for.
@@ -215,12 +259,28 @@ public enum PocketRecorderCheck {
         let declared = RecordingDeviceCapabilities(declared: observation.declaredCapabilities)
         do {
             let recordings = try await PocketInventoryReader.read(client: client)
+            shelf?.note(recordings)
+            // CUSTODY IS ASKED, ONE FILE AT A TIME, and only when a caller handed one over.
+            // "Is this on the phone" is a question with an answer; deriving it from the
+            // listing would be the panel deciding what it holds.
+            var held: Set<String> = []
+            if let custody {
+                for recording in recordings {
+                    let key = PocketRecorderFileKey(
+                        identity: identity.recordingDeviceIdentity,
+                        date: recording.date,
+                        timestamp: recording.timestamp)
+                    if await custody.alreadyHeld(key) {
+                        held.insert("\(recording.date)/\(recording.timestamp)")
+                    }
+                }
+            }
             return .checked(StoredFileDevicePresentation.detail(
                 name: observation.reportedName,
                 link: .connected,
                 battery: declared.state(of: .batteryLevel),
                 firmware: declared.state(of: .firmwareVersion),
-                manifest: PocketInventoryReader.manifest(recordings)))
+                manifest: PocketInventoryReader.manifest(recordings, heldFileIDs: held)))
         } catch let error as PocketProtocolError {
             return .inventoryFailed(error)
         } catch {
