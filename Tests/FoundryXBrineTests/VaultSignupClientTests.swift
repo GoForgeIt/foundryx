@@ -55,6 +55,12 @@ final class VaultSignupClientTests: XCTestCase {
         XCTAssertEqual(req.value(forHTTPHeaderField: "Authorization"), "Bearer tok-1")
         let body = try JSONSerialization.jsonObject(with: XCTUnwrap(Stub.lastBody)) as! [String: String]
         XCTAssertEqual(body["plan"], "pro")
+        // THE WAY BACK INTO THE APP, on the only call that can carry it. The signed-in
+        // path hands back a raw Stripe session whose success_url is a server-side env var,
+        // so the app cannot put the deep link on the URL it opens — it can only tell the
+        // service what the link is. Dropping this field means a paid checkout ends on a web
+        // page with no route home, which is exactly what it did.
+        XCTAssertEqual(body["return_url"], "foundryx://vault/return")
         XCTAssertEqual(attempt.id, "att-9")
         XCTAssertEqual(attempt.checkoutURL?.absoluteString, "https://checkout.goforgeit.com/s/att-9")
     }

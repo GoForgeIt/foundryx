@@ -396,21 +396,27 @@ struct SettingsScreen: View {
     /// vaultFunnel.activateFromSettings() opens the deliberately requested status/setup sheet.
     @ViewBuilder private var vaultEntryRow: some View {
         let status = vaultFunnel.statusPresentation
-        if status.primaryAction != .none {
+        if status.primaryAction == .openVaultDetail {
+            // THE CHEVRON NOW GOES SOMEWHERE. This row read "Your Vault is live" with a
+            // chevron and did nothing when tapped: it called activateFromSettings(), which
+            // returns immediately for a live Vault. A live Vault has plenty to say — its
+            // state, what it holds, how to leave or delete it — it just had no page.
+            NavigationLink {
+                VaultDetailView(
+                    vaultFunnel: vaultFunnel,
+                    brains: brains,
+                    accountDeletion: accountDeletion,
+                    idToken: { remote.idToken },
+                    onDeleted: { scope in
+                        if scope != .hostedVault { remote.signOut() }
+                    })
+            } label: {
+                vaultRowLabel(status, live: true)
+            }
+            .accessibilityIdentifier("vault-detail-entry")
+        } else if status.primaryAction != .none {
             Button { vaultFunnel.activateFromSettings() } label: {
-                HStack(spacing: GrainSpacing.x2) {
-                    Image(systemName: vaultFunnel.entitlement == .live
-                          ? "checkmark.seal.fill" : "key.fill")
-                        .foregroundStyle(vaultFunnel.entitlement == .live
-                                         ? GrainColor.sage : GrainColor.forgeBlue)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(status.title).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-                        Text(status.body).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-                    }
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 12)).foregroundStyle(GrainColor.textFaint)
-                }
+                vaultRowLabel(status, live: vaultFunnel.entitlement == .live)
             }
             .buttonStyle(.plain)
         } else {
@@ -439,16 +445,42 @@ struct SettingsScreen: View {
             }
             .buttonStyle(.plain)
         } else {
+            // Not actionable: a live Vault, or an entitlement we could not check. Only the
+            // FIRST of those is "On" — this drew a green seal and the word "On" next to
+            // "We couldn't check your Vault", which is the opposite of what it says.
+            let live = vaultFunnel.entitlement == .live
             HStack(spacing: GrainSpacing.x2) {
-                Image(systemName: "checkmark.seal.fill").foregroundStyle(GrainColor.sage)
+                Image(systemName: live ? "checkmark.seal.fill" : "key.slash")
+                    .foregroundStyle(live ? GrainColor.sage : GrainColor.textFaint)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(p.title).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
                     Text(p.subtitle).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
                 }
                 Spacer()
-                Text("On").grainTextStyle(.caption).foregroundStyle(GrainColor.sage)
+                if live {
+                    Text("On").grainTextStyle(.caption).foregroundStyle(GrainColor.sage)
+                }
             }
         }
+        }
+    }
+
+    /// The Vault row's contents. Shared by the navigating (live) and the sheet-opening
+    /// (setup / recovery / failure) forms so the two can never drift apart visually.
+    /// NavigationLink draws its own chevron; the Button form draws one itself.
+    private func vaultRowLabel(_ status: VaultFunnelPresentation, live: Bool) -> some View {
+        HStack(spacing: GrainSpacing.x2) {
+            Image(systemName: live ? "checkmark.seal.fill" : "key.fill")
+                .foregroundStyle(live ? GrainColor.sage : GrainColor.forgeBlue)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(status.title).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
+                Text(status.body).grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            }
+            Spacer()
+            if !live {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12)).foregroundStyle(GrainColor.textFaint)
+            }
         }
     }
 

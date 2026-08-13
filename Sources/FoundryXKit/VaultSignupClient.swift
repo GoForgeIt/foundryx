@@ -16,15 +16,36 @@ public struct VaultSignupClient: VaultSignupService {
     /// The deployed service base, e.g. https://foundry-signup-449450484577.us-central1.run.app
     private let baseURL: URL
     private let session: URLSession
+    /// The deep link that hands the browser back into the app.
+    ///
+    /// SENT ON EVERY CHECKOUT-ATTEMPT, because the service is the only party that can put
+    /// it where it needs to go. The signed-in path (a bearer is present, which is the only
+    /// path this client ever takes) hands back a RAW Stripe Checkout Session URL, whose
+    /// `success_url` is a deployment env var pointing at a marketing page — so after paying,
+    /// the browser lands on a web page that has no idea an app is waiting, and the only way
+    /// home is for the user to find it. That is what "old branding, then it reloaded to the
+    /// new site" was. The browser-first (tokenless) path already threads
+    /// `return_url=foundryx://vault/return` through, and the service's own
+    /// `/vault/checkout/success` handler already knows how to verify payment and 302 to it
+    /// with a ticket. The signed-in path simply is not wired to either.
+    ///
+    /// The service's checkout-attempt body is tolerant of unknown fields, so sending this
+    /// today is inert and becomes live the moment the service threads it into the Stripe
+    /// session's `success_url` — no app release needed for the fix to land.
+    private let returnCallback: URL
 
-    public init(baseURL: URL, session: URLSession = .shared) {
+    public init(baseURL: URL,
+                session: URLSession = .shared,
+                returnCallback: URL = URL(string: "foundryx://vault/return")!) {
         self.baseURL = baseURL
         self.session = session
+        self.returnCallback = returnCallback
     }
 
     public func createCheckoutAttempt(plan: VaultPlan, idToken: String?) async throws -> VaultCheckoutAttempt {
         let json = try await post("signup/checkout-attempt",
-                                  body: ["plan": plan.rawValue],
+                                  body: ["plan": plan.rawValue,
+                                         "return_url": returnCallback.absoluteString],
                                   idToken: idToken,
                                   requiresCredential: true)
         guard let id = (json["checkout_attempt_id"] as? String) ?? (json["id"] as? String), !id.isEmpty else {
