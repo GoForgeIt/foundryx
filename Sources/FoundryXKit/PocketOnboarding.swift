@@ -797,8 +797,14 @@ public enum PocketSessionKeyEntryPresentation {
         + "key — check you captured the key for this recorder and not for another one."
 
     /// The link, and only the link. Distinct from `refusedByRecorderLine` by construction.
+    ///
+    /// IT NO LONGER BLAMES DISTANCE. It used to end "Bring it closer and try again", which was
+    /// reported against a recorder lying on the back of the phone. Nothing in this app can
+    /// measure distance, and out-of-range, powered-off and connected-to-another-app are the
+    /// same silence from here.
     public static let linkFailedLine =
-        "Solleva couldn't reach the recorder to try that key. Bring it closer and try again."
+        "Solleva couldn't reach the recorder to try that key. Wake the recorder up and try "
+        + "again."
 
     /// The Keychain refused the write, so nothing was offered to the recorder either.
     public static let keyNotKeptLine =

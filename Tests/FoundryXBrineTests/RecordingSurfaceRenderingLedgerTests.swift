@@ -50,6 +50,15 @@ final class RecordingSurfaceRenderingLedgerTests: XCTestCase {
         // affordance, its scanning and empty lines and its capability strip all come from
         // here — the first consumers these strings have ever had under `App/`.
         "RecordingDeviceConnectPresentation",
+        // THE SCAN FOLD, DRAWN FROM THE DAY IT EXISTED. `App/DeviceScreen.swift`'s connect
+        // sheet resolves its list through `RecordingDeviceScanFilter.resolve` (the `scan`
+        // computed property) and draws `RecordingDeviceScanList.visible` in its `ForEach` and
+        // `.hiddenLine` in the disclosure row — so the rule that hides peripherals broadcasting
+        // no name is the one the screen runs, not a second copy typed into a view body. Both
+        // are on this side of the ledger deliberately: a fold that stopped being applied while
+        // the type stayed asserted is precisely the shape this file exists to catch.
+        "RecordingDeviceScanList",
+        "RecordingDeviceScanFilter",
     ]
 
     /// DEFINED, ASSERTED, AND NOT YET DRAWN.

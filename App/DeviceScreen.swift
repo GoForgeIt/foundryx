@@ -712,6 +712,9 @@ private struct RecordingDeviceConnectSheet: View {
     let onDismiss: () -> Void
 
     @StateObject private var attach = RecordingDeviceAttachModel()
+    /// THE DISCLOSURE'S STATE, AND NOTHING ELSE. `RecordingDeviceScanFilter` owns the rule;
+    /// this is only whether the person has asked to see what it folded.
+    @State private var showingUnnamed = false
 
     var body: some View {
         NavigationStack {
@@ -722,7 +725,13 @@ private struct RecordingDeviceConnectSheet: View {
                     // device the app had never connected to — a brand name above a person's
                     // actual device, which is "vendors first" in the one place the design
                     // draws two rows that read identically.
-                    ForEach(device.discovered) { found in
+                    // WHAT THE SCAN TURNED UP, MINUS THE INTERCHANGEABLE ROWS — and the rule
+                    // lives in the kit, where `swift test` can hold it, rather than as a
+                    // `filter` typed into this body. A room full of BLE advertisers produced a
+                    // list that was mostly identical `Unnamed recording device` rows; they are
+                    // FOLDED behind a count, never dropped, and only ever when there is
+                    // something named to fold them behind (see `RecordingDeviceScanFilter`).
+                    ForEach(scan.visible) { found in
                         Button {
                             // THE TAP THAT RUNS THE ADOPTION CHAIN. It used to go straight to
                             // `device.connect`, which records a `.bleStream` pair and then
@@ -749,6 +758,45 @@ private struct RecordingDeviceConnectSheet: View {
                         .disabled(attach.attaching != nil)
                     }
 
+                    // THE FOLD, SAID OUT LOUD AND REVERSIBLE IN ONE TAP. A device that
+                    // broadcasts no name is still reachable from this screen — that is the
+                    // whole difference between decluttering a list and making somebody's
+                    // recorder unpairable.
+                    if let hidden = scan.hiddenLine {
+                        Button {
+                            showingUnnamed = true
+                        } label: {
+                            HStack(spacing: GrainSpacing.x1) {
+                                Text(hidden)
+                                    .grainTextStyle(.caption)
+                                    .foregroundStyle(GrainColor.textMuted)
+                                Text(RecordingDeviceConnectPresentation.showUnnamedAction)
+                                    .grainTextStyle(.caption)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(GrainColor.forgeBlue)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("show-unnamed-devices")
+                        .padding(.vertical, GrainSpacing.x3)
+                    } else if showingUnnamed, wouldFoldSomething {
+                        Button {
+                            showingUnnamed = false
+                        } label: {
+                            Text(RecordingDeviceConnectPresentation.hideUnnamedAction)
+                                .grainTextStyle(.caption)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(GrainColor.forgeBlue)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("hide-unnamed-devices")
+                        .padding(.vertical, GrainSpacing.x3)
+                    }
+
                     // WHAT THE TAP ESTABLISHED, WHEN IT ESTABLISHED NOTHING. Every string
                     // comes from the kit; a failure that leaves the row looking untouched is
                     // how "I tapped it and nothing happened" gets shipped.
@@ -761,7 +809,11 @@ private struct RecordingDeviceConnectSheet: View {
                             .padding(.vertical, GrainSpacing.x3)
                     }
 
-                    if device.discovered.isEmpty {
+                    // `scan.visible`, NOT `device.discovered`: the empty state has to be about
+                    // what is on screen. It can only differ when the fold is active, and the
+                    // fold is only ever active when something named is showing — so this can
+                    // never say "nothing found" over a list that has rows in it.
+                    if scan.visible.isEmpty {
                         HStack(spacing: GrainSpacing.x2) {
                             if isScanning { ProgressView().tint(GrainColor.forgeBlue) }
                             Text(isScanning
@@ -898,6 +950,20 @@ private struct RecordingDeviceConnectSheet: View {
     private var isScanning: Bool {
         if case .scanning = device.connectionState { return true }
         return false
+    }
+
+    /// What this sheet draws. A COMPUTED PROPERTY rather than a `let` in the body so the rule
+    /// is applied in exactly one place and the `else if` below cannot drift from the `ForEach`
+    /// above it.
+    private var scan: RecordingDeviceScanList {
+        RecordingDeviceScanFilter.resolve(device.discovered, showingUnnamed: showingUnnamed)
+    }
+
+    /// Whether folding would actually hold anything back — asked of the SAME function that
+    /// does the folding, so "Hide" cannot appear over a list that hiding would not change.
+    private var wouldFoldSomething: Bool {
+        RecordingDeviceScanFilter.resolve(device.discovered,
+                                          showingUnnamed: false).hiddenUnnamedCount > 0
     }
 
     private func row(title: String, detail: String) -> some View {

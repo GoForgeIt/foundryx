@@ -103,6 +103,71 @@ public struct RecordingDeviceListControl: Equatable, Sendable {
     }
 }
 
+/// WHAT THE CONNECT SHEET ACTUALLY DRAWS, once the peripherals that broadcast no name have
+/// been dealt with.
+///
+/// THE REPORT. "There's too many unnamed Bluetooth devices. Can we hide anything that doesn't
+/// have a name? They're just busy and kind of get in the way." A room full of BLE advertisers
+/// produced a scan list where most rows were the same interchangeable
+/// `Unnamed recording device`, and the one row the person was looking for was somewhere in it.
+///
+/// AND WHY THEY ARE NOT SIMPLY DROPPED. The sheet's own copy says FoundryX cannot tell what a
+/// device is until it connects to it — that is `broadcastNameNote`, and it is true. Some real
+/// recorders broadcast no name at all until they are connected, so a blanket permanent hide
+/// would make a legitimate device *unpairable* while telling its owner "no recording devices
+/// found yet". That is a strictly worse defect than a busy list.
+///
+/// SO THE RULE IS TWO-PART, AND BOTH PARTS MATTER:
+///
+///   1. UNNAMED ROWS ARE FOLDED ONLY WHEN THERE IS SOMETHING NAMED TO FOLD THEM BEHIND. If
+///      nothing in range broadcasts a name, the unnamed devices ARE the list — hiding them
+///      would leave an empty sheet in front of somebody whose recorder is right there.
+///   2. THE FOLD IS ALWAYS DISCLOSED AND ALWAYS REVERSIBLE. The sheet says how many it is
+///      holding back and offers to show them. Nothing here can make a device unreachable; the
+///      worst it can do is cost one tap.
+public struct RecordingDeviceScanList: Equatable, Sendable {
+    /// The rows to draw, in the order the scan produced them.
+    public let visible: [DiscoveredDevice]
+    /// How many unnamed devices are being held back. Zero when none are.
+    public let hiddenUnnamedCount: Int
+
+    public init(visible: [DiscoveredDevice], hiddenUnnamedCount: Int) {
+        self.visible = visible
+        self.hiddenUnnamedCount = hiddenUnnamedCount
+    }
+
+    /// The disclosure line, or nil when there is nothing to disclose.
+    public var hiddenLine: String? {
+        hiddenUnnamedCount == 0
+            ? nil
+            : RecordingDeviceConnectPresentation.unnamedHiddenLine(count: hiddenUnnamedCount)
+    }
+}
+
+public enum RecordingDeviceScanFilter {
+
+    /// A device broadcasts a name when it broadcasts something other than whitespace.
+    /// `DeviceManager` stores `p.name ?? ""`, and a name of `" "` is not a name.
+    public static func broadcastsAName(_ device: DiscoveredDevice) -> Bool {
+        !device.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// - Parameter showingUnnamed: the disclosure's state. `true` is the person having asked
+    ///   to see everything, and it always shows everything — there is no state of this screen
+    ///   in which a discovered device cannot be reached.
+    public static func resolve(_ discovered: [DiscoveredDevice],
+                               showingUnnamed: Bool) -> RecordingDeviceScanList {
+        let named = discovered.filter(broadcastsAName)
+        let unnamed = discovered.count - named.count
+        // NOTHING NAMED ⇒ NOTHING TO FOLD BEHIND. This is the branch that keeps a nameless
+        // recorder pairable, and it is the reason this is a function rather than a `filter`.
+        guard !named.isEmpty, !showingUnnamed else {
+            return RecordingDeviceScanList(visible: discovered, hiddenUnnamedCount: 0)
+        }
+        return RecordingDeviceScanList(visible: named, hiddenUnnamedCount: unnamed)
+    }
+}
+
 public enum RecordingDeviceConnectPresentation {
 
     // MARK: Generic copy — brand-free, by inspection AND by assertion
@@ -146,12 +211,28 @@ public enum RecordingDeviceConnectPresentation {
     /// it, and keeps this screen's copy in the one place `genericCopy` can assert over.
     public static let unnamedDeviceName = "Unnamed recording device"
 
+    /// What the sheet says about the rows it is FOLDING rather than showing.
+    ///
+    /// It is a count and not a list, because the whole point is that these rows are
+    /// interchangeable to look at: every one of them renders `unnamedDeviceName`.
+    public static func unnamedHiddenLine(count: Int) -> String {
+        count == 1 ? "1 device with no name is hidden"
+                   : "\(count) devices with no name are hidden"
+    }
+
+    /// The disclosure. It is the reason the fold is not a deletion.
+    public static let showUnnamedAction = "Show"
+    /// And back again, so the list a person just uncluttered can be uncluttered again.
+    public static let hideUnnamedAction = "Hide"
+
     /// Every piece of generic copy this surface can render, so "generic device copy names no
     /// vendor" is checked over a POPULATION rather than over whichever strings a test author
     /// happened to remember.
     public static let genericCopy: [String] = [
         affordanceTitle, listTitle, connectSheetTitle, emptyLine, scanningLine, unavailableValue,
         unnamedDeviceName, broadcastNameNote, routePairingNote, setupHelpLink,
+        unnamedHiddenLine(count: 1), unnamedHiddenLine(count: 4),
+        showUnnamedAction, hideUnnamedAction,
     ] + capabilityLabels
 
     /// The capabilities the list shows, in a fixed order, with their labels.

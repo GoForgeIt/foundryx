@@ -485,7 +485,7 @@ private actor FactoryFreshMintWorld {
     }
 
     private func attach(mint consent: PocketMintConsent?) async -> RecordingDeviceAttachOutcome {
-        guard let stack else { return .unreachable("no recorder was staged") }
+        guard let stack else { return .unreachable(.unexplained) }
         let attachment = RecordingDeviceAttachment(
             makeCentral: stack.factory,
             // WHICHEVER CUSTODY THIS SCENARIO STAGED. `??` between two different concrete

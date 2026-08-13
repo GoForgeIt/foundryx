@@ -1205,12 +1205,16 @@ private final class UnifiedDeviceListWorld {
             }
 
         case "that message is not the one shown when the app never reached the device":
-            XCTAssertNotEqual(RecordingDeviceAttachPresentation.unrecognisedLine,
-                              RecordingDeviceAttachPresentation.unreachableLine,
-                              "\"it connected and I understood nothing\" and \"I never "
-                                  + "reached it\" are different facts, and collapsing them "
-                                  + "sends someone to move closer to a device that is already "
-                                  + "connected")
+            // HELD OVER EVERY WAY OF NOT REACHING IT, not just the one line there used to be.
+            // `.unreachable` carries a reason now, and each reason renders its own sentence,
+            // so this claim is only true if it is true against all of them.
+            for reason in RecordingDeviceUnreachableReason.allCases {
+                XCTAssertNotEqual(RecordingDeviceAttachPresentation.unrecognisedLine,
+                                  RecordingDeviceAttachPresentation.line(for: reason),
+                                  "\"it connected and I understood nothing\" reads the same as "
+                                      + "\(reason) — collapsing them sends someone to fix a "
+                                      + "connection that is already up")
+            }
             XCTAssertNil(RecordingDeviceAttachPresentation.inlineMessage(for: .adopted(
                 identity: try Self.pocketIdentity,
                 displayName: Self.pocketName,

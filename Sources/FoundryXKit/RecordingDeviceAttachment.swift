@@ -99,8 +99,90 @@ public enum RecordingDeviceAttachOutcome: Equatable, Sendable {
     case live
     /// It connected and spoke nothing this build knows.
     case unrecognised
-    /// It never got far enough to establish anything.
-    case unreachable(String)
+    /// It never got far enough to establish anything, AND WHICH STEP IT STOPPED AT.
+    ///
+    /// The payload used to be a free-text `String` that the presentation discarded, so eleven
+    /// distinct failures — a radio that was off, a peripheral this iPhone could not look up, a
+    /// connect that timed out, a service discovery that stalled, a link that dropped — all
+    /// rendered one sentence, and that sentence blamed distance. It is a value now because a
+    /// caller that cannot tell those apart cannot say anything true about any of them.
+    case unreachable(RecordingDeviceUnreachableReason)
+}
+
+/// WHERE A TAP STOPPED. One case per distinguishable failure in `RecordingDeviceAttachment`,
+/// and the reason `.unreachable` is worth carrying at all.
+///
+/// WHY THIS IS AN ENUM AND NOT THE OLD STRING. A recorder lying against the back of the phone
+/// that times out during SERVICE DISCOVERY is a completely different problem from one that
+/// never connected, and from one this iPhone could not look up at all. Telling them apart is
+/// what makes the next attempt informative instead of another dead end — for the person
+/// holding the phone, and for whoever reads the log afterwards.
+///
+/// NOTHING HERE CLAIMS DISTANCE. `UnifiedDeviceListPresentation.bannedProximityWords` already
+/// holds that a row may not say "in range", because this phone cannot distinguish out-of-range
+/// from powered-off from connected-to-another-app. The connect sheet was saying exactly that
+/// and worse — "bring it closer" — for every one of these.
+public enum RecordingDeviceUnreachableReason: String, Equatable, Sendable, CaseIterable {
+    /// The radio reported a state other than powered-on.
+    case bluetoothOff
+    /// The radio never reported ANY state inside the power-on deadline.
+    case bluetoothNeverReported
+    /// `retrievePeripherals(withIdentifiers:)` came up empty AND a fresh scan did not turn the
+    /// device up either.
+    ///
+    /// A HYPOTHESIS ABOUT THE REPORTED DEFECT, NOT A DIAGNOSIS OF IT. The peripheral handle
+    /// the pairing scan surfaced lives on `DeviceManager`'s central, and a brand-new central
+    /// is not guaranteed to be able to look it up — which would have produced the old generic
+    /// sentence with no way to tell it from four other causes. Nobody has yet seen a failing
+    /// tap with this build's reporting in it, so whether Nick's Pocket landed here is unknown.
+    /// That is what the reason is for: the NEXT one says.
+    case deviceNotFound
+    /// `connect` was issued and neither `didConnect` nor `didFailToConnect` ever came back.
+    case connectTimedOut
+    /// The radio answered `didFailToConnect` — a refusal, not a silence.
+    case connectRefused
+    /// The link came up and went away again before the graph was read — a mid-setup drop.
+    case linkDroppedDuringSetup
+    /// Connected, and service discovery came back with an error.
+    case serviceDiscoveryFailed
+    /// Connected, and service discovery never came back at all.
+    case serviceDiscoveryTimedOut
+    /// Services listed, and characteristic discovery never finished.
+    case characteristicDiscoveryTimedOut
+    /// The graph carried a stored-file map and the characteristics were gone by the time the
+    /// transport asked for them.
+    case protocolCharacteristicsVanished
+    /// The transport was built and `PocketBLEClient.connect` could not negotiate over it.
+    case protocolNegotiationFailed
+    /// The peripheral identifier this iPhone holds cannot make a durable identity.
+    case noDurableIdentity
+    /// The key handshake was issued and the recorder stopped answering part-way through.
+    case handshakeUnanswered
+    /// SOMETHING ELSE, SAID AS SOMETHING ELSE. The honest bucket — an error no branch above
+    /// produced. It exists so an unmapped failure reads as "we don't know" rather than being
+    /// rounded into whichever neighbouring cause has the friendliest sentence.
+    case unexplained
+
+    /// The short technical form, for the log and for `.linkFailed` payloads. It is NOT what
+    /// the person sees; `RecordingDeviceAttachPresentation.line(for:)` is.
+    public var diagnostic: String {
+        switch self {
+        case .bluetoothOff:                     return "bluetooth is not powered on"
+        case .bluetoothNeverReported:           return "the radio never reported its state"
+        case .deviceNotFound:                   return "the peripheral could not be found"
+        case .connectTimedOut:                  return "the connect attempt timed out"
+        case .connectRefused:                   return "the connect attempt was refused"
+        case .linkDroppedDuringSetup:           return "the link dropped during setup"
+        case .serviceDiscoveryFailed:           return "service discovery failed"
+        case .serviceDiscoveryTimedOut:         return "service discovery timed out"
+        case .characteristicDiscoveryTimedOut:  return "characteristic discovery timed out"
+        case .protocolCharacteristicsVanished:  return "the protocol characteristics went away"
+        case .protocolNegotiationFailed:        return "protocol negotiation failed"
+        case .noDurableIdentity:                return "no durable identity for this peripheral"
+        case .handshakeUnanswered:              return "the key handshake went unanswered"
+        case .unexplained:                      return "an unmapped failure"
+        }
+    }
 }
 
 /// The copy a tap can produce, in the kit rather than in the view — for the same reason every
@@ -115,9 +197,63 @@ public enum RecordingDeviceAttachPresentation {
     /// paired until custody is settled — and not a class caption.
     public static let connectingLine = "Connecting…"
 
-    /// The link never came up, or came up and went away.
-    public static let unreachableLine =
-        "FoundryX couldn't connect to that device. Bring it closer and try again."
+    /// WHAT EACH WAY OF NOT GETTING THERE ACTUALLY SAYS.
+    ///
+    /// There used to be ONE line here — "FoundryX couldn't connect to that device. Bring it
+    /// closer and try again." — and every `.unreachable` rendered it, because the reason the
+    /// outcome carried was discarded on the way to the screen. It was reported against a Pocket
+    /// lying on the back of the phone, which is the one situation in which that sentence is
+    /// certainly false, and it was the whole of what the attempt produced.
+    ///
+    /// NO LINE HERE MENTIONS DISTANCE. Nothing in this app can measure it: an RSSI is not a
+    /// diagnosis, and out-of-range, powered-off and connected-to-another-app are the same
+    /// silence on this side of the radio. Each line names the step that failed and, where
+    /// there is one, the thing the person can actually do about it.
+    public static func line(for reason: RecordingDeviceUnreachableReason) -> String {
+        switch reason {
+        case .bluetoothOff:
+            return "Bluetooth is off on this iPhone, so FoundryX couldn't reach that device. "
+                + "Turn Bluetooth on and try again."
+        case .bluetoothNeverReported:
+            return "FoundryX couldn't start Bluetooth on this iPhone. Try again, and if it "
+                + "keeps happening, restart FoundryX."
+        case .deviceNotFound:
+            return "FoundryX couldn't find that device again after you tapped it. It may have "
+                + "stopped broadcasting — wake it up and tap it again."
+        case .connectTimedOut:
+            return "That device never answered. It may be asleep, or already connected to "
+                + "another app or another phone."
+        case .connectRefused:
+            return "That device refused the connection. It's most likely already connected to "
+                + "another app or another phone."
+        case .linkDroppedDuringSetup:
+            return "That device disconnected while FoundryX was setting it up. Tap it again."
+        case .serviceDiscoveryFailed:
+            return "FoundryX connected to that device, and it wouldn't say what it can do. "
+                + "Tap it again."
+        case .serviceDiscoveryTimedOut:
+            return "FoundryX connected to that device and it never said what it can do. Turn "
+                + "it off and on again, then tap it."
+        case .characteristicDiscoveryTimedOut:
+            return "FoundryX connected to that device and it stopped part-way through "
+                + "describing itself. Turn it off and on again, then tap it."
+        case .protocolCharacteristicsVanished:
+            return "FoundryX connected to that device and lost the connection before it could "
+                + "start. Tap it again."
+        case .protocolNegotiationFailed:
+            return "FoundryX connected to that device, and it didn't answer in a way this "
+                + "version understands."
+        case .noDurableIdentity:
+            return "FoundryX can't give that device a stable identity on this iPhone, so it "
+                + "can't save it to your account."
+        case .handshakeUnanswered:
+            return "That device stopped answering while FoundryX was unlocking it. Tap it "
+                + "again."
+        case .unexplained:
+            return "FoundryX couldn't reach that device and couldn't tell why. Tap it again — "
+                + "if it keeps happening, the details are in the app's log."
+        }
+    }
 
     /// The protocol leg worked and the ACCOUNT could not keep the result. A lost user
     /// decision is said out loud rather than shown as a device that silently never appears.
@@ -131,17 +267,20 @@ public enum RecordingDeviceAttachPresentation {
     public static let unrecognisedLine =
         "FoundryX connected to that device, but it isn't one this version can record from."
 
-    /// Every line this surface can render, so "it names no vendor" is held over the
-    /// population rather than over whichever string a test author remembered.
-    public static let everyLine: [String] = [connectingLine, unreachableLine, notRememberedLine,
-                                             unrecognisedLine]
+    /// Every line this surface can render, so "it names no vendor", "none of them is empty"
+    /// and "not one of them claims distance" are held over the POPULATION rather than over
+    /// whichever string a test author remembered. `allCases` is what keeps a new reason from
+    /// slipping in without a sentence.
+    public static let everyLine: [String] =
+        [connectingLine, notRememberedLine, unrecognisedLine]
+        + RecordingDeviceUnreachableReason.allCases.map(line(for:))
 
     /// The inline line an outcome earns, or nil when the outcome is not an inline message —
     /// `.adopted` closes the sheet, `.live` hands the tap to the shipped pairing path, and
     /// `.setupUnavailable` / `.recoveryRequired` are whole screens.
     public static func inlineMessage(for outcome: RecordingDeviceAttachOutcome) -> String? {
         switch outcome {
-        case .unreachable:          return unreachableLine
+        case .unreachable(let reason): return line(for: reason)
         case .adoptionNotPersisted: return notRememberedLine
         case .unrecognised:         return unrecognisedLine
         case .adopted, .setupUnavailable, .recoveryRequired, .live,
@@ -156,19 +295,26 @@ public enum RecordingDeviceAttachPresentation {
 }
 
 public enum RecordingDeviceAttachError: Error, Equatable, Sendable, CustomStringConvertible {
-    case radioUnavailable
-    case timedOut(String)
-    case linkDropped
-    case notConnected
+    /// THE REASON TRAVELS WITH THE ERROR. It used to be reconstructed from a stage STRING at
+    /// the top of `attach`, which is how "connecting" and "service discovery" ended up
+    /// indistinguishable by the time anything rendered them.
+    case unreachable(RecordingDeviceUnreachableReason)
     case unknownCharacteristic(String)
 
     public var description: String {
         switch self {
-        case .radioUnavailable:            return "Bluetooth is not available"
-        case .timedOut(let stage):         return "\(stage) timed out"
-        case .linkDropped:                 return "the link dropped"
-        case .notConnected:                return "not connected"
+        case .unreachable(let reason):      return reason.diagnostic
         case .unknownCharacteristic(let t): return "no characteristic \(t)"
+        }
+    }
+
+    /// Which reason a thrown error means, total by construction. An error from outside this
+    /// type is `.unexplained` — said as unknown rather than rounded into a neighbour.
+    public static func reason(of error: Error) -> RecordingDeviceUnreachableReason {
+        switch error as? RecordingDeviceAttachError {
+        case .unreachable(let reason):  return reason
+        case .unknownCharacteristic:    return .protocolNegotiationFailed
+        case nil:                       return .unexplained
         }
     }
 }
@@ -233,7 +379,7 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
         }
     }
 
-    private enum Gate: Hashable { case poweredOn, connected, services, characteristics }
+    private enum Gate: Hashable { case poweredOn, rediscovered, connected, services, characteristics }
 
     private let bleQueue: DispatchQueue
     private let makeCentral: BLECentralFactory
@@ -247,6 +393,9 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
     private let lock = NSLock()
     private var central: BLECentral?
     private var peripheral: BLEPeripheral?
+    /// The peripheral a RESCAN is looking for. Non-nil only while `rediscover` is running, so
+    /// an unrelated advertisement cannot satisfy the gate.
+    private var wantedIdentifier: UUID?
     private var satisfied: Set<Gate> = []
     private var waiters: [Gate: [CheckedContinuation<Void, Error>]] = [:]
     private var outstandingServices = 0
@@ -303,8 +452,13 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
         do {
             try await reachDiscoveredGraph(of: id)
         } catch {
+            // THE ONE PLACE THE FAILURE BECOMES EVIDENCE. It is logged with the step it
+            // stopped at as well as returned, so a repeat of the reported defect leaves
+            // something behind to read even if nobody screenshots the sheet.
+            let reason = RecordingDeviceAttachError.reason(of: error)
+            log?.error("recording device: unreachable — \(reason.diagnostic)")
             teardown()
-            return .unreachable(describe(error))
+            return .unreachable(reason)
         }
 
         guard speaksStoredFileProtocol else {
@@ -359,25 +513,40 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
             return made
         }
         if created.managerState == .poweredOn { fulfil(.poweredOn) }
-        try await wait(for: .poweredOn, stage: "Bluetooth power-on", timeout: deadlines.powerOn)
+        try await wait(for: .poweredOn, timeout: deadlines.powerOn,
+                       onTimeout: .bluetoothNeverReported)
         guard created.managerState == .poweredOn else {
-            throw RecordingDeviceAttachError.radioUnavailable
+            throw RecordingDeviceAttachError.unreachable(.bluetoothOff)
         }
-        // `retrievePeripherals(withIdentifiers:)` is a SYSTEM lookup, not a per-central cache,
-        // so the peripheral the pairing scan surfaced on `DeviceManager`'s central is
-        // reachable from this one. That is what lets the probe own a separate central.
-        guard let found = created.retrievePeripherals(withIdentifiers: [id]).first else {
-            throw RecordingDeviceAttachError.notConnected
+        // `retrievePeripherals(withIdentifiers:)` WAS ASSUMED TO BE A SYSTEM LOOKUP, and the
+        // comment that used to sit here said so out loud: "not a per-central cache, so the
+        // peripheral the pairing scan surfaced on `DeviceManager`'s central is reachable from
+        // this one." Apple does not promise that. `retrievePeripherals` returns peripherals
+        // the system KNOWS — which reliably covers a bonded or currently-connected device, and
+        // does not reliably cover one that a DIFFERENT central merely saw advertising a moment
+        // ago and never connected to. Every recorder being paired for the first time is in
+        // exactly that state, and an empty array here used to be the end of the attempt.
+        //
+        // So the empty array is now a first attempt, not a verdict: this central goes and
+        // finds the device itself, with the same unfiltered scan the pairing list uses. A tap
+        // that establishes nothing must not be a device that can never be paired.
+        let found: BLEPeripheral
+        if let known = created.retrievePeripherals(withIdentifiers: [id]).first {
+            found = known
+        } else {
+            log?.info("recording device: not retrievable on this central — rescanning for it")
+            found = try await rediscover(id, on: created)
         }
         lock.withLock { peripheral = found }
         found.routeEventsToSink()
         created.connect(found, options: nil)
-        try await wait(for: .connected, stage: "connecting", timeout: deadlines.connect)
+        try await wait(for: .connected, timeout: deadlines.connect, onTimeout: .connectTimedOut)
 
         // EVERY service, because the app genuinely does not know what this device is yet.
         // Asking for one vendor's service UUID is the same mistake the scan filter was.
         found.discoverServices(nil)
-        try await wait(for: .services, stage: "service discovery", timeout: deadlines.discovery)
+        try await wait(for: .services, timeout: deadlines.discovery,
+                       onTimeout: .serviceDiscoveryTimedOut)
 
         let services = found.discoveredServices ?? []
         lock.withLock {
@@ -386,8 +555,28 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
             if services.isEmpty { satisfied.insert(.characteristics) }
         }
         for service in services { found.discoverCharacteristics(nil, for: service) }
-        try await wait(for: .characteristics, stage: "characteristic discovery",
-                       timeout: deadlines.discovery)
+        try await wait(for: .characteristics, timeout: deadlines.discovery,
+                       onTimeout: .characteristicDiscoveryTimedOut)
+    }
+
+    /// FIND THE DEVICE ON THIS CENTRAL, because looking it up on this central did not.
+    ///
+    /// Unfiltered, for the same reason the pairing scan is: a stored-file recorder advertises
+    /// no live-audio service, and a scan filtered to one is how the app used to be unable to
+    /// see the very devices this file exists to attach. The scan is stopped on every exit —
+    /// including the timeout — so a failed tap does not leave the radio scanning.
+    private func rediscover(_ id: UUID, on central: BLECentral) async throws -> BLEPeripheral {
+        lock.withLock { wantedIdentifier = id }
+        central.scanForPeripherals(withServices: nil, options: nil)
+        defer {
+            central.stopScan()
+            lock.withLock { wantedIdentifier = nil }
+        }
+        try await wait(for: .rediscovered, timeout: deadlines.connect, onTimeout: .deviceNotFound)
+        guard let found = lock.withLock({ peripheral }) else {
+            throw RecordingDeviceAttachError.unreachable(.deviceNotFound)
+        }
+        return found
     }
 
     /// Does the discovered graph carry EITHER shipped stored-file characteristic map?
@@ -402,7 +591,7 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
     ) async -> RecordingDeviceAttachOutcome {
         let map = characteristicMap()
         guard let map, let peripheral = lock.withLock({ peripheral }) else {
-            return .unreachable("the recorder stopped exposing its protocol characteristics")
+            return .unreachable(.protocolCharacteristicsVanished)
         }
         // Subscribe BEFORE the first command: a write issued before the notify state settles
         // has nowhere to answer, which is a silent hang rather than an error.
@@ -417,12 +606,12 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
 
         let transport = PocketSeamTransport(link: self, timeout: deadlines.control)
         guard let client = try? await PocketBLEClient.connect(transport: transport) else {
-            return .unreachable("the recorder exposed no protocol this build speaks")
+            return .unreachable(.protocolNegotiationFailed)
         }
         guard let identity = try? PocketAuthenticatedIdentity(peripheralIdentifier: id.uuidString)
         else {
             await client.close()
-            return .unreachable("this device has no usable durable identity")
+            return .unreachable(.noDurableIdentity)
         }
 
         // THE SHIPPED CUSTODY ORDER, THROUGH THE SHIPPED COORDINATOR. Restore first; never a
@@ -507,7 +696,7 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
             // actually REFUSED. Reporting the first as the second is how a UI tells someone
             // their key is wrong when their recorder merely walked out of range.
             await client.close()
-            return .unreachable("the recorder stopped answering during the key handshake")
+            return .unreachable(.handshakeUnanswered)
         default:
             await client.close()
             return .recoveryRequired
@@ -532,7 +721,9 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
         let (peripheral, characteristic) = lock.withLock {
             (self.peripheral, characteristicsByToken[token])
         }
-        guard let peripheral else { throw RecordingDeviceAttachError.notConnected }
+        guard let peripheral else {
+            throw RecordingDeviceAttachError.unreachable(.linkDroppedDuringSetup)
+        }
         guard let characteristic else {
             throw RecordingDeviceAttachError.unknownCharacteristic(token)
         }
@@ -586,27 +777,50 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
         eventWaiters.removeAll()
         pendingEvents.removeAll()
         self.peripheral = nil
+        self.wantedIdentifier = nil
+        // AND THE CENTRAL, which this used to keep. It nilled `peripheral` and left `central`
+        // in place, so the `CBCentralManager` a tap opened lived exactly as long as the
+        // attachment object did — and two of the states the model DELIBERATELY retains the
+        // attachment for (`.keyAcceptedNotDurable`, holding the only copy of an accepted key,
+        // and the §3.7 screen it puts up) hold that object open indefinitely. A radio held
+        // open by a failed attempt is one more thing wrong with the next attempt.
+        //
+        // It is safe to drop: this object is single-use by construction (`torndown` is never
+        // cleared), and `retryPendingCustody` builds a SIBLING from `makeCentral` rather than
+        // reusing this central.
+        self.central = nil
         lock.unlock()
 
         for (_, continuations) in pendingGates {
             for continuation in continuations {
-                continuation.resume(throwing: RecordingDeviceAttachError.linkDropped)
+                continuation.resume(
+                    throwing: RecordingDeviceAttachError.unreachable(.linkDroppedDuringSetup))
             }
         }
         for waiter in pendingEventWaiters {
             waiter.resume(throwing: PocketTransportFailure.disconnected)
         }
-        if let peripheral, let central { central.cancelPeripheralConnection(peripheral) }
+        if let peripheral, let central {
+            central.stopScan()
+            central.cancelPeripheralConnection(peripheral)
+        }
     }
+
+    /// Whether this attempt is still holding a central manager. Test-only: it is the one way
+    /// to state "the radio a tap opened is released when the tap is over" as a claim about the
+    /// object rather than about ARC's timing.
+    var isHoldingRadio: Bool { lock.withLock { central != nil } }
 
     // MARK: - Gates
 
-    private func wait(for gate: Gate, stage: String, timeout: TimeInterval) async throws {
+    private func wait(for gate: Gate, timeout: TimeInterval,
+                      onTimeout reason: RecordingDeviceUnreachableReason) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             lock.lock()
             if torndown {
                 lock.unlock()
-                continuation.resume(throwing: RecordingDeviceAttachError.linkDropped)
+                continuation.resume(
+                    throwing: RecordingDeviceAttachError.unreachable(.linkDroppedDuringSetup))
                 return
             }
             if satisfied.contains(gate) {
@@ -617,7 +831,7 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
             waiters[gate, default: []].append(continuation)
             lock.unlock()
             bleQueue.asyncAfter(deadline: .now() + timeout) { [weak self] in
-                self?.fail(gate, with: RecordingDeviceAttachError.timedOut(stage))
+                self?.fail(gate, with: RecordingDeviceAttachError.unreachable(reason))
             }
         }
     }
@@ -637,10 +851,6 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
         for continuation in pending { continuation.resume(throwing: error) }
     }
 
-    private func describe(_ error: Error) -> String {
-        (error as? RecordingDeviceAttachError)?.description ?? error.localizedDescription
-    }
-
     // MARK: - BLEEventSink
 
     public func bleCentral(_ central: BLECentral, willRestore peripherals: [BLEPeripheral]) {
@@ -652,34 +862,51 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
         if central.managerState == .poweredOn {
             fulfil(.poweredOn)
         } else {
-            fail(.poweredOn, with: RecordingDeviceAttachError.radioUnavailable)
+            fail(.poweredOn, with: RecordingDeviceAttachError.unreachable(.bluetoothOff))
         }
     }
 
-    public func bleCentral(_ central: BLECentral, didDiscover peripheral: BLEPeripheral, rssi: Int) {}
+    /// ONLY WHILE A RESCAN IS RUNNING, and only for the device the tap was about. Everything
+    /// else advertising in the room is somebody else's problem here — `DeviceManager` owns the
+    /// pairing list.
+    public func bleCentral(_ central: BLECentral, didDiscover peripheral: BLEPeripheral, rssi: Int) {
+        let wanted = lock.withLock { () -> Bool in
+            guard wantedIdentifier == peripheral.identifier else { return false }
+            self.peripheral = peripheral
+            return true
+        }
+        guard wanted else { return }
+        fulfil(.rediscovered)
+    }
 
     public func bleCentral(_ central: BLECentral, didConnect peripheral: BLEPeripheral) {
         guard lock.withLock({ self.peripheral?.identifier == peripheral.identifier }) else { return }
         fulfil(.connected)
     }
 
+    /// A REFUSAL, NOT A SILENCE. It used to be reported as `.linkDropped` alongside a mid-setup
+    /// disconnect and a connect that simply never answered — three different situations, one
+    /// sentence.
     public func bleCentral(_ central: BLECentral, didFailToConnect peripheral: BLEPeripheral,
                            error: Error?) {
-        fail(.connected, with: RecordingDeviceAttachError.linkDropped)
+        fail(.connected, with: RecordingDeviceAttachError.unreachable(.connectRefused))
     }
 
     public func bleCentral(_ central: BLECentral, didDisconnect peripheral: BLEPeripheral,
                            error: Error?) {
         guard lock.withLock({ self.peripheral?.identifier == peripheral.identifier }) else { return }
         for gate in [Gate.connected, .services, .characteristics] {
-            fail(gate, with: RecordingDeviceAttachError.linkDropped)
+            fail(gate, with: RecordingDeviceAttachError.unreachable(.linkDroppedDuringSetup))
         }
         failOldestEventWaiter(with: PocketTransportFailure.disconnected)
     }
 
     public func blePeripheral(_ peripheral: BLEPeripheral, didDiscoverServices error: Error?) {
         guard error == nil else {
-            fail(.services, with: RecordingDeviceAttachError.timedOut("service discovery"))
+            // AN ERROR IS NOT A TIMEOUT. This branch reported one as the other, so a device
+            // that answered "I can't tell you" and a device that answered nothing at all were
+            // the same event by the time anything looked at them.
+            fail(.services, with: RecordingDeviceAttachError.unreachable(.serviceDiscoveryFailed))
             return
         }
         fulfil(.services)

@@ -3,8 +3,8 @@
 # One row per customer-facing literal: kind<TAB>path<TAB>literal.
 #
 # Emitted by scripts/derive-copy-a11y-frontier.py — an INDEPENDENT implementation in
-# another language — and NOT by the Swift check it pins. The two agree row for row: 421
-# rows over 218 files, 145 `a11y-identifier` and 276 `customer-facing-string`.
+# another language — and NOT by the Swift check it pins. The two agree row for row: 423
+# rows over 218 files, 147 `a11y-identifier` and 276 `customer-facing-string`.
 #
 # ON THIS FRONTIER: the literal argument of `.accessibilityIdentifier("…")`, and the
 # literal FIRST argument of `Text(`, `Button(`, `Label(` and `.navigationTitle(`.
@@ -84,10 +84,12 @@ a11y-identifier	App/ConversationFacesView.swift	speaker-late-offer
 a11y-identifier	App/ConversationFacesView.swift	speaker-sync-reverted
 a11y-identifier	App/ConversationFacesView.swift	transcript-search
 a11y-identifier	App/DeviceScreen.swift	connect-a-recording-device
+a11y-identifier	App/DeviceScreen.swift	hide-unnamed-devices
 a11y-identifier	App/DeviceScreen.swift	recorder-light-sentence
 a11y-identifier	App/DeviceScreen.swift	recording-device-attach-message
 a11y-identifier	App/DeviceScreen.swift	recording-device-row
 a11y-identifier	App/DeviceScreen.swift	recording-device-status
+a11y-identifier	App/DeviceScreen.swift	show-unnamed-devices
 a11y-identifier	App/DeviceScreen.swift	why-isnt-my-recorder-here
 a11y-identifier	App/KilnConversationView.swift	kiln-chat-done
 a11y-identifier	App/KilnConversationView.swift	kiln-chat-provenance

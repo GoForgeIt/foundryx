@@ -64,6 +64,30 @@ final class FakePocketBLEStack: @unchecked Sendable {
     private let answersWiFiReadback: Bool
     private let map: PocketCharacteristicMap
 
+    /// HOW A DEVICE FAILS TO BE REACHED, as the shapes a real radio actually produces. The
+    /// scripted recorder above models a device that answers; these model the ways one does
+    /// not, which is the half the connect sheet had no vocabulary for.
+    struct Reachability: Sendable {
+        /// `retrievePeripherals(withIdentifiers:)` comes up empty on this central — the state
+        /// every never-bonded peripheral discovered by a DIFFERENT central is in.
+        var retrievableByIdentifier = true
+        /// Whether an unfiltered scan on this central turns the device up.
+        var answersScan = true
+        /// `connect` produces `didFailToConnect` instead of `didConnect`.
+        var refusesToConnect = false
+        /// `connect` produces nothing at all, so the connect gate has to time out.
+        var neverAnswersConnect = false
+        /// Connected, and `discoverServices` never calls back.
+        var neverListsServices = false
+    }
+
+    /// Mutable so a scenario can stage the failure it is about without a second initialiser.
+    var reachability: Reachability {
+        get { lock.lock(); defer { lock.unlock() }; return storedReachability }
+        set { lock.lock(); storedReachability = newValue; lock.unlock() }
+    }
+    private var storedReachability = Reachability()
+
     private let lock = NSLock()
     private weak var sink: BLEEventSink?
     private var queue: DispatchQueue?
@@ -207,6 +231,16 @@ final class FakePocketBLEStack: @unchecked Sendable {
     }
 
     fileprivate func issueConnect() {
+        let staged = reachability
+        if staged.neverAnswersConnect { return }
+        if staged.refusesToConnect {
+            let central = currentCentral
+            deliver { sink in
+                guard let central else { return }
+                sink.bleCentral(central, didFailToConnect: self.peripheral, error: nil)
+            }
+            return
+        }
         lock.lock(); connected = true; lock.unlock()
         peripheral.setLinkState(.connected)
         let central = currentCentral
@@ -422,6 +456,10 @@ final class FakePocketBLEPeripheral: BLEPeripheral, @unchecked Sendable {
     }
 
     func discoverServices(_ serviceUUIDs: [CBUUID]?) {
+        // A CONNECTED DEVICE THAT NEVER SAYS WHAT IT CAN DO. Not an error callback — silence,
+        // which is what the discovery deadline exists for and what the sheet used to render
+        // as "bring it closer".
+        if stack.reachability.neverListsServices { return }
         let found = catalog.filter { serviceUUIDs?.contains($0.uuid) ?? true }
         lock.lock(); discovered = found; lock.unlock()
         stack.deliver { [weak self] sink in
@@ -472,12 +510,23 @@ final class FakePocketBLECentral: BLECentral, @unchecked Sendable {
 
     var managerState: CBManagerState { .poweredOn }
 
+    /// CoreBluetooth's own caveat, modelled. `retrievePeripherals` returns peripherals the
+    /// SYSTEM knows; a never-bonded device that a different central merely saw advertising is
+    /// not reliably one of them, and `reachability.retrievableByIdentifier == false` is that
+    /// device. The production code's answer is to go and scan for it.
     func retrievePeripherals(withIdentifiers identifiers: [UUID]) -> [BLEPeripheral] {
-        identifiers.contains(stack.deviceId) ? [stack.peripheral] : []
+        guard stack.reachability.retrievableByIdentifier else { return [] }
+        return identifiers.contains(stack.deviceId) ? [stack.peripheral] : []
     }
 
     func scanForPeripherals(withServices serviceUUIDs: [CBUUID]?, options: [String: Any]?) {
         stack.recordScanFilter(serviceUUIDs)
+        // A DEVICE THAT IS STILL ADVERTISING ANSWERS A SCAN. `DeviceManager`'s own scan
+        // scenarios drive `deliverScanResult()` by hand and are unaffected: this fires only
+        // for a stack staged as un-retrievable, which is the case the rescan exists for.
+        guard !stack.reachability.retrievableByIdentifier,
+              stack.reachability.answersScan else { return }
+        stack.deliverScanResult()
     }
 
     func stopScan() {}

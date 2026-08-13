@@ -168,7 +168,14 @@ public actor PocketSessionKeyEntryCoordinator {
             // to have an opinion, and making someone retype 16 characters because their
             // recorder walked out of range is the same collapse `.refusedByRecorder` exists
             // to prevent, one layer down.
-            return .linkFailed(reason)
+            //
+            // `diagnostic` rather than the sentence: this screen's copy is
+            // `PocketSessionKeyEntryPresentation.linkFailedLine`, and the reason travels as
+            // the technical form so the payload stays printable and log-shaped. (This surface
+            // still renders ONE line for every reason — the connect sheet is the one that
+            // distinguishes them. Noted rather than fixed here, because it is a different
+            // screen with its own copy gates.)
+            return .linkFailed(reason.diagnostic)
 
         case .adoptionNotPersisted(let reason):
             // The key WORKED. The account store is what failed, so custody keeps it.
