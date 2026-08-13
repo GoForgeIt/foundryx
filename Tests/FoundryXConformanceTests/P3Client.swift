@@ -32,8 +32,16 @@ struct P3Client {
         /// whether one exists at all, so this asks the response rather than the source.
         var negotiatedVersionHeader: String? {
             for line in text.split(separator: "\r\n") {
-                let lower = line.lowercased()
-                guard lower.contains("version") || lower.hasPrefix("sec-websocket-protocol:") else { continue }
+                guard let colon = line.firstIndex(of: ":") else { continue }
+                let name = line[..<colon].lowercased()
+                // MATCH ON THE HEADER NAME, AND ON A NAME THAT MEANS THIS. The first cut
+                // matched any LINE containing "version", which a `Server-Version: 1` or
+                // an `X-Build-Version: 1` satisfies — a relay that never negotiated
+                // anything would have passed the element by shipping a build stamp. The
+                // name is still read off the RESPONSE rather than pinned from the
+                // relay's source, but it has to name a negotiated protocol version.
+                guard (name.contains("protocol") && name.contains("version"))
+                        || name == "sec-websocket-protocol" else { continue }
                 return String(line)
             }
             return nil
@@ -187,19 +195,31 @@ struct P3Client {
                             closedWithoutReply: closedDuringHead && out.isEmpty,
                             elapsed: Date().timeIntervalSince(started))
 
+        // A WRITE ONTO A CLOSED PEER IS AN ANSWER, NOT AN ERROR TO SWALLOW. If the relay
+        // has already closed, this send draws EPIPE (or a reset that surfaces on the
+        // next read as ECONNRESET). Both mean the same thing — the peer is gone — and
+        // ignoring the result made the window's verdict depend on which of `recv() == 0`
+        // and `recv() < 0 (ECONNRESET)` the kernel happened to deliver first. That is a
+        // FLAKY MEASUREMENT, and it was caught by a mutation run whose red named the
+        // wrong cause: "the window was asked for 2.00s, waited 0.00s ... and the peer
+        // did not close" against a relay that had certainly closed.
+        var peerGone = false
         if let extra = thenSend, !extra.isEmpty {
-            _ = extra.withUnsafeBytes { raw in Darwin.send(fd, raw.baseAddress!, raw.count, 0) }
+            let n = extra.withUnsafeBytes { raw in Darwin.send(fd, raw.baseAddress!, raw.count, 0) }
+            if n < 0 && (errno == EPIPE || errno == ECONNRESET) { peerGone = true }
         }
 
         // The window is a real wait. It is measured and reported, because "the relay
         // sent nothing" is only evidence if somebody actually listened.
         let windowStart = Date()
         setTimeout(window)
-        var peerClosed = closedDuringHead
+        var peerClosed = closedDuringHead || peerGone
         while Date().timeIntervalSince(windowStart) < window {
             let n = Darwin.recv(fd, &buf, buf.count, 0)
             if n > 0 { trailing.append(contentsOf: buf[0..<n]); continue }
             if n == 0 { peerClosed = true }
+            // A reset is the peer being gone, reported through the other door.
+            if n < 0 && errno == ECONNRESET { peerClosed = true }
             break
         }
         return AfterUpgrade(head: head, trailing: trailing, peerClosed: peerClosed,

@@ -41,6 +41,15 @@ final class ConformanceWorld: @unchecked Sendable {
     /// a cause is red rather than a smaller silent pass.
     let declaredRefusalCauses = 8
 
+    /// How many elements are CONJUNCTIONS, and how many questions they carry between
+    /// them. Held here, in the target's source, so that silently deleting an element's
+    /// parts takes THREE coordinated edits (driver, register, and this) rather than
+    /// two. The part comparison's own non-vacuity check is global — `partsCompared > 0`
+    /// — so without these two numbers, dropping every prologue part from both the
+    /// driver and the register would leave the negotiation parts keeping it green.
+    let declaredPartBearingElements = 2
+    let declaredTotalParts = 6
+
     func requireFixture() throws -> RelayProcessFixture {
         guard let f = fixture else { throw ConformanceStepError("no relay was started") }
         return f
@@ -136,9 +145,9 @@ enum P3ConformanceSteps {
             defineCheck("the number of distinct causes exercised is reported") { _, _, _ in
                 guard let run = w.rejectionRun else { throw ConformanceStepError("no refusals were provoked") }
                 guard run.causesExercised == w.declaredRefusalCauses else {
-                    throw ConformanceStepError("the run exercised \(run.causesExercised) refusal causes and the target declares \(w.declaredRefusalCauses). A cause that stopped being driven is not a smaller pass.")
+                    throw ConformanceStepError("the run exercised \(run.causesExercised) refusal stimuli and the target declares \(w.declaredRefusalCauses). A stimulus that stopped being driven is not a smaller pass.")
                 }
-                print("CONFORMANCE: distinct refusal causes exercised = \(run.causesExercised)")
+                print("CONFORMANCE: externally reachable refusal stimuli exercised = \(run.causesExercised) (covering 7 distinct in-process RefusalCause variants — see the register)")
             },
 
             // ---------------------------------------------------------------- the five elements
@@ -211,9 +220,19 @@ enum P3ConformanceSteps {
                         disagreements.append("  \(element.id): served=\(element.served) but its parts are \(observed) — the verdict is not the conjunction of its questions")
                     }
                 }
-                // A comparison over zero parts reports clean and proves nothing.
+                // A comparison over zero parts reports clean and proves nothing — and
+                // `> 0` is not enough either: with two part-bearing elements, dropping
+                // one element's parts from BOTH the driver and the register leaves the
+                // other's parts holding this green. The shape is asserted as NUMBERS.
                 guard partsCompared > 0 else {
                     throw ConformanceStepError("the part comparison examined 0 parts across \(w.drivenElements.count) elements — a comparison over nothing is not a pass")
+                }
+                let partBearing = w.drivenElements.filter { !$0.parts.isEmpty }.count
+                guard partBearing == w.declaredPartBearingElements else {
+                    throw ConformanceStepError("\(partBearing) element(s) carried parts and this target declares \(w.declaredPartBearingElements). An element that stopped asking its questions is not a smaller pass.")
+                }
+                guard partsCompared == w.declaredTotalParts else {
+                    throw ConformanceStepError("the run compared \(partsCompared) parts and this target declares \(w.declaredTotalParts)")
                 }
                 guard disagreements.isEmpty else {
                     throw ConformanceStepError("the register and the wire disagree, question by question:\n"

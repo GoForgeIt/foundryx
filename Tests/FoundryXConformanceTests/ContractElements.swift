@@ -9,6 +9,7 @@ import Foundation
 /// `NEGOTIATED_VERSION: &str = "p3"` and `config.rs` declares
 /// `KEY_AUTH_FRAME_TIMEOUT`, and a source-reading check would count both as served.
 /// Every verdict below is the answer a socket gave.
+
 /// The verdict on ONE question inside an element.
 ///
 /// `notReached` exists so that a question the run could not ask is recorded as
@@ -155,12 +156,12 @@ enum ContractElementDriver {
         e.served = e.parts.allSatisfy { $0.verdict == .met }
 
         let part1 = wireRefusesPrologue == .met
-            ? "the connect wire refused a prologue in both encodings (2 of 2), which is what the design requires of it"
+            ? "the connect wire refused a prologue prefix in 2 of the 2 encodings SAMPLED (decimal-ascii, u16-big-endian) — not in every conceivable encoding, which this drive does not claim"
             : "the connect wire ACCEPTED a prologue-shaped prefix in \(acceptedEncodings.joined(separator: ", ")) — that is a protocol no document designs"
         let part2 = handshakeExists == .met
             ? "after the upgrade the relay sent \(after.trailing.count) byte(s) within \(String(format: "%.2f", after.windowWaited))s"
             : after.peerClosed
-                ? "after \(firstLine(after.head)) the relay closed the connection \(String(format: "%.2f", after.windowWaited))s later without sending one handshake byte, and without reading the prologue it was offered"
+                ? "after \(firstLine(after.head)) the relay closed the connection \(String(format: "%.2f", after.windowWaited))s later without sending one handshake byte"
                 : "after \(firstLine(after.head)) the relay held the connection open for the whole \(String(format: "%.2f", after.windowWaited))s window and sent nothing"
         e.observation = "\(part1); \(part2), so there is no step-3 handshake for a prologue to be mixed into and the binding differential was NOT REACHED"
         return e
@@ -282,8 +283,8 @@ enum ContractElementDriver {
             String(decoding: $0.1, as: UTF8.self).hasPrefix("HTTP/1.1 403 ")
         }
         e.observation = e.served
-            ? "\(replies.count) distinct causes exercised, \(distinct.count) distinct reply on the wire"
-            : "\(replies.count) distinct causes exercised produced \(distinct.count) distinct replies: " +
+            ? "\(replies.count) externally reachable refusal STIMULI exercised, \(distinct.count) distinct reply on the wire — stimuli, not in-process causes: `an empty address` and `an address of nothing but spaces` both reach the relay's single EmptyHost cause, so these 8 stimuli cover 7 distinct RefusalCause variants and a client outside the relay cannot see that number at all"
+            : "\(replies.count) externally reachable stimuli produced \(distinct.count) distinct replies: " +
               replies.map { "\($0.0) -> \(String(decoding: $0.1, as: UTF8.self).split(separator: "\r\n").first.map(String.init) ?? "<nothing>")" }.joined(separator: "; ")
         return RejectionRun(element: e, causesExercised: replies.count, identical: distinct.count == 1)
     }
