@@ -310,13 +310,146 @@ public enum VaultProvisionFailure: Equatable, Sendable {
 /// User-visible contract for the funnel. SwiftUI renders this value and behavior tests
 /// assert it, preventing model-only tests from passing while the actual screen stays stuck.
 public struct VaultFunnelPresentation: Equatable, Sendable, CustomStringConvertible {
-    public enum Action: Equatable, Sendable { case none, leaveProvisioning, enterVault }
+    public enum Action: Equatable, Sendable {
+        case none
+        case leaveProvisioning
+        case enterVault
+        /// Reopen the checkout the owner already started (the abandoned-payment recovery).
+        case resumeCheckout
+        /// Open the Vault detail page — what the Settings row's chevron promises.
+        case openVaultDetail
+    }
     public let title: String
     public let body: String
+    /// The concrete lines UNDER the body — "what you can do now" on the live screen, the
+    /// two ways forward on the abandoned-checkout screen. Part of the contract because
+    /// "Your Vault is live" alone answered nothing about what $79 bought, and because a
+    /// promise this build cannot keep must be catchable in the same string a test reads.
+    public let details: [String]
     public let showsProgress: Bool
     public let primaryAction: Action
-    public var allVisibleText: String { "\(title) \(body)" }
+
+    public init(title: String,
+                body: String,
+                details: [String] = [],
+                showsProgress: Bool,
+                primaryAction: Action) {
+        self.title = title
+        self.body = body
+        self.details = details
+        self.showsProgress = showsProgress
+        self.primaryAction = primaryAction
+    }
+
+    public var allVisibleText: String {
+        ([title, body] + details).filter { !$0.isEmpty }.joined(separator: " ")
+    }
     public var description: String { allVisibleText }
+}
+
+// MARK: - What a live Vault ACTUALLY does today
+
+/// The honest "what you can do now" for a Vault that just went live.
+///
+/// SCOPE IS THE WHOLE POINT. A paying owner is told two things because two things are
+/// true in this build: captures route to the Vault, and search spans everything the Vault
+/// holds (`GET /foundryx/conversations`). Chat through the cell answers **503** — it is
+/// not built — and nothing pulls recordings off a Pocket. Both were on the marketing
+/// surface and neither is here, because a success screen that promises what the next tap
+/// cannot do is worse than one that says nothing.
+///
+/// `VaultPurchaseRecoveryFeatureTests` reads this text and fails on the words "chat",
+/// "pocket" and "sync", so re-adding either is red, not a judgement call.
+public enum VaultLiveBenefits {
+    public struct Item: Equatable, Sendable {
+        /// SF Symbol for the row.
+        public let icon: String
+        public let title: String
+        public let detail: String
+        public init(icon: String, title: String, detail: String) {
+            self.icon = icon
+            self.title = title
+            self.detail = detail
+        }
+        /// One line, for the places that render text rather than rows.
+        public var line: String { "\(title) — \(detail)" }
+    }
+
+    public static let items: [Item] = [
+        .init(icon: "arrow.up.circle",
+              title: "Your recordings land in your Vault",
+              detail: "New voice notes go to your Vault instead of staying on this iPhone."),
+        .init(icon: "magnifyingglass",
+              title: "Search your whole history",
+              detail: "Search across everything your Vault holds, not just what fits on the phone."),
+    ]
+
+    /// The flattened lines the funnel presentation carries.
+    public static var lines: [String] { items.map(\.line) }
+
+    /// The one-line version, for the Settings row where a list does not fit.
+    public static let summary =
+        "Recordings land here, and you can search everything it holds."
+}
+
+// MARK: - The Vault detail page (what the Settings chevron leads to)
+
+/// The Vault detail: state, what it holds, and how to manage or leave it.
+///
+/// This type exists because the Settings row "Your Vault is live" carried a chevron and
+/// did nothing when tapped — `activateFromSettings()` returns immediately for a live
+/// Vault, so the row was a promise of somewhere to go with nowhere behind it.
+public enum VaultDetail {
+    public struct Manage: Equatable, Sendable {
+        public enum Kind: Equatable, Sendable {
+            /// Move the app onto the Vault brain.
+            case enterVault
+            /// Move the app back to on-device.
+            case useThisPhone
+            /// The account-deletion page, where "Delete your hosted Vault" lives.
+            case deleteVault
+        }
+        public let kind: Kind
+        public let title: String
+        public let detail: String
+        public let destructive: Bool
+    }
+
+    public struct Presentation: Equatable, Sendable {
+        public let title: String
+        /// "Live · vault-abc.fly.dev" — the state, and which Vault.
+        public let stateLine: String
+        public let holds: [VaultLiveBenefits.Item]
+        public let manage: [Manage]
+    }
+
+    /// The detail page for a Vault that exists. `nil` for every other entitlement — there
+    /// is nothing to show, and the row must not pretend otherwise.
+    public static func presentation(entitlement: VaultEntitlement,
+                                    host: String?) -> Presentation? {
+        guard entitlement == .live else { return nil }
+        // WHICH Vault, when we know: the door's host and nothing else. The bearer and the
+        // full URL never reach a screen.
+        let named = host.flatMap { $0.isEmpty ? nil : " · \($0)" } ?? ""
+        return Presentation(
+            title: "Your Vault",
+            stateLine: "Live\(named)",
+            holds: VaultLiveBenefits.items,
+            manage: [
+                Manage(kind: .enterVault,
+                       title: "Use my Vault",
+                       detail: "Run Solleva on your Vault instead of this iPhone.",
+                       destructive: false),
+                Manage(kind: .useThisPhone,
+                       title: "Use this iPhone instead",
+                       detail: "Go back to on-device. Your Vault keeps everything it already holds.",
+                       destructive: false),
+                Manage(kind: .deleteVault,
+                       title: "Delete my Vault",
+                       detail: "Tear down your Vault and everything in it. Your account stays.",
+                       destructive: true),
+            ])
+    }
 }
 
 /// The result of persisting a checkout attempt: the opaque id we reconcile against,
@@ -493,6 +626,17 @@ public enum VaultFunnelState: Equatable, Sendable {
     case opening(plan: VaultPlan)
     /// "Checking your payment…" — durable, server-reconciled (a dismissal lands here).
     case checkingPayment
+    /// A checkout that was STARTED and never finished: the durable attempt is from a
+    /// previous app session (the browser is definitively gone) and the server still sees
+    /// no payment for it.
+    ///
+    /// This state exists because its absence was a dead end. The attempt sat in the store
+    /// — the app knew a checkout had been in flight — and the only thing any entry point
+    /// did with that knowledge was route the owner to `.intro`, the first screen of the
+    /// funnel, to be sold the Vault he was in the middle of buying. `.pending` on a
+    /// relaunch set no durable status at all, so Settings had nothing to show and nothing
+    /// to tap. Carrying the plan means "pick up where you left off" can mean it.
+    case checkoutIncomplete(plan: VaultPlan)
     /// "Setting up your Vault." — payment confirmed, the cell is provisioning.
     case settingUp
     /// The bounded foreground wait elapsed. Provisioning still continues server-side.
@@ -505,6 +649,61 @@ public enum VaultFunnelState: Equatable, Sendable {
     case failed(VaultProvisionFailure)
 }
 
+/// The funnel's user-visible copy, as a PURE function of the state.
+///
+/// Extracted from `VaultFunnelModel` so the screens, the Settings row and the scenarios all
+/// read one source. `inSettings` distinguishes the two surfaces that render the same state:
+/// the full-screen funnel (where "Enter" enters) and the Settings row (whose chevron must
+/// lead to the Vault detail, since it has one).
+public enum VaultFunnelCopy {
+    public static func presentation(for state: VaultFunnelState,
+                                    inSettings: Bool = false) -> VaultFunnelPresentation {
+        switch state {
+        case .settingUp:
+            return .init(title: "Setting up your Vault",
+                         body: "Payment confirmed. Provisioning continues in the background.",
+                         showsProgress: true, primaryAction: .leaveProvisioning)
+        case .settingUpDelayed:
+            return .init(title: "This is taking longer than expected",
+                         body: "You can keep using Solleva. We'll email you when your Vault is ready.",
+                         showsProgress: false, primaryAction: .leaveProvisioning)
+        case .checkoutIncomplete:
+            return .init(
+                title: "Your payment didn't go through",
+                body: "We never saw a finished payment, so your Vault isn't set up yet. "
+                    + "You can pick up where you left off, or choose a different plan.",
+                details: [
+                    "Nothing is lost — this is the same checkout you started.",
+                    "If you did pay, checking again will find it.",
+                ],
+                showsProgress: false, primaryAction: .resumeCheckout)
+        case .failed(let reason):
+            return .init(title: reason.headline, body: reason.explanation,
+                         showsProgress: false, primaryAction: .leaveProvisioning)
+        case .live:
+            // WHAT $79 ACTUALLY BOUGHT. The body used to be "Your private Vault is ready."
+            // — which answers who can open it, not what changed. `VaultLiveBenefits` is the
+            // honest, deliberately short list: recordings route here, and search spans
+            // everything it holds. Nothing about chat (the cell answers 503) and nothing
+            // about a Pocket (nothing pulls recordings off one).
+            return .init(
+                title: "Your Vault is live",
+                body: inSettings
+                    ? VaultLiveBenefits.summary
+                    : "Only your voice and your login open it, and it stays isolated from "
+                        + "every other Vault. Here's what changed:",
+                details: VaultLiveBenefits.lines,
+                showsProgress: false,
+                // The Settings row's chevron leads to the Vault detail; the funnel's
+                // primary button ENTERS. Same state, two surfaces, two destinations —
+                // and the row used to have a chevron with nothing behind it at all.
+                primaryAction: inSettings ? .openVaultDetail : .enterVault)
+        default:
+            return .init(title: "", body: "", showsProgress: false, primaryAction: .none)
+        }
+    }
+}
+
 /// Drives the Vault funnel: routing, browser hand-off, and reconcile. Holds the seams and
 /// the durable attempt store. `@MainActor ObservableObject` so the SwiftUI screens observe
 /// `state`; driven identically from the hermetic Brine steps (via MainActor.run).
@@ -514,6 +713,16 @@ public final class VaultFunnelModel: ObservableObject {
     /// The connected Vault brain, set the moment provisioning reports ready — the app
     /// hands this to the capture pipeline / chat exactly like the desktop door.
     @Published public private(set) var connectedVault: CellBackend?
+
+    /// WHICH Vault this phone is connected to, in the only terms safe to put on a screen:
+    /// the door's host. The bearer and full URL never appear in the UI. Feeds the Vault
+    /// detail's state line ("Live · vault-abc.fly.dev").
+    public var connectedVaultHost: String? {
+        guard connectedVault != nil,
+              let url = cellStore.config.flatMap({ URL(string: $0.url) }),
+              let host = url.host, !host.isEmpty else { return nil }
+        return host
+    }
 
     /// Current entitlement, derived from whether a Vault is connected/paired.
     public var entitlement: VaultEntitlement {
@@ -566,35 +775,15 @@ public final class VaultFunnelModel: ObservableObject {
     @Published public private(set) var lastProvisioningState: VaultFunnelState?
 
     public var presentation: VaultFunnelPresentation {
-        presentation(for: state)
+        VaultFunnelCopy.presentation(for: state)
     }
 
     /// Durable, non-modal status for Settings. Unlike `presentation`, this survives
     /// leaving the flow and is refreshed by background reconciliation.
     public var statusPresentation: VaultFunnelPresentation {
-        presentation(for: lastProvisioningState ?? (connectedVault == nil ? .idle : state))
-    }
-
-    private func presentation(for state: VaultFunnelState) -> VaultFunnelPresentation {
-        switch state {
-        case .settingUp:
-            return .init(title: "Setting up your Vault",
-                         body: "Payment confirmed. Provisioning continues in the background.",
-                         showsProgress: true, primaryAction: .leaveProvisioning)
-        case .settingUpDelayed:
-            return .init(title: "This is taking longer than expected",
-                         body: "You can keep using Solleva. We'll email you when your Vault is ready.",
-                         showsProgress: false, primaryAction: .leaveProvisioning)
-        case .failed(let reason):
-            return .init(title: reason.headline, body: reason.explanation,
-                         showsProgress: false, primaryAction: .leaveProvisioning)
-        case .live:
-            return .init(title: "Your Vault is live",
-                         body: "Your private Vault is ready.", showsProgress: false,
-                         primaryAction: .enterVault)
-        default:
-            return .init(title: "", body: "", showsProgress: false, primaryAction: .none)
-        }
+        VaultFunnelCopy.presentation(
+            for: lastProvisioningState ?? (connectedVault == nil ? .idle : state),
+            inSettings: true)
     }
 
     /// Whether the paid Vault purchase path may be shown on this device, gated by the App
@@ -650,6 +839,18 @@ public final class VaultFunnelModel: ObservableObject {
     public func beginSetup() {
         if entitlement == .live, let config = cellStore.config {
             state = .live(config)
+            return
+        }
+        // AN UNFINISHED CHECKOUT OUTRANKS THE INTRO. Every route into setup — the paid-intent
+        // trigger, the replayed tour, Settings — used to land on `.intro` regardless, so
+        // coming back from an abandoned payment meant being pitched the Vault you were
+        // already halfway through buying, with the durable attempt sitting unmentioned in
+        // the store. The recovery screen is where that belongs, and it is the only way back
+        // into the payment.
+        if case .checkoutIncomplete = lastProvisioningState ?? .idle,
+           attempts.load(generation: CaptureAccountScope.identityGeneration) != nil,
+           let lastProvisioningState {
+            state = lastProvisioningState
             return
         }
         state = .intro
@@ -749,7 +950,7 @@ public final class VaultFunnelModel: ObservableObject {
     /// clearing the paid checkout attempt. Settings can reopen the last observed status.
     public func leaveProvisioning() {
         switch state {
-        case .settingUp, .settingUpDelayed, .failed:
+        case .settingUp, .settingUpDelayed, .failed, .checkoutIncomplete:
             lastProvisioningState = state
             state = .idle
         default: dismiss()
@@ -816,8 +1017,14 @@ public final class VaultFunnelModel: ObservableObject {
             attemptId: attempt.id,
             plan: plan,
             generation: generation)
+        // A NEW attempt supersedes the old durable status. Without this, someone who came
+        // back from an abandoned checkout, chose a different plan and paid would keep
+        // "Your payment didn't go through" in Settings while the funnel said "Checking
+        // your payment" — two surfaces, two answers, one of them stale.
+        lastProvisioningState = nil
 
-        let url = attempt.checkoutURL ?? canonicalCheckoutURL(plan: plan, attemptId: attempt.id)
+        let url = checkoutURL(
+            serviceProvided: attempt.checkoutURL, plan: plan, attemptId: attempt.id)
         let returned = (try? await browser.open(url)) ?? nil
         // Either path is durable: move to Checking payment and reconcile.
         state = .checkingPayment
@@ -826,6 +1033,66 @@ public final class VaultFunnelModel: ObservableObject {
         } else {
             await reconcileOnForeground(generation: generation)
         }
+    }
+
+    /// "Pick up where you left off" — reopen the checkout the owner ALREADY started.
+    ///
+    /// The same attempt id, so nothing is double-charged and the reconcile that has been
+    /// watching that id keeps watching it. No new `createCheckoutAttempt` call: the
+    /// durable store already holds everything needed to rebuild the checkout URL, which is
+    /// the whole reason the attempt is persisted before the browser opens.
+    public func resumeCheckout(
+        generation: UInt64 = CaptureAccountScope.identityGeneration
+    ) async {
+        // Storefront-gated, exactly like the first attempt: never reopen external checkout
+        // where the App Store storefront disallows purchasing.
+        guard purchaseAllowed else { return }
+        guard let pending = attempts.load(generation: generation) else {
+            // Nothing to resume — offer the ordinary path rather than a dead button.
+            beginSetup()
+            return
+        }
+        state = .opening(plan: pending.plan)
+        let url = checkoutURL(
+            serviceProvided: nil, plan: pending.plan, attemptId: pending.attemptId)
+        let returned = (try? await browser.open(url)) ?? nil
+        state = .checkingPayment
+        if let returned {
+            await handleReturn(url: returned, generation: generation)
+        } else {
+            await reconcileOnForeground(generation: generation)
+        }
+    }
+
+    /// The URL the browser is actually sent to — the service's own checkout page when it
+    /// supplied one, ALWAYS carrying the way back into the app.
+    ///
+    /// This used to be `attempt.checkoutURL ?? canonicalCheckoutURL(…)`. Only the canonical
+    /// fallback carried `return=foundryx://vault/return`, so in production — where the
+    /// signup service DOES return a checkout URL — the web page was never told the deep
+    /// link that hands the user back. It could only leave them looking at a page and hope
+    /// they found their way home, which is exactly what happened: stale branding, then an
+    /// auto-reload, and no way back into Solleva.
+    ///
+    /// Merging, not replacing: a `return` the service deliberately chose is left alone
+    /// (it may be a server-side bounce that ends at the deep link anyway).
+    private func checkoutURL(serviceProvided: URL?, plan: VaultPlan, attemptId: String) -> URL {
+        guard let serviceProvided else {
+            return canonicalCheckoutURL(plan: plan, attemptId: attemptId)
+        }
+        guard var comps = URLComponents(url: serviceProvided, resolvingAgainstBaseURL: false) else {
+            return serviceProvided
+        }
+        var items = comps.queryItems ?? []
+        func ensure(_ name: String, _ value: String) {
+            guard !items.contains(where: { $0.name == name }) else { return }
+            items.append(URLQueryItem(name: name, value: value))
+        }
+        ensure("plan", plan.rawValue)
+        ensure("attempt", attemptId)
+        ensure("return", returnCallback.absoluteString)
+        comps.queryItems = items
+        return comps.url ?? serviceProvided
     }
 
     /// The canonical `goforgeit.com/vault/start` URL when the service didn't supply one.
@@ -932,7 +1199,27 @@ public final class VaultFunnelModel: ObservableObject {
         switch status {
         case .pending:
             // Not verified yet — hold "Checking payment" unless we've already advanced.
-            if isWaiting { state = .checkingPayment }
+            if isWaiting {
+                state = .checkingPayment
+            } else if let pending = inheritedAttempt(generation: generation) {
+                // AN ABANDONED CHECKOUT, and the state that did not exist.
+                //
+                // `.pending` on an attempt this app session did not create means the
+                // browser leg is over (the process was backgrounded long enough to lose
+                // it, or killed) and the server still sees no payment. That is not
+                // "waiting" — nothing is coming — and it used to set NO durable status at
+                // all: `isWaiting` is false on a relaunch, so this branch did nothing,
+                // `lastProvisioningState` stayed nil, Settings had nothing to show, and
+                // every entry point routed to `.intro` — the first screen of the purchase
+                // funnel, selling the Vault the owner was already buying.
+                //
+                // The narrow condition matters as much as the state. A checkout the user
+                // closed SECONDS ago, whose webhook has not landed, mutated the attempt
+                // store during this session and keeps the honest "Checking your payment…".
+                let incomplete = VaultFunnelState.checkoutIncomplete(plan: pending.plan)
+                lastProvisioningState = incomplete
+                if state != .idle { state = incomplete }
+            }
         case .provisioning:
             lastProvisioningState = .settingUp
             if state != .idle { state = .settingUp }
@@ -946,6 +1233,15 @@ public final class VaultFunnelModel: ObservableObject {
             // allows Settings re-entry and a later server recovery without another charge.
             reportProvisioningFailure(reason)
         }
+    }
+
+    /// The durable checkout attempt when it was written BEFORE this model existed — a
+    /// checkout started in a previous app session, whose browser is definitively gone.
+    /// `nil` when there is no attempt, or when this session is the one that created it
+    /// (an active checkout, whose payment may still be seconds from confirming).
+    private func inheritedAttempt(generation: UInt64) -> VaultCheckoutAttemptStore.Pending? {
+        guard attempts.mutationGeneration == attemptMutationGenerationAtLaunch else { return nil }
+        return attempts.load(generation: generation)
     }
 
     /// True while we're in a durable waiting state (so a later `.pending` reconcile

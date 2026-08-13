@@ -792,10 +792,34 @@ private final class UnifiedDeviceListWorld {
                                    "the page offers the action \"\(action)\"")
                 }
             }
+            // §6c, HELD OVER THE PAGE RATHER THAN OVER A CONSTANT.
+            //
+            // This used to be `XCTAssertFalse(RecordingDevicePage.bringOverIsNotOfferedYet)`
+            // and nothing else — a `let` asserted against itself. `resolve` never reads that
+            // constant, so a "Bring over recordings" action added tomorrow would have left
+            // this gate green: it enforced nothing at all. The population is the ACTIONS the
+            // page actually offers.
             XCTAssertFalse(RecordingDevicePage.bringOverIsNotOfferedYet,
-                           "a bring-over button is being offered. Design §6c: the download "
-                               + "path has never run end-to-end, and a button that always "
-                               + "fails is worse than an honest absence")
+                           "the recorded §6c decision was reversed without the gate below "
+                               + "being revisited")
+            for action in page.actions {
+                for banned in ["Bring", "bring", "Download", "download", "Import", "import",
+                               "Transfer", "transfer", "Sync", "sync"] {
+                    XCTAssertFalse(action.contains(banned),
+                                   "the page offers \"\(action)\". Design §6c: the download "
+                                       + "path has never run end-to-end, and a button that "
+                                       + "always fails is worse than an honest absence")
+                }
+            }
+            // THE WHOLE LIST, PINNED. A banned-word scan cannot see an action that brings
+            // files over under a name nobody thought of; an exact list makes adding ANY action
+            // to this page a deliberate act with a red test in front of it.
+            XCTAssertEqual(page.actions,
+                           [RecordingDevicePage.connectAndCheckAction,
+                            RecordingDevicePage.educationAction,
+                            PocketKeyCustodyPresentation.entryAction,
+                            RecordingDevicePage.forgetAction],
+                           "the actions a record-then-sync device page offers have changed")
 
         case "the page never says the device is in range":
             let page = try requirePage()

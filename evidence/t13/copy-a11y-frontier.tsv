@@ -3,8 +3,8 @@
 # One row per customer-facing literal: kind<TAB>path<TAB>literal.
 #
 # Emitted by scripts/derive-copy-a11y-frontier.py — an INDEPENDENT implementation in
-# another language — and NOT by the Swift check it pins. The two agree row for row: 423
-# rows over 218 files, 147 `a11y-identifier` and 276 `customer-facing-string`.
+# another language — and NOT by the Swift check it pins. The two agree row for row: 432
+# rows over 220 files, 152 `a11y-identifier` and 280 `customer-facing-string`.
 #
 # ON THIS FRONTIER: the literal argument of `.accessibilityIdentifier("…")`, and the
 # literal FIRST argument of `Text(`, `Button(`, `Label(` and `.navigationTitle(`.
@@ -121,6 +121,7 @@ a11y-identifier	App/SettingsScreen.swift	account-identity
 a11y-identifier	App/SettingsScreen.swift	actions-from-others
 a11y-identifier	App/SettingsScreen.swift	sign-in
 a11y-identifier	App/SettingsScreen.swift	sign-out
+a11y-identifier	App/SettingsScreen.swift	vault-detail-entry
 a11y-identifier	App/SpeakerTranscriptView.swift	confirm-inflight
 a11y-identifier	App/SpeakerTranscriptView.swift	confirm-success
 a11y-identifier	App/SpeakerTranscriptView.swift	person-create-new
@@ -132,8 +133,12 @@ a11y-identifier	App/SpeakerTranscriptView.swift	sheet-confirm-inflight
 a11y-identifier	App/SpeakerTranscriptView.swift	sheet-confirm-success
 a11y-identifier	App/SpeakerTranscriptView.swift	speaker-sync-pending
 a11y-identifier	App/SpeakerTranscriptView.swift	speaker-sync-reverted
+a11y-identifier	App/VaultDetailView.swift	vault-detail-state
+a11y-identifier	App/VaultFunnelView.swift	choose-different-plan
 a11y-identifier	App/VaultFunnelView.swift	leave-vault-provisioning
+a11y-identifier	App/VaultFunnelView.swift	resume-vault-checkout
 a11y-identifier	App/VaultFunnelView.swift	stop-waiting
+a11y-identifier	App/VaultFunnelView.swift	vault-checkout-incomplete
 a11y-identifier	App/VaultFunnelView.swift	vault-setup-failed
 a11y-identifier	Sources/FoundryXKit/AccountDeletionProgressView.swift	deletion-failure-message
 a11y-identifier	Sources/FoundryXKit/AccountDeletionProgressView.swift	deletion-failure-title
@@ -384,12 +389,17 @@ customer-facing-string	App/StatsView.swift	Stats
 customer-facing-string	App/StatsView.swift	Voice notes on this phone
 customer-facing-string	App/StatsView.swift	Your library
 customer-facing-string	App/StatsView.swift	\(day.conversationCount)
+customer-facing-string	App/VaultDetailView.swift	Only what this build actually does. Anything else you've heard about a Vault isn't on yet.
+customer-facing-string	App/VaultDetailView.swift	This iPhone isn't connected to a Vault right now.
+customer-facing-string	App/VaultDetailView.swift	Your Vault
 customer-facing-string	App/VaultFunnelView.swift	$\(plan.priceUSD)
 customer-facing-string	App/VaultFunnelView.swift	/mo
 customer-facing-string	App/VaultFunnelView.swift	Asking Solleva about everything you've captured — and searching by meaning — runs on your private Vault. It's off right now.
 customer-facing-string	App/VaultFunnelView.swift	Back to my notes
 customer-facing-string	App/VaultFunnelView.swift	Capture, transcribe, and search stay on this iPhone for free. Your private Vault adds three things.
 customer-facing-string	App/VaultFunnelView.swift	Check again
+customer-facing-string	App/VaultFunnelView.swift	Checkout
+customer-facing-string	App/VaultFunnelView.swift	Choose a different plan
 customer-facing-string	App/VaultFunnelView.swift	Choose a plan
 customer-facing-string	App/VaultFunnelView.swift	Continue with \(selected.title) · $\(selected.priceUSD)/month
 customer-facing-string	App/VaultFunnelView.swift	Enter
@@ -398,7 +408,7 @@ customer-facing-string	App/VaultFunnelView.swift	Keep using Solleva
 customer-facing-string	App/VaultFunnelView.swift	Live
 customer-facing-string	App/VaultFunnelView.swift	Not now
 customer-facing-string	App/VaultFunnelView.swift	On-device today · your Vault next
-customer-facing-string	App/VaultFunnelView.swift	Only your voice and your login open it. It stays isolated from every other Vault.
+customer-facing-string	App/VaultFunnelView.swift	Pick up where I left off
 customer-facing-string	App/VaultFunnelView.swift	Recommended
 customer-facing-string	App/VaultFunnelView.swift	See plans
 customer-facing-string	App/VaultFunnelView.swift	Set up your Vault
@@ -406,7 +416,6 @@ customer-facing-string	App/VaultFunnelView.swift	Sign in again
 customer-facing-string	App/VaultFunnelView.swift	Stop waiting
 customer-facing-string	App/VaultFunnelView.swift	This lives in your Vault
 customer-facing-string	App/VaultFunnelView.swift	Turn on your Vault
-customer-facing-string	App/VaultFunnelView.swift	Your Vault is live
 customer-facing-string	App/VaultFunnelView.swift	\(action.triggerLabel) · Search everything
 customer-facing-string	App/WaitingExperienceView.swift	\(copy.headline). \(model.statusLine(elapsed: elapsed))
 customer-facing-string	Sources/FoundryXKit/AccountDeletionProgressView.swift	Close

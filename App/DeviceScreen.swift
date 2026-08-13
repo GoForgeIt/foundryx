@@ -399,9 +399,9 @@ private struct RecordingDevicePageView: View {
     let input: RecordingDeviceListInput
     @ObservedObject var device: DeviceManager
     @ObservedObject var sources: CaptureSourceRegistry
-    /// Only the remembered Omi has a transport in this build, so only it may offer connect /
-    /// disconnect. A record-then-sync recorder gets an honest absence rather than a button
-    /// that cannot complete (design §6c).
+    /// Whether this is the ONE remembered Omi, which is a fact about the live pairing path and
+    /// nothing else. It used to double as "can this device be connected at all" — see
+    /// `canReachDevice` below for why that was wrong.
     let isSavedOmi: Bool
     let onChange: () -> Void
 
@@ -417,13 +417,34 @@ private struct RecordingDevicePageView: View {
     /// when the screen opens. `false` renders the sentence that tells the owner to write the
     /// key down, which is the safe direction to be wrong in.
     @State private var recoveryCopyExists = false
+    /// What the recorder said it is holding, the last time this screen asked it.
+    @StateObject private var check = PocketRecorderCheckModel()
+
+    /// DOES THIS BUILD HAVE A TRANSPORT THAT CAN ACTUALLY ATTACH THIS DEVICE?
+    ///
+    /// THIS USED TO BE `isSavedOmi`, WHICH IS THE BUG. `isSavedOmi` compares against
+    /// `RecordingDeviceIdentity(shape: .bleStream, …)`, so it is false for EVERY `.filePull`
+    /// recorder by construction — and `resolve` only appends connect/disconnect inside
+    /// `if canConnect`. The result: once a Pocket was adopted, its page carried no connect
+    /// action at all, and the only surface in the whole app that could ever reach it again was
+    /// the "Connect a recording device" scan sheet. A remembered recorder with no way to reach
+    /// it is a device the app forgot how to talk to.
+    ///
+    /// A remembered record-then-sync recorder has one now: `RecordingDeviceAttachment
+    /// .withAuthenticatedSession`, which `PocketRecorderCheck.run` opens and closes. It offers
+    /// "Connect and check now" — the shipped copy for this class — and what it does is exactly
+    /// what it says: it connects, reads the shelf, and disconnects. It does NOT bring anything
+    /// over, and design §6c's absence of a bring-over button is untouched.
+    private var canReachDevice: Bool {
+        isSavedOmi || (input.deviceClass == .recordThenSync && input.isRemembered)
+    }
 
     /// EVERY SLOT DECIDED IN THE KIT. This view passed `hasEducation: shape == .filePull` and
     /// `canForget: shape != .builtInMic` — two shape branches on a screen whose whole rule is
     /// that no surface switches on shape. Education now follows the negotiated protocol and
     /// forget follows the store record, both inside `resolve`, where Brine can hold them.
     private var page: RecordingDevicePagePresentation {
-        RecordingDevicePage.resolve(input, canConnect: isSavedOmi)
+        RecordingDevicePage.resolve(input, canConnect: canReachDevice)
     }
 
     var body: some View {
@@ -445,6 +466,7 @@ private struct RecordingDevicePageView: View {
                 capabilityStrip
                 captureToggle
                 actions
+                recorderShelf
             }
             .padding(.horizontal, GrainSpacing.x4)
             .padding(.bottom, GrainSpacing.x8)
@@ -591,6 +613,89 @@ private struct RecordingDevicePageView: View {
         .padding(.top, GrainSpacing.x4)
     }
 
+    /// WHAT THE RECORDER SAID IT IS HOLDING, rendered 1:1 from the kit's
+    /// `StoredFileDeviceDetailPresentation` — the presentation that shipped with zero callers
+    /// in `App/` while `features/pocket-file-pull-device.feature` asserted over it. Not one
+    /// string here is invented in this body.
+    ///
+    /// IT DRAWS NOTHING UNTIL THE OWNER ASKS. A panel that appeared on its own would be this
+    /// screen deciding to open a Bluetooth session every time somebody looked at it.
+    @ViewBuilder
+    private var recorderShelf: some View {
+        if check.isChecking || check.detail != nil || check.message != nil {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(PocketRecorderCheckPresentation.sectionTitle)
+                    .grainTextStyle(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(GrainColor.forgeBlue)
+                    .padding(.bottom, GrainSpacing.x2)
+
+                if check.isChecking {
+                    HStack(spacing: GrainSpacing.x2) {
+                        ProgressView().tint(GrainColor.forgeBlue)
+                        Text(PocketRecorderCheckPresentation.checkingLine)
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(GrainColor.textMuted)
+                    }
+                    .padding(.vertical, GrainSpacing.x2)
+                }
+
+                // A REASON, NEVER AN EMPTY PANEL. "The recorder answered and is holding
+                // nothing" and "the app never reached the recorder" are different facts, and
+                // rendering both as a blank list is how the second gets read as the first.
+                if let message = check.message {
+                    Text(message)
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.textMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.vertical, GrainSpacing.x2)
+                }
+
+                if let detail = check.detail {
+                    if detail.manifest.rows.isEmpty {
+                        Text(PocketRecorderCheckPresentation.emptyLine)
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(GrainColor.textMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.vertical, GrainSpacing.x2)
+                    } else {
+                        ForEach(Array(detail.manifest.rows.enumerated()), id: \.offset) { _, row in
+                            HStack(alignment: .firstTextBaseline, spacing: GrainSpacing.x3) {
+                                VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                                    Text(row.title)
+                                        .grainTextStyle(.body)
+                                        .foregroundStyle(GrainColor.ink)
+                                    // CUSTODY, ON EVERY ROW. Today it reads "Only on the
+                                    // recorder" for all of them, because nothing in this build
+                                    // brings a file over — which is the fact, not a shortcoming
+                                    // to hide.
+                                    Text(row.custodyLabel)
+                                        .grainTextStyle(.caption)
+                                        .foregroundStyle(GrainColor.textFaint)
+                                }
+                                Spacer(minLength: GrainSpacing.x2)
+                                Text(row.duration)
+                                    .grainTextStyle(.caption)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(GrainColor.textMuted)
+                            }
+                            .padding(.vertical, GrainSpacing.x2)
+                            .accessibilityElement(children: .combine)
+                            .overlay(alignment: .bottom) { hairline }
+                        }
+                    }
+
+                    Text(PocketRecorderCheckPresentation.sectionNote)
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.textFaint)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, GrainSpacing.x3)
+                }
+            }
+            .padding(.top, GrainSpacing.x6)
+        }
+    }
+
     private func perform(_ title: String) {
         switch title {
         case RecordingDevicePage.educationAction:
@@ -603,7 +708,15 @@ private struct RecordingDevicePageView: View {
         case RecordingDevicePage.disconnectAction:
             sources.setEnabled(CaptureSourceDescriptor.omiId, false)
             onChange()
-        case RecordingDevicePage.connectAction, RecordingDevicePage.connectAndCheckAction:
+        // A RECORD-THEN-SYNC RECORDER'S CONNECT IS NOT THE OMI'S, AND SHARING THIS BRANCH WAS
+        // A LIVE HAZARD. `connectAndCheckAction` is only ever offered for `.recordThenSync`,
+        // and this arm enabled the OMI capture source — so the moment a Pocket page got a
+        // connect action, tapping it would have turned on a different device's live capture.
+        // It was unreachable only because `canConnect` was hard-coded to `isSavedOmi`.
+        case RecordingDevicePage.connectAndCheckAction:
+            check.run(hardwareToken: input.identity.hardwareToken,
+                      advertisedName: input.displayName)
+        case RecordingDevicePage.connectAction:
             if sources.isEnabled(CaptureSourceDescriptor.omiId) {
                 device.reconnect()
             } else {
@@ -698,6 +811,51 @@ private struct RecordingDevicePageView: View {
         Rectangle()
             .fill(GrainColor.borderFaint)
             .frame(height: 1)
+    }
+}
+
+// MARK: - "Connect and check now", and the session it opens
+
+/// THE APP SIDE OF ONE CHECK.
+///
+/// It owns nothing but the tap: whether the radio is busy, what the recorder said, and the one
+/// line a check that did not reach an answer earns. Every string comes from
+/// `PocketRecorderCheckPresentation`; every decision comes from `PocketRecorderCheck`.
+///
+/// WHY THIS EXISTS AT ALL. `PocketBLEClient.listDates` / `listRecordings` shipped implemented
+/// and unit-tested with NO caller outside `Tests/`, because the one path in the app that
+/// reached an authenticated recorder closed the session before returning. This is the first
+/// production caller of either, and the panel above is where their answer lands.
+@MainActor
+final class PocketRecorderCheckModel: ObservableObject {
+    @Published private(set) var isChecking = false
+    @Published private(set) var detail: StoredFileDeviceDetailPresentation?
+    @Published private(set) var message: String?
+
+    /// - Parameter hardwareToken: the DURABLE address of a stored-file recorder, which is the
+    ///   authenticated peripheral identifier (`PocketAuthenticatedIdentity`) and never the
+    ///   advertised name. A token that is not one is not a recorder this can reach, and it says
+    ///   so rather than silently doing nothing.
+    func run(hardwareToken: String, advertisedName: String) {
+        guard !isChecking else { return }
+        guard let identifier = UUID(uuidString: hardwareToken) else {
+            message = PocketRecorderCheckPresentation.notThisRecorderLine
+            detail = nil
+            return
+        }
+        isChecking = true
+        detail = nil
+        message = nil
+        Task {
+            // A FRESH ATTACHMENT PER CHECK, which is `run`'s default. An attachment's
+            // `teardown()` retires its own link and generation, so reusing one is a session
+            // that can never come back up.
+            let outcome = await PocketRecorderCheck.run(peripheralIdentifier: identifier,
+                                                        advertisedName: advertisedName)
+            self.isChecking = false
+            self.message = PocketRecorderCheckPresentation.message(for: outcome)
+            if case .checked(let reading) = outcome { self.detail = reading }
+        }
     }
 }
 

@@ -344,4 +344,81 @@ final class DeviceCompositionRootGateTests: XCTestCase {
                       "the checklist entry must name the file the constant lives in, or it "
                           + "cannot be acted on")
     }
+
+    // MARK: - A remembered recorder has a way back to it, and it is not the Omi's
+
+    /// WHAT THIS HOLDS THAT NO BEHAVIOURAL PROBE CAN. `RecordingDevicePage.resolve` appends
+    /// connect/disconnect only `if canConnect`, and every Brine scenario calls `resolve(input)`
+    /// — which DEFAULTS `canConnect` to `true`. So the kit suite has always drawn a Pocket page
+    /// with a connect action on it, while the shipped screen passed `canConnect: isSavedOmi`,
+    /// an expression that is false for every `.filePull` identity by construction. A remembered
+    /// Pocket's page therefore carried no connect action at all, and `swift test` cannot
+    /// compile `App/` to notice. This is that argument, read off the file.
+    func testARememberedRecorderCanBeReachedFromItsOwnPage() throws {
+        let screen = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent("App/DeviceScreen.swift"),
+            encoding: .utf8)
+
+        // Non-vacuity FIRST: if the page moves out of this file, say so rather than pass for
+        // having found nothing to check.
+        XCTAssertTrue(screen.contains("RecordingDevicePage.resolve("),
+                      "the device page is no longer built in App/DeviceScreen.swift — this "
+                          + "gate is checking a file that no longer holds the boundary")
+
+        XCTAssertFalse(
+            screen.contains("RecordingDevicePage.resolve(input, canConnect: isSavedOmi)"),
+            "the device page is resolved with `canConnect: isSavedOmi`. `isSavedOmi` compares "
+                + "against a `.bleStream` identity, so it is false for every stored-file "
+                + "recorder — which means a remembered Pocket's page offers no way to reach it "
+                + "at all, and the scan sheet is the only surface left that can")
+        XCTAssertTrue(
+            screen.contains("input.deviceClass == .recordThenSync && input.isRemembered"),
+            "the page's connect gate no longer admits a remembered record-then-sync recorder. "
+                + "It must be reachable from its own page, or the only entry point to a device "
+                + "the account already remembers is the pairing scan")
+    }
+
+    /// The check action is WIRED, and it is wired to the check — not to the Omi's connect arm
+    /// it used to share a `case` with.
+    ///
+    /// `connectAndCheckAction` and `connectAction` were one branch that enabled the OMI capture
+    /// source. That was harmless only because the action could never be offered for anything
+    /// but an Omi; the line above makes it reachable for a Pocket, and a Pocket page whose
+    /// connect button turns on a different device's live capture is a worse bug than the
+    /// absence it replaced.
+    func testTheCheckActionRunsTheCheckAndNotTheOmiCaptureToggle() throws {
+        let screen = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent("App/DeviceScreen.swift"),
+            encoding: .utf8)
+
+        XCTAssertFalse(
+            screen.contains("case RecordingDevicePage.connectAction, "
+                            + "RecordingDevicePage.connectAndCheckAction:"),
+            "\"Connect and check now\" shares its branch with the Omi's \"Connect\", which "
+                + "enables `CaptureSourceDescriptor.omiId` — so tapping it on a stored-file "
+                + "recorder's page turns on a DIFFERENT device's live capture")
+        XCTAssertTrue(
+            screen.contains("case RecordingDevicePage.connectAndCheckAction:"),
+            "the check action has no branch of its own")
+        XCTAssertTrue(
+            screen.contains("check.run(hardwareToken:"),
+            "nothing in App/ calls the check. `PocketRecorderCheck`, "
+                + "`PocketInventoryReader`, `PocketBLEClient.listDates` and "
+                + "`listRecordings(on:)` would then all be reachable-in-principle and called "
+                + "by nobody, which is the exact state this work exists to leave behind")
+        XCTAssertTrue(
+            screen.contains("PocketRecorderCheck.run(peripheralIdentifier:"),
+            "the app-side model no longer runs the shipped check")
+
+        // AND THE ANSWER IS RENDERED. A check whose result reaches no surface is a Bluetooth
+        // session opened for nothing.
+        for rendered in ["PocketRecorderCheckPresentation.sectionTitle",
+                         "PocketRecorderCheckPresentation.emptyLine",
+                         "PocketRecorderCheckPresentation.sectionNote",
+                         "detail.manifest.rows"] {
+            XCTAssertTrue(screen.contains(rendered),
+                          "App/DeviceScreen.swift does not render `\(rendered)`, so the check's "
+                              + "answer never reaches a person")
+        }
+    }
 }

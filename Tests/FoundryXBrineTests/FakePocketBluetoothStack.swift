@@ -53,6 +53,15 @@ final class FakePocketBLEStack: @unchecked Sendable {
         case blindlyAcknowledges(holding: String)
     }
 
+    /// ONE FILE THIS RECORDER IS HOLDING, in the reference trace's own fields. There is no
+    /// content: nothing in this suite downloads, and a fixture that carried bytes would
+    /// invite one to.
+    struct ScriptedRecording: Sendable, Equatable {
+        let date: String
+        let timestamp: String
+        let sizeBytes: Int
+    }
+
     let deviceId: UUID
     let deviceName: String
     private let behaviour: KeyBehaviour
@@ -62,6 +71,12 @@ final class FakePocketBLEStack: @unchecked Sendable {
     /// Whether this firmware answers `APP&WIFI` at all. A firmware that does not is
     /// `MCU&UNKNOWN` — an honest "not proven", which is a different answer from a refusal.
     private let answersWiFiReadback: Bool
+    /// What this recorder is holding, in the order its firmware lists it.
+    private let inventory: [ScriptedRecording]
+    /// Whether this firmware answers `LIST_DIRS` / `LIST&` at all. `false` is the honest
+    /// "this build's command is not one I know" — `MCU&UNKNOWN` — which is a different answer
+    /// from a recorder that lists nothing.
+    private let answersInventory: Bool
     private let map: PocketCharacteristicMap
 
     /// HOW A DEVICE FAILS TO BE REACHED, as the shapes a real radio actually produces. The
@@ -108,7 +123,11 @@ final class FakePocketBLEStack: @unchecked Sendable {
          exposesStoredFileProtocol: Bool = true,
          alsoExposesOmiAudioService: Bool = false,
          answersWiFiReadback: Bool = true,
+         inventory: [ScriptedRecording] = [],
+         answersInventory: Bool = true,
          behaviour: KeyBehaviour? = nil) {
+        self.inventory = inventory
+        self.answersInventory = answersInventory
         self.deviceId = deviceId
         self.deviceName = deviceName
         // `acceptedSecret` stays the shorthand every existing scenario is written in: a value
@@ -282,6 +301,25 @@ final class FakePocketBLEStack: @unchecked Sendable {
             response = "MCU&BAT&72"
         } else if command == "FW" {
             response = "MCU&FW&1.6"
+        } else if command == "LIST_DIRS", answersInventory {
+            // THE DAYS, THEN THE COUNT — the reference trace's own two-frame shape. The count
+            // frame is what makes an interrupted sequence detectable, so it is emitted here
+            // rather than assumed by the reader.
+            var days: [String] = []
+            for recording in inventory where !days.contains(recording.date) {
+                days.append(recording.date)
+            }
+            for day in days { notifyControl("MCU&DIRS&\(day)") }
+            notifyControl("MCU&DIRS_SUM&\(days.count)")
+            return
+        } else if command.hasPrefix("LIST&"), answersInventory {
+            let day = String(command.dropFirst("LIST&".count))
+            let files = inventory.filter { $0.date == day }
+            for file in files {
+                notifyControl("MCU&F&\(file.date)&\(file.timestamp)&\(file.sizeBytes)")
+            }
+            notifyControl("MCU&LIST&\(files.count)")
+            return
         } else if command == "WIFI" {
             // THE READ-BACK, DERIVED FROM WHAT THE FIRMWARE IS ACTUALLY HOLDING.
             //

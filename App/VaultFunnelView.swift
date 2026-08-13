@@ -76,6 +76,8 @@ struct VaultFunnelView: View {
                 .padding(.bottom, GrainSpacing.x4)
                 .accessibilityIdentifier("stop-waiting")
             }
+        case .checkoutIncomplete:
+            checkoutIncompleteScreen
         case .settingUp, .settingUpDelayed:
             provisioningScreen
         case .live:
@@ -232,6 +234,53 @@ struct VaultFunnelView: View {
         .padding(.vertical, GrainSpacing.x6)
     }
 
+    // MARK: checkout abandoned — the way BACK INTO payment
+    //
+    // This screen exists because leaving mid-checkout was a dead end. The attempt is
+    // persisted before the browser ever opens, so the app knew a payment had been started;
+    // it simply never said so, and every route back landed on the funnel's FIRST screen,
+    // pitching the Vault the owner was already halfway through buying. Two doors: resume
+    // the checkout you started, or pick a different plan. Leaving keeps the attempt, so
+    // Settings can bring you straight back here.
+
+    private var checkoutIncompleteScreen: some View {
+        let presentation = model.presentation
+        return VStack(spacing: GrainSpacing.x4) {
+            Spacer()
+            Image(systemName: "creditcard.trianglebadge.exclamationmark")
+                .font(.system(size: 56)).foregroundStyle(GrainColor.amber)
+            microLabel("Checkout")
+            Text(presentation.title).grainTextStyle(.title).multilineTextAlignment(.center)
+            Text(presentation.body)
+                .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
+                .multilineTextAlignment(.center)
+            VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                ForEach(presentation.details, id: \.self) { line in
+                    privacyLine("info.circle", line)
+                }
+            }
+            Spacer()
+            VStack(spacing: GrainSpacing.x2) {
+                GrainButton("Pick up where I left off", variant: .filled, size: .lg) {
+                    Task { await model.resumeCheckout() }
+                }
+                .accessibilityIdentifier("resume-vault-checkout")
+                GrainButton("Choose a different plan", variant: .outlined, size: .regular) {
+                    model.seePlans()
+                }
+                .accessibilityIdentifier("choose-different-plan")
+                // Leaving KEEPS the attempt: Settings shows this same status and taps
+                // straight back in. `abandonCheckout()` (which clears it) stays on the
+                // waiting screen, where "stop waiting" is what the user means.
+                GrainButton("Not now", variant: .text, size: .regular) {
+                    model.leaveProvisioning()
+                }
+            }
+        }
+        .padding(.vertical, GrainSpacing.x6)
+        .accessibilityIdentifier("vault-checkout-incomplete")
+    }
+
     // MARK: failed — a terminal stop that always offers a way out
     //
     // This screen exists because its absence trapped a paying owner on
@@ -280,15 +329,26 @@ struct VaultFunnelView: View {
     // MARK: live — "Your Vault is live"
 
     private var liveScreen: some View {
-        VStack(spacing: GrainSpacing.x4) {
+        // Copy comes from the TESTED presentation, not from literals here. The screen used
+        // to say "Your Vault is live / Only your voice and your login open it" and stop —
+        // which answers who can open it, and nothing about what $79 changed. The two rows
+        // below are what this build actually does with a Vault; the scenarios fail on the
+        // words "chat", "pocket" and "sync", so aspiration cannot creep back in.
+        let presentation = model.presentation
+        return VStack(spacing: GrainSpacing.x4) {
             Spacer()
             Image(systemName: "checkmark.seal.fill")
                 .font(.system(size: 64)).foregroundStyle(GrainColor.sage)
             microLabel("Live")
-            Text("Your Vault is live").grainTextStyle(.title).multilineTextAlignment(.center)
-            Text("Only your voice and your login open it. It stays isolated from every other Vault.")
+            Text(presentation.title).grainTextStyle(.title).multilineTextAlignment(.center)
+            Text(presentation.body)
                 .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
                 .multilineTextAlignment(.center)
+            VStack(spacing: GrainSpacing.x2) {
+                ForEach(VaultLiveBenefits.items, id: \.title) { item in
+                    unlockRow(item.icon, item.title, item.detail)
+                }
+            }
             Spacer()
             VStack(spacing: GrainSpacing.x2) {
                 // ENTER means enter. This used to be `model.dismiss()` — it closed the
