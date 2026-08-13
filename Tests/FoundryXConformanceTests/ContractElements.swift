@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// The five elements of T10's published P3 client contract (T25 spec §2.3), each
 /// DRIVEN against the running relay and each verdict COMPUTED from what came back.
@@ -79,14 +80,24 @@ enum ContractElementDriver {
     //     the upgrade acceptance, and binds it into the prologue". The bytes at connect
     //     are an HTTP head and a `101`. A relay that accepted a prologue-shaped prefix
     //     ahead of that head would be speaking a protocol no document designs.
-    //   * A NOISE PROLOGUE IS NEVER TRANSMITTED, and this repository's own primitive
-    //     says so: `Sources/FoundryXKit/NoiseXX.swift:209-211` takes `prologue: Data` and
-    //     `mixHash`es it. It is an input to the transcript hash that both peers must
-    //     already hold. That is exactly the property 03-protocols claims for it — "a
-    //     handshake transcript completed for community A's host cannot be replayed
-    //     against community B, because the prologue disagrees" — and a prologue put on
-    //     the wire would give no such property, because a replaying peer would simply
-    //     send the same bytes.
+    //   * A PROLOGUE IS MIXED, NOT SENT AS A PREFIX. `Sources/FoundryXKit/NoiseXX.swift:209-211`
+    //     takes `prologue: Data` and `mixHash`es it: it is an input to the transcript hash
+    //     that both peers derive for themselves. That is what carries 03-protocols' property
+    //     — "a handshake transcript completed for community A's host cannot be replayed
+    //     against community B, because the prologue disagrees" — because the two sides
+    //     compute the same `h` only when they agree about the tenancy.
+    //
+    //     CORRECTED 2026-08-13, and the correction is the point. The version of this comment
+    //     that landed with the re-specification said a prologue is "NEVER TRANSMITTED" and
+    //     that the replay property depends on its not being sent. THAT CLAIM IS FALSE, and
+    //     this program had ALREADY withdrawn it in writing before this file repeated it —
+    //     `rungs-run.md` "A claim from the first draft of this ruling, WITHDRAWN": the Noise
+    //     framework expressly allows a prologue to carry negotiation data already sent, and
+    //     the security comes from both parties mixing the SAME context, with the responder
+    //     DERIVING the host and version rather than accepting attacker-supplied ones. A
+    //     gpt-5.6-sol review found the withdrawn argument still standing here. The ruling
+    //     does not rest on it and survives its removal: counts (1) and (2) are untouched, and
+    //     what is left of (3) — mixed rather than prefixed — is what the code actually does.
     //
     // So the element is driven as the design's three questions instead of one invented
     // one. It is still NOT SERVED, and now for a reason that is true.
@@ -113,8 +124,26 @@ enum ContractElementDriver {
         // puts it: after the upgrade. Nothing is asserted about its contents; the only
         // question is whether an exchange happens at all, because a prologue binds a
         // transcript and a connection with no transcript has nothing to bind.
+        //
+        // WHAT IS SENT, AND WHY IT CHANGED. Until 2026-08-13 this probe wrote the tenancy
+        // bytes themselves after the `101` and waited to be spoken to. Against today's relay
+        // that is indistinguishable from anything else — it closes the socket either way —
+        // but against a relay that GREW the handshake the two are not the same at all: a peer
+        // speaking Noise-XX waits for an opening message and cannot read 15 bytes of bare
+        // tenancy as one. So the old probe would have gone on reporting `unmet` at a relay
+        // that had implemented the whole of step 3, and `_blocked_on`'s promise that this
+        // drive "flips the day the relay grows one" was not true. A gpt-5.6-sol review
+        // predicted that; `features/prologue-binding.feature` then MEASURED it against a
+        // correctly speaking peer, both ways, and the two scenarios that record it are graded
+        // by mutations `M5` and `M6`.
+        //
+        // An opening message carrying no payload is exactly the sender's 32-byte ephemeral
+        // public value. It is written here as raw bytes, not produced by a FoundryXKit
+        // transport type, for the same reason `P3Client` speaks raw bytes at all: a client
+        // built out of the relay counterpart's own types would agree with it by construction.
+        let opening = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation
         let window = Double(f.authTimeoutSeconds)
-        let after = try c.exchangeThenListen(request: head, window: window, thenSend: wirePrologue)
+        let after = try c.exchangeThenListen(request: head, window: window, thenSend: opening)
         let handshakeExists: PartVerdict = (after.head.upgraded && !after.trailing.isEmpty) ? .met : .unmet
         // A PROBE THAT DID NOT HAPPEN MUST REFUSE, NEVER RECORD A VALUE. "The relay sent
         // nothing" is evidence only if the listening really occurred: either the peer
@@ -132,20 +161,32 @@ enum ContractElementDriver {
         // must not complete against another. Unreachable while part 2 is unmet, and
         // recorded as UNASKED rather than as a `false` that would read as refuted.
         //
-        // AND THE DAY PART 2 IS MET, THIS REFUSES RATHER THAN ANSWERING. There is no
-        // drive for the differential in this target, because there is no handshake to
-        // drive it against and writing one now would be inventing a protocol nobody has
-        // shipped. A hardcoded `unmet` here would be a verdict from a probe that never
-        // ran — it would keep the element red for a reason nobody measured, and it
-        // would go on saying `unmet` against a relay that bound the prologue perfectly.
-        // So the arrival of a handshake makes this suite LOUD, naming what must be built.
+        // AND THE DAY PART 2 IS MET, THIS REFUSES RATHER THAN ANSWERING. A hardcoded
+        // `unmet` here would be a verdict from a probe that never ran — it would keep the
+        // element red for a reason nobody measured, and it would go on saying `unmet`
+        // against a relay that bound the prologue perfectly. So the arrival of a handshake
+        // makes this suite LOUD, naming what must be built.
+        //
+        // WHAT IS MISSING IS NOW A SUBJECT, NOT AN ORACLE. Until 2026-08-13 `not-reached`
+        // was carrying two meanings at once — "nothing answered" and "nobody knows how to
+        // ask" — and only the first was true of the world. The question itself is now
+        // executed and mutation-graded in `features/prologue-binding.feature`: two peers
+        // that mix the same tenancy complete and carry traffic, and peers that disagree by
+        // one byte cannot complete. Four mutations grade it, and the one that matters — both
+        // peers ignoring the prologue, which is what "not load-bearing" means — makes three
+        // scenarios go red. THAT DOES NOT SERVE THIS ELEMENT and must never be read as
+        // serving it: those peers are this repository's own, the relay does not use them,
+        // and the element's owner is T10. It is an oracle waiting for a subject.
         if handshakeExists == .met {
             throw ConformanceStepError("""
-            prologue-bytes part 3 has no drive, and part 2 just became MET: the relay now speaks after \
-            the upgrade (\(after.trailing.count) byte(s) in \(String(format: "%.2f", after.windowWaited))s). \
-            The binding differential — a handshake transcript completed for one bound host must not \
-            complete against another (design/03-protocols.md P3 step 3) — is the question this element \
-            turns on and this target cannot yet ask it. BUILD IT; do not record a verdict for it.
+            prologue-bytes part 3 has no drive against THIS subject, and part 2 just became MET: the \
+            relay now speaks after the upgrade (\(after.trailing.count) byte(s) in \
+            \(String(format: "%.2f", after.windowWaited))s). The binding differential — a handshake \
+            transcript completed for one bound host must not complete against another \
+            (design/03-protocols.md P3 step 3) — is the question this element turns on. The ORACLE for \
+            it exists and is graded: features/prologue-binding.feature. What has been missing is a \
+            subject, and a subject has just appeared. POINT THE ORACLE AT IT; do not record a verdict \
+            for it from here.
             """)
         }
         let bindingDifferential: PartVerdict = .notReached
@@ -161,7 +202,7 @@ enum ContractElementDriver {
         let part2 = handshakeExists == .met
             ? "after the upgrade the relay sent \(after.trailing.count) byte(s) within \(String(format: "%.2f", after.windowWaited))s"
             : after.peerClosed
-                ? "after \(firstLine(after.head)) the relay closed the connection \(String(format: "%.2f", after.windowWaited))s later without sending one handshake byte"
+                ? "after \(firstLine(after.head)) the relay was handed a 32-byte opening message and closed the connection \(String(format: "%.2f", after.windowWaited))s later without sending one handshake byte"
                 : "after \(firstLine(after.head)) the relay held the connection open for the whole \(String(format: "%.2f", after.windowWaited))s window and sent nothing"
         e.observation = "\(part1); \(part2), so there is no step-3 handshake for a prologue to be mixed into and the binding differential was NOT REACHED"
         return e
