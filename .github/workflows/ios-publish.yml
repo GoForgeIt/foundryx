@@ -32,7 +32,7 @@ concurrency:
 jobs:
   unit-and-invariant-suites:
     runs-on: [self-hosted, macOS, ios]
-    timeout-minutes: 40
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with: { path: foundryx }
@@ -83,6 +83,11 @@ jobs:
           SW
           swift /tmp/kc-probe.swift
       - name: relay + swift + gates
+        # No inner duration knob anymore: ci-gates' deadlock detector now watches
+        # OUTPUT PROGRESS (SWIFT_TEST_STALL, default 300s of byte-silence), so a
+        # slow-but-writing run can never be misdiagnosed. Attempts 3 and 4 both
+        # died to the old flat bound — one at 1187/1370 tests passing. The
+        # job-level timeout-minutes above is the only duration guard.
         run: |
           export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
           # The T25 conformance target starts a REAL foundry-relay
@@ -105,7 +110,7 @@ jobs:
   app-compile-leak-lint:
     needs: unit-and-invariant-suites
     runs-on: [self-hosted, macOS, ios]
-    timeout-minutes: 40
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with: { path: foundryx }
@@ -146,7 +151,7 @@ jobs:
   ios-simulator-brine:
     needs: app-compile-leak-lint
     runs-on: [self-hosted, macOS, ios]
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with: { path: foundryx }
@@ -187,7 +192,7 @@ jobs:
   build-sign-ship:
     needs: ios-simulator-brine
     runs-on: [self-hosted, macOS, ios]
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       # The ship script is VERBATIM from Concourse and expects these exact
       # sibling dir names.

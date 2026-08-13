@@ -82,17 +82,17 @@ GATE_SUITES=(HangReproTests RebuildBytesIndependenceTests ResidualMainActorWorkT
 
 # ---------------------------------------------------------------- swift: the whole package
 #
-# SWIFT_TEST_TIMEOUT bounds a single attempt. The suite runs ~150s, so 300s leaves 2x
-# headroom. It was 1200s and that was too generous: on 2026-08-12 build 15 sat TWENTY
-# MINUTES on the deadlock before self-healing, which reads as "CI is slow" rather than
-# "CI is stuck". A healthy run has
-# never approached 20 minutes. This exists because `swift test` can park FOREVER on the
-# SwiftPM workspace lock: observed twice (2026-08-11 and 2026-08-12, on two different
-# macOS workers), 3h and 6h, at 0.0% CPU, holding `$TMPDIR/<mangled-path>_.build.lock`
-# on its OWN fd — no error, no output, nothing in the log to read. A build that hangs
-# forever is worse than one that fails: it burns a worker, and the wedge watchdog then
-# aborts it, which reads as a flaky build rather than the deadlock it is.
-SWIFT_TEST_TIMEOUT="${SWIFT_TEST_TIMEOUT:-300}"
+# SWIFT_TEST_STALL is how long a single attempt may go WITHOUT WRITING A BYTE before
+# it is declared deadlocked. Progress, not duration: both observed wedges (2026-08-11
+# and 2026-08-12, 3h and 6h on two different workers) sat at 0.0% CPU holding
+# `$TMPDIR/<mangled-path>_.build.lock` on their OWN fd, with a byte-static log — no
+# error, no output, nothing. A slow attempt (cold compile, loaded box) keeps writing.
+# The previous flat SWIFT_TEST_TIMEOUT could not tell those apart and misdiagnosed a
+# healthy compiling run THREE times on 2026-08-12/13 — twice in CI (one killed at
+# 1187/1370 tests passing) and once locally — each time reporting "deadlocked twice"
+# about a process that was demonstrably working. Duration is bounded by the caller
+# (CI's job-level timeout-minutes); this knob only detects wedges.
+SWIFT_TEST_STALL="${SWIFT_TEST_STALL:-300}"
 
 # The lock SwiftPM takes for THIS workspace. The name is the absolute .build path with
 # '/' turned into '_', in TMPDIR. Deriving it (rather than globbing all of TMPDIR) means
@@ -104,23 +104,30 @@ _swift_build_lock_path() {
   printf '%s/%s_.build.lock\n' "${TMPDIR:-/tmp}" "$(printf '%s' "$PWD" | tr '/' '_')"
 }
 
-# One attempt, bounded. Returns 124 on timeout (the `timeout` convention), which the
-# caller distinguishes from a genuine test failure.
+# One attempt, supervised by PROGRESS. Returns 124 only after the attempt has written
+# nothing for SWIFT_TEST_STALL seconds — the deadlock's actual signature — which the
+# caller distinguishes from a genuine test failure. There is deliberately NO overall
+# duration bound here: a run that is still writing is still working, however slow the
+# box, and killing it discards compile progress the retry then pays for again.
 _swift_test_once() {
   local out="$1"
-  if command -v timeout >/dev/null 2>&1; then
-    timeout -k 30 "$SWIFT_TEST_TIMEOUT" swift test >"$out" 2>&1
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout -k 30 "$SWIFT_TEST_TIMEOUT" swift test >"$out" 2>&1
-  else
-    # No coreutils: supervise by hand so the bound still holds.
-    swift test >"$out" 2>&1 & local p=$!
-    ( sleep "$SWIFT_TEST_TIMEOUT"; kill -TERM "$p" 2>/dev/null; sleep 20; kill -KILL "$p" 2>/dev/null ) & local w=$!
-    wait "$p"; local rc=$?
-    kill "$w" 2>/dev/null
-    # A killed child reports 143/137; report that as a timeout, not a test failure.
-    case "$rc" in 143|137) return 124;; *) return "$rc";; esac
-  fi
+  swift test >"$out" 2>&1 & local p=$!
+  local last=-1 size idle=0
+  while kill -0 "$p" 2>/dev/null; do
+    sleep 10
+    size=$(wc -c <"$out" 2>/dev/null | tr -d ' ') || size=0
+    if [ "${size:-0}" != "$last" ]; then
+      last="$size"; idle=0
+    else
+      idle=$((idle + 10))
+      if [ "$idle" -ge "$SWIFT_TEST_STALL" ]; then
+        kill -TERM "$p" 2>/dev/null; sleep 20; kill -KILL "$p" 2>/dev/null
+        wait "$p" 2>/dev/null
+        return 124
+      fi
+    fi
+  done
+  wait "$p"
 }
 
 # Print WHICH tests failed. Without this the gate reported `tail -40`, which on a 1345-test
@@ -146,16 +153,17 @@ phase_swift() {
   _swift_test_once "$out" || rc=$?
 
   if [ "$rc" -eq 124 ]; then
-    # SELF-HEAL, ONCE. A timeout here is the workspace-lock deadlock, not a slow suite.
-    # Clear only THIS workspace's lock and its .build, then retry. If it deadlocks twice
-    # the machine is genuinely wrong and this must fail loudly rather than retry forever.
+    # SELF-HEAL, ONCE. 124 now means the attempt wrote NOTHING for SWIFT_TEST_STALL
+    # seconds — the workspace-lock deadlock's real signature, not mere slowness.
+    # Clear only THIS workspace's lock, then retry. The heal used to also
+    # `pkill swift-*` MACHINE-WIDE (murdering concurrent jobs' builds) and
+    # `rm -rf .build` (forcing the retry to recompile cold, which is how a retry
+    # got SLOWER than the attempt it replaced). The supervisor already killed our
+    # own process tree; the lock file is the only wedge left to clear.
     local lock; lock="$(_swift_build_lock_path)"
-    echo "    swift test exceeded ${SWIFT_TEST_TIMEOUT}s — the SwiftPM workspace-lock deadlock."
-    echo "    clearing lock + .build and retrying ONCE: $lock"
-    pkill -f 'swift-(test|build|package|frontend)' 2>/dev/null || true
-    sleep 3
+    echo "    swift test wrote nothing for ${SWIFT_TEST_STALL}s — the SwiftPM workspace-lock deadlock."
+    echo "    clearing this workspace's lock and retrying ONCE: $lock"
     rm -f "$lock" 2>/dev/null || true
-    rm -rf "$PWD/.build" 2>/dev/null || true
     rc=0
     _swift_test_once "$out" || rc=$?
     if [ "$rc" -eq 124 ]; then
@@ -164,7 +172,7 @@ phase_swift() {
       # `fail` RECORDS a failure and returns; it does not exit. Without this return the
       # function fell through and reported swift-test failed TWICE, with a misleading
       # "retry completed" line printed after it had already given up. (Caught by running
-      # this path with SWIFT_TEST_TIMEOUT=5 before trusting it.)
+      # this path with a forced stall before trusting it.)
       fail "swift-test (deadlocked twice on the SwiftPM workspace lock)"
       return 1
     fi
