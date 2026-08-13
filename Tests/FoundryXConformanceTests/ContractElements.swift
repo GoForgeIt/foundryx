@@ -130,7 +130,24 @@ enum ContractElementDriver {
         // PART 3 — the binding itself: a transcript completed against one bound host
         // must not complete against another. Unreachable while part 2 is unmet, and
         // recorded as UNASKED rather than as a `false` that would read as refuted.
-        let bindingDifferential: PartVerdict = (handshakeExists == .met) ? .unmet : .notReached
+        //
+        // AND THE DAY PART 2 IS MET, THIS REFUSES RATHER THAN ANSWERING. There is no
+        // drive for the differential in this target, because there is no handshake to
+        // drive it against and writing one now would be inventing a protocol nobody has
+        // shipped. A hardcoded `unmet` here would be a verdict from a probe that never
+        // ran — it would keep the element red for a reason nobody measured, and it
+        // would go on saying `unmet` against a relay that bound the prologue perfectly.
+        // So the arrival of a handshake makes this suite LOUD, naming what must be built.
+        if handshakeExists == .met {
+            throw ConformanceStepError("""
+            prologue-bytes part 3 has no drive, and part 2 just became MET: the relay now speaks after \
+            the upgrade (\(after.trailing.count) byte(s) in \(String(format: "%.2f", after.windowWaited))s). \
+            The binding differential — a handshake transcript completed for one bound host must not \
+            complete against another (design/03-protocols.md P3 step 3) — is the question this element \
+            turns on and this target cannot yet ask it. BUILD IT; do not record a verdict for it.
+            """)
+        }
+        let bindingDifferential: PartVerdict = .notReached
 
         e.parts = [("connect-wire-refuses-a-prologue", wireRefusesPrologue),
                    ("post-upgrade-handshake-exists", handshakeExists),
