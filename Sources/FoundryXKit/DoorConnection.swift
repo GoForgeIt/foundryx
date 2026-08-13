@@ -283,7 +283,9 @@ public final class NoiseRelayChannel: MuxFrameChannel, @unchecked Sendable {
         let msg2 = try await Self.recvBinary(task)
         _ = try initiator.readMessage(msg2)
         try await task.send(.data(try initiator.writeMessage()))
-        if let expected = config.expectedDoorStatic, initiator.remoteStaticPublic != expected {
+        // THE PIN. Unconditional — `RelayConfig.expectedDoorStatic` is not optional, so
+        // this site has no unpinned form.
+        if initiator.remoteStaticPublic != config.expectedDoorStatic {
             task.cancel(with: .policyViolation, reason: nil)
             throw RelayError.doorIdentityMismatch
         }

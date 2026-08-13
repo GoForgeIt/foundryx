@@ -77,9 +77,9 @@ final class P1World: @unchecked Sendable {
 ///
 /// - *"Make the predicate assert only that the client logged `pinned=false`; the
 ///   behavioural assertion goes red because the client still completed the channel"*
-///   -> `testP1IsOpenBecauseTheClientProceeded`. The client DOES log `pinned=false`
-///   in the absent-identity case (`HostResolver.swift:96`), so a log-reading predicate
-///   reports the fix CLOSED. This test pins the observable to proceeding-or-not.
+///   -> `testP1IsClosedBecauseTheClientRefusesInBothCases`, which asserts over the
+///   transcript's OBSERVED outcomes (a completed positive control, a refused
+///   absent-identity case) and never over a log line.
 /// - *"drop the wrong-identity case; the two-case count goes red"*
 ///   -> `testP1DrivesExactlyTwoCases`.
 final class P1ConformanceTests: XCTestCase {
@@ -120,26 +120,49 @@ final class P1ConformanceTests: XCTestCase {
             """)
     }
 
-    /// The behavioural assertion. A predicate that read the log instead of the outcome
-    /// reddens here, because the client logs `pinned=false` and completes anyway.
-    func testP1IsOpenBecauseTheClientProceeded() throws {
+    /// The behavioural assertion.
+    ///
+    /// **This assertion was inverted on 2026-08-13, when the fail-open it recorded was
+    /// closed.** It previously required `.open`, and that was correct for as long as the
+    /// client completed a channel with no `machine_id`: `HostResolver.swift:94` coerced
+    /// the missing value to `""`, `hexToData` answered nil, and both consumers were
+    /// conditional, so no pin was checked. That transcript is recorded in
+    /// `evidence/mandatory-client-pin/02-P1-baseline-OPEN-before-the-fix.log`, and this
+    /// test passing on `.open` is what proves the defect was real before it was fixed.
+    ///
+    /// The pin is now mandatory — `RelayConfig.expectedDoorStatic` is not optional and
+    /// an unpinnable answer is refused at resolve — so the client refuses in BOTH cases
+    /// and P1 is CLOSED. What keeps this from being a green bought by a client that
+    /// simply stopped connecting: the predicate's POSITIVE CONTROL must complete a real
+    /// channel first (it refuses otherwise), and the wrong-identity case must refuse at
+    /// the HANDSHAKE rather than at resolve (the predicate refuses otherwise). Both are
+    /// asserted below.
+    func testP1IsClosedBecauseTheClientRefusesInBothCases() throws {
         let o = try requireOutcome()
-        XCTAssertEqual(o.status, .open,
+        XCTAssertEqual(o.status, .closed,
             """
-            P1 is CLOSED only if the client REFUSES in both cases. At this baseline the \
-            client completes the channel when the gateway omits `machine_id`: \
-            `HostResolver.swift:94` coerces the missing value to "", `hexToData` returns \
-            nil on the `!hex.isEmpty` guard, and both consumers are conditional \
-            (`RelayTransport.swift:109`, `DoorConnection.swift:286`), so no pin is checked. \
-            A status of CLOSED here means the predicate stopped observing \
-            proceeding-or-not — the substitute `spec.md` §5.1 forbids by name.
+            P1 is CLOSED only if the client REFUSES in both cases. It came back \
+            \(o.status.rawValue), which means the client still reached a channel for a \
+            gateway answer it could not pin.
             \(o.output)
             """)
-        XCTAssertTrue(o.output.contains("the client COMPLETED the channel"),
+        XCTAssertTrue(o.output.contains("positive control (correct machine_id): the client completed the channel"),
             """
-            The OPEN verdict must be carried by an OBSERVED completed channel, not by a \
-            log line and not by an absent assertion. Nothing in P1's transcript records \
-            the client completing:
+            The CLOSED verdict must sit on top of an OBSERVED completed channel for the \
+            CORRECT key. Without it, a client that refused everything — or a rig whose \
+            relay was never reachable — would look exactly like a client that pins.
+            \(o.output)
+            """)
+        XCTAssertTrue(o.output.contains("case absent-identity: the client REFUSED"),
+            """
+            The absent-identity case is the one that used to fail open, and its refusal \
+            must be recorded in the transcript rather than inferred from the status.
+            \(o.output)
+            """)
+        XCTAssertFalse(o.output.contains("case absent-identity: the client COMPLETED the channel"),
+            """
+            The transcript still records the client COMPLETING the channel with no \
+            door key. That is the P1 fail-open, verbatim, and it is not closed.
             \(o.output)
             """)
     }

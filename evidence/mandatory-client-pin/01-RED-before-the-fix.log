@@ -1,0 +1,33 @@
+[0/1] Planning build
+Building for debugging...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.48s)
+Test Suite 'Selected tests' started at 2026-08-13 15:01:11.855.
+Test Suite 'FoundryXPackageTests.xctest' started at 2026-08-13 15:01:11.856.
+Test Suite 'MandatoryDoorPinTests' started at 2026-08-13 15:01:11.856.
+Test Case '-[FoundryXConformanceTests.MandatoryDoorPinTests testThePhoneRefusesAHostItCannotPin]' started.
+/Users/nicholasrinard/Development/foundry-hearth/.claude/worktrees/wf_b2ca1f93-0bb-4/_scratch/fx-pin/Tests/FoundryXConformanceTests/ConformanceFeatureDriver.swift:64: error: -[FoundryXConformanceTests.MandatoryDoorPinTests testThePhoneRefusesAHostItCannotPin] : XCTAssertTrue failed - the-phone-refuses-a-host-it-cannot-pin scenarios failed:
+[failed] a host designation the phone cannot turn into a door key is refused (row 1): the phone COMPLETED the resolve and built a relay configuration carrying NO PIN. An answer that cannot be turned into a door key must produce no configuration at all — otherwise the connect proceeds unpinned, which is the fail-open P1 records.
+[failed] a host designation the phone cannot turn into a door key is refused (row 2): the phone COMPLETED the resolve and built a relay configuration carrying NO PIN. An answer that cannot be turned into a door key must produce no configuration at all — otherwise the connect proceeds unpinned, which is the fail-open P1 records.
+[failed] a host designation the phone cannot turn into a door key is refused (row 3): the phone COMPLETED the resolve and built a relay configuration carrying NO PIN. An answer that cannot be turned into a door key must produce no configuration at all — otherwise the connect proceeds unpinned, which is the fail-open P1 records.
+[failed] a host designation the phone cannot turn into a door key is refused (row 4): the phone COMPLETED the resolve and built a relay configuration carrying a pin of 31 bytes. An answer that cannot be turned into a door key must produce no configuration at all — otherwise the connect proceeds unpinned, which is the fail-open P1 records.
+[failed] a host designation the phone cannot turn into a door key is refused (row 5): the phone COMPLETED the resolve and built a relay configuration carrying NO PIN. An answer that cannot be turned into a door key must produce no configuration at all — otherwise the connect proceeds unpinned, which is the fail-open P1 records.
+[failed] a host designation the phone cannot turn into a door key is refused (row 6): the phone COMPLETED the resolve and built a relay configuration carrying NO PIN. An answer that cannot be turned into a door key must produce no configuration at all — otherwise the connect proceeds unpinned, which is the fail-open P1 records.
+[failed] a host designation the phone cannot turn into a door key is refused (row 7): the phone COMPLETED the resolve and built a relay configuration carrying NO PIN. An answer that cannot be turned into a door key must produce no configuration at all — otherwise the connect proceeds unpinned, which is the fail-open P1 records.
+[failed] a host designation the phone cannot turn into a door key is refused (row 8): the phone COMPLETED the resolve and built a relay configuration carrying NO PIN. An answer that cannot be turned into a door key must produce no configuration at all — otherwise the connect proceeds unpinned, which is the fail-open P1 records.
+[failed] a host designation the phone cannot turn into a door key is refused (row 9): the phone COMPLETED the resolve and built a relay configuration carrying a pin of 32 bytes. An answer that cannot be turned into a door key must produce no configuration at all — otherwise the connect proceeds unpinned, which is the fail-open P1 records.
+[failed] the refusal says the host could not be pinned: the phone COMPLETED the resolve and built a relay configuration carrying NO PIN. An answer that cannot be turned into a door key must produce no configuration at all — otherwise the connect proceeds unpinned, which is the fail-open P1 records.
+[failed] a relay configuration has no way to spell "no pin": `RelayConfig.expectedDoorStatic` is Optional<Data> — an OPTIONAL. While it is optional, `nil` has a spelling at both dial sites (`RelayTransport.roundTrip`, `NoiseRelayChannel.connect`), each of which reads it with `if let` and simply skips the pin. The type is the guard: with a non-optional there is no unpinned dial to write.
+/Users/nicholasrinard/Development/foundry-hearth/.claude/worktrees/wf_b2ca1f93-0bb-4/_scratch/fx-pin/Tests/FoundryXConformanceTests/ConformanceFeatureDriver.swift:65: error: -[FoundryXConformanceTests.MandatoryDoorPinTests testThePhoneRefusesAHostItCannotPin] : XCTAssertEqual failed: ("11") is not equal to ("0") - the-phone-refuses-a-host-it-cannot-pin: expected 0 failed scenarios
+Test Case '-[FoundryXConformanceTests.MandatoryDoorPinTests testThePhoneRefusesAHostItCannotPin]' failed (0.146 seconds).
+Test Suite 'MandatoryDoorPinTests' failed at 2026-08-13 15:01:12.002.
+	 Executed 1 test, with 2 failures (0 unexpected) in 0.146 (0.146) seconds
+Test Suite 'FoundryXPackageTests.xctest' failed at 2026-08-13 15:01:12.002.
+	 Executed 1 test, with 2 failures (0 unexpected) in 0.146 (0.146) seconds
+Test Suite 'Selected tests' failed at 2026-08-13 15:01:12.002.
+	 Executed 1 test, with 2 failures (0 unexpected) in 0.146 (0.147) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.
+rc=1

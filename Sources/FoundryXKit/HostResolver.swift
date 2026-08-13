@@ -36,12 +36,18 @@ public enum HostResolveError: Error, LocalizedError {
     case noHostDesignated
     case http(Int, String)
     case badResponse
+    /// The gateway named a host whose `machine_id` is not a door key, so there is
+    /// nothing to pin. Carries the reason for the log; the person is told the
+    /// machine could not be verified.
+    case hostCannotBePinned(String)
 
     public var errorDescription: String? {
         switch self {
         case .noHostDesignated: return "No desktop is designated as your host yet — open Solleva on your Mac and press “Make this machine the host”."
         case .http(let c, let b): return "Host lookup failed (\(c)): \(b)"
         case .badResponse: return "Unexpected response from the gateway"
+        case .hostCannotBePinned(let why):
+            return "Your Mac's identity could not be verified, so Solleva will not connect to it (\(why)). Open Solleva on your Mac and press “Make this machine the host” again."
         }
     }
 }
@@ -55,17 +61,54 @@ public struct HostResolver: Sendable {
         self.log = log
     }
 
-    /// Decode a hex string (e.g. the door's 64-char pubkey) to bytes; nil if not
-    /// valid even-length hex.
-    static func hexToData(_ hex: String) -> Data? {
-        guard !hex.isEmpty, hex.count % 2 == 0 else { return nil }
-        var out = Data(capacity: hex.count / 2)
+    /// The characters a `machine_id` may be spelled with. Lowercase only, on purpose —
+    /// see `doorStaticKey(fromMachineId:)`.
+    private static let machineIdAlphabet = Set("0123456789abcdef")
+
+    /// The door's X25519 static public key, decoded from the `machine_id` the gateway
+    /// named — or a REFUSAL.
+    ///
+    /// This replaces `hexToData`, which returned `nil` for anything it could not decode
+    /// and left the caller to decide what `nil` meant. The caller decided it meant "no
+    /// pin", which is how a missing `machine_id` became an unpinned dial. There is no
+    /// `nil` here: every way an answer fails to be a door key is a thrown refusal that
+    /// names itself.
+    ///
+    /// What it accepts is exactly one spelling of exactly one thing: 64 LOWERCASE hex
+    /// characters, which decode to the 32 bytes of an X25519 public key.
+    ///
+    /// * **not 64 characters** — a shorter even-length string used to decode happily
+    ///   into a short "pin" that could never equal a 32-byte key. That is a pin that
+    ///   only ever refuses, i.e. a broken connect wearing the costume of a control.
+    /// * **uppercase** — `machine_id_from_static_key` emits lowercase, and the host
+    ///   registry treats a differently-spelled id as a DIFFERENT id. Normalising the
+    ///   spelling here would let the phone pin against an id the registry never issued;
+    ///   the client refuses the spelling rather than repairing it.
+    static func doorStaticKey(fromMachineId raw: Any?) throws -> Data {
+        guard let value = raw else {
+            throw HostResolveError.hostCannotBePinned("the gateway named no machine_id for this host")
+        }
+        guard let hex = value as? String else {
+            throw HostResolveError.hostCannotBePinned("the gateway's machine_id is not text")
+        }
+        guard hex.count == 64 else {
+            throw HostResolveError.hostCannotBePinned("the gateway's machine_id is \(hex.count) characters; a door key is 64")
+        }
+        guard hex.allSatisfy({ machineIdAlphabet.contains($0) }) else {
+            throw HostResolveError.hostCannotBePinned("the gateway's machine_id is not lowercase hexadecimal")
+        }
+        var out = Data(capacity: 32)
         var idx = hex.startIndex
         while idx < hex.endIndex {
             let next = hex.index(idx, offsetBy: 2)
-            guard let byte = UInt8(hex[idx..<next], radix: 16) else { return nil }
+            guard let byte = UInt8(hex[idx..<next], radix: 16) else {
+                throw HostResolveError.hostCannotBePinned("the gateway's machine_id did not decode")
+            }
             out.append(byte)
             idx = next
+        }
+        guard out.count == 32 else {
+            throw HostResolveError.hostCannotBePinned("the gateway's machine_id decoded to \(out.count) bytes; an X25519 public key is 32")
         }
         return out
     }
@@ -87,19 +130,30 @@ public struct HostResolver: Sendable {
               let tunnel = obj["tunnel_id"] as? String else {
             throw HostResolveError.badResponse
         }
-        // PIN the door's static key: the resolved `machine_id` IS the door's X25519
-        // public key (hex). Pinning it means a rogue door that registered under this
-        // tunnel fails the Noise handshake — so the relay needs no door-registration
-        // secret (open registration is safe with this pin).
-        let machineId = (obj["machine_id"] as? String) ?? ""
-        let expectedDoor = Self.hexToData(machineId)
-        log?.info("resolved host tunnel=\(tunnel) label=\((obj["label"] as? String) ?? "?") pinned=\(expectedDoor != nil)")
-        return RelayConfig(
+        // THE PIN IS MANDATORY, AND THIS IS WHERE IT IS ENFORCED.
+        //
+        // The resolved `machine_id` IS the door's X25519 public key (hex). Pinning it is
+        // what makes a rogue door that registered under this tunnel fail the Noise
+        // handshake. Until 2026-08-13 this read `(obj["machine_id"] as? String) ?? ""`
+        // and handed the empty string to a decoder that answered `nil`, and `nil` meant
+        // NO PIN — so an answer carrying no door key produced a configuration the phone
+        // dialled anyway, and the channel completed against whoever was parked there.
+        // The line above this one used to say open door registration was safe "with this
+        // pin"; the pin was optional, so it was not.
+        //
+        // An answer we cannot pin is now a refusal, and the refusal happens HERE, before
+        // any socket is opened — there is no configuration to dial, so there is no
+        // connect left to fail open. The relay-side answer (a door that must prove it
+        // was installed by us) is a separate control and does not replace this one.
+        let expectedDoor = try Self.doorStaticKey(fromMachineId: obj["machine_id"])
+        let config = RelayConfig(
             relayURL: remote.relayWSURL,
             tunnelId: tunnel,
             staticPrivate: PhoneStaticKey.loadOrCreate(),
             expectedDoorStatic: expectedDoor
         )
+        log?.info("resolved host tunnel=\(tunnel) label=\((obj["label"] as? String) ?? "?") door=\(config.pinnedDoorPrefix)")
+        return config
     }
 }
 
