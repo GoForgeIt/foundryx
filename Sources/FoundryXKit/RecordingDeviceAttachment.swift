@@ -124,18 +124,27 @@ public enum RecordingDeviceAttachPresentation {
     public static let notRememberedLine =
         "FoundryX connected to that device but couldn't save it to your account. Try again."
 
+    /// THE LINK CAME UP AND NOTHING ON THE OTHER END WAS UNDERSTOOD. A separate fact from
+    /// `unreachableLine`: telling someone to bring a device closer when the app is already
+    /// connected to it sends them to fix the one thing that is not broken. It offers no retry
+    /// because a second tap cannot change what the device speaks.
+    public static let unrecognisedLine =
+        "FoundryX connected to that device, but it isn't one this version can record from."
+
     /// Every line this surface can render, so "it names no vendor" is held over the
     /// population rather than over whichever string a test author remembered.
-    public static let everyLine: [String] = [connectingLine, unreachableLine, notRememberedLine]
+    public static let everyLine: [String] = [connectingLine, unreachableLine, notRememberedLine,
+                                             unrecognisedLine]
 
     /// The inline line an outcome earns, or nil when the outcome is not an inline message —
-    /// `.adopted` closes the sheet, `.live` / `.unrecognised` hand the tap to the shipped
-    /// pairing path, and `.setupUnavailable` / `.recoveryRequired` are whole screens.
+    /// `.adopted` closes the sheet, `.live` hands the tap to the shipped pairing path, and
+    /// `.setupUnavailable` / `.recoveryRequired` are whole screens.
     public static func inlineMessage(for outcome: RecordingDeviceAttachOutcome) -> String? {
         switch outcome {
         case .unreachable:          return unreachableLine
         case .adoptionNotPersisted: return notRememberedLine
-        case .adopted, .setupUnavailable, .recoveryRequired, .live, .unrecognised,
+        case .unrecognised:         return unrecognisedLine
+        case .adopted, .setupUnavailable, .recoveryRequired, .live,
              .mintRefused, .mintNotVerified, .keyAcceptedNotDurable, .keyNotKept,
              .custodyUnreadable:
             // Each of these is a whole screen with its own copy, not a one-line aside. A mint

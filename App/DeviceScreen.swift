@@ -934,10 +934,14 @@ private struct RecordingDeviceConnectSheet: View {
 /// landed on, and the fall-through to the shipped pairing path. It derives no copy — every
 /// string it shows comes from `RecordingDeviceAttachPresentation`.
 ///
-/// THE FALL-THROUGH IS THE REASON OMI STILL PAIRS. `.live` and `.unrecognised` hand the tap
-/// straight to `DeviceManager.connect`, unchanged, and so does every failure of the probe
-/// itself — a stored-file leg that could swallow an Omi pairing would be a bad trade for a
-/// device class nobody can attach yet.
+/// THE FALL-THROUGH IS THE REASON OMI STILL PAIRS. `.live` hands the tap straight to
+/// `DeviceManager.connect`, unchanged — a stored-file leg that could swallow an Omi pairing
+/// would be a bad trade for a device class nobody can attach yet.
+///
+/// `.unrecognised` IS NOT PART OF THAT FALL-THROUGH, and used to be. A device that connected
+/// and spoke nothing this build knows was handed to the live pairing path and the sheet was
+/// dismissed as though it had been adopted, with no message — the reported "tapping it just
+/// cycles back to the list". It now earns its own line and the sheet stays where it is.
 @MainActor
 final class RecordingDeviceAttachModel: ObservableObject {
     /// The row currently being attached, so it can say `Connecting…` and the rest can be
@@ -1022,11 +1026,16 @@ final class RecordingDeviceAttachModel: ObservableObject {
             case .recoveryRequired:
                 self.ceremonyScreen = .didNotFinish
                 self.showingCeremony = true
-            case .live, .unrecognised:
+            case .live:
                 // THE SHIPPED PAIRING PATH, UNTOUCHED. This is the branch an Omi takes.
                 device.connect(found)
                 onAdopted()
-            case .adoptionNotPersisted, .unreachable:
+            case .unrecognised, .adoptionNotPersisted, .unreachable:
+                // NOT AN ADOPTION, SO NOT A DISMISSAL. `.unrecognised` used to share the
+                // branch above: a device that connected and spoke nothing this build knows was
+                // handed to the live pairing path and the sheet closed with no message, which
+                // is what "tapping it just cycles back to the list" was. The line assigned to
+                // `inlineMessage` above stays on screen and the sheet stays open.
                 break
             }
         }

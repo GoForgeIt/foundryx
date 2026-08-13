@@ -94,6 +94,19 @@ Feature: One device list wires Pocket and Omi as peers
     And FoundryX sent that recorder nothing at all
     And the account does not remember that recorder
 
+  Scenario: a device that connects but speaks nothing this build knows says so and stays put
+    Given a signed-in account and a discovered device that connects and speaks nothing this build knows
+    When I tap that discovered device
+    Then the app says it connected to that device but cannot record from it
+    And the app does not report that device as added
+    And that message is not the one shown when the app never reached the device
+
+  Scenario: a device that speaks the live-audio protocol still pairs exactly as it always has
+    Given a signed-in account and a discovered device that speaks the live-audio protocol
+    When I tap that discovered device
+    Then the app hands that device to the shipped pairing path and closes the sheet
+    And the app shows no failure message for that device
+
   Scenario: the pairing scan is not restricted to one vendor's service
     Given the connect affordance has started a pairing scan
     Then the scan carries no service filter at all

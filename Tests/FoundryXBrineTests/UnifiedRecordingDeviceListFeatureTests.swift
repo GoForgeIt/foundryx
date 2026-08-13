@@ -27,12 +27,14 @@ final class UnifiedRecordingDeviceListFeatureTests: ProcessGlobalStateTestCase {
                 registry: StepRegistry(UnifiedDeviceListSteps.make(world: world)))
             // Pin the POPULATION: the runner asserts only that nothing FAILED, so deleting a
             // scenario would otherwise leave this suite green.
-            XCTAssertEqual(result.passed, 12,
-                           "unified-recording-device-list must run all 12 scenarios — one per "
+            XCTAssertEqual(result.passed, 14,
+                           "unified-recording-device-list must run all 14 scenarios — one per "
                                + "acceptance criterion in the track spec, plus the ordering, "
-                               + "relaunch and honest-capability cases, plus the three that "
+                               + "relaunch and honest-capability cases, plus the five that "
                                + "hold the APP'S OWN adoption chain: the tap that adopts, the "
-                               + "recorder FoundryX has no key for, and the unfiltered scan")
+                               + "recorder FoundryX has no key for, the unfiltered scan, the "
+                               + "device that connects and speaks nothing this build knows, and "
+                               + "the live-audio device that must still pair")
         } catch {
             world.cleanup()
             throw error
@@ -180,6 +182,8 @@ private enum UnifiedDeviceListSteps {
             "a signed-in account that pairs a Pocket through the shipped adoption seam",
             "a signed-in account and a discovered recorder FoundryX already holds the key for",
             "a signed-in account and a discovered recorder FoundryX holds no key for",
+            "a signed-in account and a discovered device that connects and speaks nothing this build knows",
+            "a signed-in account and a discovered device that speaks the live-audio protocol",
             "the connect affordance has started a pairing scan",
         ]
         /// The chain the app runs on a tap is ASYNCHRONOUS end to end — a radio, a protocol
@@ -235,6 +239,11 @@ private enum UnifiedDeviceListSteps {
             "the account does not remember that recorder",
             "the scan carries no service filter at all",
             "a device advertising no live-audio service still answers it and appears in the list",
+            "the app says it connected to that device but cannot record from it",
+            "the app does not report that device as added",
+            "that message is not the one shown when the app never reached the device",
+            "the app hands that device to the shipped pairing path and closes the sheet",
+            "the app shows no failure message for that device",
         ]
         var steps = givens.map { phrase in
             defineStep(phrase) { context, _, _ in
@@ -315,6 +324,12 @@ private final class UnifiedDeviceListWorld {
     /// nothing for it regardless of what any other scenario adopted.
     private static let unprovisionedPeripheralId =
         UUID(uuidString: "FFFFFFFF-9B44-4C1E-9A22-7E5F0D3C1B08")!
+    /// A device that connects and speaks NEITHER protocol — the `.unrecognised` case.
+    private static let mutePeripheralId =
+        UUID(uuidString: "AAAAAAAA-9B44-4C1E-9A22-7E5F0D3C1B08")!
+    /// A device that exposes the LIVE-AUDIO service — the branch an Omi takes.
+    private static let livePeripheralId =
+        UUID(uuidString: "BBBBBBBB-9B44-4C1E-9A22-7E5F0D3C1B08")!
     /// A well-formed 16-byte ASCII session secret, as the protocol client requires.
     private static let sessionSecret = "A!b2-C_d.E?9+x=Z"
 
@@ -493,6 +508,29 @@ private final class UnifiedDeviceListWorld {
                                              deviceName: "PKT02_BLUE_ffffffff",
                                              acceptedSecret: Self.sessionSecret)
             // EMPTY ON PURPOSE. This is every recorder in the world today.
+            secrets = InMemoryPocketSecretStore()
+            inputs = []
+
+        case "a signed-in account and a discovered device that connects and speaks nothing this build knows":
+            try signIn()
+            // NEITHER PROTOCOL. It answers, it discovers, and everything it exposes is a
+            // generic device-information service — the state `.unrecognised` names. This is
+            // the device that used to be adopted as though it were an Omi.
+            attachStack = FakePocketBLEStack(deviceId: Self.mutePeripheralId,
+                                             deviceName: "Pocket",
+                                             exposesStoredFileProtocol: false,
+                                             alsoExposesOmiAudioService: false)
+            secrets = InMemoryPocketSecretStore()
+            inputs = []
+
+        case "a signed-in account and a discovered device that speaks the live-audio protocol":
+            try signIn()
+            // THE OMI SHAPE, and the reason this pair of scenarios exists together: the fix
+            // for the one above must not cost this one its pairing.
+            attachStack = FakePocketBLEStack(deviceId: Self.livePeripheralId,
+                                             deviceName: "Omi",
+                                             exposesStoredFileProtocol: false,
+                                             alsoExposesOmiAudioService: true)
             secrets = InMemoryPocketSecretStore()
             inputs = []
 
@@ -1124,6 +1162,85 @@ private final class UnifiedDeviceListWorld {
                           "the device answered the scan and never reached the list: "
                               + "\(device.discovered.map(\.name))")
 
+        // ── a device that connects and speaks nothing this build knows ───────
+        case "the app says it connected to that device but cannot record from it":
+            XCTAssertEqual(attachOutcome, .unrecognised,
+                           "a device exposing neither the stored-file protocol nor the "
+                               + "live-audio service produced "
+                               + "\(String(describing: attachOutcome)) — this scenario is "
+                               + "measuring some other outcome")
+            let line = RecordingDeviceAttachPresentation.inlineMessage(for: .unrecognised)
+            XCTAssertEqual(line, RecordingDeviceAttachPresentation.unrecognisedLine,
+                           "a tap that connected and understood nothing produced "
+                               + "\(String(describing: line)) — with no line the sheet closes "
+                               + "in silence and the person is returned to the list with no "
+                               + "idea whether anything happened")
+            XCTAssertTrue(
+                RecordingDeviceAttachPresentation.everyLine.contains(
+                    RecordingDeviceAttachPresentation.unrecognisedLine),
+                "the line this outcome earns is not in `everyLine`, so the brand-free and "
+                    + "non-empty properties held over the population skip it")
+
+        case "the app does not report that device as added":
+            // `swift test` cannot compile `App/`, so the branch itself is the evidence: no
+            // case that handles `.unrecognised` may run the adoption dismissal or hand the
+            // device to the live pairing path. That pairing IS what "it just cycles back to
+            // the list" was.
+            let branches = try Self.branches(of: Self.deviceScreenCode(),
+                                             mentioning: ".unrecognised")
+            XCTAssertFalse(branches.isEmpty,
+                           "no branch in the Devices screen mentions `.unrecognised` at all, "
+                               + "so this gate is vacuous")
+            for branch in branches {
+                XCTAssertFalse(branch.body.contains("onAdopted("),
+                               "`\(branch.label)` dismisses the connect sheet as a successful "
+                                   + "adoption. A device that connected and spoke nothing this "
+                                   + "build knows was NOT adopted, and closing the sheet with "
+                                   + "no message is exactly the reported defect: tapping the "
+                                   + "recorder \"just cycles back to the list\"")
+                XCTAssertFalse(branch.body.contains("device.connect("),
+                               "`\(branch.label)` hands a device this build understood nothing "
+                                   + "of to the live pairing path, which then remembers it as "
+                                   + "a live device")
+            }
+
+        case "that message is not the one shown when the app never reached the device":
+            XCTAssertNotEqual(RecordingDeviceAttachPresentation.unrecognisedLine,
+                              RecordingDeviceAttachPresentation.unreachableLine,
+                              "\"it connected and I understood nothing\" and \"I never "
+                                  + "reached it\" are different facts, and collapsing them "
+                                  + "sends someone to move closer to a device that is already "
+                                  + "connected")
+            XCTAssertNil(RecordingDeviceAttachPresentation.inlineMessage(for: .adopted(
+                identity: try Self.pocketIdentity,
+                displayName: Self.pocketName,
+                negotiatedProtocol: PocketRecordingDeviceBridge.protocolIdentifier)),
+                         "an adoption that WORKED now renders a failure line too, so the line "
+                             + "above says nothing about failure")
+
+        // ── the live-audio device, which must still pair ─────────────────────
+        case "the app hands that device to the shipped pairing path and closes the sheet":
+            XCTAssertEqual(attachOutcome, .live,
+                           "a device exposing the live-audio service produced "
+                               + "\(String(describing: attachOutcome)) — the Omi path is gone")
+            let live = try Self.branches(of: Self.deviceScreenCode(), mentioning: ".live")
+                .filter { $0.body.contains("device.connect(found)") }
+            XCTAssertEqual(live.count, 1,
+                           "exactly one branch may run the shipped pairing path, and "
+                               + "\(live.count) do — a live device tapped in the connect sheet "
+                               + "no longer pairs at all, or more than one outcome now claims "
+                               + "to be one")
+            XCTAssertTrue(live[0].body.contains("onAdopted("),
+                          "`\(live[0].label)` pairs the device and never closes the sheet")
+            XCTAssertFalse(live[0].label.contains(".unrecognised"),
+                           "`\(live[0].label)` still routes an unrecognised device through the "
+                               + "Omi pairing path — the two outcomes are back on one branch")
+
+        case "the app shows no failure message for that device":
+            XCTAssertNil(RecordingDeviceAttachPresentation.inlineMessage(for: .live),
+                         "a device that pairs normally now renders a failure line under the "
+                             + "list it just joined")
+
         default:
             throw BrineStepError("unhandled Then: \(phrase)")
         }
@@ -1150,6 +1267,47 @@ private final class UnifiedDeviceListWorld {
         let url = AppSourceTree.repoRoot.appendingPathComponent("App/DeviceScreen.swift")
         return AppSourceTree.withoutComments(
             of: try String(contentsOf: url, encoding: .utf8))
+    }
+
+    fileprivate struct SwitchBranch {
+        let label: String
+        let body: String
+    }
+
+    /// Every `case …:` label mentioning `token`, WITH THE BODY THAT RUNS FOR IT.
+    ///
+    /// Asserting on the whole file — "the source contains `onAdopted()`" — cannot tell which
+    /// outcome runs it, which is precisely the distinction the defect turned on: `.live` and
+    /// `.unrecognised` shared one branch and one of them had no business being there. A body
+    /// ends at the first non-empty line indented no further than its own label, so the switch's
+    /// closing brace ends the last branch rather than swallowing the rest of the file.
+    fileprivate static func branches(of code: String,
+                                     mentioning token: String) -> [SwitchBranch] {
+        var found: [SwitchBranch] = []
+        var label: String?
+        var labelIndent = 0
+        var body: [String] = []
+        func flush() {
+            if let label { found.append(SwitchBranch(label: label, body: body.joined(separator: "\n"))) }
+            label = nil
+            body = []
+        }
+        for raw in code.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(raw)
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let indent = line.count - line.drop(while: { $0 == " " }).count
+            if trimmed.hasPrefix("case ") && trimmed.hasSuffix(":") {
+                flush()
+                label = trimmed
+                labelIndent = indent
+                continue
+            }
+            guard label != nil else { continue }
+            if !trimmed.isEmpty && indent <= labelIndent { flush(); continue }
+            body.append(line)
+        }
+        flush()
+        return found.filter { $0.label.contains(token) }
     }
 }
 
