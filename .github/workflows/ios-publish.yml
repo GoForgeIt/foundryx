@@ -90,6 +90,13 @@ jobs:
           ( cd foundry && cargo build --release -p foundry-relay --bin foundry-relay )
           export FOUNDRYX_CONFORMANCE_RELAY_BIN="$PWD/foundry/target/release/foundry-relay"
           [ -x "$FOUNDRYX_CONFORMANCE_RELAY_BIN" ]
+          # The P1/A9 conformance targets start the BLIND TUNNEL as a real process —
+          # a different binary from the P3 relay (TunnelRelayFixture pins its shipped
+          # identifier). Absent, every P1 predicate is a refusal: exactly how run
+          # attempt 2 failed on 2026-08-12.
+          ( cd foundry && cargo build --release -p foundryx-tunnel --bin foundryx-relay-server )
+          export FOUNDRYX_CONFORMANCE_TUNNEL_BIN="$PWD/foundry/target/release/foundryx-relay-server"
+          [ -x "$FOUNDRYX_CONFORMANCE_TUNNEL_BIN" ]
           cd foundryx
           swift build
           # The cheap phases, and the ones that actually go red — first and alone.
