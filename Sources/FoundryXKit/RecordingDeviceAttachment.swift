@@ -21,24 +21,20 @@
 // factory — which is what makes the Brine scenario below evidence about the app rather than
 // evidence about a fake.
 //
-// THE ONE STEP THIS BUILD GENUINELY CANNOT TAKE, AND IT IS NOT PAPERED OVER. Attaching a
-// stored-file recorder requires a 16-byte session secret. FoundryX can RESTORE one it already
-// holds (`PocketOnboardingCoordinator.restore`), and that whole leg runs here for real. It
-// cannot MINT one: `provisionFactoryFresh` is documented as "called only for a factory-fresh
-// unit after the firmware alphabet/entropy gate is met", and DESIGN-pocket-connect.md §3.6 /
-// T2 req 3 hold that gate shut until an evidenced firmware-compatible key alphabet and a
-// security-reviewed entropy policy exist. So a recorder FoundryX has never provisioned comes
-// back `.setupUnavailable` — the shipped §3.6 screen, which says out loud that setup is off
-// and that the recorder was sent nothing. That is the honest stopping point, and it is a
-// RETURN VALUE rather than a comment so the UI has to render it.
+// CUSTODY, AND WHERE THE MINT ACTUALLY LIVES NOW. Attaching a stored-file recorder requires a
+// 16-byte session secret. FoundryX RESTORES one it already holds through
+// `PocketOnboardingCoordinator.restore`, and — only from the owner's explicit confirmation on
+// the consent screen, which is the only thing that can construct a `PocketMintConsent` — it
+// MINTS one through `coordinator.mintFactoryFresh` below. A plain tap passes `mint: nil` and a
+// recorder FoundryX holds no key for comes back `.setupUnavailable`, the shipped §3.6 answer,
+// which says out loud that nothing was written.
 //
-// SAID EVEN MORE PLAINLY, BECAUSE IT IS THE THING MOST EASILY OVERCLAIMED: nothing anywhere
-// in this app calls `provisionFactoryFresh`, so on a real phone today the Keychain holds a
-// secret for no recorder and EVERY tap on a stored-file device lands on `.setupUnavailable`.
-// The chain above it is complete and proven end to end — the transport, the client, the
-// handshake, the bridge, the adoption, the store, the row — and the key is the one link that
-// is still missing. It is missing on purpose, it is visible in the UI, and it is the single
-// change that turns this from "reachable" into "reaches".
+// (THIS PARAGRAPH USED TO SAY THE OPPOSITE — that "nothing anywhere in this app calls
+// `provisionFactoryFresh`" and that "EVERY tap on a stored-file device lands on
+// `.setupUnavailable`". Both were true when they were written and neither has been true since
+// the consent screen shipped: `App/DeviceScreen.swift`'s `confirmMintAfterOwnerConsent()`
+// calls `attach(…, mint:)`, which reaches the mint below. A comment that is a post-mortem of a
+// gap already closed reads, to the next person, as current status.)
 //
 // WHAT IT DELIBERATELY DOES NOT DO. It does not decide that a device is live. If the
 // peripheral speaks no stored-file protocol, it says so and hands the tap back to the shipped
@@ -101,6 +97,18 @@ public enum RecordingDeviceAttachOutcome: Equatable, Sendable {
     case unrecognised
     /// It never got far enough to establish anything.
     case unreachable(String)
+}
+
+/// What a scoped session produced — the body's value, or the single reason there was no
+/// session to run it on.
+///
+/// IT IS NOT `Result`. A `Result<T, RecordingDeviceAttachOutcome>` would need the outcome to
+/// be an `Error`, and it is not one: `.live` and `.setupUnavailable` are things that happened,
+/// not failures, and the two most-likely call sites (`try?`, `get()`) would flatten exactly
+/// the distinctions the enum exists to keep.
+public enum RecordingDeviceSessionResult<Value: Sendable>: Sendable {
+    case ran(Value)
+    case unavailable(RecordingDeviceAttachOutcome)
 }
 
 /// The copy a tap can produce, in the kit rather than in the view — for the same reason every
@@ -397,12 +405,99 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
             || PocketCharacteristicMap.fallback.required.isSubset(of: available)
     }
 
+    /// AN AUTHENTICATED SESSION THAT OUTLIVES THE CALL THAT OPENED IT.
+    ///
+    /// WHAT THIS EXISTS TO FIX. Every stored-file path in this file used to close the protocol
+    /// session the instant custody was settled — `adoptStoredFileRecorder` calls
+    /// `client.close()` on every single branch, and `attach` then calls `teardown()`. So the
+    /// client was never handed to anybody, and `PocketBLEClient.listDates`,
+    /// `listRecordings(on:)` and `download(_:)` had no caller anywhere in `App/` or `Sources/`
+    /// — the app could reach an authenticated recorder and had no way to ask it anything.
+    /// This is the scope in which asking is possible.
+    ///
+    /// IT NEVER MINTS. There is no `mint:` parameter, deliberately: a key is written to a
+    /// recorder from exactly one place (`attach(…, mint:)`, from the consent screen), and a
+    /// second door into `provisionFactoryFresh` is the kind of thing that gets added "just for
+    /// this one caller" and then ships.
+    ///
+    /// SINGLE USE, exactly like `attach`. `teardown()` retires this object's link and its
+    /// generation; a second call gets `.linkDropped`. Callers make a fresh attachment per
+    /// check, which is what `PocketRecorderCheck.run` does.
+    public func withAuthenticatedSession<T: Sendable>(
+        peripheralIdentifier id: UUID,
+        advertisedName: String,
+        _ body: (PocketBLEClient, PocketAuthenticatedIdentity) async -> T
+    ) async -> RecordingDeviceSessionResult<T> {
+        do {
+            try await reachDiscoveredGraph(of: id)
+        } catch {
+            teardown()
+            return .unavailable(.unreachable(describe(error)))
+        }
+        guard speaksStoredFileProtocol else {
+            let sawAudio = lock.withLock { serviceUUIDs.contains(OmiUUID.audioService) }
+            teardown()
+            return .unavailable(sawAudio ? .live : .unrecognised)
+        }
+        switch await establishStoredFileSession(id: id, advertisedName: advertisedName,
+                                                mint: nil) {
+        case .blocked(let outcome):
+            teardown()
+            return .unavailable(outcome)
+        case .ready(let client, let identity):
+            let value = await body(client, identity)
+            // THE SESSION IS CLOSED HERE AND NOWHERE ELSE ON THIS PATH, so a body that
+            // returned early cannot leave a recorder holding an open authenticated link.
+            await client.close()
+            teardown()
+            return .ran(value)
+        }
+    }
+
+    /// The outcome of the custody handshake: either a live authenticated session, or the
+    /// single `RecordingDeviceAttachOutcome` that says why there isn't one.
+    ///
+    /// Every `.blocked` value has ALREADY closed the client and harvested any key the
+    /// coordinator was holding, so a caller cannot forget to.
+    private enum StoredFileSession {
+        case ready(PocketBLEClient, PocketAuthenticatedIdentity)
+        case blocked(RecordingDeviceAttachOutcome)
+    }
+
     private func adoptStoredFileRecorder(
         id: UUID, advertisedName: String, mint: PocketMintConsent?
     ) async -> RecordingDeviceAttachOutcome {
+        switch await establishStoredFileSession(id: id, advertisedName: advertisedName,
+                                                mint: mint) {
+        case .blocked(let outcome):
+            return outcome
+        case .ready(let client, let identity):
+            let observation = await PocketRecordingDeviceBridge.observe(
+                client: client, identity: identity, advertisedName: advertisedName)
+            await client.close()
+            switch RecordingDeviceAdoption.remember(observation) {
+            case .recorded:
+                log?.info("recording device: adopted a stored-file recorder")
+                return .adopted(identity: observation.identity,
+                                displayName: observation.reportedName,
+                                negotiatedProtocol: PocketRecordingDeviceBridge.protocolIdentifier)
+            case .noMatchingRecord:
+                return .adoptionNotPersisted("the account store had no record to update")
+            case .unavailable(let reason):
+                log?.error("recording device: adoption NOT PERSISTED — "
+                    + RecordingDeviceLogRedaction.redactingAccountScopes(reason))
+                return .adoptionNotPersisted(reason)
+            }
+        }
+    }
+
+    private func establishStoredFileSession(
+        id: UUID, advertisedName: String, mint: PocketMintConsent?
+    ) async -> StoredFileSession {
         let map = characteristicMap()
         guard let map, let peripheral = lock.withLock({ peripheral }) else {
-            return .unreachable("the recorder stopped exposing its protocol characteristics")
+            return .blocked(
+                .unreachable("the recorder stopped exposing its protocol characteristics"))
         }
         // Subscribe BEFORE the first command: a write issued before the notify state settles
         // has nowhere to answer, which is a silent hang rather than an error.
@@ -417,12 +512,12 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
 
         let transport = PocketSeamTransport(link: self, timeout: deadlines.control)
         guard let client = try? await PocketBLEClient.connect(transport: transport) else {
-            return .unreachable("the recorder exposed no protocol this build speaks")
+            return .blocked(.unreachable("the recorder exposed no protocol this build speaks"))
         }
         guard let identity = try? PocketAuthenticatedIdentity(peripheralIdentifier: id.uuidString)
         else {
             await client.close()
-            return .unreachable("this device has no usable durable identity")
+            return .blocked(.unreachable("this device has no usable durable identity"))
         }
 
         // THE SHIPPED CUSTODY ORDER, THROUGH THE SHIPPED COORDINATOR. Restore first; never a
@@ -442,30 +537,18 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
         }
         switch state {
         case .ready:
-            let observation = await PocketRecordingDeviceBridge.observe(
-                client: client, identity: identity, advertisedName: advertisedName)
-            await client.close()
-            switch RecordingDeviceAdoption.remember(observation) {
-            case .recorded:
-                log?.info("recording device: adopted a stored-file recorder")
-                return .adopted(identity: observation.identity,
-                                displayName: observation.reportedName,
-                                negotiatedProtocol: PocketRecordingDeviceBridge.protocolIdentifier)
-            case .noMatchingRecord:
-                return .adoptionNotPersisted("the account store had no record to update")
-            case .unavailable(let reason):
-                log?.error("recording device: adoption NOT PERSISTED — "
-                    + RecordingDeviceLogRedaction.redactingAccountScopes(reason))
-                return .adoptionNotPersisted(reason)
-            }
+            // THE SESSION IS HANDED BACK OPEN. Whoever asked for it closes it — `attach` after
+            // one observation, `withAuthenticatedSession` after its body — and that is the
+            // whole difference between a recorder this app can identify and one it can ask.
+            return .ready(client, identity)
         case .coexistenceAvailable:
             await client.close()
-            return .setupUnavailable
+            return .blocked(.setupUnavailable)
         case .mintRefused:
             // THE SAFE ANSWER TO U1. The recorder heard one key and said no, so it is still
             // holding the one another app gave it. One key was sent; a second never will be.
             await client.close()
-            return .mintRefused
+            return .blocked(.mintRefused)
         case .mintNotVerified:
             // ACKNOWLEDGED, UNPROVEN. `MCU&SK&OK` came back and the access-point read-back did
             // not agree with the key we sent, so this build refuses to call it setup. The key
@@ -477,18 +560,18 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
                 lock.withLock { pendingMint = (key, identity, advertisedName, id) }
             }
             await client.close()
-            return .mintNotVerified
+            return .blocked(.mintNotVerified)
         case .keyNotKept:
             // NOTHING WAS SENT. Custody refused the candidate before the recorder was asked,
             // which is the whole point of doing custody first.
             await client.close()
-            return .keyNotKept
+            return .blocked(.keyNotKept)
         case .custodyUnreadable:
             // FoundryX MAY HOLD THIS RECORDER'S KEY AND COULD NOT READ IT. Distinct from
             // `.setupUnavailable`, which is the state that offers to mint — offering to mint
             // here would write a second key to a recorder FoundryX itself set up.
             await client.close()
-            return .custodyUnreadable
+            return .blocked(.custodyUnreadable)
         case .acceptedNotDurable:
             // THE RECORDER HAS A KEY THIS PHONE COULD NOT STORE. The coordinator is about to
             // go away with the only copy of it, so the key is held here — and `mintedKey` is
@@ -499,7 +582,7 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
                 }
             }
             await client.close()
-            return .keyAcceptedNotDurable
+            return .blocked(.keyAcceptedNotDurable)
         case .indeterminate:
             // THE HANDSHAKE NEVER COMPLETED. `restore` reserves `.indeterminate` for a key
             // that was never answered — a dropped link, a timeout, a firmware that stopped
@@ -507,10 +590,11 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
             // actually REFUSED. Reporting the first as the second is how a UI tells someone
             // their key is wrong when their recorder merely walked out of range.
             await client.close()
-            return .unreachable("the recorder stopped answering during the key handshake")
+            return .blocked(
+                .unreachable("the recorder stopped answering during the key handshake"))
         default:
             await client.close()
-            return .recoveryRequired
+            return .blocked(.recoveryRequired)
         }
     }
 

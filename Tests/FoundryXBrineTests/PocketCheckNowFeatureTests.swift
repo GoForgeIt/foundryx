@@ -1,0 +1,283 @@
+import XCTest
+import BrineSwiftCore
+@testable import FoundryXKit
+
+/// `features/pocket-check-now.feature`, driven against the SAME wrapped BLE seam
+/// `DeviceManager` runs on. The only injected things are the radio and the secret store;
+/// `RecordingDeviceAttachment`, `PocketSeamTransport`, `PocketBLEClient`,
+/// `PocketOnboardingCoordinator`, `PocketRecordingDeviceBridge`, `PocketInventoryReader` and
+/// `StoredFileDevicePresentation` are the shipped types `App/DeviceScreen.swift` calls.
+final class PocketCheckNowFeatureTests: XCTestCase {
+    func testPocketCheckNowFeature() async throws {
+        let world = PocketCheckNowWorld()
+        let result = try await BrineFeatureRunner.run(
+            "pocket-check-now",
+            registry: StepRegistry(PocketCheckNowSteps.make(world)))
+        XCTAssertEqual(result.passed, 6)
+    }
+}
+
+private enum PocketCheckNowSteps {
+    static func make(_ world: PocketCheckNowWorld) -> [StepDefinition] {
+        let givens = [
+            "a remembered recorder FoundryX holds the key for, holding two recordings",
+            "a remembered recorder FoundryX holds no key for",
+            "a remembered recorder that is not reachable",
+            "a remembered recorder FoundryX holds the key for, holding nothing",
+            "a remembered recorder FoundryX holds the key for that will not answer a listing",
+        ]
+        let whens = ["I check that recorder now"]
+        let thens = [
+            "the check reports the recorder's battery and firmware",
+            "it lists both recordings newest first with a duration for each",
+            "every listed recording says it is only on the recorder",
+            "the panel offers no bring-over action and repeats the deletion promise",
+            "one key handshake was issued and the listing commands followed it on that same session",
+            "the recorder was sent no download, no delete and no WiFi command",
+            "the link was closed once the answer was in hand",
+            "the check says the key is missing rather than showing an empty shelf",
+            "no listing command was issued",
+            "the check says the recorder could not be reached rather than showing an empty shelf",
+            "the check reports an empty shelf in words and still repeats the deletion promise",
+            "the panel claims no recording state and no Live Activity",
+            "the check says it connected but got no list rather than showing an empty shelf",
+        ]
+        var steps = givens.map { phrase in
+            defineStep(phrase) { context, _, _ in try await world.given(phrase); return context }
+        }
+        steps += whens.map { phrase in
+            defineStep(phrase) { context, _, _ in try await world.when(phrase); return context }
+        }
+        steps += thens.map { phrase in
+            defineCheck(phrase) { _, _, _ in try await world.then(phrase) }
+        }
+        return steps
+    }
+}
+
+private actor PocketCheckNowWorld {
+    private static let secret = "0123456789abcdef"
+    /// The two files this recorder is holding, in the order its firmware lists them — an
+    /// OLDER day first, so "newest first" is a claim the fixture can actually falsify.
+    private static let scripted: [FakePocketBLEStack.ScriptedRecording] = [
+        .init(date: "2026-03-27", timestamp: "20260327091500", sizeBytes: 96_000),
+        .init(date: "2026-03-28", timestamp: "20260328001919", sizeBytes: 480_000),
+    ]
+
+    private var stack: FakePocketBLEStack?
+    private var secrets = InMemoryPocketSecretStore()
+    /// The identifier the check is asked for, which is NOT always the one the radio can find.
+    private var targetIdentifier: UUID?
+    private var outcome: PocketRecorderCheckOutcome?
+
+    func given(_ phrase: String) async throws {
+        outcome = nil
+        secrets = InMemoryPocketSecretStore()
+        let identifier = UUID()
+        switch phrase {
+        case "a remembered recorder FoundryX holds the key for, holding two recordings":
+            try await stage(identifier: identifier, inventory: Self.scripted, holdsKey: true)
+
+        case "a remembered recorder FoundryX holds no key for":
+            // The recorder is keyed — by somebody. This iPhone's custody is empty, which is
+            // the state every recorder in the world is in until FoundryX provisions one.
+            try await stage(identifier: identifier, inventory: Self.scripted, holdsKey: false)
+
+        case "a remembered recorder that is not reachable":
+            try await stage(identifier: identifier, inventory: Self.scripted, holdsKey: true)
+            // THE RADIO CANNOT FIND IT. `retrievePeripherals(withIdentifiers:)` is a system
+            // lookup; asking for an identifier this stack does not own is exactly the answer
+            // a recorder that walked away gives.
+            targetIdentifier = UUID()
+
+        case "a remembered recorder FoundryX holds the key for, holding nothing":
+            try await stage(identifier: identifier, inventory: [], holdsKey: true)
+
+        case "a remembered recorder FoundryX holds the key for that will not answer a listing":
+            try await stage(identifier: identifier, inventory: Self.scripted, holdsKey: true,
+                            answersInventory: false)
+
+        default:
+            throw BrineStepError("unhandled Given: \(phrase)")
+        }
+    }
+
+    private func stage(identifier: UUID,
+                       inventory: [FakePocketBLEStack.ScriptedRecording],
+                       holdsKey: Bool,
+                       answersInventory: Bool = true) async throws {
+        let made = FakePocketBLEStack(deviceId: identifier,
+                                      deviceName: "PKT01_BLUE_26079bc5",
+                                      acceptedSecret: Self.secret,
+                                      inventory: inventory,
+                                      answersInventory: answersInventory)
+        stack = made
+        targetIdentifier = identifier
+        if holdsKey {
+            try await secrets.save(
+                Self.secret,
+                for: try PocketAuthenticatedIdentity(peripheralIdentifier: identifier.uuidString))
+        }
+    }
+
+    func when(_ phrase: String) async throws {
+        guard phrase == "I check that recorder now" else {
+            throw BrineStepError("unhandled When: \(phrase)")
+        }
+        guard let stack, let targetIdentifier else {
+            throw BrineStepError("no recorder was staged")
+        }
+        // THE PRODUCTION COMPONENT, on the production seam. `recovery: nil` keeps this
+        // hermetic: with no in-memory attach record, the shipped default would consult a real
+        // iCloud Keychain item.
+        let attachment = RecordingDeviceAttachment(
+            makeCentral: stack.factory,
+            secrets: secrets,
+            recovery: nil,
+            deadlines: .init(powerOn: 5, connect: 5, discovery: 5, control: 5))
+        outcome = await PocketRecorderCheck.run(peripheralIdentifier: targetIdentifier,
+                                                advertisedName: stack.deviceName,
+                                                attachment: attachment)
+    }
+
+    private func requireDetail() throws -> StoredFileDeviceDetailPresentation {
+        guard case .checked(let detail) = outcome else {
+            throw BrineStepError("the check did not report a reading: \(String(describing: outcome))")
+        }
+        return detail
+    }
+
+    private func requireCommands() throws -> [String] {
+        guard let stack else { throw BrineStepError("no recorder was staged") }
+        return stack.commandsWritten
+    }
+
+    func then(_ phrase: String) async throws {
+        switch phrase {
+        case "the check reports the recorder's battery and firmware":
+            let detail = try requireDetail()
+            XCTAssertEqual(detail.battery, "72%")
+            XCTAssertEqual(detail.firmware, "1.6")
+            XCTAssertEqual(detail.linkLabel, RecordingDeviceLinkState.connected.label)
+
+        case "it lists both recordings newest first with a duration for each":
+            let detail = try requireDetail()
+            XCTAssertEqual(detail.manifest.rows.map(\.title),
+                           ["2026-03-28 · 00:19", "2026-03-27 · 09:15"],
+                           "the recorder's own reported instants are not listed newest first")
+            XCTAssertEqual(detail.manifest.rows.map(\.duration), ["2 min", "24 sec"])
+
+        case "every listed recording says it is only on the recorder":
+            let detail = try requireDetail()
+            XCTAssertEqual(detail.manifest.rows.map(\.custodyLabel),
+                           ["Only on the recorder", "Only on the recorder"],
+                           "a file that has never been brought over is labelled as though "
+                               + "Solleva were holding a copy of it")
+
+        case "the panel offers no bring-over action and repeats the deletion promise":
+            // §6c, HELD OVER THE PANEL RATHER THAN OVER A CONSTANT. The old gate asserted a
+            // `let` against itself and would have stayed green beside a bring-over button.
+            XCTAssertFalse(RecordingDevicePage.bringOverIsNotOfferedYet)
+            for line in PocketRecorderCheckPresentation.everyLine {
+                for banned in ["Bring", "bring over", "Download", "Import", "Transfer"] {
+                    XCTAssertFalse(line.contains(banned),
+                                   "the check panel says \"\(banned)\" — design §6c: the "
+                                       + "download path has never run end to end, and a "
+                                       + "button that always fails is worse than an honest "
+                                       + "absence")
+                }
+            }
+            XCTAssertTrue(
+                PocketRecorderCheckPresentation.sectionNote
+                    .contains(PocketRecorderCustodyPromise.text),
+                "the shipped deletion promise is not on the one surface that lists a "
+                    + "recorder's files — the promise had no renderer at all")
+
+        case "one key handshake was issued and the listing commands followed it on that same session":
+            let commands = try requireCommands()
+            XCTAssertEqual(commands.filter { $0.hasPrefix("SK&") }.count, 1,
+                           "the check opened more than one authenticated session")
+            guard let handshake = commands.firstIndex(where: { $0.hasPrefix("SK&") }),
+                  let listing = commands.firstIndex(of: "LIST_DIRS") else {
+                return XCTFail("the recorder was never asked what it is holding: \(commands)")
+            }
+            XCTAssertLessThan(handshake, listing)
+            // THE WHOLE TRANSCRIPT, PINNED. `BAT`/`FW` appear TWICE because the shipped
+            // custody flow reads them twice on a successful restore — once as
+            // `PocketOnboardingCoordinator`'s confirmation that the key was accepted, once as
+            // `PocketRecordingDeviceBridge.observe`'s facts — which is exactly what the
+            // adoption path has always done. It is pinned rather than tolerated: a third read
+            // appearing here is a regression somebody should have to look at.
+            XCTAssertEqual(commands, ["SK&\(Self.secret)", "BAT", "FW", "BAT", "FW",
+                                      "LIST_DIRS", "LIST&2026-03-27", "LIST&2026-03-28"])
+
+        case "the recorder was sent no download, no delete and no WiFi command":
+            let commands = try requireCommands()
+            for command in commands {
+                XCTAssertFalse(command.hasPrefix("U&"),
+                               "the check issued the download command \"\(command)\"")
+                XCTAssertFalse(command.hasPrefix("WIFI"),
+                               "the check took the recorder off Bluetooth: \"\(command)\"")
+                XCTAssertFalse(command.uppercased().contains("DEL"),
+                               "the check issued \"\(command)\" — no automatic delete, ever")
+            }
+
+        case "the link was closed once the answer was in hand":
+            guard let stack else { throw BrineStepError("no recorder was staged") }
+            XCTAssertFalse(stack.isConnected,
+                           "the probe left its own GATT link up after the answer was in hand")
+
+        case "the check says the key is missing rather than showing an empty shelf":
+            XCTAssertEqual(outcome, .unavailable(.setupUnavailable))
+            XCTAssertEqual(PocketRecorderCheckPresentation.message(for: try requireOutcome()),
+                           PocketRecorderCheckPresentation.keyUnusableLine)
+
+        case "no listing command was issued":
+            let commands = try requireCommands()
+            XCTAssertFalse(commands.contains("LIST_DIRS"),
+                           "a recorder Solleva holds no key for was asked what it is holding")
+
+        case "the check says the recorder could not be reached rather than showing an empty shelf":
+            guard case .unavailable(.unreachable) = try requireOutcome() else {
+                return XCTFail("an unreachable recorder reported \(String(describing: outcome))")
+            }
+            XCTAssertEqual(PocketRecorderCheckPresentation.message(for: try requireOutcome()),
+                           RecordingDeviceAttachPresentation.unreachableLine)
+
+        case "the check reports an empty shelf in words and still repeats the deletion promise":
+            let detail = try requireDetail()
+            XCTAssertEqual(detail.manifest.rows, [])
+            XCTAssertEqual(PocketRecorderCheckPresentation.emptyLine,
+                           "There's nothing on this recorder right now.")
+            XCTAssertTrue(
+                PocketRecorderCheckPresentation.sectionNote
+                    .contains(PocketRecorderCustodyPromise.text))
+
+        case "the panel claims no recording state and no Live Activity":
+            let detail = try requireDetail()
+            XCTAssertFalse(detail.showsRecordingState,
+                           "reading a recorder's shelf dressed itself as recording")
+            XCTAssertFalse(detail.showsLiveActivity)
+
+        case "the check says it connected but got no list rather than showing an empty shelf":
+            guard case .inventoryFailed = try requireOutcome() else {
+                return XCTFail("a recorder that refused the listing reported "
+                               + String(describing: outcome))
+            }
+            XCTAssertEqual(PocketRecorderCheckPresentation.message(for: try requireOutcome()),
+                           PocketRecorderCheckPresentation.inventoryFailedLine)
+            let commands = try requireCommands()
+            XCTAssertTrue(commands.contains("LIST_DIRS"),
+                          "the listing was never attempted, so 'it would not answer' is not "
+                              + "what was proven")
+
+        default:
+            throw BrineStepError("unhandled Then: \(phrase)")
+        }
+    }
+
+    private func requireOutcome() throws -> PocketRecorderCheckOutcome {
+        guard let outcome else { throw BrineStepError("the check never ran") }
+        return outcome
+    }
+}

@@ -45,12 +45,17 @@ public enum PocketRecordingDeviceBridge {
 /// This is the join. It is shape-blind and vendor-blind on purpose — it takes an observation,
 /// any observation, and records the pair the account will remember it by.
 ///
-/// WHAT STILL BLOCKS THE ROW ON A REAL PHONE, STATED OUT LOUD. Nothing in the app reaches an
-/// authenticated stored-file session yet: there is no `PocketBLETransport` conformance backed
-/// by CoreBluetooth anywhere in the tree, and design §3.6 / T2 req 3 gate provisioning until
-/// an evidenced key alphabet and a security-reviewed entropy policy exist. So this seam is
-/// exercised end-to-end from the protocol client down, and the radio is the one leg that is
-/// still missing. It is named here rather than left as a green claim.
+/// WHAT REACHES IT ON A REAL PHONE, AS OF THE SESSION-LIFETIME CHANGE. `PocketSeamTransport`
+/// (`RecordingDeviceAttachment.swift`) is the CoreBluetooth-backed `PocketBLETransport`, and
+/// `RecordingDeviceAttachment.attach` runs this bridge on the session it opens. What is still
+/// missing is downstream of here and named where it lives: nothing brings a recorder's files
+/// over yet — `PocketBLEClient.download` has no caller — so `PocketRecorderCheck` lists a
+/// recorder's shelf and every row on it reads "Only on the recorder".
+///
+/// (THIS PARAGRAPH USED TO SAY there is no `PocketBLETransport` conformance backed by
+/// CoreBluetooth anywhere in the tree. That was true when it was written and stopped being
+/// true when the attach seam shipped; it is corrected rather than deleted because reading it
+/// as current status is what makes this whole file look unwired.)
 public enum RecordingDeviceAdoption {
     /// Remember an observed device under the identity the transport established for it.
     ///
