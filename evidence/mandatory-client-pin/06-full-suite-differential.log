@@ -12,7 +12,7 @@ CLEAN BASE — detached origin/main c83c53bfe1fbde6f55d358724c4de1a019b527b0
     failing test cases:
       -[FoundryXConformanceTests.P3ConformanceTests testP3ConformanceFeature]   (2 assertions)
 
-BRANCH — foundryx-relay/mandatory-pin-20260813
+BRANCH — foundryx-relay/mandatory-pin-20260813, run 1
     Executed 1392 tests, with 5 tests skipped and 6 failures (0 unexpected) in 277.943s
     rc=1
     failing test cases:
@@ -20,7 +20,18 @@ BRANCH — foundryx-relay/mandatory-pin-20260813
       -[FoundryXConformanceTests.A9BaselineRedTests testAllThreePredicatesAreRed…]   (1)  CAUSED BY THIS CHANGE
       -[FoundryXBrineTests.PocketFactoryFreshMintFeatureTests testPocketFactoryF…]   (3)  FLAKE, see below
 
+BRANCH — foundryx-relay/mandatory-pin-20260813, run 2 (same tree, same command)
+    Executed 1392 tests, with 5 tests skipped and 3 failures (0 unexpected) in 217.572s
+    rc=1
+    failing test cases:
+      -[FoundryXConformanceTests.P3ConformanceTests testP3ConformanceFeature]        (2)  SAME AS BASE
+      -[FoundryXConformanceTests.A9BaselineRedTests testAllThreePredicatesAreRed…]   (1)  CAUSED BY THIS CHANGE
+    the pocket test did NOT fail on this run.
+
 1392 vs 1391 = the one test this branch adds (MandatoryDoorPinTests), which passes.
+
+DIFFERENTIAL, branch minus base, reproduced across two runs:
+    exactly one test case, A9BaselineRedTests.testAllThreePredicatesAreRedAtTheBaseline.
 
 ----------------------------------------------------------------------------------
 A9 — CAUSED BY THIS CHANGE, DELIBERATELY NOT BOUGHT GREEN
@@ -61,6 +72,8 @@ and no call path with the door pin; this branch touches neither pocket nor BLE.
     Executed 8 tests, with 0 failures (0 unexpected) in 0.446s
     Executed 8 tests, with 0 failures (0 unexpected) in 0.529s
 
-It did not fire on the clean-base full run, so this is ONE observation of a load-dependent
-flake and not a reproduced difference. It is named here rather than filed as "pre-existing"
-from memory.
+It did not fire on the clean-base full run, and it did not fire on a SECOND full run of
+this same branch tree. One observation in three full runs, zero in ten isolated runs: a
+load-dependent flake, not a difference this change made. It is named here rather than
+filed as "pre-existing" from memory, and it is a real defect somebody should chase — a
+mint that reports `unreachable("the link dropped")` under load is worth a look.
