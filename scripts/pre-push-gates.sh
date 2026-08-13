@@ -43,9 +43,14 @@ while read -r _local_ref _local_sha pushed_ref _remote_sha; do
   esac
 done
 if [ "$SAW_INPUT" -eq 0 ]; then
-  case "$(git rev-parse --abbrev-ref HEAD)" in
-    main|ship/*) GATED=1 ;;
-  esac
+  # FAIL CLOSED. With no refs on stdin we cannot know the DESTINATION, and the
+  # destination is the only thing that matters: `git push origin wip:main` ships
+  # to main from a branch named nothing like it. Falling back to HEAD's name got
+  # this exactly backwards once — a push of merge/ship-to-main INTO main was
+  # waved through as "does not trigger a workflow". A gate that fails open is
+  # not a gate. Unknown destination ⇒ run the gates.
+  echo "pre-push: no refs on stdin — destination unknown, gating (fail-closed)"
+  GATED=1
 fi
 
 if [ "$GATED" -eq 0 ]; then
