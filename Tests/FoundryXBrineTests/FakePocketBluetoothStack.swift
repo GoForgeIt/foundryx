@@ -1,6 +1,19 @@
 import Foundation
 import CoreBluetooth
+// THE SAME FILE, COMPILED INTO TWO LANES THAT NAME THE KIT DIFFERENTLY.
+//
+// Under SPM / `FoundryXiOSTests`, the kit is its own module (`FoundryXKit`). In the
+// app-hosted scenario lane the app target COMPILES `Sources/FoundryXKit` directly, so
+// there is no `FoundryXKit` module there at all — the same types live in the app module.
+// Importing both would put two distinct `BLECentral` types in one file and nothing would
+// typecheck. This shim is the whole difference; every line below is shared verbatim,
+// which is the point: the app-hosted lane must be driven by the fake the rest of the
+// suite already trusts, not by a second opinion about what a recorder does.
+#if APP_HOSTED_SCENARIOS
+@testable import FoundryX
+#else
 @testable import FoundryXKit
+#endif
 
 /// A SCRIPTED STORED-FILE RECORDER BEHIND THE SAME BLE SEAM THE APP RUNS ON.
 ///
