@@ -58,39 +58,60 @@ echo " pre-push gates — the same phases ios-publish.yml runs in CI"
 echo " (bypass: git push --no-verify)"
 echo "════════════════════════════════════════════════════════════════"
 
-# The T25 conformance target starts a REAL relay; absent, P3 is a refusal, not a
-# skip. Resolve it the way CI does rather than making the pusher know about it.
-# Any prebuilt binary first — including in sibling worktrees, because the
-# foundry checkouts here are transient (the worktree-sweep agent removed the one
-# this hook originally hard-coded, hours after it was written).
-if [ -z "${FOUNDRYX_CONFORMANCE_RELAY_BIN:-}" ]; then
-  found="$(ls -t "$HOME"/Development/*/target/release/foundry-relay 2>/dev/null | head -1)"
-  [ -n "$found" ] && export FOUNDRYX_CONFORMANCE_RELAY_BIN="$found"
-fi
-# Else build it from a checkout that actually CONTAINS the crate. Which checkout
-# that is cannot be assumed: `~/Development/foundry` tracks whatever branch is in
-# flight, and on 2026-08-13 that branch had the crate mid-rename, so a hard-coded
-# `-p foundry-relay` there failed with "did not match any packages" while main
-# had it all along. Find the crate, then build where it lives.
-if [ -z "${FOUNDRYX_CONFORMANCE_RELAY_BIN:-}" ]; then
-  echo "pre-push: no prebuilt relay — locating the crate"
-  for root in "$HOME"/Development/foundry "$HOME"/Development/foundry-wt-* "$HOME"/Development/*/foundry; do
-    [ -f "$root/crates/foundry-relay/Cargo.toml" ] || continue
-    echo "pre-push: building foundry-relay in $root"
-    if ( cd "$root" && cargo build --release -p foundry-relay --bin foundry-relay -q ); then
-      export FOUNDRYX_CONFORMANCE_RELAY_BIN="$root/target/release/foundry-relay"
-      break
+# CONFORMANCE BINARIES — DERIVED FROM CI, NOT LISTED HERE.
+#
+# The conformance targets start REAL processes; absent, every predicate is a
+# REFUSAL that reads exactly like a product defect. There are two today and the
+# first version of this hook resolved only one: it built the P3 relay, left
+# FOUNDRYX_CONFORMANCE_TUNNEL_BIN unset, and P1/A9 refused — so the hook BLOCKED
+# a merge whose tree was fine, on a red it manufactured itself. A hook that cries
+# wolf gets bypassed, which would have cost more than the bug it was added for.
+#
+# So the pairs are read out of the workflow: each `cargo build … -p PKG --bin BIN`
+# and the `export FOUNDRYX_CONFORMANCE_*_BIN=…/BIN` beside it. A third binary
+# added to CI is resolved here on the next push with no edit to this file.
+CI_WF=".github/workflows/ios-publish.yml"
+resolve_conformance_bins() {
+  local var pkg bin found root
+  # Pair each exported *_BIN var with the --bin it points at, in workflow order.
+  while IFS='|' read -r var bin pkg; do
+    [ -n "$var" ] || continue
+    # already set by the caller? honour it.
+    eval "current=\${$var:-}"
+    if [ -n "${current:-}" ] && [ -x "${current}" ]; then
+      echo "pre-push: $var = $current (inherited)"; continue
     fi
-  done
-fi
-if [ ! -x "${FOUNDRYX_CONFORMANCE_RELAY_BIN:-/nonexistent}" ]; then
-  echo "PRE-PUSH BLOCKED: no foundry-relay binary and no checkout containing"
-  echo "crates/foundry-relay. The P3 conformance lane would report refusals that"
-  echo "look like product defects (it did, on 2026-08-12). Check out foundry main"
-  echo "and build it, or export FOUNDRYX_CONFORMANCE_RELAY_BIN yourself."
-  exit 1
-fi
-echo "pre-push: relay = $FOUNDRYX_CONFORMANCE_RELAY_BIN"
+    found="$(ls -t "$HOME"/Development/*/target/release/"$bin" 2>/dev/null | head -1)"
+    if [ -z "$found" ]; then
+      # Build where the crate actually lives: ~/Development/foundry tracks
+      # whatever branch is in flight, and on 2026-08-13 that branch had the
+      # crate mid-rename while main had it all along.
+      for root in "$HOME"/Development/foundry "$HOME"/Development/foundry-wt-* "$HOME"/Development/*/foundry; do
+        [ -f "$root/Cargo.toml" ] || continue
+        echo "pre-push: building $pkg ($bin) in $root"
+        if ( cd "$root" && cargo build --release -p "$pkg" --bin "$bin" -q 2>/dev/null ); then
+          found="$root/target/release/$bin"; break
+        fi
+      done
+    fi
+    if [ ! -x "${found:-/nonexistent}" ]; then
+      echo "PRE-PUSH BLOCKED: could not resolve $var (binary '$bin' from package"
+      echo "'$pkg'). Its conformance lane would report refusals that look like"
+      echo "product defects. Build it in a foundry checkout, or export $var."
+      exit 1
+    fi
+    export "$var=$found"
+    echo "pre-push: $var = $found"
+  done <<EOF
+$(awk '
+  /cargo build --release -p/ { for (i=1;i<=NF;i++) { if ($i=="-p") pkg=$(i+1); if ($i=="--bin") bin=$(i+1) } }
+  /export FOUNDRYX_CONFORMANCE_[A-Z]+_BIN=/ {
+    v=$0; sub(/^[^A-Z]*/,"",v); sub(/=.*/,"",v);
+    if (pkg && bin) print v "|" bin "|" pkg;
+  }' "$CI_WF")
+EOF
+}
+resolve_conformance_bins
 
 # THE PHASE LIST IS DERIVED, NOT TYPED. Each CI job's `ci-gates.sh <phases>` line
 # is read out of the workflow, so a phase added to CI is gated here on the next
