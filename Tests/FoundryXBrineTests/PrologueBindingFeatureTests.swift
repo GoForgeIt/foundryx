@@ -16,9 +16,20 @@ import CryptoKit
 /// `afaba943`: `grep -rni prologue --include='*.rs' crates/` → **0 hits**.
 ///
 /// `not-reached` was therefore doing two jobs at once: *nothing answered* and *nobody knew
-/// how to ask*. This file retires the second. The question is asked here, against the only
-/// two peers that exist — this repository's own `NoiseXXInitiator` and `NoiseXXResponder` —
-/// and it is graded by mutations that make it fail.
+/// how to ask*. This file retires the second, for the hermetic case. The question is asked
+/// here against this repository's own `NoiseXXInitiator` and `NoiseXXResponder`, and it is
+/// graded by mutations that make it fail.
+///
+/// **TWO OVERSTATEMENTS CORRECTED 2026-08-13, both of them universals nobody counted.**
+/// (1) This paragraph used to call these "the only two peers that exist". They are not:
+/// `crates/foundryx-tunnel` in the foundry repository speaks `Noise_XX_25519_ChaChaPoly_BLAKE2s`
+/// through `snow` (`src/lib.rs:34`) and carries golden vectors declared to be "the interop
+/// contract the iOS Swift client" must match (`tests/handshake_vectors.rs:1`). They are the
+/// only two peers THIS TARGET can reach, which is a fact about the target and not about the
+/// world. (2) Retiring "nobody knew how to ask" is narrower than it sounded: the day the
+/// relay grows a post-upgrade transcript, `ContractElements.prologue` still has no live
+/// differential to drive and deliberately THROWS rather than inventing one. What exists is
+/// an oracle for the property, not an adapter to a real subject.
 ///
 /// **It does not serve the element and it must never be read as serving it.** `Package.swift`
 /// places `FoundryXBrineTests` outside `FoundryXConformanceTests`'s dependency closure exactly
@@ -159,9 +170,17 @@ final class PrologueBindingWorld: @unchecked Sendable {
     var peerReadError = ""
     var peerReply = Data()
 
-    /// EXACTLY what `ContractElements.prologue` sends after the `101` today:
-    /// the bound address followed by the version as u16 big-endian.
-    static let tenancyBytesAsTheDriveSendsThem: Data = prologue(host: "bound.example", version: 1)
+    /// The tenancy bytes as the conformance drive USED to send them after the `101`: the
+    /// bound address followed by the version as u16 big-endian.
+    ///
+    /// STALE LABEL CORRECTED 2026-08-13 — this used to say "EXACTLY what
+    /// `ContractElements.prologue` sends after the `101` today", and that stopped being
+    /// true when part 2's probe became a 32-byte opening message. The scenario these bytes
+    /// feed is still the one worth having: it is the demonstration that bare tenancy is NOT
+    /// something a Noise peer can read as an opening, which is WHY the drive was changed.
+    /// Naming it "what the drive sends" would now be a claim about a sibling target that is
+    /// false, and this file cannot check it.
+    static let tenancyBytesAsTheOldDriveSentThem: Data = prologue(host: "bound.example", version: 1)
 
     /// True once a Given has actually set both bindings. A When that ran without one would
     /// be measuring two empty prologues, which agree — a green from a scenario that set
@@ -398,7 +417,7 @@ enum PrologueBindingSteps {
             defineStep("it is handed the tenancy bytes on their own") { ctx, _, _ in
                 guard let peer = w.listeningPeer else { throw BrineStepError("no listening peer") }
                 do {
-                    _ = try peer.readMessage(PrologueBindingWorld.tenancyBytesAsTheDriveSendsThem)
+                    _ = try peer.readMessage(PrologueBindingWorld.tenancyBytesAsTheOldDriveSentThem)
                     w.peerCouldRead = true
                 } catch {
                     w.peerCouldRead = false
@@ -429,7 +448,7 @@ enum PrologueBindingSteps {
             defineCheck("it cannot read them as an opening at all") { _, _, _ in
                 guard !w.peerCouldRead else {
                     throw BrineStepError("""
-                    a correctly speaking peer ACCEPTED \(PrologueBindingWorld.tenancyBytesAsTheDriveSendsThem.count) \
+                    a correctly speaking peer ACCEPTED \(PrologueBindingWorld.tenancyBytesAsTheOldDriveSentThem.count) \
                     bytes of bare tenancy as an opening. If that were so, the conformance target's \
                     post-upgrade probe would be a knock, and this scenario would have no point.
                     """)
