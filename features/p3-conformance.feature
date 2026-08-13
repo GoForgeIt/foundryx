@@ -37,6 +37,7 @@ Feature: A client meets the real relay, and the contract is counted rather than 
     When the client drives each of the five published contract elements against the relay
     Then five contract elements are examined
     And the elements the relay serves are exactly the elements the register declares served
+    And each element's individual questions are answered exactly as the register declares them
     And every element the relay does not serve is named with what the client observed
 
   Scenario: this target reports no green it did not run

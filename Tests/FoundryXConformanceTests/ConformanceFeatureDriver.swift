@@ -118,7 +118,14 @@ enum ConformanceSkipCensus {
 
 /// The declared half of the contract-element comparison.
 struct ContractElementRegister {
-    struct Row: Decodable { let id: String; let name: String; let served: Bool }
+    struct Row: Decodable {
+        let id: String
+        let name: String
+        let served: Bool
+        /// The per-question declaration, for the elements whose verdict is a
+        /// conjunction. Absent for the elements that are a single question.
+        let parts: [String: String]?
+    }
     private struct File: Decodable { let elements: [Row] }
     let rows: [Row]
 

@@ -38,6 +38,14 @@ struct P3Client {
             }
             return nil
         }
+        /// The VALUE the relay echoed, not merely the fact that some header mentioned a
+        /// version. A selection is proved by the value being a member of what was
+        /// offered; a header whose presence is asserted and whose content is not is a
+        /// decoration a constant satisfies.
+        var negotiatedVersionValue: String? {
+            guard let header = negotiatedVersionHeader, let colon = header.firstIndex(of: ":") else { return nil }
+            return String(header[header.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+        }
     }
 
     /// Open a real TCP connection, write `request`, and read whatever comes back until
@@ -94,6 +102,110 @@ struct P3Client {
                         elapsed: Date().timeIntervalSince(started))
     }
 
+    /// What happened on the socket AFTER the head, which is the phase the design puts
+    /// the handshake in (`03-protocols.md` P3 step 3: tenant bind and negotiation are
+    /// steps 1–2, the mutual handshake is step 3, and it is post-upgrade).
+    ///
+    /// This exists because the pre-upgrade `exchange` above stops at `\r\n\r\n` and so
+    /// cannot tell "the relay upgraded and then spoke" from "the relay upgraded and
+    /// then closed". Those are the two answers the prologue element turns on.
+    struct AfterUpgrade {
+        var head: Exchange
+        /// Every byte the relay sent after the head, within the window.
+        var trailing: Data
+        /// The peer closed the connection rather than continuing.
+        var peerClosed: Bool
+        /// How long the window actually waited, so a zero-byte result cannot be a
+        /// window nobody opened.
+        var windowWaited: TimeInterval
+    }
+
+    /// Write `request`, read the head, then keep listening for `window` seconds.
+    /// `thenSend` (if any) is written after the head arrives, so a relay that reads a
+    /// first handshake message rather than writing one is also given its chance.
+    func exchangeThenListen(request: String, window: TimeInterval, thenSend: Data? = nil) throws -> AfterUpgrade {
+        let started = Date()
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw P3ClientError.io("socket() failed: \(errno)") }
+        defer { close(fd) }
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let connected = withUnsafePointer(to: &addr) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                Darwin.connect(fd, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard connected == 0 else { throw P3ClientError.io("connect() to 127.0.0.1:\(port) failed: \(errno)") }
+
+        func setTimeout(_ seconds: TimeInterval) {
+            var tv = timeval(tv_sec: Int(seconds), tv_usec: Int32((seconds - floor(seconds)) * 1_000_000))
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        }
+        setTimeout(3.0)
+
+        let payload = Array(request.utf8)
+        var sent = 0
+        while sent < payload.count {
+            let n = payload.withUnsafeBufferPointer { buf in
+                Darwin.send(fd, buf.baseAddress! + sent, payload.count - sent, 0)
+            }
+            guard n > 0 else { throw P3ClientError.io("send() failed: \(errno)") }
+            sent += n
+        }
+
+        var out = Data()
+        var buf = [UInt8](repeating: 0, count: 4096)
+        var closedDuringHead = false
+        while true {
+            let n = Darwin.recv(fd, &buf, buf.count, 0)
+            if n > 0 {
+                out.append(contentsOf: buf[0..<n])
+                if String(decoding: out, as: UTF8.self).contains("\r\n\r\n") { break }
+                continue
+            }
+            if n == 0 { closedDuringHead = true }
+            break
+        }
+
+        // SPLIT AT THE HEAD TERMINATOR, NOT AT THE READ BOUNDARY. A relay that writes
+        // its `101` and its first handshake message without an intervening flush
+        // delivers both in ONE segment, and attributing the whole segment to the head
+        // makes a relay that DID speak after the upgrade look silent. That is not
+        // hypothetical: mutation M2 (write bytes straight after the upgrade) SURVIVED
+        // this drive until this split existed — the element reported `unmet` against a
+        // relay that had just answered. A read boundary is the network's choice; the
+        // protocol's boundary is `\r\n\r\n`.
+        var trailing = Data()
+        if let terminator = out.range(of: Data("\r\n\r\n".utf8)) {
+            trailing = out.suffix(from: terminator.upperBound)
+            out = out.prefix(upTo: terminator.upperBound)
+        }
+        let head = Exchange(bytes: out,
+                            closedWithoutReply: closedDuringHead && out.isEmpty,
+                            elapsed: Date().timeIntervalSince(started))
+
+        if let extra = thenSend, !extra.isEmpty {
+            _ = extra.withUnsafeBytes { raw in Darwin.send(fd, raw.baseAddress!, raw.count, 0) }
+        }
+
+        // The window is a real wait. It is measured and reported, because "the relay
+        // sent nothing" is only evidence if somebody actually listened.
+        let windowStart = Date()
+        setTimeout(window)
+        var peerClosed = closedDuringHead
+        while Date().timeIntervalSince(windowStart) < window {
+            let n = Darwin.recv(fd, &buf, buf.count, 0)
+            if n > 0 { trailing.append(contentsOf: buf[0..<n]); continue }
+            if n == 0 { peerClosed = true }
+            break
+        }
+        return AfterUpgrade(head: head, trailing: trailing, peerClosed: peerClosed,
+                            windowWaited: Date().timeIntervalSince(windowStart))
+    }
+
     // MARK: the request shapes
 
     /// The conforming request: the relay's one route, the address, and the client's pin
@@ -101,6 +213,19 @@ struct P3Client {
     static func conforming(host: String, community: String) -> String {
         "GET /p3 HTTP/1.1\r\nHost: \(host)\r\nx-foundry-community-pid: \(community)\r\n"
             + "x-foundry-protocol-offer: 1\r\n\r\n"
+    }
+
+    /// The same request with the version offer under the client's control — `nil` for
+    /// a client that sends no offer header at all.
+    ///
+    /// Negotiation is an EXCHANGE (T10 spec §5.1: the offer rides the same pre-upgrade
+    /// request that carries the host, and the relay echoes its selection in the upgrade
+    /// acceptance). An exchange is only proved by driving BOTH directions, so the offer
+    /// has to be a parameter rather than a constant baked into `conforming`.
+    static func offering(_ offer: String?, host: String, community: String) -> String {
+        let offerLine = offer.map { "x-foundry-protocol-offer: \($0)\r\n" } ?? ""
+        return "GET /p3 HTTP/1.1\r\nHost: \(host)\r\nx-foundry-community-pid: \(community)\r\n"
+            + offerLine + "\r\n"
     }
 
     /// NON-CONFORMING FIXTURE, case 1: a client that names no community. It cannot

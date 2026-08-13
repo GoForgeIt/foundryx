@@ -1,22 +1,37 @@
 {
     "_what": "The five elements of T10's published P3 client contract (T25 spec §2.3). `served` is the DECLARATION; the run COMPUTES the same field by driving each element against the real relay over a real socket, and the coverage scenario asserts the two sets are EQUAL.",
     "_why_equality": "Equality, never 'at most' and never 'at least'. An element that starts being served has to move this file, and an element that stops being served goes red without one. A register that only forbade regressions would let the relay quietly grow a behaviour nobody reviewed; one that only forbade additions would let it lose one.",
-    "_mutation": "flip any `served` value and the coverage scenario goes red naming the element and quoting what the client observed. Delete an element and the `five contract elements are examined` assertion goes red.",
+    "_why_parts": "Two of the five elements are CONJUNCTIONS, and a conjunction that publishes only its result cannot tell which half moved — worse, a mutation that flips one conjunct while the AND stays false is INVISIBLE to an equality over `served` alone. `parts` is declared question by question and compared question by question. `not-reached` is a third value on purpose: a question the run could not ask is recorded as unasked, never as answered `false`.",
+    "_mutation": "flip any `served` value and the coverage scenario goes red naming the element and quoting what the client observed. Flip any `parts` value and the part-equality scenario goes red naming the element AND the part. Delete an element and the `five contract elements are examined` assertion goes red.",
     "_provenance": "every `served` value below was set from a run, not from reading the relay's source. Two of them contradicted the author's prediction before the run: `auth-timeout` was predicted NOT served and is served (crates/foundry-relay/src/serve.rs:380-381 really does set a socket read timeout from the deployed key), and that correction is the reason this file records observations rather than expectations.",
     "elements": [
         {
             "id": "prologue-bytes",
-            "name": "the (normalized_host || version) prologue bytes",
+            "name": "the (normalized_host || negotiated_version) prologue, bound into the handshake",
             "served": false,
-            "observed": "sent the prologue bytes ahead of the request and the relay answered HTTP/1.1 403 Forbidden — it reads a request line (serve.rs REQUEST_LINE = \"GET /p3 HTTP/1.1\"), not a prologue",
-            "owner": "T10 — this is the relay's obligation, not this track's. T25 drives it and reports; it does not implement it."
+            "parts": {
+                "connect-wire-refuses-a-prologue": "met",
+                "post-upgrade-handshake-exists": "unmet",
+                "prologue-binding-differential": "not-reached"
+            },
+            "observed": "the connect wire refused a prologue in both encodings (2 of 2), which is what the design requires of it; after HTTP/1.1 101 Switching Protocols the relay closed the connection without sending one handshake byte, and without reading the prologue it was offered, so there is no step-3 handshake for a prologue to be mixed into and the binding differential was NOT REACHED",
+            "owner": "T10 — this is the relay's obligation, not this track's. T25 drives it and reports; it does not implement it.",
+            "_respecified": "2026-08-13. THIS ELEMENT WAS MIS-SPECIFIED AND THE PREVIOUS ROW RECORDED A FALSE REASON. It drove the element by sending `(boundHost || \"p3\")` ahead of the request head and recorded the relay's 403 as `it reads a request line, not a prologue` — a sentence that reads as a relay defect and is not one. THE DESIGN SAYS THE DRIVER WAS WRONG, on three independent counts: (1) `design/03-protocols.md` P3 orders the protocol as `1. TCP/TLS + tenant bind BEFORE the upgrade -> 2. version negotiation -> 3. mutual handshake (Noise-XX) with prologue = (normalized_host || negotiated_version)`, with the per-connection state machine `tcp-open -> tenant-bound -> version-negotiated -> handshaking`; the prologue is step 3 and the old drive put it two states early. (2) T10 spec §5.1 RESOLVES the connect wire — the version offer rides `the same pre-upgrade request that carries the host` and the relay `echoes the negotiated version in the upgrade acceptance, and binds it into the prologue` — so the bytes at connect are an HTTP head and a 101, and a relay that accepted a prologue-shaped prefix ahead of that head would be speaking a protocol no document designs. (3) A NOISE PROLOGUE IS NEVER TRANSMITTED, and this repository's own primitive is the proof: `Sources/FoundryXKit/NoiseXX.swift:209-211` and `:317-319` take `prologue: Data` and `mixHash` it — it is an input to the transcript hash both peers must already hold. That is precisely the property 03-protocols claims for it (`a handshake transcript completed for community A's host cannot be replayed against community B, because the prologue disagrees`), and a prologue put on the wire would give no such property, because the replaying peer would send the same bytes. The old drive's VALUE was wrong too: it concatenated the literal `p3`, and `P3` is the protocol's ordinal name (03-protocols P1..P9) while T10 §2.3 pins a version as an unsigned integer 1..=65535.",
+            "_blocked_on": "T10 PHASE-4 task 4.2 (`bind the version into the prologue and the transcript`), itself blocked on T06's signing API, and T10 PHASE-10 (the published contract with a golden vector per element) — both recorded as blocked in foundry `evidence/t10/registers/blocked-tasks.toml`. NO CHANGE TO THIS TARGET CAN SERVE THIS ELEMENT: there is no step-3 handshake in `crates/foundry-relay` at all (`serve.rs` ends at the 101 and says so: `Step 1 is the PRE-upgrade exchange. It stops here on purpose`). What this target owes is a true observation and a drive that flips the day the relay grows one.",
+            "_still_owed_by_the_contract": "the golden vector. T10 A13 requires `prologue bytes for a fixed host+version` that a contract-only client reproduces byte-for-byte. No document pins the byte encoding of the `||`, so this run asserts nothing about the encoding and drives part 1 with BOTH plausible ones (decimal-ASCII and u16 big-endian) rather than picking one and calling it the contract."
         },
         {
             "id": "version-negotiation",
             "name": "version negotiation as a wire exchange, not an asserted field",
             "served": true,
-            "observed": "offered version 1 via x-foundry-protocol-offer and the reply named one: X-Foundry-Protocol-Version — a real exchange since foundry 7f6ed530 (feat(t10): version negotiation the relay actually reads, 2026-08-12), which also REFUSES an absent offer with the shared 403 (RefusalCause::NoCommonVersion). That refusal is why this suite went red the moment the relay grew the behaviour: the conforming client predated the offer header. Client updated + this row moved in the same commit, per this register's own equality rule.",
-            "owner": "T10"
+            "parts": {
+                "offer-selected-and-echoed-by-value": "met",
+                "no-common-version-refused-pre-upgrade": "met",
+                "absent-offer-refused-pre-upgrade": "met"
+            },
+            "observed": "offered 1 and the reply named X-Foundry-Protocol-Version: 1; a legal offer of 65535 the relay does not speak answered HTTP/1.1 403 Forbidden; an absent offer answered HTTP/1.1 403 Forbidden — a real exchange since foundry 7f6ed530 (feat(t10): version negotiation the relay actually reads, 2026-08-12)",
+            "owner": "T10",
+            "_strengthened": "2026-08-13. The previous drive made ONE offer, accepted any reply header whose name merely CONTAINED `version`, and asserted nothing about an offer the relay cannot meet — so a relay that stamped a constant header on every reply would have passed it, which is the exact defect the element exists to detect. It now asserts the echoed VALUE is a member of what was offered, and drives both refusal directions. The refusal direction is what proves the relay READ the offer rather than decorated the reply."
         },
         {
             "id": "host-binding-before-upgrade",
@@ -36,8 +51,9 @@
             "id": "generic-rejections",
             "name": "byte-identical generic rejections",
             "served": true,
-            "observed": "6 distinct causes reachable from outside produced 1 distinct reply on the wire, all HTTP/1.1 403.",
-            "owner": "T10 — served on the byte-identity component only. T10's own spec §2.2 defines the rejection as an OBSERVATION TUPLE (bytes, phase at close, status/close code, whether anything preceded the close, timing class) partitioned into a pre-upgrade cohort P and a post-upgrade cohort H. Every cause this client can reach from outside today is cohort P, so cohort H and the non-byte components of the tuple are UNCOVERED here and are named as such rather than counted."
+            "observed": "8 distinct causes reachable from outside produced 1 distinct reply on the wire, all HTTP/1.1 403.",
+            "owner": "T10 — served on the byte-identity component only. T10's own spec §2.2 defines the rejection as an OBSERVATION TUPLE (bytes, phase at close, status/close code, whether anything preceded the close, timing class) partitioned into a pre-upgrade cohort P and a post-upgrade cohort H. Every cause this client can reach from outside today is cohort P, so cohort H and the non-byte components of the tuple are UNCOVERED here and are named as such rather than counted.",
+            "_widened": "2026-08-13, from 6 causes to 8. D7's differential names wrong-tenant / unknown-host / BAD-VERSION / timeout, and bad-version was unreachable for as long as negotiation was a constant. It is reachable now, in both of its shapes — an offer that cannot be read (the relay's MalformedOffer) and a legal offer with no common member (NoCommonVersion) — and both are driven here and required to be indistinguishable from `nobody bound that address`. The timeout remains excluded by name (T10 spec §5.2), so the differential is 8 pre-upgrade causes, not D7's four-case tuple."
         }
     ]
 }

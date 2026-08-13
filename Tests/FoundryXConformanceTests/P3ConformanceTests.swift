@@ -39,7 +39,7 @@ final class ConformanceWorld: @unchecked Sendable {
     /// The number of externally reachable refusal causes the driver declares. The run
     /// reports what it exercised and the check asserts the two are equal, so deleting
     /// a cause is red rather than a smaller silent pass.
-    let declaredRefusalCauses = 6
+    let declaredRefusalCauses = 8
 
     func requireFixture() throws -> RelayProcessFixture {
         guard let f = fixture else { throw ConformanceStepError("no relay was started") }
@@ -175,6 +175,54 @@ enum P3ConformanceSteps {
                       served on the wire but NOT declared:        \(onlyObserved)
                     \(detail)
                     """)
+                }
+            },
+            defineCheck("each element's individual questions are answered exactly as the register declares them") { _, _, _ in
+                let register = try ContractElementRegister.load()
+                let declaredByID = Dictionary(uniqueKeysWithValues: register.rows.map { ($0.id, $0.parts) })
+                var partsCompared = 0
+                var disagreements: [String] = []
+                for element in w.drivenElements {
+                    let declared = declaredByID[element.id] ?? nil
+                    let observed = element.partMap
+                    // Absence has to agree in both directions too. An element that grew
+                    // parts without the register growing them, or the reverse, is a
+                    // silent divergence between the declaration and the drive.
+                    guard let declared else {
+                        if !observed.isEmpty {
+                            disagreements.append("  \(element.id): the run answered \(observed.keys.sorted()) and the register declares no parts for it")
+                        }
+                        continue
+                    }
+                    guard !observed.isEmpty else {
+                        disagreements.append("  \(element.id): the register declares parts \(declared.keys.sorted()) and the run answered none")
+                        continue
+                    }
+                    for name in Set(declared.keys).union(observed.keys).sorted() {
+                        partsCompared += 1
+                        let d = declared[name] ?? "<not declared>"
+                        let o = observed[name] ?? "<not answered>"
+                        if d != o { disagreements.append("  \(element.id) / \(name): declared \(d), observed \(o)") }
+                    }
+                    // The verdict must be the conjunction it claims to be, so a `served`
+                    // hand-edited away from its own parts is red rather than believed.
+                    let allMet = element.parts.allSatisfy { $0.verdict == .met }
+                    if element.served != allMet {
+                        disagreements.append("  \(element.id): served=\(element.served) but its parts are \(observed) — the verdict is not the conjunction of its questions")
+                    }
+                }
+                // A comparison over zero parts reports clean and proves nothing.
+                guard partsCompared > 0 else {
+                    throw ConformanceStepError("the part comparison examined 0 parts across \(w.drivenElements.count) elements — a comparison over nothing is not a pass")
+                }
+                guard disagreements.isEmpty else {
+                    throw ConformanceStepError("the register and the wire disagree, question by question:\n"
+                                               + disagreements.joined(separator: "\n"))
+                }
+                print("CONFORMANCE: element parts compared = \(partsCompared), disagreements = 0")
+                for element in w.drivenElements where !element.parts.isEmpty {
+                    let rendered = element.parts.map { "\($0.name)=\($0.verdict.rawValue)" }.joined(separator: ", ")
+                    print("CONFORMANCE: PARTS — \(element.id): \(rendered)")
                 }
             },
             defineCheck("every element the relay does not serve is named with what the client observed") { _, _, _ in
