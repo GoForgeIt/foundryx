@@ -1,0 +1,88 @@
+MUTATION RECORD — features/the-phone-refuses-a-host-it-cannot-pin.feature
+Branch foundryx-relay/mandatory-pin-20260813, base origin/main c83c53bfe1fbde6f55d358724c4de1a019b527b0
+Gate: swift test --filter MandatoryDoorPinTests   (12 scenarios, count asserted by ConformanceFeatureDriver)
+
+Each mutation is applied ALONE to the fixed tree, run, and reverted. The point is not
+that the suite goes red — it is that the ONE scenario aimed at that subject goes red,
+and the message names the subject. Verbatim observed output below.
+
+UNMUTATED (the fixed tree)
+    Executed 1 test, with 0 failures (0 unexpected) in 0.085 (0.085) seconds
+    rc=0
+
+----------------------------------------------------------------------------------
+M1 — the absent case falls back instead of refusing (the original defect, restored)
+    Sources/FoundryXKit/HostResolver.swift, doorStaticKey(fromMachineId:)
+      -  guard let value = raw else { throw HostResolveError.hostCannotBePinned(…) }
+      +  guard let value = raw else { return Data() }
+
+RED, 2 scenarios:
+  [failed] a host designation the phone cannot turn into a door key is refused (row 1):
+    the phone COMPLETED the resolve and built a relay configuration carrying a pin of 0
+    bytes. An answer that cannot be turned into a door key must produce no configuration
+    at all — otherwise the connect proceeds unpinned, which is the fail-open P1 records.
+  [failed] the refusal says the host could not be pinned: (same observation)
+    Executed 1 test, with 2 failures (0 unexpected)
+
+----------------------------------------------------------------------------------
+M2 — the alphabet is widened to accept uppercase (a spelling is normalised in)
+    Sources/FoundryXKit/HostResolver.swift
+      -  private static let machineIdAlphabet = Set("0123456789abcdef")
+      +  private static let machineIdAlphabet = Set("0123456789abcdefABCDEF")
+
+RED, exactly the uppercase row and nothing else:
+  [failed] a host designation the phone cannot turn into a door key is refused (row 9):
+    the phone COMPLETED the resolve and built a relay configuration carrying a pin of 32
+    bytes. …
+    Executed 1 test, with 2 failures (0 unexpected)
+
+----------------------------------------------------------------------------------
+M3 — the pin is optional again (the type-level guard removed)
+    Sources/FoundryXKit/RelayTransport.swift
+      -  public let expectedDoorStatic: Data
+      +  public let expectedDoorStatic: Data?
+
+NOTE: this mutation DOES NOT COMPILE on its own — P1GatewayIdentityPredicate.swift:215
+reads `config.expectedDoorStatic.count` and stops building. That is the guard working:
+reverting the pin to optional is a build break before it is a test failure. The
+predicate was patched to `?? -1` only so the scenario could be observed.
+
+RED, exactly the structural scenario:
+  [failed] a relay configuration has no way to spell "no pin":
+    `RelayConfig.expectedDoorStatic` is Optional<Data> — an OPTIONAL. While it is
+    optional, `nil` has a spelling at both dial sites (`RelayTransport.roundTrip`,
+    `NoiseRelayChannel.connect`), each of which reads it with `if let` and simply skips
+    the pin. The type is the guard: with a non-optional there is no unpinned dial to write.
+    Executed 1 test, with 2 failures (0 unexpected)
+
+----------------------------------------------------------------------------------
+M4 — the old hexToData length rule restored and the 32-byte floor deleted
+    Sources/FoundryXKit/HostResolver.swift
+      -  guard hex.count == 64 else { … }        +  guard hex.count % 2 == 0, !hex.isEmpty else { … }
+      -  guard out.count == 32 else { … }        +  (deleted)
+
+RED, exactly the short-key row:
+  [failed] a host designation the phone cannot turn into a door key is refused (row 4):
+    the phone COMPLETED the resolve and built a relay configuration carrying a pin of 31
+    bytes. …
+    Executed 1 test, with 2 failures (0 unexpected)
+
+----------------------------------------------------------------------------------
+M5 — refuse EVERY answer, including a correct one (the "buy green by never connecting"
+     mutation this feature must not survive)
+    Sources/FoundryXKit/HostResolver.swift, first line of doorStaticKey:
+      +  throw HostResolveError.hostCannotBePinned("M5")
+
+RED on the POSITIVE CONTROL, which is the whole reason it is there:
+  [failed] a host designation carrying a real door key resolves and is pinned:
+    the phone refused a host it CAN pin: hostCannotBePinned("M5"). A resolver that
+    refuses everything would satisfy every refusal scenario in this feature, so this is
+    the control that keeps them meaning something.
+  [failed] a relay configuration has no way to spell "no pin":
+    no relay configuration was produced, so its type could not be read
+    Executed 1 test, with 2 failures (0 unexpected)
+
+----------------------------------------------------------------------------------
+AFTER REVERTING ALL FIVE
+    git status --porcelain  ->  (empty)
+    Executed 1 test, with 0 failures (0 unexpected) in 0.085 (0.085) seconds
