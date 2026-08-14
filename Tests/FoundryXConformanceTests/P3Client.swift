@@ -228,11 +228,26 @@ struct P3Client {
 
     // MARK: the request shapes
 
-    /// The conforming request: the relay's one route, the address, and the client's pin
-    /// of the community it expects to reach.
-    static func conforming(host: String, community: String) -> String {
-        "GET /p3 HTTP/1.1\r\nHost: \(host)\r\nx-foundry-community-pid: \(community)\r\n"
-            + "x-foundry-protocol-offer: 1\r\n\r\n"
+    /// The version this client speaks and therefore predicts the relay will select.
+    ///
+    /// It is one number rather than a list because the connect frame must be signed over
+    /// the version the exchange is ABOUT TO produce, and negotiation happens in the same
+    /// request that carries the frame — so a client offering `{1}` signs `1`, and if it
+    /// offered a set it would have to predict `max(offer ∩ what the relay speaks)` before
+    /// it has been told what the relay speaks. Predicting wrong is not a soft failure: the
+    /// proof covers the version, so the signature simply does not verify.
+    static let clientVersion: UInt16 = 1
+
+    /// The conforming request: the relay's one route, the address, the client's pin of the
+    /// community it expects to reach, its version offer — and, since foundry's auth middle
+    /// landed, a connect frame that PROVES which key is on the connection.
+    ///
+    /// The frame is what the pin never could. `x-foundry-community-pid` is a value the
+    /// client copies out of the deployment's own public bindings, so every check above it
+    /// can be passed by anybody who has read one line of configuration; the proof can only
+    /// be made by whoever holds the private half.
+    static func conforming(host: String, community: String, identity: ConnectIdentity) -> String {
+        offering(String(clientVersion), host: host, community: community, identity: identity)
     }
 
     /// The same request with the version offer under the client's control — `nil` for
@@ -242,24 +257,122 @@ struct P3Client {
     /// request that carries the host, and the relay echoes its selection in the upgrade
     /// acceptance). An exchange is only proved by driving BOTH directions, so the offer
     /// has to be a parameter rather than a constant baked into `conforming`.
-    static func offering(_ offer: String?, host: String, community: String) -> String {
+    ///
+    /// The connect frame is always signed over [`clientVersion`], including on the offers
+    /// this client expects to be refused. That is deliberate and it is not a shortcut: a
+    /// request whose offer the relay cannot meet is refused AT NEGOTIATION, which runs
+    /// before the auth middle, so the frame on it is never read. Signing something else
+    /// there would be inventing a second client shape for a code path nobody reaches.
+    static func offering(_ offer: String?, host: String, community: String,
+                         identity: ConnectIdentity) -> String {
         let offerLine = offer.map { "x-foundry-protocol-offer: \($0)\r\n" } ?? ""
         return "GET /p3 HTTP/1.1\r\nHost: \(host)\r\nx-foundry-community-pid: \(community)\r\n"
-            + offerLine + "\r\n"
+            + offerLine
+            + identity.frameHeaders(host: host, community: community, version: clientVersion)
+            + "\r\n"
     }
 
     /// NON-CONFORMING FIXTURE, case 1: a client that names no community. It cannot
     /// detect a silently re-pointed address, which is exactly why the contract requires
     /// the pin. If this is admitted the feature is worthless, so it must be refused.
-    static func namingNoCommunity(host: String) -> String {
-        "GET /p3 HTTP/1.1\r\nHost: \(host)\r\nx-foundry-protocol-offer: 1\r\n\r\n"
+    ///
+    /// It still carries a VALID connect frame, signed over the community it really is
+    /// reaching — it is conforming in every respect except the one it is named for.
+    /// Dropping the frame too would make this stimulus reach two distinct causes at once
+    /// (`MissingPin` and `MissingIdentity`) and the relay refuses at the first, so the
+    /// fixture would have stopped driving the cause it is named for without anything going
+    /// red.
+    static func namingNoCommunity(host: String, community: String, identity: ConnectIdentity) -> String {
+        "GET /p3 HTTP/1.1\r\nHost: \(host)\r\nx-foundry-protocol-offer: 1\r\n"
+            + identity.frameHeaders(host: host, community: community, version: clientVersion)
+            + "\r\n"
     }
 
     /// NON-CONFORMING FIXTURE, case 2: a client that asserts a community rather than
     /// one the address is bound to.
-    static func namingWrongCommunity(host: String) -> String {
-        "GET /p3 HTTP/1.1\r\nHost: \(host)\r\nx-foundry-community-pid: \(String(repeating: "cd", count: 32))\r\n"
-            + "x-foundry-protocol-offer: 1\r\n\r\n"
+    static func namingWrongCommunity(host: String, identity: ConnectIdentity) -> String {
+        let asserted = String(repeating: "cd", count: 32)
+        return "GET /p3 HTTP/1.1\r\nHost: \(host)\r\nx-foundry-community-pid: \(asserted)\r\n"
+            + "x-foundry-protocol-offer: 1\r\n"
+            + identity.frameHeaders(host: host, community: asserted, version: clientVersion)
+            + "\r\n"
+    }
+}
+
+/// The client half of the relay's auth middle: a key, the location it says it is
+/// connecting from, and the five header lines that carry a proof of possession.
+///
+/// ## What is signed, and why each field is in it
+///
+/// `identity::connect_body` is seven canonical fields — identity, origin, community,
+/// version, location, nonce, timestamp — and every one of them is load-bearing from the
+/// client's side too:
+///
+///  * without `origin` a proof harvested at one deployment's door opens every other one;
+///  * without `community` a proof made for one tenant on a shared host opens another's;
+///  * `version` is the half of N1's prologue the relay can check at connect time, and it
+///    is carried as its own field rather than concatenated onto the host, because the
+///    canonical encoder is length-prefixed per field and hand-concatenating would
+///    reintroduce the boundary ambiguity that encoder exists to remove;
+///  * `location` is signed so it cannot be edited in flight — the relay is explicit that
+///    it remains a CLAIM rather than a verified fact, and this client does not pretend
+///    otherwise;
+///  * `nonce` and `timestamp` are what stop the proof being replayable.
+///
+/// ## The nonce is CLIENT-CHOSEN TODAY AND WILL NOT BE
+///
+/// The relay's replay defence is a process-local `HashMap` keyed on `(identity, nonce)`
+/// and bounded by the deployed auth-frame window (`identity::NonceCache`) — which means it
+/// forgets when the process restarts and knows nothing about a second relay. **Under an
+/// upcoming change the nonce becomes SERVER-ISSUED**: the client will fetch a challenge
+/// and sign the value it was handed, rather than picking one.
+///
+/// This type is shaped so that lands as a small change rather than a rewrite: the nonce is
+/// produced by exactly one function, [`nextNonce`], which nothing outside this type calls,
+/// and the frame is minted per request rather than cached. When the challenge endpoint
+/// exists, `nextNonce` becomes a fetch and takes a connection to fetch over; nothing else
+/// here moves, and no call site changes.
+struct ConnectIdentity {
+    let key: Secp256k1.SigningKey
+    /// The location this client says it is. A SIGNED CLAIM: the relay types it as one
+    /// (`session_context::SignedLocationClaim`) because the signed device set carries no
+    /// public key to resolve a location against, so nothing on the far side can verify it.
+    let locationId: String
+
+    var identityKeyHex: String { key.publicKeyHex }
+
+    /// The five header lines, each already terminated — the caller appends the blank line
+    /// that ends the head.
+    ///
+    /// A FRESH FRAME PER REQUEST, always. `(identity, nonce)` is spent on first use inside
+    /// the freshness window, so a cached frame replayed on a second connection is refused
+    /// as `ReplayedProof` — which on the wire is the same bytes as every other refusal, and
+    /// would therefore show up as an unexplained non-upgrade rather than as a bug.
+    func frameHeaders(host: String, community: String, version: UInt16) -> String {
+        let nonce = Self.nextNonce()
+        let timestamp = UInt64(Date().timeIntervalSince1970)
+        let body = FoundrySigning.connectBody(identityKeyHex: key.publicKeyHex,
+                                              normalizedHost: host,
+                                              communityPid: community,
+                                              negotiatedVersion: version,
+                                              locationId: locationId,
+                                              nonceHex: nonce,
+                                              timestamp: timestamp)
+        let proof = FoundrySigning.sign(key, tag: FoundrySigning.connectTag, body: body)
+        return "x-foundry-identity-key: \(key.publicKeyHex)\r\n"
+            + "x-foundry-location-id: \(locationId)\r\n"
+            + "x-foundry-connect-nonce: \(nonce)\r\n"
+            + "x-foundry-connect-timestamp: \(timestamp)\r\n"
+            + "x-foundry-connect-proof: \(proof)\r\n"
+    }
+
+    /// Sixteen random bytes, lower-case hex — the relay refuses an empty nonce, an
+    /// odd-length one, and anything that is not lower-case hex.
+    ///
+    /// THE ONE PLACE A NONCE IS CHOSEN. See the type's note: when the relay issues the
+    /// challenge instead, this is the function that changes.
+    private static func nextNonce() -> String {
+        (0..<16).map { _ in String(format: "%02x", UInt8.random(in: 0...255)) }.joined()
     }
 }
 

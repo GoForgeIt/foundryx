@@ -64,8 +64,38 @@ final class RelayProcessFixture {
     private(set) var pid: Int32 = 0
     private(set) var imageDigest: String = ""
     private(set) var port: UInt16 = 0
-    private(set) var communityPid: String = String(repeating: "ab", count: 32)
     private(set) var boundHost: String = "bound.example"
+
+    /// The key that FOUNDED this deployment's community, and therefore the community's
+    /// own identity.
+    ///
+    /// It used to be the literal `ababab…`, and that stopped working when the relay grew
+    /// enrolment: `membership::fold` requires entry zero of `communities/<pid>.log` to be a
+    /// `Found` whose owner's pid EQUALS the pid the deployment bound the host to, so the
+    /// bindings file and the log's founding key are two spellings of one key. A made-up pid
+    /// has no key, so no log can be founded under it, so nobody can be enrolled in it.
+    private(set) var communityKey = Secp256k1.SigningKey.generate()
+
+    /// The community the bound host resolves to — the founding key's x-only public half.
+    var communityPid: String { communityKey.publicKeyHex }
+
+    /// The conforming client's own key and location. A DIFFERENT principal from the
+    /// community: it is admitted by the founder in entry one of the signed log, which is
+    /// what a door presenting a location's key actually looks like.
+    private(set) var identity = ConnectIdentity(key: Secp256k1.SigningKey.generate(),
+                                                locationId: "loc-conformance-01")
+
+    /// The deployment directory this run created. The relay reads its configuration, its
+    /// community logs and its seam log out of here, so a harness that owns the directory
+    /// can read what the door decided without the door having to expose a route for it.
+    private(set) var deploymentDir: URL?
+
+    /// Where this deployment's door writes what it decided —
+    /// `seam_log::auth_log_path` = `<deployment>/seam/auth.log`.
+    ///
+    /// It is derived from the deployment directory rather than configured, because the
+    /// relay's configuration register is closed at three keys and this is not a fourth.
+    var seamLogPath: URL? { deploymentDir?.appendingPathComponent("seam").appendingPathComponent("auth.log") }
 
     /// Every scratch directory this harness created, so teardown enumerates what the
     /// RUN made rather than one path somebody remembered. A leak counter that checks
@@ -108,6 +138,20 @@ final class RelayProcessFixture {
         try relayToml.write(to: dir.appendingPathComponent("relay.toml"), atomically: true, encoding: .utf8)
         try "\(boundHost) = \"\(communityPid)\"\n"
             .write(to: dir.appendingPathComponent("bindings.toml"), atomically: true, encoding: .utf8)
+
+        // ---- THE COMMUNITY'S SIGNED MEMBERSHIP LOG ---------------------------------
+        // The relay resolves enrolment by FOLDING this file, per connection, with no cache
+        // and no short-circuit. A deployment that binds a host to a community it holds no
+        // signed log for is refused (`MembershipError::Unreadable`), so this is not
+        // optional decoration: without it every client — conforming or not — is denied.
+        let communities = dir.appendingPathComponent("communities")
+        try FileManager.default.createDirectory(at: communities, withIntermediateDirectories: true)
+        try CommunityMembershipLog.text(founder: communityKey,
+                                        memberPid: identity.identityKeyHex,
+                                        memberName: "conformance-client")
+            .write(to: communities.appendingPathComponent("\(communityPid).log"),
+                   atomically: true, encoding: .utf8)
+        deploymentDir = dir
 
         let p = Process()
         p.executableURL = binURL
