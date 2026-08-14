@@ -110,12 +110,20 @@ enum FoundrySigning {
 
     /// `identity::connect_body`. Seven fields, in this order, each one carried as its own
     /// canonical field rather than concatenated into a prologue string.
+    ///
+    /// The sixth field was `nonce` until foundry main `6de3bb3c` made the value the RELAY'S
+    /// to issue. It is renamed IN PLACE — same position, same order, same encoder — because
+    /// the field NAME is inside the length-prefixed pre-image: a client still writing `nonce`
+    /// signs a different message and its proof simply does not verify. MEASURED, not
+    /// reasoned about — putting `nonce` back here while everything else stayed correct made
+    /// the door decide `unproven-identity`, which on the wire is the same 403 as every other
+    /// refusal. See `ConnectIdentity` for where the value now comes from.
     static func connectBody(identityKeyHex: String,
                             normalizedHost: String,
                             communityPid: String,
                             negotiatedVersion: UInt16,
                             locationId: String,
-                            nonceHex: String,
+                            challengeHex: String,
                             timestamp: UInt64) -> CanonicalBody {
         CanonicalBody(kind: "fx.relay.connect")
             .with("identity", identityKeyHex)
@@ -123,7 +131,7 @@ enum FoundrySigning {
             .with("community", communityPid)
             .with("version", String(negotiatedVersion))
             .with("location", locationId)
-            .with("nonce", nonceHex)
+            .with("challenge", challengeHex)
             .with("timestamp", String(timestamp))
     }
 

@@ -128,7 +128,7 @@ enum P3ConformanceSteps {
             defineStep("a client asks for an address the deployment binds, naming the community it is bound to") { ctx, _, _ in
                 let f = try w.requireFixture()
                 w.lastExchange = try w.requireClient().exchange(
-                    request: P3Client.conforming(host: f.boundHost, community: f.communityPid, identity: f.identity))
+                    request: try P3Client.conforming(host: f.boundHost, community: f.communityPid, identity: f.identity))
                 return ctx
             },
             defineCheck("the connection is upgraded") { _, _, _ in
@@ -148,12 +148,12 @@ enum P3ConformanceSteps {
             // ---------------------------------------------------------------- the non-conforming fixtures
             defineStep("a client asks for an address the deployment binds, naming no community at all") { ctx, _, _ in
                 let f = try w.requireFixture()
-                w.lastExchange = try w.requireClient().exchange(request: P3Client.namingNoCommunity(host: f.boundHost, community: f.communityPid, identity: f.identity))
+                w.lastExchange = try w.requireClient().exchange(request: try P3Client.namingNoCommunity(host: f.boundHost, community: f.communityPid, identity: f.identity))
                 return ctx
             },
             defineStep("a client asks for an address the deployment binds, naming a community it is not bound to") { ctx, _, _ in
                 let f = try w.requireFixture()
-                w.lastExchange = try w.requireClient().exchange(request: P3Client.namingWrongCommunity(host: f.boundHost, identity: f.identity))
+                w.lastExchange = try w.requireClient().exchange(request: try P3Client.namingWrongCommunity(host: f.boundHost, identity: f.identity))
                 return ctx
             },
             defineCheck("the connection is refused") { _, _, _ in

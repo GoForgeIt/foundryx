@@ -192,6 +192,15 @@ final class RelayProcessFixture {
         startedPids.append(pid)
 
         port = try Self.readListeningPort(from: out, deadline: Date().addingTimeInterval(10))
+
+        // ---- THE CLIENT CAN NOW BE ISSUED SOMETHING TO SIGN ------------------------
+        // Set HERE and nowhere else, because this is the first instant both halves are
+        // known: the relay was asked for `:0` and has just printed the port it got, and
+        // the bound host is this fixture's own. Since foundry main 6de3bb3c the connect
+        // proof covers a challenge THE DEPLOYMENT ISSUED, so an identity without this is
+        // an identity that cannot open a door — and `ConnectIdentity` refuses rather than
+        // fetching against port zero, so forgetting it is a named failure, not a 403.
+        identity.challengeSource = ConnectIdentity.ChallengeSource(port: port, host: boundHost)
     }
 
     /// What the deployment is configured with, so a scenario that waits on the relay's
