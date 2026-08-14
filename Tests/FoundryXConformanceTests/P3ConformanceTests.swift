@@ -134,7 +134,8 @@ enum P3ConformanceSteps {
             defineCheck("the connection is upgraded") { _, _, _ in
                 let r = try w.requireExchange()
                 guard r.upgraded else {
-                    throw ConformanceStepError("expected an upgrade; the relay answered \(firstLine(r))")
+                    throw ConformanceStepError("expected an upgrade; the relay answered \(firstLine(r))"
+                                               + P3ConformanceSteps.whatTheDoorDecided(w))
                 }
             },
             defineCheck("the relay returns a session token") { _, _, _ in
@@ -465,5 +466,49 @@ enum P3ConformanceSteps {
 
     private static func firstLine(_ r: P3Client.Exchange) -> String {
         r.text.split(separator: "\r\n").first.map(String.init) ?? "<no reply at all>"
+    }
+
+    /// What the door recorded about the connection it just refused.
+    ///
+    /// ## Why a failure message reads a file
+    ///
+    /// Every refusal this relay writes is ONE constant — `403`, `Connection: close`,
+    /// `Content-Length: 0` — across all of `serve::RefusalCause::ALL`. That is deliberate
+    /// and this target must not ask for it to be weakened. Its cost lands here: when the
+    /// CONFORMING client is refused, `the relay answered HTTP/1.1 403 Forbidden` names no
+    /// cause at all, and the harness reports the one sentence that cannot tell a broken
+    /// fixture from a relay that changed its contract.
+    ///
+    /// The door answers it where a caller on the wire cannot reach — its CQRS seam log,
+    /// inside the deployment directory this harness owns and no route serves. That is the
+    /// instrument the published connect-wire contract names (§5, `p3-connect-wire-contract.md`),
+    /// and a conforming client that is refused is exactly the moment to read it.
+    ///
+    /// This is REPORTING, not a verdict: no `served` value, no part, and no scenario
+    /// outcome is computed from it. It is the difference between a lane that bisects
+    /// eleven commits to find out why, and a lane that reads the answer off the failure.
+    ///
+    /// It refuses to be silent about its own failure. An unreadable log is REPORTED as
+    /// unreadable rather than swallowed into an empty string, because a diagnostic that
+    /// goes quiet when its instrument breaks is worse than no diagnostic.
+    static func whatTheDoorDecided(_ w: ConformanceWorld) -> String {
+        let fixture: RelayProcessFixture
+        do { fixture = try w.requireFixture() }
+        catch { return "\n  the harness holds no relay fixture, so there is no seam log to read: \(error)" }
+        do {
+            let entries = try DoorSeamLog.read(at: fixture.seamLogPath)
+            let refusals = entries.filter { $0.outcome == DoorSeamLog.refuse }
+            guard !refusals.isEmpty else {
+                return "\n  the door recorded \(entries.count) decision(s) about this deployment and NONE of them is a refusal — so the 403 was written by something that never reached the seam"
+            }
+            let named = refusals.map { "\($0.seam)/\($0.decidingConjunct.isEmpty ? "<unnamed>" : $0.decidingConjunct)" }
+            return """
+            \n  the door recorded \(refusals.count) refusal(s) of \(entries.count) decision(s), deciding on \
+            \(named.joined(separator: ", ")) — read from the door's own seam log, because every refusal \
+            writes the same bytes and the wire cannot tell them apart
+            """
+        } catch {
+            return "\n  the door's seam log could not be read, so this run cannot say which conjunct decided: \(error)"
+        }
     }
 }
