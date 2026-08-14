@@ -990,7 +990,14 @@ final class PocketRecorderCheckModel: ObservableObject {
                                                     advertisedName: advertisedName,
                                                     recording: recording,
                                                     custody: self.custody,
-                                                    attachment: Self.makeAttachment())
+                                                    attachment: Self.makeAttachment(),
+                                                    // THE OWNER'S OWN LIBRARY, ASKED FOR RATHER
+                                                    // THAN GUESSED. The conversation must land in
+                                                    // the directory this manager hydrates from;
+                                                    // resolving it independently happens to
+                                                    // agree today and is not guaranteed to.
+                                                    destination: .init(
+                                                        baseDir: manager.captureLibraryRoot))
             self.isBringingOver = false
             self.bringOverMessage = PocketBringOverPresentation.message(for: outcome)
             // THE HAND-OFF. From here it is the ordinary drain and the ordinary finalize — the

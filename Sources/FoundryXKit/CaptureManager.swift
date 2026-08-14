@@ -969,6 +969,17 @@ public final class CaptureManager: ObservableObject {
     /// Internal (not private) so organizer helpers in the module can reach the
     /// same capture tree (search text, segment sizes, category store).
     let baseDir: URL
+
+    /// THE LIBRARY THIS MANAGER OWNS, readable from `App/`.
+    ///
+    /// A producer of a FINISHED capture — `PocketCaptureImport`, writing a recording pulled off
+    /// a record-then-sync recorder — has to write into the SAME directory this manager hydrates
+    /// from, or the conversation lands somewhere nothing will ever look and `adoptCompletedCapture`
+    /// finds nothing to adopt. Resolving the root independently (from the ambient account
+    /// binding) happens to agree today and is not GUARANTEED to: a manager built on an explicit
+    /// root, or one still holding the previous account's root across a switch, disagrees. So the
+    /// producer asks the owner rather than guessing.
+    public var captureLibraryRoot: URL { baseDir }
     private let log: DoorLog?
     private let source: AudioFrameSource
     /// Optional SECOND frame source: the phone's own microphone (a `MicFrameSource`).

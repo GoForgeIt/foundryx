@@ -225,6 +225,13 @@ targets:
       # The one Brine driver, shared for the same reason: a second one is a second idea of
       # what "the scenario passed" means. It imports no kit module, so it needs no shim.
       - path: Tests/FoundryXBrineTests/BrineFeatureRunner.swift
+      # THE RECORDER'S OWN AUDIO, carried as a bundle RESOURCE. The app's bring-over now
+      # DECODES what it pulled, so these scenarios need real MPEG-2 Layer III rather than two
+      # bytes that satisfy a sync-word check — and this lane runs inside the shipping app on a
+      # simulator, where the repository is not reachable by `#filePath` the way it is for the
+      # hostless suite. Same file the hostless suite reads; see its POCKET-AUDIO-PROVENANCE.txt.
+      - path: Tests/FoundryXBrineTests/fixtures/pocket/pocket-fw16-3s.mp3
+        buildPhase: resources
     dependencies:
       # The APP target — not the FoundryXKit package. Depending on both would put two copies
       # of every kit type in the process (one compiled into the app, one in the library) and

@@ -30,3 +30,18 @@ Feature: Solleva's recorder page brings a recording over
     And I bring the offered recording over
     Then Solleva says it kept the recording
     And the recorder's shelf now says that recording is in Solleva
+
+  Scenario: A recording brought over becomes a conversation Solleva is holding
+    Given a remembered recorder holding one recording
+    When Solleva asks that recorder what it is holding
+    And I bring the offered recording over
+    Then Solleva's conversations include the one that came off the recorder
+    And it is not presented as a recording in progress
+
+  Scenario: The conversation reaches the brain the way every recording does
+    Given a remembered recorder holding one recording
+    When Solleva asks that recorder what it is holding
+    And I bring the offered recording over
+    And Solleva sends what it is holding
+    Then that conversation's audio was uploaded and the conversation was finalized
+    And the audio that went up is the ordinary audio every recording sends

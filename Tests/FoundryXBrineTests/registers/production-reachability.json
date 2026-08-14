@@ -1,310 +1,440 @@
 {
-    "_what": "THE REACHABILITY REGISTER. Every capability named below is one this repository DECLARES must be reached from shipping code, together with the production call site that proves it. The checker (`ProductionReachabilityRegisterTests`) recomputes each verdict from the source text and asserts the computed verdict EQUALS the declared one, in both directions.",
-
-    "_the_defect_this_exists_for": "Brine scenarios drive INJECTED FAKES — correctly, by design, so logic can be proven without hardware. Nothing in that arrangement asserts that PRODUCTION CODE EVER CALLS THE LOGIC. Green therefore proves the code is RIGHT, not that it is REACHED. Four instances in one day: (1) `PocketBLEClient.download` shipped as a complete, unit-tested protocol client with ZERO callers under `App/`, and all eight Pocket feature files passed anyway; (2) `PocketDurableSync`, `PocketFastSyncCoordinator` and the stored-file live-boundary lifecycle were written, tested, and had zero callers, while the Pocket flow was reported delivered; (3) `StoredFileLiveBoundarySpy`'s five counters have zero write sites anywhere outside the spy itself, and the commit that added them claimed 'the counters now have real production write sites' — false on `main` and still false here; (4) in the sibling `foundry` repository a `link_provider_sub` field was added to a handler the iOS client never calls, and every test passed because the tests called the handler directly.",
-
-    "_why_a_register_and_not_a_heuristic": "'Every public symbol must have a caller' is unshippable noise: a library target's whole job is to publish symbols an app has not called yet, and a gate that reds on all of them is a gate people delete. This is a REGISTER — a curated table of capabilities somebody DECIDED must be reachable, each with the caller that proves it. A row that matches nothing is a failure, and a capability whose declared caller no longer calls it is a failure. Both directions, exactly like the `NounAlignmentCensus` residue rows and the P3 contract register's `served` equality: a capability that starts being reached has to MOVE this file, and one that stops being reached goes red without one.",
-
-    "_why_this_shape_and_not_a_third_one": "Two idioms already exist and this is their intersection, not a third. The sibling `foundry` repo keeps declaration tables at `ci/registers/*.toml` with prose headers, `[[row]]` entries and residue in both directions. This repo keeps App-side construction censuses in Swift (`BrainSelectionCompositionTests` pins `CellStore(`'s construction sites to an EXACT file list; `DeviceCompositionRootGateTests` reads `App/` because `swift test` cannot compile it) and already keeps one JSON register read by repo path at `Tests/FoundryXConformanceTests/registers/p3-contract-elements.json`. JSON read by `#filePath`-relative path, checked by a Swift test in `Tests/FoundryXBrineTests/`, is the existing shape for 'a declaration table a Swift gate compares against measured reality'. The three-valued verdict is borrowed outright from that register's `met` / `unmet` / `not-reached`.",
-
-    "_three_verdicts_never_two": "`reachable`, `unreachable`, `undetermined`. THE THIRD ONE IS THE POINT. Three false reds in one day came from a checker that could not tell 'nothing calls this' from 'I cannot see who calls this', and reported the second as the first. A text register cannot follow a protocol existential, cannot read another repository, and cannot know whether an unregistered production file is itself reached. Each of those is recorded as `undetermined` WITH THE REASON, and `undetermined` is never counted as a pass for the capability — it is counted as a question nobody has answered. Collapsing it into `unreachable` would make this gate the disease it was built to cure.",
-
-    "_not_satisfiable_by_a_test": "A caller inside `Tests/`, `TestSupport/` or `UITests/` is not production reachability; that is the entire point. The checker enforces it structurally: `production_roots` and `non_production_roots` are disjoint and asserted disjoint, every resolved node path must be under a production root, and a `via` or `unregistered_production_file` that resolves under a non-production root is a NAMED HARD FAILURE rather than a satisfied row. `tested_from`, where a row declares it, is the opposite claim — the test files that DO exercise a capability nothing production reaches — and it is compared for EQUALITY against a scan of the non-production roots, so the contrast 'N test files, 0 production sites' is a measured number rather than a sentence.",
-
-    "_what_this_replaces": "Ad-hoc one-off versions of this check are already scattered through the suite — `DevicePagePresentationTests` greps for `PocketOnboardingView` presenters, `UnifiedRecordingDeviceListFeatureTests` does the same check again 900 lines away, `BrainSelectionCompositionTests` pins `CellStore(`. Each was written after a specific orphan shipped. This is the place a new one goes instead of a new bespoke grep.",
-
-    "_mutation": "Delete or rename any declared caller line and the row's computed verdict falls to `unreachable` while the register still declares `reachable` — RED, naming the capability, the file and the anchor. Add a production caller for a row declared `unreachable` — RED, demanding promotion. Point a `via` at a file under `Tests/` — RED, naming it as a test caller. Break a `declaration_anchor` — RED as a DEAD ROW. Change a `via` to `unregistered_production_file` — the verdict moves to `undetermined`, not to `unreachable`, and the counts move with it.",
-
-    "_mutations_run": "EIGHT MUTATIONS, ALL KILLED, executed against `0c2659e` BEFORE this register was trusted — a gate nobody has watched fail is not a gate. M1: delete the only production caller of `PocketBringOver.run` in `App/DeviceScreen.swift` -> RED on THREE rows at once (`pocket-bring-over-run`, `pocket-ble-download`, `pocket-durable-sync-ordering`), because reach is transitive and a per-symbol grep could not have seen the other two. AND THE POINT OF THE WHOLE EXERCISE: under that same mutation `swift test --filter Pocket` reported `Executed 27 tests, with 0 failures` — the defect class reproduced live, with this gate the only thing that noticed. M2: rename the `SettingsScreen(` call in `App/RootView.swift` -> RED on THIRTEEN rows; one broken link near the root and everything below it falls. M3: add a production call to `StoredFileDeviceLifecycle.runFullLinkLifecycle` -> RED naming `App/DeviceScreen.swift` and demanding the row be promoted out of the red roster. M4: point `pocket-ble-download`'s caller at a file under `Tests/` -> RED twice, named as a non-production root. M5: rename `walWritten` at its own declaration -> RED as a DEAD ROW. M6: the SAME REAL CALLER as M1, merely de-registered as an `unregistered_production_file` -> computed `undetermined`, NOT `unreachable`, naming the file and the reason. That is the mutation that proves the two states are distinguished rather than merged, and it is the one a naive gate would have reported identically to M1. M7: make `link_provider_sub` appear in `App/SettingsScreen.swift` -> RED on the cross-repository row. M8: the COORDINATED edit — flip `pocket-durable-sync-import` to `reachable` AND move `verdict_counts` to agree -> STILL RED, because the verdict is recomputed from the source text and never read from this file.",
-
-    "_stated_limits": "(1) CONTAINMENT IS FILE-LEVEL. A node is a file; a call site inside a dead function of a live file still counts as reached from that file. Function-level containment needs a parser, and a lexer that pretended to have one would be a worse lie than a stated limit. (2) The checker is a LEXER — it strips comments and blanks string literals (reusing `AppSourceTree.code(of:)`, which knows Swift's nesting block comments and multiline strings) but knows nothing of `#if`, so code behind a false `#if` counts as a call. That is the safe direction here: it over-reports reach, so it is recorded as a limit rather than relied on. (3) A capability's OWN declaring file is excluded from the undeclared-caller scan, so internal recursion is not mistaken for external reach.",
-
-    "production_roots": ["App", "Sources", "Widget"],
-    "non_production_roots": ["Tests", "TestSupport", "UITests"],
-
-    "_entry_points": "The files whose reachability is taken as GIVEN, because they are how the process starts. Everything else must chain to one. Keeping this list to one row is deliberate: an entry point is an axiom, and a register that can add axioms freely can make anything reachable.",
-    "entry_points": [
+  "_what": "THE REACHABILITY REGISTER. Every capability named below is one this repository DECLARES must be reached from shipping code, together with the production call site that proves it. The checker (`ProductionReachabilityRegisterTests`) recomputes each verdict from the source text and asserts the computed verdict EQUALS the declared one, in both directions.",
+  "_the_defect_this_exists_for": "Brine scenarios drive INJECTED FAKES — correctly, by design, so logic can be proven without hardware. Nothing in that arrangement asserts that PRODUCTION CODE EVER CALLS THE LOGIC. Green therefore proves the code is RIGHT, not that it is REACHED. Four instances in one day: (1) `PocketBLEClient.download` shipped as a complete, unit-tested protocol client with ZERO callers under `App/`, and all eight Pocket feature files passed anyway; (2) `PocketDurableSync`, `PocketFastSyncCoordinator` and the stored-file live-boundary lifecycle were written, tested, and had zero callers, while the Pocket flow was reported delivered; (3) `StoredFileLiveBoundarySpy`'s five counters have zero write sites anywhere outside the spy itself, and the commit that added them claimed 'the counters now have real production write sites' — false on `main` and still false here; (4) in the sibling `foundry` repository a `link_provider_sub` field was added to a handler the iOS client never calls, and every test passed because the tests called the handler directly.",
+  "_why_a_register_and_not_a_heuristic": "'Every public symbol must have a caller' is unshippable noise: a library target's whole job is to publish symbols an app has not called yet, and a gate that reds on all of them is a gate people delete. This is a REGISTER — a curated table of capabilities somebody DECIDED must be reachable, each with the caller that proves it. A row that matches nothing is a failure, and a capability whose declared caller no longer calls it is a failure. Both directions, exactly like the `NounAlignmentCensus` residue rows and the P3 contract register's `served` equality: a capability that starts being reached has to MOVE this file, and one that stops being reached goes red without one.",
+  "_why_this_shape_and_not_a_third_one": "Two idioms already exist and this is their intersection, not a third. The sibling `foundry` repo keeps declaration tables at `ci/registers/*.toml` with prose headers, `[[row]]` entries and residue in both directions. This repo keeps App-side construction censuses in Swift (`BrainSelectionCompositionTests` pins `CellStore(`'s construction sites to an EXACT file list; `DeviceCompositionRootGateTests` reads `App/` because `swift test` cannot compile it) and already keeps one JSON register read by repo path at `Tests/FoundryXConformanceTests/registers/p3-contract-elements.json`. JSON read by `#filePath`-relative path, checked by a Swift test in `Tests/FoundryXBrineTests/`, is the existing shape for 'a declaration table a Swift gate compares against measured reality'. The three-valued verdict is borrowed outright from that register's `met` / `unmet` / `not-reached`.",
+  "_three_verdicts_never_two": "`reachable`, `unreachable`, `undetermined`. THE THIRD ONE IS THE POINT. Three false reds in one day came from a checker that could not tell 'nothing calls this' from 'I cannot see who calls this', and reported the second as the first. A text register cannot follow a protocol existential, cannot read another repository, and cannot know whether an unregistered production file is itself reached. Each of those is recorded as `undetermined` WITH THE REASON, and `undetermined` is never counted as a pass for the capability — it is counted as a question nobody has answered. Collapsing it into `unreachable` would make this gate the disease it was built to cure.",
+  "_not_satisfiable_by_a_test": "A caller inside `Tests/`, `TestSupport/` or `UITests/` is not production reachability; that is the entire point. The checker enforces it structurally: `production_roots` and `non_production_roots` are disjoint and asserted disjoint, every resolved node path must be under a production root, and a `via` or `unregistered_production_file` that resolves under a non-production root is a NAMED HARD FAILURE rather than a satisfied row. `tested_from`, where a row declares it, is the opposite claim — the test files that DO exercise a capability nothing production reaches — and it is compared for EQUALITY against a scan of the non-production roots, so the contrast 'N test files, 0 production sites' is a measured number rather than a sentence.",
+  "_what_this_replaces": "Ad-hoc one-off versions of this check are already scattered through the suite — `DevicePagePresentationTests` greps for `PocketOnboardingView` presenters, `UnifiedRecordingDeviceListFeatureTests` does the same check again 900 lines away, `BrainSelectionCompositionTests` pins `CellStore(`. Each was written after a specific orphan shipped. This is the place a new one goes instead of a new bespoke grep.",
+  "_mutation": "Delete or rename any declared caller line and the row's computed verdict falls to `unreachable` while the register still declares `reachable` — RED, naming the capability, the file and the anchor. Add a production caller for a row declared `unreachable` — RED, demanding promotion. Point a `via` at a file under `Tests/` — RED, naming it as a test caller. Break a `declaration_anchor` — RED as a DEAD ROW. Change a `via` to `unregistered_production_file` — the verdict moves to `undetermined`, not to `unreachable`, and the counts move with it.",
+  "_mutations_run": "EIGHT MUTATIONS, ALL KILLED, executed against `0c2659e` BEFORE this register was trusted — a gate nobody has watched fail is not a gate. M1: delete the only production caller of `PocketBringOver.run` in `App/DeviceScreen.swift` -> RED on THREE rows at once (`pocket-bring-over-run`, `pocket-ble-download`, `pocket-durable-sync-ordering`), because reach is transitive and a per-symbol grep could not have seen the other two. AND THE POINT OF THE WHOLE EXERCISE: under that same mutation `swift test --filter Pocket` reported `Executed 27 tests, with 0 failures` — the defect class reproduced live, with this gate the only thing that noticed. M2: rename the `SettingsScreen(` call in `App/RootView.swift` -> RED on THIRTEEN rows; one broken link near the root and everything below it falls. M3: add a production call to `StoredFileDeviceLifecycle.runFullLinkLifecycle` -> RED naming `App/DeviceScreen.swift` and demanding the row be promoted out of the red roster. M4: point `pocket-ble-download`'s caller at a file under `Tests/` -> RED twice, named as a non-production root. M5: rename `walWritten` at its own declaration -> RED as a DEAD ROW. M6: the SAME REAL CALLER as M1, merely de-registered as an `unregistered_production_file` -> computed `undetermined`, NOT `unreachable`, naming the file and the reason. That is the mutation that proves the two states are distinguished rather than merged, and it is the one a naive gate would have reported identically to M1. M7: make `link_provider_sub` appear in `App/SettingsScreen.swift` -> RED on the cross-repository row. M8: the COORDINATED edit — flip `pocket-durable-sync-import` to `reachable` AND move `verdict_counts` to agree -> STILL RED, because the verdict is recomputed from the source text and never read from this file.",
+  "_stated_limits": "(1) CONTAINMENT IS FILE-LEVEL. A node is a file; a call site inside a dead function of a live file still counts as reached from that file. Function-level containment needs a parser, and a lexer that pretended to have one would be a worse lie than a stated limit. (2) The checker is a LEXER — it strips comments and blanks string literals (reusing `AppSourceTree.code(of:)`, which knows Swift's nesting block comments and multiline strings) but knows nothing of `#if`, so code behind a false `#if` counts as a call. That is the safe direction here: it over-reports reach, so it is recorded as a limit rather than relied on. (3) A capability's OWN declaring file is excluded from the undeclared-caller scan, so internal recursion is not mistaken for external reach.",
+  "production_roots": [
+    "App",
+    "Sources",
+    "Widget"
+  ],
+  "non_production_roots": [
+    "Tests",
+    "TestSupport",
+    "UITests"
+  ],
+  "_entry_points": "The files whose reachability is taken as GIVEN, because they are how the process starts. Everything else must chain to one. Keeping this list to one row is deliberate: an entry point is an axiom, and a register that can add axioms freely can make anything reachable.",
+  "entry_points": [
+    {
+      "id": "app-main",
+      "path": "App/FoundryXApp.swift",
+      "anchor": "@main",
+      "why": "the process entry point — `@main` is what iOS launches, and nothing above it exists to be registered."
+    }
+  ],
+  "capabilities": [
+    {
+      "id": "root-view",
+      "name": "the composition root the app launches into",
+      "declared_in": "App/RootView.swift",
+      "declaration_anchor": "struct RootView: View",
+      "call_pattern": "RootView(",
+      "reached_from": [
         {
-            "id": "app-main",
-            "path": "App/FoundryXApp.swift",
-            "anchor": "@main",
-            "why": "the process entry point — `@main` is what iOS launches, and nothing above it exists to be registered."
+          "via": "app-main",
+          "anchor": "RootView()"
         }
-    ],
-
-    "capabilities": [
-        {
-            "id": "root-view",
-            "name": "the composition root the app launches into",
-            "declared_in": "App/RootView.swift",
-            "declaration_anchor": "struct RootView: View",
-            "call_pattern": "RootView(",
-            "reached_from": [{ "via": "app-main", "anchor": "RootView()" }],
-            "verdict": "reachable",
-            "why": "the first link of the spine; every App-side row below chains through it."
-        },
-        {
-            "id": "settings-screen",
-            "name": "Settings",
-            "declared_in": "App/SettingsScreen.swift",
-            "declaration_anchor": "struct SettingsScreen: View",
-            "call_pattern": "SettingsScreen(",
-            "reached_from": [{ "via": "root-view", "anchor": "SettingsScreen(brains: brains, remote: remote," }],
-            "verdict": "reachable",
-            "why": "the only route to the device screen; registered so the device rows below are chained to a root rather than to each other."
-        },
-        {
-            "id": "device-screen",
-            "name": "the recording-device screen",
-            "declared_in": "App/DeviceScreen.swift",
-            "declaration_anchor": "struct DeviceScreen: View",
-            "call_pattern": "DeviceScreen(",
-            "reached_from": [{ "via": "settings-screen", "anchor": "DeviceScreen(device: device, manager: manager, sources: sources," }],
-            "verdict": "reachable",
-            "why": "the App-side file that holds every production caller of the Pocket stored-file capabilities. If this screen stops being presented, every Pocket row below correctly falls to `unreachable` in one move — which is the property a per-capability grep for `App/` could never have."
-        },
-        {
-            "id": "pocket-onboarding-view",
-            "name": "the Pocket setup / key-custody / consent ceremony screens",
-            "declared_in": "App/PocketOnboardingView.swift",
-            "declaration_anchor": "struct PocketOnboardingView: View",
-            "call_pattern": "PocketOnboardingView(",
-            "reached_from": [{ "via": "device-screen", "anchor": "PocketOnboardingView(screen: .education) { _ in showingEducation = false }" }],
-            "verdict": "reachable",
-            "why": "SHIPPED ORPHANED ONCE ALREADY — a grep for it outside its own file returned nothing while its scenarios were green, and two separate bespoke tests were written afterwards to hold it (`DevicePagePresentationTests`, `UnifiedRecordingDeviceListFeatureTests`). This row is where that obligation belongs."
-        },
-        {
-            "id": "recording-device-attachment",
-            "name": "the tap-to-connect adoption chain",
-            "declared_in": "Sources/FoundryXKit/RecordingDeviceAttachment.swift",
-            "declaration_anchor": "public func attach(peripheralIdentifier id: UUID,",
-            "call_pattern": "attachment.attach(peripheralIdentifier:",
-            "reached_from": [{ "via": "device-screen", "anchor": "let outcome = await attachment.attach(peripheralIdentifier: id, advertisedName: name)" }],
-            "verdict": "reachable",
-            "why": "the tap used to go straight to `device.connect`, so a stored-file recorder could be tapped and never became a row. This is the chain that replaced it."
-        },
-        {
-            "id": "pocket-device-bridge-observe",
-            "name": "asking a connected recorder which protocol it speaks",
-            "declared_in": "Sources/FoundryXKit/PocketRecordingDeviceSource.swift",
-            "declaration_anchor": "public static func observe(",
-            "call_pattern": "PocketRecordingDeviceBridge.observe(",
-            "reached_from": [{ "via": "recording-device-attachment", "anchor": "let observation = await PocketRecordingDeviceBridge.observe(" }],
-            "verdict": "reachable",
-            "why": "one of the three symbols named in `DeviceScreen.swift`'s own comment as having never been reached from the app."
-        },
-        {
-            "id": "recording-device-adoption-remember",
-            "name": "remembering an adopted recorder durably",
-            "declared_in": "Sources/FoundryXKit/PocketRecordingDeviceSource.swift",
-            "declaration_anchor": "public static func remember(",
-            "call_pattern": "RecordingDeviceAdoption.remember(",
-            "reached_from": [{ "via": "recording-device-attachment", "anchor": "switch RecordingDeviceAdoption.remember(observation) {" }],
-            "verdict": "reachable",
-            "why": "the second of those three symbols."
-        },
-        {
-            "id": "pocket-recorder-check",
-            "name": "connect and ask a recorder what it is holding",
-            "declared_in": "Sources/FoundryXKit/PocketRecorderCheck.swift",
-            "declaration_anchor": "public static func run(",
-            "call_pattern": "PocketRecorderCheck.run(",
-            "reached_from": [{ "via": "device-screen", "anchor": "let outcome = await PocketRecorderCheck.run(peripheralIdentifier: identifier," }],
-            "verdict": "reachable",
-            "why": "the first production caller of `listDates` / `listRecordings` — the path that used to close the session before returning."
-        },
-        {
-            "id": "pocket-ble-list-dates",
-            "name": "PocketBLEClient.listDates — the recorder's day index",
-            "declared_in": "Sources/FoundryXKit/PocketBLEProtocolClient.swift",
-            "declaration_anchor": "public func listDates() async throws -> [String] {",
-            "call_pattern": ".listDates(",
-            "reached_from": [{ "via": "pocket-recorder-check", "anchor": "for day in try await client.listDates() where !days.contains(day)" }],
-            "verdict": "reachable",
-            "why": "INSTANCE 1, HALF ONE — shipped implemented and unit-tested with no caller outside `Tests/`."
-        },
-        {
-            "id": "pocket-ble-list-recordings",
-            "name": "PocketBLEClient.listRecordings — one day's shelf",
-            "declared_in": "Sources/FoundryXKit/PocketBLEProtocolClient.swift",
-            "declaration_anchor": "public func listRecordings(on requestedDate: String) async throws -> [PocketRecording] {",
-            "call_pattern": ".listRecordings(",
-            "reached_from": [{ "via": "pocket-recorder-check", "anchor": "for day in days { found += try await client.listRecordings(on: day) }" }],
-            "verdict": "reachable",
-            "why": "INSTANCE 1, HALF TWO."
-        },
-        {
-            "id": "pocket-bring-over-offered",
-            "name": "choosing the one file worth pulling first",
-            "declared_in": "Sources/FoundryXKit/PocketBringOver.swift",
-            "declaration_anchor": "public static func offered(_ recordings: [PocketRecording]) -> PocketRecording? {",
-            "call_pattern": "PocketBringOver.offered(",
-            "reached_from": [{ "via": "device-screen", "anchor": "self.offeredRecording = PocketBringOver.offered(shelf.recordings)" }],
-            "verdict": "reachable",
-            "why": "the only reason the check reads the unpresented shelf."
-        },
-        {
-            "id": "pocket-bring-over-run",
-            "name": "pulling one file off the recorder onto the phone",
-            "declared_in": "Sources/FoundryXKit/PocketBringOver.swift",
-            "declaration_anchor": "public static func run(",
-            "call_pattern": "PocketBringOver.run(",
-            "reached_from": [{ "via": "device-screen", "anchor": "let outcome = await PocketBringOver.run(peripheralIdentifier: identifier," }],
-            "verdict": "reachable",
-            "why": "the caller `PocketBLEClient.download` never had."
-        },
-        {
-            "id": "pocket-ble-download",
-            "name": "PocketBLEClient.download — the file transfer itself",
-            "declared_in": "Sources/FoundryXKit/PocketBLEProtocolClient.swift",
-            "declaration_anchor": "public func download(_ request: PocketRecordingRequest) async throws -> Data {",
-            "call_pattern": ".download(",
-            "reached_from": [{ "via": "pocket-bring-over-run", "anchor": "payload = try await client.download(recording.request)" }],
-            "verdict": "reachable",
-            "why": "INSTANCE 1, THE HEADLINE. A full protocol client, tested, with ZERO callers under `App/` while all eight Pocket feature files passed. It is reachable at this commit and this row is what keeps it that way."
-        },
-        {
-            "id": "pocket-durable-sync-ordering",
-            "name": "PocketDurableSync.ordered — newest day, smallest file first",
-            "declared_in": "Sources/FoundryXKit/PocketDurableSync.swift",
-            "declaration_anchor": "public static func ordered(_ candidates: [PocketInventoryCandidate]) -> [PocketInventoryCandidate] {",
-            "call_pattern": "PocketDurableSync.ordered(",
-            "reached_from": [{ "via": "pocket-bring-over-run", "anchor": "guard let first = PocketDurableSync.ordered(candidates).first else { return nil }" }],
-            "verdict": "reachable",
-            "why": "INSTANCE 2, THE ONE PART THAT IS NOW REACHED. The comparator is genuinely called from production. The actor that owns it is NOT — see `pocket-durable-sync-import` below. Splitting them is the honest reading: 'PocketDurableSync has a caller' is true and means almost nothing."
-        },
-
-        {
-            "id": "pocket-durable-sync-import",
-            "name": "PocketDurableSync.importFile — decode, commit durably, hand to the finalized-capture sink",
-            "declared_in": "Sources/FoundryXKit/PocketDurableSync.swift",
-            "declaration_anchor": "public func importFile(_ candidate: PocketInventoryCandidate, payload: Data,",
-            "call_pattern": "PocketDurableSync(store:",
-            "reached_from": [],
-            "tested_from": ["Tests/FoundryXBrineTests/PocketDurableSyncFeatureTests.swift"],
-            "verdict": "unreachable",
-            "why": "INSTANCE 2, OPENLY RED. The actor is constructed in ONE file and that file is a test. Nothing under `App/`, `Sources/` or `Widget/` ever builds one, so no brought-over file has ever passed through durable import, receipt verification or the finalized-capture sink in a shipping build — while `features/pocket-durable-sync.feature` is green. `PocketBringOver` writes through `PocketRecorderFileStore` instead, which is a different and smaller promise. NOT PROMOTED AND NOT DELETED: this row is the deliverable."
-        },
-        {
-            "id": "pocket-fast-sync-coordinator",
-            "name": "PocketFastSyncCoordinator — the Wi-Fi handoff that makes a long file finish",
-            "declared_in": "Sources/FoundryXKit/PocketFastSync.swift",
-            "declaration_anchor": "public actor PocketFastSyncCoordinator {",
-            "call_pattern": "PocketFastSyncCoordinator(",
-            "reached_from": [],
-            "tested_from": ["Tests/FoundryXBrineTests/PocketFastSyncFeatureTests.swift"],
-            "verdict": "unreachable",
-            "why": "INSTANCE 2, OPENLY RED. Constructed only in its own feature test. Every outcome it can produce — completed, keptBluetooth, paused, cancelled, unavailable, failed — is unobservable in a shipping build."
-        },
-        {
-            "id": "stored-file-lifecycle-stub",
-            "name": "StoredFileDeviceLifecycle.runFullLinkLifecycle — the lifecycle the live-boundary counters guard",
-            "declared_in": "Sources/FoundryXKit/PocketRecordingDeviceSource.swift",
-            "declaration_anchor": "public static func runFullLinkLifecycle(liveBoundaries: StoredFileLiveBoundarySpy) {",
-            "call_pattern": "StoredFileDeviceLifecycle.runFullLinkLifecycle(",
-            "reached_from": [],
-            "tested_from": [
-                "Tests/FoundryXBrineTests/PocketBringOverFeatureTests.swift",
-                "Tests/FoundryXBrineTests/PocketDurableSyncFeatureTests.swift",
-                "Tests/FoundryXBrineTests/PocketFastSyncFeatureTests.swift",
-                "Tests/FoundryXBrineTests/PocketFilePullDeviceFeatureTests.swift",
-                "Tests/FoundryXBrineTests/UnifiedRecordingDeviceListFeatureTests.swift"
-            ],
-            "verdict": "unreachable",
-            "why": "INSTANCE 3, OPENLY RED. FIVE test files drive this and no production file does. Its body is a stub: `for _ in 0..<5 { liveBoundaries.storedFileLifecycleEvent() }` — one counter incremented five times, with a comment saying there is 'intentionally no call here to any live capture boundary'. The scenarios that assert 'a stored-file device never touches the live pipeline' are therefore asserting that a five-line loop does not call anything, which is true of the loop and says nothing about the app. The commit that added the counters claimed 'the counters now have real production write sites'. That claim is FALSE at this commit and the next five rows are the measurement."
-        },
-        {
-            "id": "live-boundary-active-source-selection",
-            "name": "StoredFileLiveBoundarySpy.activeSourceSelected — a write site for the active-source counter",
-            "declared_in": "Sources/FoundryXKit/PocketRecordingDeviceSource.swift",
-            "declaration_anchor": "public func activeSourceSelected() { lock.withLock { storage.activeSourceSelections += 1 } }",
-            "call_pattern": ".activeSourceSelected(",
-            "reached_from": [],
-            "tested_from": [],
-            "verdict": "unreachable",
-            "why": "INSTANCE 3, COUNTER 1 OF 5. ZERO call sites — not in production, and not even in a test. A counter nothing ever increments reads 0 forever, and every scenario asserting it is 0 passes by construction."
-        },
-        {
-            "id": "live-boundary-frame-router-start",
-            "name": "StoredFileLiveBoundarySpy.frameRouterStarted",
-            "declared_in": "Sources/FoundryXKit/PocketRecordingDeviceSource.swift",
-            "declaration_anchor": "public func frameRouterStarted() { lock.withLock { storage.frameRouterStarts += 1 } }",
-            "call_pattern": ".frameRouterStarted(",
-            "reached_from": [],
-            "tested_from": [],
-            "verdict": "unreachable",
-            "why": "INSTANCE 3, COUNTER 2 OF 5. ZERO call sites anywhere."
-        },
-        {
-            "id": "live-boundary-wal-write",
-            "name": "StoredFileLiveBoundarySpy.walWritten",
-            "declared_in": "Sources/FoundryXKit/PocketRecordingDeviceSource.swift",
-            "declaration_anchor": "public func walWritten() { lock.withLock { storage.walWrites += 1 } }",
-            "call_pattern": ".walWritten(",
-            "reached_from": [],
-            "tested_from": [],
-            "verdict": "unreachable",
-            "why": "INSTANCE 3, COUNTER 3 OF 5. ZERO call sites anywhere."
-        },
-        {
-            "id": "live-boundary-live-activity",
-            "name": "StoredFileLiveBoundarySpy.liveActivityStarted",
-            "declared_in": "Sources/FoundryXKit/PocketRecordingDeviceSource.swift",
-            "declaration_anchor": "public func liveActivityStarted() { lock.withLock { storage.liveActivities += 1 } }",
-            "call_pattern": ".liveActivityStarted(",
-            "reached_from": [],
-            "tested_from": [],
-            "verdict": "unreachable",
-            "why": "INSTANCE 3, COUNTER 4 OF 5. ZERO call sites anywhere."
-        },
-        {
-            "id": "live-boundary-live-state-mutation",
-            "name": "StoredFileLiveBoundarySpy.liveStateMutated",
-            "declared_in": "Sources/FoundryXKit/PocketRecordingDeviceSource.swift",
-            "declaration_anchor": "public func liveStateMutated() { lock.withLock { storage.liveStateMutations += 1 } }",
-            "call_pattern": ".liveStateMutated(",
-            "reached_from": [],
-            "tested_from": [],
-            "verdict": "unreachable",
-            "why": "INSTANCE 3, COUNTER 5 OF 5. ZERO call sites anywhere."
-        },
-
-        {
-            "id": "pocket-ble-fast-sync-control",
-            "name": "PocketBLEClient as the fast-sync control channel",
-            "declared_in": "Sources/FoundryXKit/PocketBLEProtocolClient.swift",
-            "declaration_anchor": "extension PocketBLEClient: PocketFastSyncControlling {",
-            "call_pattern": "PocketFastSyncControlling",
-            "reached_from": [
-                {
-                    "dynamic": "every call goes through the existential `any PocketFastSyncControlling` held by `PocketFastSyncCoordinator`. A text register cannot see which conformer a protocol existential dispatches to, and there is no honest way to fake that with a grep.",
-                    "depends_on": "pocket-fast-sync-coordinator"
-                }
-            ],
-            "verdict": "undetermined",
-            "why": "THE THIRD VERDICT, ON REAL CODE. Calling this `unreachable` would be a guess dressed as a measurement; calling it `reachable` would be the original disease. What IS determined is printed beside it: its only known existential holder, `pocket-fast-sync-coordinator`, is declared `unreachable` — so the likely truth is that this conformance is dead too, and the way to find out is to make the coordinator reachable, not to make this checker cleverer."
-        },
-        {
-            "id": "foundry-link-provider-sub",
-            "name": "the iOS client reaching the handler that links provider + sub",
-            "declared_in": null,
-            "unreadable_because": "the callee lives in the sibling `foundry` repository. This checker reads ONE repository by `#filePath`, and a cross-repository call graph is not something it can see. Recorded here rather than omitted, because omitting it is how the defect shipped.",
-            "call_pattern": "link_provider_sub",
-            "absent_locally": true,
-            "reached_from": [],
-            "verdict": "undetermined",
-            "why": "INSTANCE 4. `link_provider_sub` was added to a handler the iOS client never calls, with a comment claiming it fixed the client path; every test passed because the tests called the handler directly. From THIS side the measurable fact is that no production or test file in this repository mentions it at all — asserted by `absent_locally`, so the day a client call appears the row goes red and demands a real verdict. The gate says `undetermined` and names the reason. It does NOT say `unreachable`: this repository is not where that question can be answered."
-        }
-    ],
-
-    "_verdict_counts_are_equality": "Declared as exact counts, never bounds. A bound would let the unreachable roster grow by one without anybody moving this file, which is precisely how four capabilities reached `main` unreached.",
-    "verdict_counts": {
-        "reachable": 14,
-        "unreachable": 8,
-        "undetermined": 2
+      ],
+      "verdict": "reachable",
+      "why": "the first link of the spine; every App-side row below chains through it."
     },
-
-    "_floor": "A register that lost its rows would be a silent full pass, so the population is asserted before its contents are.",
-    "minimum_capabilities": 20,
-    "minimum_entry_points": 1
+    {
+      "id": "settings-screen",
+      "name": "Settings",
+      "declared_in": "App/SettingsScreen.swift",
+      "declaration_anchor": "struct SettingsScreen: View",
+      "call_pattern": "SettingsScreen(",
+      "reached_from": [
+        {
+          "via": "root-view",
+          "anchor": "SettingsScreen(brains: brains, remote: remote,"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "the only route to the device screen; registered so the device rows below are chained to a root rather than to each other."
+    },
+    {
+      "id": "device-screen",
+      "name": "the recording-device screen",
+      "declared_in": "App/DeviceScreen.swift",
+      "declaration_anchor": "struct DeviceScreen: View",
+      "call_pattern": "DeviceScreen(",
+      "reached_from": [
+        {
+          "via": "settings-screen",
+          "anchor": "DeviceScreen(device: device, manager: manager, sources: sources,"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "the App-side file that holds every production caller of the Pocket stored-file capabilities. If this screen stops being presented, every Pocket row below correctly falls to `unreachable` in one move — which is the property a per-capability grep for `App/` could never have."
+    },
+    {
+      "id": "pocket-onboarding-view",
+      "name": "the Pocket setup / key-custody / consent ceremony screens",
+      "declared_in": "App/PocketOnboardingView.swift",
+      "declaration_anchor": "struct PocketOnboardingView: View",
+      "call_pattern": "PocketOnboardingView(",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "PocketOnboardingView(screen: .education) { _ in showingEducation = false }"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "SHIPPED ORPHANED ONCE ALREADY — a grep for it outside its own file returned nothing while its scenarios were green, and two separate bespoke tests were written afterwards to hold it (`DevicePagePresentationTests`, `UnifiedRecordingDeviceListFeatureTests`). This row is where that obligation belongs."
+    },
+    {
+      "id": "recording-device-attachment",
+      "name": "the tap-to-connect adoption chain",
+      "declared_in": "Sources/FoundryXKit/RecordingDeviceAttachment.swift",
+      "declaration_anchor": "public func attach(peripheralIdentifier id: UUID,",
+      "call_pattern": "attachment.attach(peripheralIdentifier:",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "let outcome = await attachment.attach(peripheralIdentifier: id, advertisedName: name)"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "the tap used to go straight to `device.connect`, so a stored-file recorder could be tapped and never became a row. This is the chain that replaced it."
+    },
+    {
+      "id": "pocket-device-bridge-observe",
+      "name": "asking a connected recorder which protocol it speaks",
+      "declared_in": "Sources/FoundryXKit/PocketRecordingDeviceSource.swift",
+      "declaration_anchor": "public static func observe(",
+      "call_pattern": "PocketRecordingDeviceBridge.observe(",
+      "reached_from": [
+        {
+          "via": "recording-device-attachment",
+          "anchor": "let observation = await PocketRecordingDeviceBridge.observe("
+        }
+      ],
+      "verdict": "reachable",
+      "why": "one of the three symbols named in `DeviceScreen.swift`'s own comment as having never been reached from the app."
+    },
+    {
+      "id": "recording-device-adoption-remember",
+      "name": "remembering an adopted recorder durably",
+      "declared_in": "Sources/FoundryXKit/PocketRecordingDeviceSource.swift",
+      "declaration_anchor": "public static func remember(",
+      "call_pattern": "RecordingDeviceAdoption.remember(",
+      "reached_from": [
+        {
+          "via": "recording-device-attachment",
+          "anchor": "switch RecordingDeviceAdoption.remember(observation) {"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "the second of those three symbols."
+    },
+    {
+      "id": "pocket-recorder-check",
+      "name": "connect and ask a recorder what it is holding",
+      "declared_in": "Sources/FoundryXKit/PocketRecorderCheck.swift",
+      "declaration_anchor": "public static func run(",
+      "call_pattern": "PocketRecorderCheck.run(",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "let outcome = await PocketRecorderCheck.run(peripheralIdentifier: identifier,"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "the first production caller of `listDates` / `listRecordings` — the path that used to close the session before returning."
+    },
+    {
+      "id": "pocket-ble-list-dates",
+      "name": "PocketBLEClient.listDates — the recorder's day index",
+      "declared_in": "Sources/FoundryXKit/PocketBLEProtocolClient.swift",
+      "declaration_anchor": "public func listDates() async throws -> [String] {",
+      "call_pattern": ".listDates(",
+      "reached_from": [
+        {
+          "via": "pocket-recorder-check",
+          "anchor": "for day in try await client.listDates() where !days.contains(day)"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "INSTANCE 1, HALF ONE — shipped implemented and unit-tested with no caller outside `Tests/`."
+    },
+    {
+      "id": "pocket-ble-list-recordings",
+      "name": "PocketBLEClient.listRecordings — one day's shelf",
+      "declared_in": "Sources/FoundryXKit/PocketBLEProtocolClient.swift",
+      "declaration_anchor": "public func listRecordings(on requestedDate: String) async throws -> [PocketRecording] {",
+      "call_pattern": ".listRecordings(",
+      "reached_from": [
+        {
+          "via": "pocket-recorder-check",
+          "anchor": "for day in days { found += try await client.listRecordings(on: day) }"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "INSTANCE 1, HALF TWO."
+    },
+    {
+      "id": "pocket-bring-over-offered",
+      "name": "choosing the one file worth pulling first",
+      "declared_in": "Sources/FoundryXKit/PocketBringOver.swift",
+      "declaration_anchor": "public static func offered(_ recordings: [PocketRecording]) -> PocketRecording? {",
+      "call_pattern": "PocketBringOver.offered(",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "self.offeredRecording = PocketBringOver.offered(shelf.recordings)"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "the only reason the check reads the unpresented shelf."
+    },
+    {
+      "id": "pocket-bring-over-run",
+      "name": "pulling one file off the recorder onto the phone",
+      "declared_in": "Sources/FoundryXKit/PocketBringOver.swift",
+      "declaration_anchor": "public static func run(",
+      "call_pattern": "PocketBringOver.run(",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "let outcome = await PocketBringOver.run(peripheralIdentifier: identifier,"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "the caller `PocketBLEClient.download` never had."
+    },
+    {
+      "id": "pocket-ble-download",
+      "name": "PocketBLEClient.download — the file transfer itself",
+      "declared_in": "Sources/FoundryXKit/PocketBLEProtocolClient.swift",
+      "declaration_anchor": "                         into sink: (Data) throws -> Void) async throws -> Int {",
+      "call_pattern": ".download(",
+      "reached_from": [
+        {
+          "via": "pocket-bring-over-run",
+          "anchor": "_ = try await client.download(recording.request, ceilingBytes: maximumBytes) { chunk in"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "INSTANCE 1, THE HEADLINE. A full protocol client, tested, with ZERO callers under `App/` while all eight Pocket feature files passed. It is reachable at this commit and this row is what keeps it that way. The anchor is the STREAMING form's signature line, because that is the one production calls: the whole-`Data` overload is a convenience the protocol unit tests use, and anchoring on it would let the streaming path be deleted without a red."
+    },
+    {
+      "id": "pocket-durable-sync-ordering",
+      "name": "PocketDurableSync.ordered — newest day, smallest file first",
+      "declared_in": "Sources/FoundryXKit/PocketDurableSync.swift",
+      "declaration_anchor": "public static func ordered(_ candidates: [PocketInventoryCandidate]) -> [PocketInventoryCandidate] {",
+      "call_pattern": "PocketDurableSync.ordered(",
+      "reached_from": [
+        {
+          "via": "pocket-bring-over-run",
+          "anchor": "guard let first = PocketDurableSync.ordered(candidates).first else { return nil }"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "INSTANCE 2, THE ONE PART THAT IS NOW REACHED. The comparator is genuinely called from production. The actor that owns it is NOT — see `pocket-durable-sync-import` below. Splitting them is the honest reading: 'PocketDurableSync has a caller' is true and means almost nothing."
+    },
+    {
+      "id": "pocket-audio-translator",
+      "name": "PocketAudioTranslator — the recorder's MP3 becomes the pipeline's Opus frames",
+      "declared_in": "Sources/FoundryXKit/PocketAudioTranslator.swift",
+      "declaration_anchor": "    public static func translate(fileAt url: URL,",
+      "call_pattern": "PocketAudioTranslator.translate(",
+      "reached_from": [
+        {
+          "via": "pocket-capture-import",
+          "anchor": "translated = try PocketAudioTranslator.translate(fileAt: file) { packet in"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "THE TRANSLATOR, and the only thing this leg was allowed to invent. It streams: one 8192-frame read block and one 20 ms Opus packet, flat in the length of the recording, against the 691 MB a whole-`Data` decode of a two-hour file would materialise. Its output is the format every other source already emits, which is what makes everything downstream unable to tell a pulled recording from a recorded one."
+    },
+    {
+      "id": "pocket-capture-import",
+      "name": "PocketCaptureImport — a held file becomes an ordinary capture the pipeline owns",
+      "declared_in": "Sources/FoundryXKit/PocketCaptureImport.swift",
+      "declaration_anchor": "    public static func makeConversation(",
+      "call_pattern": "PocketCaptureImport.makeConversation(",
+      "reached_from": [
+        {
+          "via": "pocket-bring-over-run",
+          "anchor": "imported = try PocketCaptureImport.makeConversation("
+        }
+      ],
+      "verdict": "reachable",
+      "why": "THE HAND-OFF, and deliberately the least original file in the leg: the same `CaptureWAL`, the same `seg-%012llu.opus` segments, the same `meta.json` / `card.json` birth stamps, the same `.capture-source` marker and the same `.needs-finalize` marker every other capture is made of. Past it there is no second ingest route and no `if pocket` — the origin travels as DATA, which is what `RecordingDeviceShape.filePull` was already for."
+    },
+    {
+      "id": "capture-adopt-completed",
+      "name": "CaptureManager.adoptCompletedCapture — the running app takes a finished capture",
+      "declared_in": "Sources/FoundryXKit/CaptureManager.swift",
+      "declaration_anchor": "    public func adoptCompletedCapture(captureId: String) -> Bool {",
+      "call_pattern": "adoptCompletedCapture(captureId:",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "manager.adoptCompletedCapture(captureId: captureID)"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "THE ROW THAT WOULD HAVE CAUGHT THIS DEFECT CLASS AGAIN. `CaptureManager` hydrates its library ONCE, in `loadExisting()`, at construction — so a conversation created while the app is already open is invisible and un-uploaded until the next launch unless something hands it over. Every scenario about the import can be green without this call, which is precisely the shape `PocketBLEClient.download` shipped in. It takes a capture id and NOTHING else: it cannot tell which producer wrote the capture, so the background-restoration spool and `BrainSeeder` are served by the same verb."
+    },
+    {
+      "id": "opus-frame-packer",
+      "name": "Opus48kFramePacker — the one place PCM becomes the frames the pipeline speaks",
+      "declared_in": "Sources/FoundryXKit/MicFrameSource.swift",
+      "declaration_anchor": "public final class Opus48kFramePacker {",
+      "call_pattern": "Opus48kFramePacker(",
+      "reached_from": [
+        {
+          "via": "pocket-audio-translator",
+          "anchor": "let packer = Opus48kFramePacker()"
+        },
+        {
+          "via": "opus-frame-packer",
+          "anchor": "private let packer = Opus48kFramePacker()"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "LIFTED OUT OF `MicFrameSource.ingest` RATHER THAN COPIED FOR POCKET. A second producer of pipeline frames now exists, and two copies of the framing rule is how two producers drift into two framings the door's TOC-based granule parser reads differently. Both callers are declared: the phone microphone (its own file, which is also this row's declaring file — file-level containment means the mic's own use is stated rather than silently excluded) and the translator."
+    },
+    {
+      "id": "pocket-durable-sync-import",
+      "name": "PocketDurableSync.importFile — decode, commit durably, hand to the finalized-capture sink",
+      "declared_in": "Sources/FoundryXKit/PocketDurableSync.swift",
+      "declaration_anchor": "public func importFile(_ candidate: PocketInventoryCandidate, payload: Data,",
+      "call_pattern": "PocketDurableSync(store:",
+      "reached_from": [],
+      "tested_from": [
+        "Tests/FoundryXBrineTests/PocketDurableSyncFeatureTests.swift"
+      ],
+      "verdict": "unreachable",
+      "why": "INSTANCE 2, OPENLY RED, AND NOW SUPERSEDED RATHER THAN MERELY UNCALLED. The actor is constructed in ONE file and that file is a test. It stays unreachable ON PURPOSE: its decoder seam is `PocketMP3Decoding.decode(_ mp3: Data) -> PocketPCM`, which takes the whole recording as one `Data` and returns the whole decode as another — at fw-1.6's 32 kbps CBR, two hours is ~29 MB of MP3 that decodes to 691 MB of PCM, so a conformance that actually decoded a real Pocket file would take the phone down. The shipped path is the streaming `PocketAudioTranslator` -> `PocketCaptureImport`, registered below and reachable. Wiring this actor is a REGRESSION until that seam is reshaped, which is why the honest red stands."
+    },
+    {
+      "id": "pocket-fast-sync-coordinator",
+      "name": "PocketFastSyncCoordinator — the Wi-Fi handoff that makes a long file finish",
+      "declared_in": "Sources/FoundryXKit/PocketFastSync.swift",
+      "declaration_anchor": "public actor PocketFastSyncCoordinator {",
+      "call_pattern": "PocketFastSyncCoordinator(",
+      "reached_from": [],
+      "tested_from": [
+        "Tests/FoundryXBrineTests/PocketFastSyncFeatureTests.swift"
+      ],
+      "verdict": "unreachable",
+      "why": "INSTANCE 2, OPENLY RED. Constructed only in its own feature test. Every outcome it can produce — completed, keptBluetooth, paused, cancelled, unavailable, failed — is unobservable in a shipping build."
+    },
+    {
+      "id": "stored-file-lifecycle-stub",
+      "name": "StoredFileDeviceLifecycle.runFullLinkLifecycle — the lifecycle the live-boundary counters guard",
+      "declared_in": "Sources/FoundryXKit/PocketRecordingDeviceSource.swift",
+      "declaration_anchor": "public static func runFullLinkLifecycle(liveBoundaries: StoredFileLiveBoundarySpy) {",
+      "call_pattern": "StoredFileDeviceLifecycle.runFullLinkLifecycle(",
+      "reached_from": [],
+      "tested_from": [
+        "Tests/FoundryXBrineTests/PocketBringOverFeatureTests.swift",
+        "Tests/FoundryXBrineTests/PocketDurableSyncFeatureTests.swift",
+        "Tests/FoundryXBrineTests/PocketFastSyncFeatureTests.swift",
+        "Tests/FoundryXBrineTests/PocketFilePullDeviceFeatureTests.swift",
+        "Tests/FoundryXBrineTests/UnifiedRecordingDeviceListFeatureTests.swift"
+      ],
+      "verdict": "unreachable",
+      "why": "INSTANCE 3, OPENLY RED. FIVE test files drive this and no production file does. Its body is a stub: `for _ in 0..<5 { liveBoundaries.storedFileLifecycleEvent() }` — one counter incremented five times, with a comment saying there is 'intentionally no call here to any live capture boundary'. The scenarios that assert 'a stored-file device never touches the live pipeline' are therefore asserting that a five-line loop does not call anything, which is true of the loop and says nothing about the app. The commit that added the counters claimed 'the counters now have real production write sites'. That claim is FALSE at this commit and the next five rows are the measurement."
+    },
+    {
+      "id": "live-boundary-active-source-selection",
+      "name": "StoredFileLiveBoundarySpy.activeSourceSelected — a write site for the active-source counter",
+      "declared_in": "Sources/FoundryXKit/PocketRecordingDeviceSource.swift",
+      "declaration_anchor": "public func activeSourceSelected() { lock.withLock { storage.activeSourceSelections += 1 } }",
+      "call_pattern": ".activeSourceSelected(",
+      "reached_from": [],
+      "tested_from": [],
+      "verdict": "unreachable",
+      "why": "INSTANCE 3, COUNTER 1 OF 5. ZERO call sites — not in production, and not even in a test. A counter nothing ever increments reads 0 forever, and every scenario asserting it is 0 passes by construction."
+    },
+    {
+      "id": "live-boundary-frame-router-start",
+      "name": "StoredFileLiveBoundarySpy.frameRouterStarted",
+      "declared_in": "Sources/FoundryXKit/PocketRecordingDeviceSource.swift",
+      "declaration_anchor": "public func frameRouterStarted() { lock.withLock { storage.frameRouterStarts += 1 } }",
+      "call_pattern": ".frameRouterStarted(",
+      "reached_from": [],
+      "tested_from": [],
+      "verdict": "unreachable",
+      "why": "INSTANCE 3, COUNTER 2 OF 5. ZERO call sites anywhere."
+    },
+    {
+      "id": "live-boundary-wal-write",
+      "name": "StoredFileLiveBoundarySpy.walWritten",
+      "declared_in": "Sources/FoundryXKit/PocketRecordingDeviceSource.swift",
+      "declaration_anchor": "public func walWritten() { lock.withLock { storage.walWrites += 1 } }",
+      "call_pattern": ".walWritten(",
+      "reached_from": [],
+      "tested_from": [],
+      "verdict": "unreachable",
+      "why": "INSTANCE 3, COUNTER 3 OF 5. ZERO call sites anywhere."
+    },
+    {
+      "id": "live-boundary-live-activity",
+      "name": "StoredFileLiveBoundarySpy.liveActivityStarted",
+      "declared_in": "Sources/FoundryXKit/PocketRecordingDeviceSource.swift",
+      "declaration_anchor": "public func liveActivityStarted() { lock.withLock { storage.liveActivities += 1 } }",
+      "call_pattern": ".liveActivityStarted(",
+      "reached_from": [],
+      "tested_from": [],
+      "verdict": "unreachable",
+      "why": "INSTANCE 3, COUNTER 4 OF 5. ZERO call sites anywhere."
+    },
+    {
+      "id": "live-boundary-live-state-mutation",
+      "name": "StoredFileLiveBoundarySpy.liveStateMutated",
+      "declared_in": "Sources/FoundryXKit/PocketRecordingDeviceSource.swift",
+      "declaration_anchor": "public func liveStateMutated() { lock.withLock { storage.liveStateMutations += 1 } }",
+      "call_pattern": ".liveStateMutated(",
+      "reached_from": [],
+      "tested_from": [],
+      "verdict": "unreachable",
+      "why": "INSTANCE 3, COUNTER 5 OF 5. ZERO call sites anywhere."
+    },
+    {
+      "id": "pocket-ble-fast-sync-control",
+      "name": "PocketBLEClient as the fast-sync control channel",
+      "declared_in": "Sources/FoundryXKit/PocketBLEProtocolClient.swift",
+      "declaration_anchor": "extension PocketBLEClient: PocketFastSyncControlling {",
+      "call_pattern": "PocketFastSyncControlling",
+      "reached_from": [
+        {
+          "dynamic": "every call goes through the existential `any PocketFastSyncControlling` held by `PocketFastSyncCoordinator`. A text register cannot see which conformer a protocol existential dispatches to, and there is no honest way to fake that with a grep.",
+          "depends_on": "pocket-fast-sync-coordinator"
+        }
+      ],
+      "verdict": "undetermined",
+      "why": "THE THIRD VERDICT, ON REAL CODE. Calling this `unreachable` would be a guess dressed as a measurement; calling it `reachable` would be the original disease. What IS determined is printed beside it: its only known existential holder, `pocket-fast-sync-coordinator`, is declared `unreachable` — so the likely truth is that this conformance is dead too, and the way to find out is to make the coordinator reachable, not to make this checker cleverer."
+    },
+    {
+      "id": "foundry-link-provider-sub",
+      "name": "the iOS client reaching the handler that links provider + sub",
+      "declared_in": null,
+      "unreadable_because": "the callee lives in the sibling `foundry` repository. This checker reads ONE repository by `#filePath`, and a cross-repository call graph is not something it can see. Recorded here rather than omitted, because omitting it is how the defect shipped.",
+      "call_pattern": "link_provider_sub",
+      "absent_locally": true,
+      "reached_from": [],
+      "verdict": "undetermined",
+      "why": "INSTANCE 4. `link_provider_sub` was added to a handler the iOS client never calls, with a comment claiming it fixed the client path; every test passed because the tests called the handler directly. From THIS side the measurable fact is that no production or test file in this repository mentions it at all — asserted by `absent_locally`, so the day a client call appears the row goes red and demands a real verdict. The gate says `undetermined` and names the reason. It does NOT say `unreachable`: this repository is not where that question can be answered."
+    }
+  ],
+  "_verdict_counts_are_equality": "Declared as exact counts, never bounds. A bound would let the unreachable roster grow by one without anybody moving this file, which is precisely how four capabilities reached `main` unreached.",
+  "verdict_counts": {
+    "reachable": 18,
+    "undetermined": 2,
+    "unreachable": 8
+  },
+  "_floor": "A register that lost its rows would be a silent full pass, so the population is asserted before its contents are.",
+  "minimum_capabilities": 28,
+  "minimum_entry_points": 1
 }
