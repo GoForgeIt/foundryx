@@ -45,10 +45,10 @@ jobs:
       # This job is CPU-heavy end to end, so the slot spans the whole job. There
       # is no fall-through: if no slot frees inside the wait budget this step
       # fails and the build does not run.
-      - name: acquire the machine-wide mac build slot
-        run: bash "$GITHUB_WORKSPACE/foundryx/ci/mac-slot.sh" acquire "foundryx-ios-publish/unit-and-invariant-suites"
       - uses: actions/checkout@v4
         with: { path: foundryx }
+      - name: acquire the machine-wide mac build slot
+        run: bash "$GITHUB_WORKSPACE/foundryx/ci/mac-slot.sh" acquire "foundryx-ios-publish/unit-and-invariant-suites"
       - uses: actions/checkout@v4
         with:
           repository: GoForgeIt/forge-design-system
@@ -141,10 +141,10 @@ jobs:
       # This job is CPU-heavy end to end, so the slot spans the whole job. There
       # is no fall-through: if no slot frees inside the wait budget this step
       # fails and the build does not run.
-      - name: acquire the machine-wide mac build slot
-        run: bash "$GITHUB_WORKSPACE/foundryx/ci/mac-slot.sh" acquire "foundryx-ios-publish/app-compile-leak-lint"
       - uses: actions/checkout@v4
         with: { path: foundryx }
+      - name: acquire the machine-wide mac build slot
+        run: bash "$GITHUB_WORKSPACE/foundryx/ci/mac-slot.sh" acquire "foundryx-ios-publish/app-compile-leak-lint"
       - uses: actions/checkout@v4
         with:
           repository: GoForgeIt/forge-design-system
@@ -200,10 +200,10 @@ jobs:
       # This job is CPU-heavy end to end, so the slot spans the whole job. There
       # is no fall-through: if no slot frees inside the wait budget this step
       # fails and the build does not run.
-      - name: acquire the machine-wide mac build slot
-        run: bash "$GITHUB_WORKSPACE/foundryx/ci/mac-slot.sh" acquire "foundryx-ios-publish/ios-simulator-brine"
       - uses: actions/checkout@v4
         with: { path: foundryx }
+      - name: acquire the machine-wide mac build slot
+        run: bash "$GITHUB_WORKSPACE/foundryx/ci/mac-slot.sh" acquire "foundryx-ios-publish/ios-simulator-brine"
       - uses: actions/checkout@v4
         with:
           repository: GoForgeIt/forge-design-system
@@ -275,12 +275,17 @@ jobs:
       # This job is CPU-heavy end to end, so the slot spans the whole job. There
       # is no fall-through: if no slot frees inside the wait budget this step
       # fails and the build does not run.
-      - name: acquire the machine-wide mac build slot
-        run: bash "$GITHUB_WORKSPACE/foundryx/ci/mac-slot.sh" acquire "foundryx-ios-publish/build-sign-ship"
       # The ship script is VERBATIM from Concourse and expects these exact
       # sibling dir names.
       - uses: actions/checkout@v4
         with: { path: foundryx-source }
+      # AFTER the checkout, and pointed at THIS job's directory. The slot script
+      # lives in the repo, so acquiring before the checkout reaches for a file
+      # that does not exist yet — every job failed 127 that way. And this job
+      # alone checks out to `foundryx-source`, so the path other jobs use is
+      # never present here at all.
+      - name: acquire the machine-wide mac build slot
+        run: bash "$GITHUB_WORKSPACE/foundryx-source/ci/mac-slot.sh" acquire "foundryx-ios-publish/build-sign-ship"
       - uses: actions/checkout@v4
         with:
           repository: GoForgeIt/forge-design-system
@@ -309,4 +314,4 @@ jobs:
       # instead of waiting for its Runner.Worker pid to disappear.
       - name: release the machine-wide mac build slot
         if: always()
-        run: bash "$GITHUB_WORKSPACE/foundryx/ci/mac-slot.sh" release
+        run: bash "$GITHUB_WORKSPACE/foundryx-source/ci/mac-slot.sh" release
