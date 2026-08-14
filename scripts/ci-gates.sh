@@ -88,8 +88,18 @@ RAN=0
 # hook derives its phase list from `.github/workflows/ios-publish.yml` with
 # `grep -oE 'bash scripts/ci-gates\.sh [a-z ]+'`, so a phase name carrying a hyphen or a digit
 # truncates and turns every push into "UNKNOWN PHASE -> exit 2".
+#
+# CeremonyStateExitRegisterTests is the STATE-EXIT GATE — the same question one level in. The
+# register above asks whether shipping code ever CALLS a capability; this asks whether a person
+# standing in a particular STATE can REACH one. Six defects had that shape — implemented, tested,
+# reachable from one state and orphaned from another the user actually lands in. The two worst:
+# `.handshakeUnanswered` (a recorder that answers a wrong key with SILENCE) had no exits at all,
+# and `.didNotFinish` (a recorder that REFUSED the key we hold) carried "Try again" as its FIRST,
+# PRIMARY button while that title fell through the routing table's `default` arm and closed the
+# whole connect sheet — under a body reading "Try again before you close this."
+# It runs here for the same phase-name reason recorded above.
 GATE_SUITES=(HangReproTests RebuildBytesIndependenceTests ResidualMainActorWorkTests
-             ProductionReachabilityRegisterTests)
+             ProductionReachabilityRegisterTests CeremonyStateExitRegisterTests)
 
 # ---------------------------------------------------------------- swift: the whole package
 #

@@ -560,10 +560,20 @@ public struct PocketSetupPresentation: Equatable, Sendable {
     /// reached from `.setupUnavailable`, which a recorder that HAS a stored key never returns.
     /// One typo therefore locked the recorder out of the only path that could fix it. The
     /// entry action is what makes a mistyped key a retry rather than a wall.
+    ///
+    /// AND THE RESET GUIDANCE, WHICH THIS SCREEN WAS THE LAST ONE MISSING. `.recoveryRequired`
+    /// is the state where the recorder PROVED the key is wrong — it heard it and said no. An
+    /// owner in that state has exactly three moves that can change anything: hand over a key
+    /// that works, ask again in case the refusal was the recorder's rather than the key's, or
+    /// start the recorder over. `PocketFactoryResetPresentation` — a whole written screen with
+    /// the cost stated before the gesture — hung off the CONSENT screen only, which means
+    /// "Solleva holds no key", and is therefore the one state a recorder whose stored key was
+    /// just refused can never produce. Exactly the shape of the deadlock below it.
     public static let didNotFinish = PocketSetupPresentation(
         title: "Set up Pocket",
         body: "Setup didn't finish. Try again before you close this.",
-        actions: [retryAction, PocketSessionKeyEntryPresentation.entryAction])
+        actions: [retryAction, PocketSessionKeyEntryPresentation.entryAction,
+                  PocketMintConsentPresentation.resetAction])
     /// DESIGN §3.7 — THE ONE SCREEN IN THE APP WHERE CLOSING IT LOSES SOMETHING FOREVER.
     ///
     /// The recorder took the key and this iPhone could not store it. There is no reset opcode
@@ -696,8 +706,11 @@ public struct PocketSetupPresentation: Equatable, Sendable {
             + "busy with another app answers exactly the same way as one that was set up with "
             + "a different key — with nothing at all."
             + "\n\nSo the key is still here, untouched. Try the recorder again, or enter the "
-            + "key it was set up with; a key you enter takes the place of the one Solleva has.",
-        actions: [retryAction, PocketSessionKeyEntryPresentation.entryAction])
+            + "key it was set up with; a key you enter takes the place of the one Solleva has."
+            + "\n\nIf you have no way to get that key, you can start the recorder over — which "
+            + "clears whoever owns it now, including Solleva.",
+        actions: [retryAction, PocketSessionKeyEntryPresentation.entryAction,
+                  PocketMintConsentPresentation.resetAction])
 
     public static let all = [setup, didNotFinish, acceptedNotDurable, ready, indeterminate,
                              keepBothApps, quarantined, setupUnavailable, keyNotKept,

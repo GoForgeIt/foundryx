@@ -74,10 +74,13 @@ struct PocketOnboardingView: View {
             switch screen {
             case .education: education
             case .enterExistingKey: keyEntry
+            // EVERY ONE OF THESE DRAWS `drawnActions`, NOT ITS OWN ARRAY. The buttons a screen
+            // offers are the whole subject of the state-exit gate, and a body nothing in this
+            // repository can execute is the one place they must not be typed a second time.
             case .mintConsent:
                 guidance(title: PocketMintConsentPresentation.title,
                          sections: PocketMintConsentPresentation.sections,
-                         actions: PocketMintConsentPresentation.actions)
+                         actions: drawnActions)
             case .mintRefused:
                 guidance(title: PocketMintRefusedPresentation.title,
                          sections: [
@@ -86,18 +89,18 @@ struct PocketOnboardingView: View {
                             .init(title: "What you can do",
                                   body: PocketMintRefusedPresentation.options),
                          ],
-                         actions: PocketMintRefusedPresentation.actions)
+                         actions: drawnActions)
             case .mintNotVerified:
                 guidance(title: PocketMintNotVerifiedPresentation.title,
                          sections: [
                             .init(title: "What Solleva knows",
                                   body: PocketMintNotVerifiedPresentation.body),
                          ],
-                         actions: PocketMintNotVerifiedPresentation.actions)
+                         actions: drawnActions)
             case .factoryReset:
                 guidance(title: PocketFactoryResetPresentation.title,
                          sections: PocketFactoryResetPresentation.sections,
-                         actions: PocketFactoryResetPresentation.actions)
+                         actions: drawnActions)
             case .keyCustody: keyCustody
             default: ceremony(presentation)
             }
@@ -124,6 +127,36 @@ struct PocketOnboardingView: View {
         case .education, .enterExistingKey, .mintConsent, .mintRefused, .mintNotVerified,
              .factoryReset, .keyCustody:
             return .setup
+        }
+    }
+
+    /// EVERY BUTTON THIS SCREEN PUTS IN FRONT OF A PERSON, AND THE BODY ABOVE DRAWS THIS.
+    ///
+    /// WHY IT EXISTS AT ALL. `presentation` answers only for the screens rendered by `ceremony`;
+    /// the four `guidance` screens — the consent decision, a refused mint, an unproven mint, and
+    /// the maker's reset — draw arrays of their own, and `presentation` maps every one of them to
+    /// `.setup`. So the buttons on the four screens where the owner has the most to decide were
+    /// invisible from outside a `body` nothing in this repository can execute. That is exactly
+    /// the blind spot the state-exit register is held over, and a register whose measurement had
+    /// to guess at four of its rows would be worth nothing.
+    ///
+    /// IT IS WHAT THE BODY DRAWS, NOT A SECOND OPINION ABOUT IT. Each `guidance` call above
+    /// passes `drawnActions`, so this cannot drift from the screen: a divergence would need
+    /// somebody to reintroduce the literal array they just took out.
+    var drawnActions: [String] {
+        switch screen {
+        case .mintConsent:      return PocketMintConsentPresentation.actions
+        case .mintRefused:      return PocketMintRefusedPresentation.actions
+        case .mintNotVerified:  return PocketMintNotVerifiedPresentation.actions
+        case .factoryReset:     return PocketFactoryResetPresentation.actions
+        // §10 custody draws its reveal / copy / hide as CLOSURES the sheet owns; `Done` is the
+        // only one that reaches `action(title)` and therefore the only one the routing table
+        // can be asked about.
+        case .keyCustody:       return [PocketKeyCustodyPresentation.doneAction]
+        // The field's exit is its submit closure, and the education sheet's is the sheet. Neither
+        // has a routed button, and `[]` here is the claim rather than an omission.
+        case .enterExistingKey, .education: return []
+        default:                return presentation.actions
         }
     }
 
