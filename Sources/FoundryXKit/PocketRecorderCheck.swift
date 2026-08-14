@@ -43,6 +43,23 @@ public enum PocketRecordingLabel {
         }
         return "\(date) · \(String(digits[8..<10]))\(":")\(String(digits[10..<12]))"
     }
+
+    /// THE INSTANT THE RECORDER SAYS THIS FILE WAS MADE, or nil when it reported something
+    /// this build has never seen. The wire form is `yyyyMMddHHmmss`; the conversation-date
+    /// pipeline speaks `yyyyMMdd-HHmmss`, so this is one inserted dash and then the SAME
+    /// integer parse every capture id goes through — never a `DateFormatter`, which is the
+    /// DATEPARSE hang class `CaptureIdTime` exists to keep out of this path.
+    ///
+    /// nil rather than "now": a file whose reported time cannot be read is a file whose date
+    /// is unknown, and dating it to the moment somebody happened to collect it is exactly the
+    /// invention `title(date:timestamp:)` above refuses to make.
+    public static func reportedInstant(date: String, timestamp: String) -> Date? {
+        let digits = Array(timestamp)
+        guard digits.count == 14, digits.allSatisfy(\.isNumber) else { return nil }
+        let stamp = String(digits[0..<8]) + "-" + String(digits[8..<14])
+        guard let seconds = CaptureIdTime.epochUTC(fromStamp: stamp) else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(seconds))
+    }
 }
 
 /// LIST_DIRS, then LIST per day — the reference trace's own two commands, in the order the

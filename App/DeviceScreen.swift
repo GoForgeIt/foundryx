@@ -205,6 +205,7 @@ struct DeviceScreen: View {
         if let input = list.input(for: identity) {
             RecordingDevicePageView(input: input,
                                     device: device,
+                                    manager: manager,
                                     sources: sources,
                                     isSavedOmi: isSavedOmi(identity),
                                     onChange: refresh)
@@ -398,6 +399,11 @@ final class RecordingDeviceListModel: ObservableObject {
 private struct RecordingDevicePageView: View {
     let input: RecordingDeviceListInput
     @ObservedObject var device: DeviceManager
+    /// THE ONE THAT OWNS THE CAPTURE LIBRARY. A bring-over writes a finished conversation into
+    /// this manager's base directory, and the manager has to be TOLD — `loadExisting()` only
+    /// runs when a manager is built, so a conversation created while the app is already open is
+    /// invisible until the next launch unless somebody hands it over.
+    @ObservedObject var manager: CaptureManager
     @ObservedObject var sources: CaptureSourceRegistry
     /// Whether this is the ONE remembered Omi, which is a fact about the live pairing path and
     /// nothing else. It used to double as "can this device be connected at all" — see
@@ -712,7 +718,8 @@ private struct RecordingDevicePageView: View {
         if check.offeredRecording != nil {
             Button {
                 check.bringOver(hardwareToken: input.identity.hardwareToken,
-                                advertisedName: input.displayName)
+                                advertisedName: input.displayName,
+                                into: manager)
             } label: {
                 Text(PocketBringOverPresentation.actionTitle).frame(maxWidth: .infinity)
             }
@@ -933,7 +940,13 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// The re-read is not cosmetic: custody is the only thing that knows whether the file
     /// landed, so the row's "In Solleva" has to come from asking the disk again rather than
     /// from this method having been optimistic.
-    func bringOver(hardwareToken: String, advertisedName: String) {
+    /// - Parameter manager: the capture owner the finished conversation is handed to. Without
+    ///   this the recording would be a complete, correct, pending-finalize capture directory
+    ///   that NOTHING in the running app knows exists — `loadExisting()` runs once, at
+    ///   construction — so it would sit there un-uploaded until the next launch. Handing it
+    ///   over is one call, and it is the only line of this whole leg that is about the app
+    ///   rather than about the recording.
+    func bringOver(hardwareToken: String, advertisedName: String, into manager: CaptureManager) {
         guard !isChecking, !isBringingOver else { return }
         guard let recording = offeredRecording else { return }
         guard let identifier = UUID(uuidString: hardwareToken) else {
@@ -949,6 +962,12 @@ final class PocketRecorderCheckModel: ObservableObject {
                                                     custody: self.custody)
             self.isBringingOver = false
             self.bringOverMessage = PocketBringOverPresentation.message(for: outcome)
+            // THE HAND-OFF. From here it is the ordinary drain and the ordinary finalize — the
+            // same two an Omi or phone-mic conversation runs, with nothing Pocket-shaped in
+            // either of them.
+            if let captureID = outcome.captureID {
+                manager.adoptCompletedCapture(captureId: captureID)
+            }
             self.run(hardwareToken: hardwareToken, advertisedName: advertisedName)
         }
     }

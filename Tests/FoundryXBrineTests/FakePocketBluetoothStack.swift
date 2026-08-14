@@ -68,12 +68,20 @@ final class FakePocketBLEStack: @unchecked Sendable {
         /// The bytes this firmware will actually put on the audio characteristic, which is NOT
         /// required to be `sizeBytes` long.
         let content: Data?
+        /// THE SIZE THIS FIRMWARE ANNOUNCES WHEN THE FILE IS ASKED FOR, which is a DIFFERENT
+        /// number from the one it listed. Real firmware answers `LIST&<day>` and `U&<file>`
+        /// from two different places, and nothing on the wire makes them agree — which is the
+        /// hole a ceiling that only ever checked the LISTED size sailed straight through.
+        /// Defaults to `sizeBytes`, so every existing fixture is unchanged.
+        let announcedSizeBytes: Int?
 
-        init(date: String, timestamp: String, sizeBytes: Int, content: Data? = nil) {
+        init(date: String, timestamp: String, sizeBytes: Int, content: Data? = nil,
+             announcedSizeBytes: Int? = nil) {
             self.date = date
             self.timestamp = timestamp
             self.sizeBytes = sizeBytes
             self.content = content
+            self.announcedSizeBytes = announcedSizeBytes
         }
     }
 
@@ -353,7 +361,7 @@ final class FakePocketBLEStack: @unchecked Sendable {
                 notifyControl("MCU&UNKNOWN")
                 return
             }
-            notifyControl("MCU&U&\(file.sizeBytes)")
+            notifyControl("MCU&U&\(file.announcedSizeBytes ?? file.sizeBytes)")
             var offset = content.startIndex
             while offset < content.endIndex {
                 let end = content.index(offset, offsetBy: Self.notificationBytes,

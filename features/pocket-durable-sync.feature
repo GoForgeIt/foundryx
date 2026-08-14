@@ -1,5 +1,14 @@
 Feature: Pocket recordings join the durable conversation pipeline
-  Pocket is pulled after the fact and never enters a live capture path.
+  Pocket is pulled after the fact and never enters a LIVE capture path: no FrameRouter, no
+  Live Activity, no recording pill, no currently-recording state, nothing the app presents as
+  audio that is still arriving.
+
+  IT DOES WRITE THE ORDINARY DURABLE SEGMENTS, and that line used to read "no WAL". The WAL is
+  what a finished capture IS — `CaptureManager.merge` has folded pre-existing segments into one
+  and driven them through `markNeedsFinalize` → `sync` → `finalize` since long before any Pocket
+  existed — so forbidding it would have forced a second, parallel way to get audio to the brain,
+  which is the one thing this leg was told not to build. `features/pocket-bring-over.feature`
+  holds the boundary that actually matters, measured around the real pull.
 
   Scenario: absence backs off and presence resets the cadence
     Given an attached Pocket is away
@@ -39,4 +48,4 @@ Feature: Pocket recordings join the durable conversation pipeline
   Scenario: Pocket has no live recording behavior
     Given spies around all live capture boundaries
     When the complete Pocket sync lifecycle runs
-    Then no FrameRouter, WAL, Live Activity, recording pill, or currently-recording state is reached
+    Then no FrameRouter, Live Activity, recording pill, or currently-recording state is reached

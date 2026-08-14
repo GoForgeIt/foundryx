@@ -36,6 +36,8 @@ let package = Package(
                 "then-capabilities.json",
                 "fixtures/device-agnostic",
                 "fixtures/s05-device-shape-interpretation.json",
+                // The Pocket audio fixture is read by REPO PATH too (see its PROVENANCE.txt).
+                "fixtures/pocket",
             ],
             resources: [
                 .copy("fixtures/handshake_vectors.json"),

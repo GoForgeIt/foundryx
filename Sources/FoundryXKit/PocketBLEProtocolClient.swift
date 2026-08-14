@@ -292,21 +292,105 @@ public actor PocketBLEClient {
         }
     }
 
-    public func download(_ request: PocketRecordingRequest) async throws -> Data {
-        guard validToken(request.date), validToken(request.timestamp) else { throw PocketProtocolError.malformedResponse }
+    /// HOW MUCH OF A FILE MAY ARRIVE BEFORE THE SYNC WORD IS FOUND.
+    ///
+    /// The trim exists because a Pocket prefixes its payload with a short preamble the audio
+    /// pipeline cannot use, and the sync word is where the recording starts. Bounding the search
+    /// is what lets the rest of the transfer stream: past this many bytes with no `0xFF 0xF3`,
+    /// the answer is "this is not the audio this build understands" and no more of it is held.
+    /// Generous — a Pocket's preamble is tens of bytes, not thousands.
+    public static let maximumPreambleBytes = 4 * 1024
+
+    /// THE CEILING ON ONE FILE, AND THE ARITHMETIC THAT NOW SETS IT.
+    ///
+    /// It used to be 32 MB, and the reason given was memory: the old shape held the whole
+    /// payload AND the copy custody re-read to prove itself, so peak footprint was twice the
+    /// file and ~2.2 hours of Pocket audio was genuinely all a phone could take. Nothing on
+    /// this path accumulates any more — the radio streams to disk and the decoder streams off
+    /// it — so that reason is gone and the honest bound is now storage and the owner's
+    /// patience over BLE. At fw-1.6's 32 kbps CBR (4,000 bytes/second) this is about 18 hours
+    /// of audio, which is more than a Pocket left running for a weekend can hold.
+    ///
+    /// It is still a REFUSAL and not a best-effort, because the alternative to refusing a file
+    /// too big is an attempt that takes the app down partway through.
+    public static let maximumDownloadBytes = 256 * 1024 * 1024
+
+    /// STREAM ONE FILE OFF THE RECORDER, BOUNDED BY A CEILING THE CALLER SETS.
+    ///
+    /// WHAT THIS REPLACES, AND THE HOLE IT CLOSES. The shipped shape returned the whole file as
+    /// one `Data`, sized its accumulation from the recorder's OWN `MCU&U&<n>`, and was refused
+    /// by a ceiling that only ever looked at the size the recorder LISTED. Those are two
+    /// different numbers from the same untrusted device: a Pocket that lists a 900-byte file and
+    /// then announces 500 MB sailed straight past the ceiling and accumulated until the app
+    /// died. So there are now THREE bounds and the announcement is trusted for none of them:
+    ///
+    ///   1. the ANNOUNCED size must be within `ceilingBytes` — refused before a byte arrives;
+    ///   2. the DELIVERED bytes are counted and the transfer is abandoned the moment they pass
+    ///      the ceiling, so a recorder that announces 900 and then sends forever is stopped;
+    ///   3. nothing is accumulated at all past the preamble — each chunk goes to `sink` and is
+    ///      released, so peak memory is one BLE notification regardless of file length.
+    ///
+    /// - Parameter sink: receives the payload in arrival order, starting at the MP3 sync word.
+    ///   It may throw to abort (a disk that will not take the bytes); the throw propagates.
+    /// - Returns: the number of bytes handed to `sink`.
+    @discardableResult
+    public func download(_ request: PocketRecordingRequest,
+                         ceilingBytes: Int,
+                         into sink: (Data) throws -> Void) async throws -> Int {
+        guard validToken(request.date), validToken(request.timestamp) else {
+            throw PocketProtocolError.malformedResponse
+        }
         return try await protected(.download) {
             try await write("U&\(request.date)&\(request.timestamp)")
             let announced = try await matchingValue(prefix: "MCU&U&", operation: .download)
             guard let size = Int(announced), size > 0 else { throw PocketProtocolError.malformedResponse }
-            var bytes = Data()
-            while bytes.count < size {
+            // BOUND 1 — the recorder's own announcement, checked against the caller's ceiling
+            // rather than against the size some earlier listing happened to report.
+            guard size <= ceilingBytes else { throw PocketProtocolError.malformedResponse }
+
+            var preamble = Data()          // held ONLY until the sync word is located
+            var synced = false
+            var delivered = 0              // bytes handed to `sink`
+            var received = 0               // bytes taken off the radio, sync word or not
+
+            while received < size {
                 let event = try await nextEvent(operation: .download)
-                guard case .audio(let chunk, let eventGeneration) = event, eventGeneration == generation else { continue }
-                bytes.append(chunk)
+                guard case .audio(let chunk, let eventGeneration) = event,
+                      eventGeneration == generation else { continue }
+                received += chunk.count
+                // BOUND 2 — the recorder is sending more than it said it would. There is no
+                // frame for "stop" on this wire, so the session is retired by the throw.
+                guard received <= ceilingBytes else { throw PocketProtocolError.malformedResponse }
+
+                if synced {
+                    try sink(chunk)
+                    delivered += chunk.count
+                    continue
+                }
+                preamble.append(chunk)
+                if let start = preamble.firstMP3Sync {
+                    let body = preamble.subdata(in: start..<preamble.endIndex)
+                    preamble = Data()      // BOUND 3 — nothing is retained from here on
+                    synced = true
+                    try sink(body)
+                    delivered += body.count
+                } else if preamble.count > PocketBLEClient.maximumPreambleBytes {
+                    throw PocketProtocolError.malformedResponse
+                }
             }
-            guard let sync = bytes.firstMP3Sync else { throw PocketProtocolError.malformedResponse }
-            return bytes.subdata(in: sync..<bytes.endIndex)
+            guard synced else { throw PocketProtocolError.malformedResponse }
+            return delivered
         }
+    }
+
+    /// The whole-file convenience, for callers holding a file small enough to name a bound for.
+    /// Production pulls do NOT use it — `PocketBringOver` streams to disk — but the protocol
+    /// unit tests do, and it is the same code path with the sink appending to one buffer.
+    public func download(_ request: PocketRecordingRequest,
+                         ceilingBytes: Int = PocketBLEClient.maximumDownloadBytes) async throws -> Data {
+        var bytes = Data()
+        _ = try await download(request, ceilingBytes: ceilingBytes) { bytes.append($0) }
+        return bytes
     }
 
     /// T5's typed extension point. Commands remain serialized by this client's authenticated

@@ -3892,6 +3892,74 @@ public final class CaptureManager: ObservableObject {
         return primaryId
     }
 
+    // MARK: adopt a capture written by something other than a live session
+
+    /// TAKE OWNERSHIP OF A CAPTURE THAT ALREADY EXISTS ON DISK, AND DRIVE IT DOWN THE NORMAL LANE.
+    ///
+    /// WHY THIS IS GENERAL AND NOT POCKET-SHAPED. Two producers already write finished captures
+    /// into this manager's base directory without going anywhere near a live session:
+    /// `OmiRestorationSpool`, which spools a background BLE restoration before any UI exists,
+    /// and `PocketCaptureImport`, which writes a recording pulled off a record-then-sync
+    /// recorder. Both relied on `loadExisting()` finding their directory — which only runs when
+    /// a manager is CONSTRUCTED, so a capture created while the app is already open was invisible
+    /// until the next launch. This is the missing verb, and it takes a capture id and nothing
+    /// else: it cannot tell, and must not care, which producer wrote it.
+    ///
+    /// It is EXACTLY `merge`'s tail: hydrate the WAL, warm its status, mark pending-finalize,
+    /// rebuild, and kick sync→finalize. No FrameRouter, no `beginSession`, no Live Activity, no
+    /// `active`, no `beginStreaming` — same as merge, and for the same reason. The capture is
+    /// finished; all that remains is to get it to the brain.
+    ///
+    /// - Returns: false when there is no such capture on disk, when it holds no audio, when it
+    ///   is deleted/discarded, or when this manager already owns it — never a partial adoption.
+    @discardableResult
+    public func adoptCompletedCapture(captureId: String) -> Bool {
+        guard !accountExposureClosing, !accountExposureClosed else { return false }
+        guard active?.captureId != captureId else { return false }
+        guard !isDeleted(captureId), !isDiscarded(captureId) else { return false }
+        let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil)) ?? []
+        // A CAPTURE WITH NO AUDIO IS NOT A CAPTURE. Adopting an empty directory would put a row
+        // in the list that can never finalize (`tryFinalize` gates on `totalSegments > 0`) and
+        // never go away.
+        guard files.contains(where: { $0.pathExtension == "opus" }) else { return false }
+
+        let wal: CaptureWAL
+        if let existing = captures.first(where: { $0.captureId == captureId }) {
+            wal = existing
+        } else {
+            let fresh = makeWAL(captureId: captureId)
+            // Warm NOW (on the main actor `publish()` applies synchronously) so the adopted
+            // capture's real 0/N counts are in `status` before `drainBatch` reads them — an
+            // unwarmed WAL reports `pendingSegments == 0` and would be skipped for a whole tick.
+            fresh.warmStatus()
+            captures.insert(fresh, at: 0)
+            wal = fresh
+        }
+        retryStates[captureId] = nil
+        finalizing.remove(captureId)
+        markNeedsFinalize(captureId)
+        invalidateMeta(captureId)
+        invalidateSidecar(captureId)
+        rebuildVisibleCaptures()
+
+        // KICK THE SHARED DRAIN, NOT THIS WAL'S `sync()`. Calling `wal.sync()` directly here
+        // raced the 5-second drain timer on the SAME WAL — measured as segments 1, 2 and 3
+        // uploaded twice — because `sync()` has no cross-caller exclusion; `drainPending`'s
+        // `isDraining` guard is the thing that does, and it ends in `retryPendingFinalizes()`
+        // anyway. So an adopted capture goes down the identical lane on the identical schedule
+        // as every other pending capture, just sooner.
+        let taskID = UUID()
+        let task = Task { @MainActor [weak self] in
+            defer { self?.mergeFinalizeTasks[taskID] = nil }
+            await self?.drainPending()
+        }
+        mergeFinalizeTasks[taskID] = task
+        log?.info("capture \(captureId): adopted from disk — pending finalize")
+        return true
+    }
+
     /// Append ONE source capture's `seg-*.opus` onto the PRIMARY's WAL directory, renumbered
     /// to CONTINUE the primary's sequence (so the audio stays time-ordered). Pure disk —
     /// safe to run OFF the main actor (touches no actor state). Each segment is COPIED via an
@@ -4621,15 +4689,33 @@ public final class CaptureManager: ObservableObject {
 
     /// A capture is pending-finalize iff its dir has the marker (set on close,
     /// removed on a successful door finalize). Durable so a relaunch retries.
-    private func needsFinalizeMarker(_ captureId: String) -> URL {
+    /// THE PENDING-FINALIZE MARKER'S PATH, IN ONE PLACE.
+    ///
+    /// It is `nonisolated static` because the marker is how a producer OUTSIDE this manager
+    /// hands a finished capture to the finalize lane, and both such producers already exist:
+    /// `BrainSeeder.rearmForDoorSeed` re-arms phone-only conversations for a newly connected
+    /// brain, and `PocketCaptureImport` writes a recording pulled off a record-then-sync
+    /// recorder. Each of them used to spell the literal `".needs-finalize"` itself, so renaming
+    /// the marker would have silently stopped finalizing their captures while every test that
+    /// went through this manager stayed green.
+    public nonisolated static func needsFinalizeMarkerURL(_ captureId: String, baseDir: URL) -> URL {
         baseDir.appendingPathComponent(captureId, isDirectory: true)
             .appendingPathComponent(".needs-finalize")
     }
 
-    private func markNeedsFinalize(_ captureId: String) {
+    /// Mark a capture pending-finalize on disk, from anywhere. Durable, so a relaunch retries.
+    public nonisolated static func markNeedsFinalizeOnDisk(_ captureId: String, baseDir: URL) {
         let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try? Data().write(to: needsFinalizeMarker(captureId), options: [.atomic])
+        try? Data().write(to: needsFinalizeMarkerURL(captureId, baseDir: baseDir), options: [.atomic])
+    }
+
+    private func needsFinalizeMarker(_ captureId: String) -> URL {
+        Self.needsFinalizeMarkerURL(captureId, baseDir: baseDir)
+    }
+
+    private func markNeedsFinalize(_ captureId: String) {
+        Self.markNeedsFinalizeOnDisk(captureId, baseDir: baseDir)
     }
 
     private func isPendingFinalize(_ captureId: String) -> Bool {

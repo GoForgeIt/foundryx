@@ -8,18 +8,26 @@
 // answers the smallest honest version of that question — durable custody on this phone, proven
 // by reading the bytes back — and stops there.
 //
-// WHAT THIS DELIBERATELY DOES NOT DO, AND WHY IT IS NOT A HALF-BUILD.
+// WHAT IT NOW DOES, AND WHERE IT STOPS. The sink this file's first version said was
+// "unspecified" turned out to be already built and already shipping: a completed capture
+// reaches Lore as `seg-*.opus` segments in a capture directory plus a `.needs-finalize` marker,
+// and `CaptureManager`'s drain and `tryFinalize` do the rest. So the leg is a TRANSLATOR and
+// nothing else — `PocketAudioTranslator` turns the recorder's MP3 into the Opus frames the
+// pipeline already speaks, `PocketCaptureImport` writes them into the standard capture layout,
+// and past that hand-off a brought-over recording executes the SAME functions as a phone-mic or
+// Omi one. There is no second ingest route, no Pocket-specific upload, no parallel finalize and
+// no `if pocket` anywhere downstream: the origin travels as DATA (the `.capture-source` marker
+// and the device sidecar), which is what `RecordingDeviceShape.filePull` was already for.
 //
-//   * IT DOES NOT DECODE, ENCODE, UPLOAD, OR FINALIZE. No MP3 decoder, no Opus, no
-//     `CaptureBackend.finalize`, no `PocketFinalizedCaptureSink`. A brought-over file is a file
-//     this phone is now holding; turning it into a conversation is a different leg with a
-//     different unproven half, and building it against an unspecified sink is exactly how the
-//     unwired modules this file exists beside got written.
-//   * IT NEVER TOUCHES LIVE CAPTURE. `features/pocket-durable-sync.feature` forbids a pull
-//     reaching the FrameRouter, the capture WAL, a Live Activity, the recording pill or any
-//     currently-recording state — because the file already existed on the recorder before the
-//     phone was involved, and dressing that up as a recording is a lie about where the audio
-//     came from. Nothing here imports any of them.
+// WHAT THIS DELIBERATELY DOES NOT DO.
+//
+//   * IT NEVER STARTS A LIVE RECORDING. No FrameRouter, no `beginSession`, no `beginStreaming`,
+//     no Live Activity, no recording pill, no `active` capture, no currently-recording state.
+//     The file existed on the recorder before the phone was involved and dressing that up as a
+//     recording would be a lie about where the audio came from. It DOES write WAL segments,
+//     because that is what a finished capture is made of and inventing a second way to hold
+//     one is the thing this design forbids — `CaptureManager.merge` has shipped exactly that
+//     shape (pre-existing segments → `markNeedsFinalize` → `sync` → `tryFinalize`) for months.
 //   * IT ISSUES NO DELETE. `PocketRecorderCustodyPromise.text` is a promise, and a bring-over
 //     is the one operation that would be tempted to break it. It is repeated on this panel.
 //   * IT BRINGS ONE FILE. Not a backlog, not a queue, not a cadence — those are written
@@ -27,13 +35,41 @@
 //     over a leg no human has ever watched finish is a bigger unwired module, not a smaller one.
 
 import Foundation
+import CryptoKit
 
-/// Where a brought-over file lives and how custody is proven.
+/// ONE FILE BEING WRITTEN INTO CUSTODY, A CHUNK AT A TIME.
+///
+/// WHY THIS EXISTS RATHER THAN `keep(_:bytes:)`. The old shape took the whole recording as one
+/// `Data` — which meant the radio had to accumulate the whole recording as one `Data` too, and
+/// then custody held a SECOND copy of it to prove the re-read. Two hours of Pocket audio is
+/// ~29 MB, so peak was ~58 MB of a phone's memory for a file that is only ever streamed
+/// through. Nothing here holds more than one BLE notification.
+public protocol PocketRecorderFileWriting: Sendable {
+    /// Append arriving bytes. Throws if the phone will not take them.
+    func write(_ chunk: Data) throws
+    /// THE COMMIT POINT: re-read what was written, compare it against a digest accumulated
+    /// while writing, and only then take the real name. Returns the byte count it re-read.
+    func commit() throws -> Int
+    /// Remove the partial artifact. Idempotent — safe to call after `commit`.
+    func abandon()
+}
+
+/// Where a brought-over file lives, how custody is proven, and what it became.
 public protocol PocketRecorderFileCustody: Sendable {
     func alreadyHeld(_ key: PocketRecorderFileKey) async -> Bool
-    /// Persist atomically, then prove custody by READING THE FILE BACK and comparing bytes.
-    /// Must remove any partial artifact on failure. Returns the byte count it re-read.
-    func keep(_ key: PocketRecorderFileKey, bytes: Data) async throws -> Int
+    /// Where this phone is holding the file, or nil when it is not holding it.
+    func heldFile(_ key: PocketRecorderFileKey) async -> URL?
+    /// Open a streaming commit for this key. Must leave nothing behind on failure.
+    func beginKeeping(_ key: PocketRecorderFileKey) async throws -> any PocketRecorderFileWriting
+    /// THE CONVERSATION THIS FILE BECAME, or nil when it has not become one yet.
+    ///
+    /// It is a separate fact from "the bytes are held", and conflating them is a data-loss
+    /// shape: a phone that died between the custody commit and the import would hold the file
+    /// forever, answer `alreadyHeld` yes, never ask the recorder again — and never make the
+    /// conversation. With the receipt separate, the retry costs no radio time at all: the
+    /// bytes are already here, so the import simply runs again off the held file.
+    func conversation(for key: PocketRecorderFileKey) async -> String?
+    func noteConversation(_ captureID: String, for key: PocketRecorderFileKey) async
 }
 
 /// Why custody refused to claim it is holding something.
@@ -79,47 +115,164 @@ public struct PocketRecorderFileStore: PocketRecorderFileCustody {
             .appendingPathComponent("\(key.timestamp).mp3")
     }
 
+    /// The receipt that says which conversation this file became. It sits beside the audio so
+    /// custody's two facts — "the bytes are here" and "they are a conversation" — travel
+    /// together and are still two facts.
+    public func receiptURL(for key: PocketRecorderFileKey) -> URL {
+        url(for: key).deletingPathExtension().appendingPathExtension("capture")
+    }
+
     public func alreadyHeld(_ key: PocketRecorderFileKey) async -> Bool {
         FileManager.default.fileExists(atPath: url(for: key).path)
     }
 
-    public func keep(_ key: PocketRecorderFileKey, bytes: Data) async throws -> Int {
+    public func heldFile(_ key: PocketRecorderFileKey) async -> URL? {
+        let target = url(for: key)
+        return FileManager.default.fileExists(atPath: target.path) ? target : nil
+    }
+
+    public func conversation(for key: PocketRecorderFileKey) async -> String? {
+        guard let data = try? Data(contentsOf: receiptURL(for: key)),
+              let id = String(data: data, encoding: .utf8), !id.isEmpty else { return nil }
+        return id
+    }
+
+    public func noteConversation(_ captureID: String, for key: PocketRecorderFileKey) async {
+        try? Data(captureID.utf8).write(to: receiptURL(for: key), options: [.atomic])
+    }
+
+    public func beginKeeping(_ key: PocketRecorderFileKey) async throws -> any PocketRecorderFileWriting {
         let destination = url(for: key)
         let partial = destination.appendingPathExtension("partial")
         do {
             try FileManager.default.createDirectory(
                 at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try bytes.write(to: partial, options: .atomic)
-        } catch {
-            try? FileManager.default.removeItem(at: partial)
-            throw PocketRecorderCustodyFailure.couldNotWrite
-        }
-        // THE PROOF, AND THE REASON THIS IS NOT JUST A WRITE. The bytes are read back off the
-        // filesystem and compared to the ones the radio handed over.
-        guard let reRead = try? Data(contentsOf: partial), reRead == bytes else {
-            try? FileManager.default.removeItem(at: partial)
-            throw PocketRecorderCustodyFailure.didNotReadBackIdentical
-        }
-        do {
-            if FileManager.default.fileExists(atPath: destination.path) {
-                try FileManager.default.removeItem(at: destination)
+            if FileManager.default.fileExists(atPath: partial.path) {
+                try FileManager.default.removeItem(at: partial)
             }
-            try FileManager.default.moveItem(at: partial, to: destination)
+            guard FileManager.default.createFile(atPath: partial.path, contents: nil) else {
+                throw PocketRecorderCustodyFailure.couldNotWrite
+            }
+            return try PocketRecorderFileWriter(partial: partial, destination: destination)
         } catch {
             try? FileManager.default.removeItem(at: partial)
             throw PocketRecorderCustodyFailure.couldNotWrite
         }
-        return reRead.count
+    }
+}
+
+/// THE STREAMING COMMIT, WITH THE RE-READ STILL THE COMMIT POINT.
+///
+/// The bytes go to a `.partial` sibling; a digest of everything handed over is accumulated as
+/// they are written; then the partial is READ BACK OFF THE FILESYSTEM in bounded chunks and its
+/// digest compared. Only then does it take the real name. So a crash, a full disk or a
+/// truncated write leaves a `.partial` that `alreadyHeld` will never claim, instead of a short
+/// file that looks exactly like a good one.
+///
+/// COMPARING DIGESTS RATHER THAN BYTES IS NOT A WEAKENING. The old proof compared two whole
+/// copies in memory, which is the same claim for twice the file's footprint; SHA-256 over the
+/// same two streams answers the identical question — "is what came back the thing that went
+/// in" — in constant space. What it gives up is the ability to say WHERE they differ, and
+/// custody never said that anyway: it deletes the artifact either way.
+public final class PocketRecorderFileWriter: PocketRecorderFileWriting, @unchecked Sendable {
+    /// Bytes re-read per pass on the verification sweep.
+    static let verifyChunkBytes = 1 << 20
+
+    private let lock = NSLock()
+    private let partial: URL
+    private let destination: URL
+    private let handle: FileHandle
+    private var digest = SHA256()
+    private var written = 0
+    private var closed = false
+
+    init(partial: URL, destination: URL) throws {
+        self.partial = partial
+        self.destination = destination
+        self.handle = try FileHandle(forWritingTo: partial)
+    }
+
+    public func write(_ chunk: Data) throws {
+        try lock.withLock {
+            guard !closed else { throw PocketRecorderCustodyFailure.couldNotWrite }
+            do { try handle.write(contentsOf: chunk) }
+            catch { throw PocketRecorderCustodyFailure.couldNotWrite }
+            digest.update(data: chunk)
+            written += chunk.count
+        }
+    }
+
+    public func commit() throws -> Int {
+        try lock.withLock {
+            guard !closed else { throw PocketRecorderCustodyFailure.couldNotWrite }
+            closed = true
+            do {
+                try handle.synchronize()
+                try handle.close()
+            } catch {
+                try? FileManager.default.removeItem(at: partial)
+                throw PocketRecorderCustodyFailure.couldNotWrite
+            }
+            let expected = digest.finalize()
+            guard let reader = try? FileHandle(forReadingFrom: partial) else {
+                try? FileManager.default.removeItem(at: partial)
+                throw PocketRecorderCustodyFailure.didNotReadBackIdentical
+            }
+            var reRead = SHA256()
+            var count = 0
+            while true {
+                let block = (try? reader.read(upToCount: Self.verifyChunkBytes)) ?? nil
+                guard let block, !block.isEmpty else { break }
+                reRead.update(data: block)
+                count += block.count
+            }
+            try? reader.close()
+            guard count == written, reRead.finalize() == expected else {
+                try? FileManager.default.removeItem(at: partial)
+                throw PocketRecorderCustodyFailure.didNotReadBackIdentical
+            }
+            do {
+                if FileManager.default.fileExists(atPath: destination.path) {
+                    try FileManager.default.removeItem(at: destination)
+                }
+                try FileManager.default.moveItem(at: partial, to: destination)
+            } catch {
+                try? FileManager.default.removeItem(at: partial)
+                throw PocketRecorderCustodyFailure.couldNotWrite
+            }
+            return count
+        }
+    }
+
+    public func abandon() {
+        lock.withLock {
+            if !closed { try? handle.close(); closed = true }
+            try? FileManager.default.removeItem(at: partial)
+        }
     }
 }
 
 /// What one bring-over established.
 public enum PocketBringOverOutcome: Sendable, Equatable {
-    case broughtOver(bytes: Int)
-    case alreadyHeld
+    /// The file is in custody AND it is a conversation. `captureID` is carried because the
+    /// running app has to be able to hand exactly this capture to `CaptureManager` — an
+    /// outcome that only said "it worked" would leave the conversation invisible until the
+    /// next launch, which is the difference between a file on a phone and a recording a
+    /// person can read.
+    case broughtOver(bytes: Int, captureID: String)
+    /// The bytes AND the conversation were already here; the recorder was not asked again.
+    case alreadyHeld(captureID: String)
     case transferIncomplete     // fewer bytes than announced / stall / disconnect
-    case unreadableRecording    // no MP3 sync, or refused by the size ceiling
+    case unreadableRecording    // no MP3 sync, refused by the ceiling, or not audio at all
     case recorderUnavailable(String)   // carries a presentation line, never a raw error
+
+    /// The conversation this bring-over produced, if it produced one.
+    public var captureID: String? {
+        switch self {
+        case .broughtOver(_, let id), .alreadyHeld(let id): return id
+        default: return nil
+        }
+    }
 }
 
 /// Every string this affordance can render, in the kit, for the same reason every other device
@@ -182,14 +335,13 @@ public enum PocketBringOverPresentation {
 /// ONE BRING-OVER: open a session, ask for one file, prove it landed, close it.
 public enum PocketBringOver {
 
-    /// THE CEILING, AND THE ARITHMETIC BEHIND IT. Pocket fw-1.6 lists bytes at a fixed 32 kbps
-    /// CBR — 4,000 bytes per second, the same constant `StoredFileDevicePresentation.duration`
-    /// divides by — so 32 MB is about 2.2 hours of audio. The shape here holds the payload AND
-    /// the copy it re-reads to prove custody in memory at the same time, so peak footprint is
-    /// roughly twice the file. A recorder left running for a weekend can be holding far more
-    /// than that, and the honest answer to one of those files is a refusal, not an attempt that
-    /// takes the app down partway through.
-    public static let maximumBytes = 32 * 1024 * 1024
+    /// THE CEILING. One value, enforced where the bytes actually arrive — see
+    /// `PocketBLEClient.maximumDownloadBytes` for the arithmetic and for why it is no longer
+    /// 32 MB. Checked HERE against the LISTED size purely to save the owner a session that was
+    /// always going to end in a refusal; the binding checks are the client's, because the listed
+    /// size and the announced size are two different numbers from the same untrusted device and
+    /// only one of them governs how many bytes actually turn up.
+    public static let maximumBytes = PocketBLEClient.maximumDownloadBytes
 
     /// THE ONE THE SHELF OFFERS: smallest first. Long files are hours over BLE, and the first
     /// file anybody ever pulls off a Pocket should be the one that finishes.
@@ -215,15 +367,46 @@ public enum PocketBringOver {
         }
     }
 
+    /// WHERE THE CONVERSATION IS WRITTEN, and why it is a parameter.
+    ///
+    /// The default is the account-scoped captures root — the SAME directory `CaptureManager`
+    /// hydrates from, because a conversation written anywhere else is a directory nothing will
+    /// ever look in. It is injectable so a hermetic suite can own the library it asserts about.
+    public struct Destination: Sendable {
+        public let baseDir: URL
+        public let binding: CaptureAccountScope.AccountBinding?
+        public let log: DoorLog?
+        /// THE BINDING IS ONLY DEFAULTED WHEN THE ROOT IS. `CaptureWAL` accepts a binding only
+        /// when its root MATCHES the directory it was handed, and silently writes nothing when
+        /// they disagree — so pairing an explicit root with the ambient account's binding is a
+        /// capture that opens, appends every frame, and has no segments on disk. Left nil, the
+        /// WAL derives the right binding for the root it was actually given.
+        public init(baseDir: URL? = nil,
+                    binding: CaptureAccountScope.AccountBinding? = nil,
+                    log: DoorLog? = nil) {
+            if let baseDir {
+                self.baseDir = baseDir
+                self.binding = binding
+            } else {
+                let resolved = binding ?? CaptureAccountScope.currentAccountBinding()
+                self.baseDir = resolved?.root ?? CaptureWAL.documentsCaptures()
+                self.binding = resolved
+            }
+            self.log = log
+        }
+    }
+
     /// - Parameter attachment: injected so the Brine scenarios drive the SHIPPED attachment
     ///   over a faked radio rather than a faked attachment. A fresh attachment per pull is not
     ///   an optimisation to remove: `teardown()` retires the object's link and generation.
+    /// - Parameter destination: the capture library the resulting conversation is written into.
     public static func run(
         peripheralIdentifier id: UUID,
         advertisedName: String,
         recording: PocketRecording,
         custody: any PocketRecorderFileCustody = PocketRecorderFileStore(),
-        attachment: RecordingDeviceAttachment = RecordingDeviceAttachment()
+        attachment: RecordingDeviceAttachment = RecordingDeviceAttachment(),
+        destination: Destination = Destination()
     ) async -> PocketBringOverOutcome {
         // BEFORE THE RADIO IS TOUCHED. Refusing a file only after opening a session would
         // spend the owner's battery and the recorder's time to arrive at the same no.
@@ -232,8 +415,8 @@ public enum PocketBringOver {
         let result = await attachment.withAuthenticatedSession(
             peripheralIdentifier: id, advertisedName: advertisedName
         ) { client, identity in
-            await pull(client: client, identity: identity,
-                       recording: recording, custody: custody)
+            await pull(client: client, identity: identity, advertisedName: advertisedName,
+                       recording: recording, custody: custody, destination: destination)
         }
         switch result {
         case .ran(let outcome):
@@ -250,23 +433,52 @@ public enum PocketBringOver {
 
     private static func pull(client: PocketBLEClient,
                              identity: PocketAuthenticatedIdentity,
+                             advertisedName: String,
                              recording: PocketRecording,
-                             custody: any PocketRecorderFileCustody) async -> PocketBringOverOutcome {
-        let key = PocketRecorderFileKey(identity: identity.recordingDeviceIdentity,
+                             custody: any PocketRecorderFileCustody,
+                             destination: Destination) async -> PocketBringOverOutcome {
+        let deviceIdentity = identity.recordingDeviceIdentity
+        let key = PocketRecorderFileKey(identity: deviceIdentity,
                                         date: recording.date,
                                         timestamp: recording.timestamp)
         // BEFORE ANY COMMAND IS ISSUED. Asking a recorder for hours of audio this phone is
         // already holding is the one avoidable cost in this whole leg.
-        if await custody.alreadyHeld(key) { return .alreadyHeld }
+        //
+        // "HELD" AND "IS A CONVERSATION" ARE ASKED SEPARATELY. A phone that died between the
+        // custody commit and the import holds the bytes and has no conversation; treating that
+        // as "already done" would strand the recording forever. The retry costs no radio time —
+        // the file is here — so it simply runs the import again off the held file.
+        if let held = await custody.heldFile(key) {
+            if let existing = await custody.conversation(for: key) {
+                return .alreadyHeld(captureID: existing)
+            }
+            return await conversation(from: held, key: key, bytes: nil,
+                                      deviceIdentity: deviceIdentity,
+                                      advertisedName: advertisedName,
+                                      recording: recording, custody: custody,
+                                      destination: destination)
+        }
 
-        let payload: Data
+        let writer: any PocketRecorderFileWriting
+        do { writer = try await custody.beginKeeping(key) }
+        catch { return .transferIncomplete }
+
+        let bytes: Int
         do {
-            payload = try await client.download(recording.request)
+            // STREAMED STRAIGHT TO DISK. The radio hands over one notification at a time and
+            // each one goes to the file; nothing accumulates, so a two-hour recording costs the
+            // same memory as a two-second one.
+            _ = try await client.download(recording.request, ceilingBytes: maximumBytes) { chunk in
+                try writer.write(chunk)
+            }
+            bytes = try writer.commit()
         } catch let error as PocketProtocolError {
+            writer.abandon()
             switch error {
             case .malformedResponse, .unsupportedOperation:
                 // THE RECORDER ANSWERED AND THIS BUILD COULD NOT USE THE ANSWER: no `0xFF 0xF3`
-                // sync anywhere, a size it did not state, or a firmware without the command.
+                // sync anywhere, a size it did not state or exceeded, or a firmware without the
+                // command.
                 return .unreadableRecording
             case .timeout, .stall, .disconnected, .transportFailure, .cancelled:
                 // IT STOPPED ARRIVING. There is no error frame for this on the wire — the
@@ -277,17 +489,56 @@ public enum PocketBringOver {
                 return .recorderUnavailable(PocketRecorderCheckPresentation.keyUnusableLine)
             }
         } catch {
-            return .transferIncomplete
-        }
-
-        do {
-            return .broughtOver(bytes: try await custody.keep(key, bytes: payload))
-        } catch {
             // THE BYTES ARRIVED AND THIS PHONE COULD NOT PROVE IT IS HOLDING THEM. Custody has
             // already removed whatever it wrote, so "nothing was kept" is a fact rather than a
             // hope, and the recorder still has the only copy — which it always did.
+            writer.abandon()
             return .transferIncomplete
         }
+
+        guard let held = await custody.heldFile(key) else { return .transferIncomplete }
+        return await conversation(from: held, key: key, bytes: bytes,
+                                  deviceIdentity: deviceIdentity,
+                                  advertisedName: advertisedName,
+                                  recording: recording, custody: custody,
+                                  destination: destination)
+    }
+
+    /// THE HAND-OFF, AND THE END OF THIS FILE'S JOB. Past `PocketCaptureImport` the recording is
+    /// a capture directory in the normal library with the normal birth stamps and the normal
+    /// pending-finalize marker, and every function that touches it from here — drain, resync,
+    /// finalize, ingest, transcription, titling — is the one every other recording runs.
+    private static func conversation(from held: URL,
+                                     key: PocketRecorderFileKey,
+                                     bytes: Int?,
+                                     deviceIdentity: RecordingDeviceIdentity,
+                                     advertisedName: String,
+                                     recording: PocketRecording,
+                                     custody: any PocketRecorderFileCustody,
+                                     destination: Destination) async -> PocketBringOverOutcome {
+        let imported: PocketImportedCapture
+        do {
+            imported = try PocketCaptureImport.makeConversation(
+                fromHeldFile: held,
+                recorder: deviceIdentity,
+                displayName: advertisedName,
+                recorderReported: PocketRecordingLabel.reportedInstant(
+                    date: recording.date, timestamp: recording.timestamp) ?? Date(),
+                binding: destination.binding,
+                baseDir: destination.baseDir,
+                log: destination.log)
+        } catch {
+            // IT IS IN CUSTODY AND IT IS NOT AUDIO. The bytes stay — they are the owner's
+            // recording and the only thing that makes a later retry free — but no conversation
+            // is claimed, and the line says the recording could not be read.
+            return .unreadableRecording
+        }
+        await custody.noteConversation(imported.captureID, for: key)
+        // `resourceValues`, NEVER `attributesOfItem` — the latter is a whole-attribute stat that
+        // has cost this app measured main-thread hangs, and reading the file back to count its
+        // bytes would undo the entire reason nothing on this path is held in memory.
+        let onDisk = (try? held.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        return .broughtOver(bytes: bytes ?? onDisk, captureID: imported.captureID)
     }
 }
 

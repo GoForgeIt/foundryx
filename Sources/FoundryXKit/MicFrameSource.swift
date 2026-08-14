@@ -112,6 +112,74 @@ public final class OpusEncoder48k: @unchecked Sendable {
     }
 }
 
+/// ACCUMULATE 48 kHz MONO Int16 AND EMIT ONE OPUS PACKET PER 960 SAMPLES.
+///
+/// This is the single home of "PCM becomes the frames the pipeline speaks". It was lifted out
+/// of `MicFrameSource.ingest` verbatim — the `pending` accumulator plus the
+/// `while pending.count >= frameSamples` drain — because a SECOND producer of pipeline frames
+/// now exists (`PocketAudioTranslator`, which decodes a file a recorder handed over), and two
+/// copies of the framing rule is how two producers drift into two subtly different framings
+/// that the door's TOC-based granule parser then reads differently.
+///
+/// Everything downstream — `CaptureWAL.encodeSegment`, the door's `mux_ogg_opus`, Lore's STT —
+/// therefore cannot tell a microphone from a brought-over file, which is the entire point.
+///
+/// NOT thread-safe. `MicFrameSource` drives it on its serial encode queue; the translator
+/// drives it on one call stack.
+public final class Opus48kFramePacker {
+    private let encoder: OpusEncoder48k
+    private var pending: [Int16] = []
+
+    public init(encoder: OpusEncoder48k = OpusEncoder48k()) {
+        self.encoder = encoder
+    }
+
+    public var isReady: Bool { encoder.isReady }
+
+    /// How many packets this packer has emitted. Diagnostics + the translator's return value.
+    public private(set) var packetsEmitted = 0
+
+    public func reset() {
+        pending.removeAll(keepingCapacity: true)
+    }
+
+    /// Append samples and emit every COMPLETE 20 ms packet they now make up. A partial tail
+    /// stays buffered for the next call.
+    public func append(_ samples: UnsafeBufferPointer<Int16>, emit: (Data) -> Void) {
+        pending.append(contentsOf: samples)
+        drain(emit: emit)
+    }
+
+    /// Append samples from an array. Same rule, for callers that already hold one.
+    public func append(_ samples: [Int16], emit: (Data) -> Void) {
+        pending.append(contentsOf: samples)
+        drain(emit: emit)
+    }
+
+    /// ZERO-PAD THE TAIL AND EMIT IT. Only a FINISHED source may call this: a live stream's
+    /// buffered tail belongs to the frame that has not arrived yet, so `MicFrameSource` never
+    /// calls it. A file, by contrast, has a real last 3 milliseconds, and dropping them
+    /// silently is audio the owner recorded and this app threw away.
+    public func flush(emit: (Data) -> Void) {
+        guard !pending.isEmpty else { return }
+        let fs = OpusEncoder48k.frameSamples
+        pending.append(contentsOf: repeatElement(0, count: fs - pending.count % fs))
+        drain(emit: emit)
+    }
+
+    private func drain(emit: (Data) -> Void) {
+        let fs = OpusEncoder48k.frameSamples
+        while pending.count >= fs {
+            let frame = Array(pending.prefix(fs))
+            pending.removeFirst(fs)
+            if let packet = encoder.encode(frame) {
+                packetsEmitted += 1
+                emit(packet)
+            }
+        }
+    }
+}
+
 #if os(iOS) && canImport(AVFoundation)
 
 /// The phone microphone as an AudioFrameSource (iOS). `start()` requests mic
@@ -136,14 +204,15 @@ public final class MicFrameSource: NSObject, AccountAudioSourceExposure, @unchec
 
     private let log: DoorLog?
     private let engine = AVAudioEngine()
-    private let encoder = OpusEncoder48k()
+    /// THE SHARED FRAMER, not a private accumulator. A brought-over file goes through the same
+    /// type, so a Pocket import and a phone-mic recording produce byte-identical framing.
+    private let packer = Opus48kFramePacker()
     private let target48k = AVAudioFormat(commonFormat: .pcmFormatInt16,
                                           sampleRate: 48000, channels: 1, interleaved: true)!
     private var converter: AVAudioConverter?
     /// Serial encode queue — keeps `onFrame` ordered (the FrameRouter assumes a serial
     /// source callback queue) and the Int16 accumulator single-threaded.
     private let queue = DispatchQueue(label: "foundryx.mic-source")
-    private var pending: [Int16] = []    // accumulates to 960-sample frames (queue only)
     private var running = false          // queue only — the user's INTENT to record
     private var engineLive = false       // queue only — the AVAudioEngine is actually tapping
     private var interrupted = false      // queue only — paused by an OS audio interruption
@@ -196,7 +265,7 @@ public final class MicFrameSource: NSObject, AccountAudioSourceExposure, @unchec
     private func startLocked() {
         guard !isAccountExposureClosed else { return }
         guard !running else { return }
-        guard encoder.isReady else {
+        guard packer.isReady else {
             emitState(.failed("opus encoder unavailable"))
             return
         }
@@ -235,7 +304,7 @@ public final class MicFrameSource: NSObject, AccountAudioSourceExposure, @unchec
                 return false
             }
             converter = conv
-            pending.removeAll(keepingCapacity: true)
+            packer.reset()
             input.removeTap(onBus: 0)   // defensive: never stack taps on a resume
             // Tap the raw hardware PCM; we normalise + encode on our serial queue.
             input.installTap(onBus: 0, bufferSize: Self.tapBufferSize, format: inFormat) { [weak self] buf, _ in
@@ -264,7 +333,7 @@ public final class MicFrameSource: NSObject, AccountAudioSourceExposure, @unchec
         engineLive = false
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        pending.removeAll(keepingCapacity: false)
+        packer.reset()
         converter = nil
         if releaseSession {
             try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
@@ -426,15 +495,11 @@ public final class MicFrameSource: NSObject, AccountAudioSourceExposure, @unchec
             // recognizer (no Opus round-trip), BEFORE we encode it for the durable WAL.
             self.emitPCM(out)
             let n = Int(out.frameLength)
-            self.pending.append(contentsOf: UnsafeBufferPointer(start: ch[0], count: n))
-            let fs = OpusEncoder48k.frameSamples
-            while self.pending.count >= fs {
-                let frame = Array(self.pending.prefix(fs))
-                self.pending.removeFirst(fs)
-                if let pkt = self.encoder.encode(frame) {
-                    self.frameCount += 1
-                    self.emitFrame(pkt)
-                }
+            // NO `flush()` HERE, and that is deliberate: a live stream's buffered tail belongs
+            // to the 20 ms frame that has not finished arriving. Only a finished FILE flushes.
+            self.packer.append(UnsafeBufferPointer(start: ch[0], count: n)) { pkt in
+                self.frameCount += 1
+                self.emitFrame(pkt)
             }
         }
     }
