@@ -28,6 +28,10 @@ struct PocketOnboardingView: View {
         /// FoundryX may hold this recorder's key and could not read it. Deliberately NOT the
         /// mint offer: a second key would replace one the recorder may already be using.
         case custodyUnreadable
+        /// The recorder never answered the key Solleva holds. Deliberately NOT a caption and
+        /// NOT the mint offer: silence is not evidence that the key is wrong, and the way out
+        /// is to replace the key or to ask the recorder again.
+        case handshakeUnanswered
     }
 
     let screen: Screen
@@ -102,7 +106,11 @@ struct PocketOnboardingView: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    private var presentation: PocketSetupPresentation {
+    /// WHICH COPY A SCREEN DRAWS. Internal rather than private so the app-hosted scenario lane
+    /// can hold "the state the model set is the state the view renders" — a model that lands on
+    /// a screen the view maps to `.setup` is a dead end with a friendly title, and there is no
+    /// other way to notice from outside a `body` nothing in this repository can execute.
+    var presentation: PocketSetupPresentation {
         switch screen {
         case .setup: return .setup
         case .didNotFinish: return .didNotFinish
@@ -112,6 +120,7 @@ struct PocketOnboardingView: View {
         case .setupUnavailable: return .setupUnavailable
         case .keyNotKept: return .keyNotKept
         case .custodyUnreadable: return .custodyUnreadable
+        case .handshakeUnanswered: return .handshakeUnanswered
         case .education, .enterExistingKey, .mintConsent, .mintRefused, .mintNotVerified,
              .factoryReset, .keyCustody:
             return .setup

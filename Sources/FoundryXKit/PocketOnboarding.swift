@@ -658,9 +658,50 @@ public struct PocketSetupPresentation: Equatable, Sendable {
             + "\n\nUnlock this iPhone and try again.",
         actions: [retryAction, PocketSessionKeyEntryPresentation.entryAction])
 
+    /// THE RECORDER NEVER ANSWERED THE KEY SOLLEVA IS ALREADY HOLDING — AND SILENCE PROVES
+    /// NOTHING, WHICH IS THE WHOLE REASON THIS SCREEN HAS THE ACTIONS IT HAS.
+    ///
+    /// WHAT WENT WRONG WITHOUT IT. `PocketOnboardingCoordinator.restore` sends the key custody
+    /// holds and reads the answer. This firmware answers a key it does not hold with SILENCE,
+    /// not with `MCU&SK&FAIL`, so the 8-second control deadline expires, `authenticate` throws,
+    /// `PocketProtocolOnboardingClient` maps every non-refusal to `.indeterminate`, and the
+    /// attach comes back `.unreachable(.handshakeUnanswered)`. That was an inline caption
+    /// reading "Tap it again", and the key stayed in custody — correctly — so the next tap sent
+    /// the same unusable key and got the same silence. The only screen that can REPLACE a key
+    /// hung off `.setupUnavailable`, which means "Solleva holds no key", so a recorder Solleva
+    /// held a bad key for could not reach it from anywhere. Reported on unit
+    /// PKT01_BLUE_26079bc5, whose correct key a Mac in the same room used to list five days and
+    /// pull a whole recording while the app said the device had stopped answering.
+    ///
+    /// WHY THE KEY IS NOT DELETED HERE, AND WHY THERE IS NO "FORGET THIS RECORDER" BUTTON.
+    /// A REFUSAL is proof: the recorder heard the key and said no, so it is worthless and
+    /// `PocketSessionKeyEntryCoordinator` takes it straight back out of custody. SILENCE is not
+    /// proof of anything — a sleeping recorder, one busy with another app, and one holding a
+    /// different key are the same nothing from this side of the radio. And custody may be the
+    /// only copy of that key in the world: this firmware has no reset opcode and no key-read
+    /// opcode, so on a recorder Solleva minted for, a one-tap "forget" is a one-tap brick, on a
+    /// screen produced by evidence that proves nothing. The escape is therefore to REPLACE the
+    /// key with one the owner is holding — which the entry path already does, since
+    /// `PocketSecretStore.save` overwrites — and the deletion nobody can undo is not offered.
+    ///
+    /// WHAT IT DOES NOT SAY. It does not say the key is wrong, because Solleva does not know
+    /// that; it says Solleva cannot tell, and names the possibilities. It shows no key and
+    /// offers no way to look at one — `PocketSetupPresentation.all` is the population the
+    /// no-reveal gate is held over, and this value is in it.
+    public static let handshakeUnanswered = PocketSetupPresentation(
+        title: "Your recorder didn't answer",
+        body: "Solleva already has a key for this recorder. It sent that key, the recorder "
+            + "said nothing back, and Solleva stopped there."
+            + "\n\nSolleva can't tell you why. A recorder that is asleep, switched off, or "
+            + "busy with another app answers exactly the same way as one that was set up with "
+            + "a different key — with nothing at all."
+            + "\n\nSo the key is still here, untouched. Try the recorder again, or enter the "
+            + "key it was set up with; a key you enter takes the place of the one Solleva has.",
+        actions: [retryAction, PocketSessionKeyEntryPresentation.entryAction])
+
     public static let all = [setup, didNotFinish, acceptedNotDurable, ready, indeterminate,
                              keepBothApps, quarantined, setupUnavailable, keyNotKept,
-                             custodyUnreadable]
+                             custodyUnreadable, handshakeUnanswered]
 }
 
 public struct PocketEducationSection: Equatable, Sendable {

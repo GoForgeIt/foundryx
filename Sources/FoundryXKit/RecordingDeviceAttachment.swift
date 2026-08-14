@@ -255,8 +255,16 @@ public enum RecordingDeviceAttachPresentation {
             return "FoundryX can't give that device a stable identity on this iPhone, so it "
                 + "can't save it to your account."
         case .handshakeUnanswered:
-            return "That device stopped answering while FoundryX was unlocking it. Tap it "
-                + "again."
+            // IT USED TO END "Tap it again." — WHICH WAS THE WHOLE OF THE REMEDY, AND THE
+            // REMEDY WAS A LOOP. Solleva sends the key custody already holds; this firmware
+            // answers a key it does not hold with silence; so tapping again sent the same key
+            // and got the same nothing, and the sentence said to keep doing it. On the connect
+            // sheet this is now a whole screen (`PocketSetupPresentation.handshakeUnanswered`)
+            // with a way to replace the key, and this line is what the recorder page — which
+            // has no ceremony — says. It names what happened and stops there rather than
+            // prescribing the one action that cannot work.
+            return "That device didn't answer the key FoundryX has for it. FoundryX can't tell "
+                + "whether the device was busy or the key no longer works."
         case .unexplained:
             return "FoundryX couldn't reach that device and couldn't tell why. Tap it again — "
                 + "if it keeps happening, the details are in the app's log."

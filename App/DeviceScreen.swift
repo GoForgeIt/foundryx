@@ -1199,38 +1199,16 @@ private struct RecordingDeviceConnectSheet: View {
             // runs. Nothing here calls `provisionFactoryFresh`.
             .navigationDestination(isPresented: $attach.showingCeremony) {
                 PocketOnboardingView(screen: attach.ceremonyScreen) { title in
-                    switch title {
-                    case PocketSessionKeyEntryPresentation.entryAction:
-                        attach.showKeyEntry()
-                    // THE ONE TAP THAT CAN WRITE A KEY TO A RECORDER. It is the confirm action
-                    // on the consent screen and nothing else — every other title here either
-                    // navigates or closes.
-                    case PocketMintConsentPresentation.confirmAction:
-                        attach.confirmMintAfterOwnerConsent()
-                    case PocketMintConsentPresentation.resetAction:
-                        attach.showFactoryReset()
-                    // DESIGN §3.7. The recorder is holding a key this phone could not store,
-                    // and this is the one action that can still save it. It retries the
-                    // Keychain; it never sends a second key.
-                    case PocketSetupPresentation.retrySecureStorageAction:
-                        attach.retrySecureStorageForAcceptedKey()
-                    case PocketFactoryResetPresentation.retryAction,
-                         PocketMintNotVerifiedPresentation.retryAction:
-                        attach.showMintConsent()
-                    // THE TWO STORAGE SCREENS RETRY FOR REAL. Their situation is the one that
-                    // genuinely changes on its own — an iPhone gets unlocked, a Keychain
-                    // answers — so "Try again" here re-runs the ordinary tap rather than
-                    // closing the sheet. Matched on the screen as well as the title because
-                    // several screens share the word and a dead button on the screen standing
-                    // between an owner and their recorder is the failure this whole path
-                    // exists to avoid.
-                    case PocketSetupPresentation.retryAction
-                        where attach.ceremonyScreen == .keyNotKept
-                            || attach.ceremonyScreen == .custodyUnreadable:
-                        attach.retryAfterStorageFailure()
-                    case PocketKeyCustodyPresentation.entryAction:
-                        attach.showKeyCustody()
-                    default:
+                    // THE ROUTING IS ON THE MODEL, NOT IN THIS CLOSURE, AND THAT IS THE POINT.
+                    //
+                    // It used to be a `switch` written here, inside a SwiftUI `body`. Nothing in
+                    // this repository can execute a `body`: `swift test` cannot compile `App/`
+                    // at all, and the app-hosted lane drives models rather than views. So the
+                    // table that decides which button does what was the one part of this flow
+                    // with no test of any kind — and a missing row in it is exactly how a key
+                    // the recorder never answered became a screen with no way off it.
+                    // `ceremonyAction` is that table, on an object a scenario can call.
+                    if attach.ceremonyAction(title) == .closeTheSheet {
                         attach.dismissCeremony()
                         onDismiss()
                     }
@@ -1301,6 +1279,28 @@ private struct RecordingDeviceConnectSheet: View {
     }
 }
 
+#if DEBUG
+/// THE TWO THINGS A HERMETIC RUN CANNOT OWN, AND NOTHING ELSE. Declared at file scope rather
+/// than nested inside the `@MainActor` model so that it is a plain `Sendable` value a scenario
+/// can build off the main actor.
+struct RecordingDeviceScenarioSeam: Sendable {
+    let makeCentral: @Sendable (BLEEventSink, DispatchQueue, String?) -> BLECentral
+    let secrets: any PocketSecretStore
+    let recovery: (any PocketKeyRecoveryStore)?
+    let deadlines: RecordingDeviceAttachment.Deadlines
+
+    init(makeCentral: @escaping @Sendable (BLEEventSink, DispatchQueue, String?) -> BLECentral,
+         secrets: any PocketSecretStore,
+         recovery: (any PocketKeyRecoveryStore)? = nil,
+         deadlines: RecordingDeviceAttachment.Deadlines = .init()) {
+        self.makeCentral = makeCentral
+        self.secrets = secrets
+        self.recovery = recovery
+        self.deadlines = deadlines
+    }
+}
+#endif
+
 // MARK: - The tap, and the chain it runs
 
 /// THE APP SIDE OF THE ADOPTION CHAIN.
@@ -1344,6 +1344,46 @@ final class RecordingDeviceAttachModel: ObservableObject {
     private var ceremonyTarget: (id: UUID, name: String)?
     private var onAdopted: (() -> Void)?
 
+    #if DEBUG
+    /// THE RADIO AND THE KEYCHAIN — the two things a hermetic run cannot own — AND NOTHING
+    /// ELSE. Same shape and same justification as `PocketRecorderCheckModel
+    /// .attachmentFactoryForScenarios`: this model is a `@StateObject` created inside the view
+    /// that owns it, so a dependency threaded through its initialiser would be a parameter on
+    /// the shipping view that exists only for tests. `#if DEBUG` means the Release binary has
+    /// no such door, and `leak` proves that over the shipped binary.
+    ///
+    /// THE KEYCHAIN HAS TO BE IN HERE TOO, unlike the recorder page's seam. The app-scenario
+    /// host is built `CODE_SIGNING_ALLOWED=NO`, so a real `KeychainPocketSecretStore` answers
+    /// `errSecMissingEntitlement` — every scenario would then assert against a custody failure
+    /// rather than against the handshake it is about.
+    nonisolated(unsafe) static var scenarioSeam: RecordingDeviceScenarioSeam?
+    #endif
+
+    /// The attachment every path in this model opens a link with: the production one unless a
+    /// scenario running inside a DEBUG build has supplied a radio and a custody store.
+    private static func makeAttachment() -> RecordingDeviceAttachment {
+        #if DEBUG
+        if let seam = scenarioSeam {
+            return RecordingDeviceAttachment(makeCentral: seam.makeCentral,
+                                             secrets: seam.secrets,
+                                             recovery: seam.recovery,
+                                             deadlines: seam.deadlines)
+        }
+        #endif
+        return RecordingDeviceAttachment()
+    }
+
+    /// The same substitution for the one path that does not build an attachment itself.
+    private static func makeKeyEntryCoordinator() -> PocketSessionKeyEntryCoordinator {
+        #if DEBUG
+        if let seam = scenarioSeam {
+            return .live(secrets: seam.secrets, makeCentral: seam.makeCentral,
+                         deadlines: seam.deadlines)
+        }
+        #endif
+        return .live()
+    }
+
     func attach(_ found: DiscoveredDevice,
                 using device: DeviceManager,
                 onAdopted: @escaping () -> Void) {
@@ -1351,7 +1391,7 @@ final class RecordingDeviceAttachModel: ObservableObject {
         attaching = found.id
         inlineMessage = nil
         keyEntryMessage = nil
-        let attachment = RecordingDeviceAttachment()
+        let attachment = Self.makeAttachment()
         self.attachment = attachment
         let name = found.name
         let id = found.id
@@ -1402,6 +1442,24 @@ final class RecordingDeviceAttachModel: ObservableObject {
             case .recoveryRequired:
                 self.ceremonyScreen = .didNotFinish
                 self.showingCeremony = true
+            // THE REPORTED DEADLOCK, AND THE ROUTE THAT ENDS IT.
+            //
+            // Solleva holds a key for this recorder and the recorder never answered it. This
+            // used to fall into the `break` below: an inline caption reading "Tap it again",
+            // and nothing else — so the next tap restored the same key, got the same silence,
+            // and produced the same caption, forever. The one screen that can REPLACE a key
+            // hung off `.setupUnavailable`, which means "Solleva holds no key", and is
+            // therefore the one state a recorder with a stored key can never reach.
+            //
+            // THE KEY IS NOT TOUCHED HERE. Silence is not evidence it is wrong (see
+            // `PocketSetupPresentation.handshakeUnanswered`), so the screen offers the two
+            // moves that cannot lose anything — ask again, or hand over a key that replaces
+            // this one — and the caption is cleared because this is a whole screen now, not an
+            // aside behind it.
+            case .unreachable(.handshakeUnanswered):
+                self.inlineMessage = nil
+                self.ceremonyScreen = .handshakeUnanswered
+                self.showingCeremony = true
             case .live:
                 // THE SHIPPED PAIRING PATH, UNTOUCHED. This is the branch an Omi takes.
                 device.connect(found)
@@ -1415,6 +1473,56 @@ final class RecordingDeviceAttachModel: ObservableObject {
                 break
             }
         }
+    }
+
+    /// Whether the ceremony handled a tap itself, or whether the sheet should close.
+    enum CeremonyDisposition: Equatable { case handled, closeTheSheet }
+
+    /// WHICH BUTTON DOES WHAT, AS A FUNCTION RATHER THAN AS A `switch` INSIDE A `body`.
+    ///
+    /// Every action on every ceremony screen arrives here as its own title, matched against the
+    /// NAMED constant the kit words the button from — a literal on one side and a constant on
+    /// the other is a routing bug that compiles, on screens where a dead button is the whole
+    /// difference between an owner keeping their recorder and losing it.
+    ///
+    /// `.closeTheSheet` is the honest default: a title with no row here is a screen whose
+    /// action this model does not implement, and dismissing is the one response that cannot
+    /// leave somebody staring at a button that does nothing.
+    @discardableResult
+    func ceremonyAction(_ title: String) -> CeremonyDisposition {
+        switch title {
+        case PocketSessionKeyEntryPresentation.entryAction:
+            showKeyEntry()
+        // THE ONE TAP THAT CAN WRITE A KEY TO A RECORDER. It is the confirm action on the
+        // consent screen and nothing else — every other title here either navigates or closes.
+        case PocketMintConsentPresentation.confirmAction:
+            confirmMintAfterOwnerConsent()
+        case PocketMintConsentPresentation.resetAction:
+            showFactoryReset()
+        // DESIGN §3.7. The recorder is holding a key this phone could not store, and this is
+        // the one action that can still save it. It retries the Keychain; it never sends a
+        // second key.
+        case PocketSetupPresentation.retrySecureStorageAction:
+            retrySecureStorageForAcceptedKey()
+        case PocketFactoryResetPresentation.retryAction,
+             PocketMintNotVerifiedPresentation.retryAction:
+            showMintConsent()
+        // THE SCREENS WHOSE "TRY AGAIN" RETRIES FOR REAL. Each names a situation that genuinely
+        // changes on its own — an iPhone gets unlocked, a Keychain answers, a recorder wakes up
+        // — so the word re-runs the ordinary tap rather than closing the sheet. Matched on the
+        // SCREEN as well as the title because several screens share the word, and a "Try again"
+        // that quietly dismisses is the shape of the defect this whole path exists to avoid.
+        case PocketSetupPresentation.retryAction
+            where ceremonyScreen == .keyNotKept
+                || ceremonyScreen == .custodyUnreadable
+                || ceremonyScreen == .handshakeUnanswered:
+            retryPlainAttach()
+        case PocketKeyCustodyPresentation.entryAction:
+            showKeyCustody()
+        default:
+            return .closeTheSheet
+        }
+        return .handled
     }
 
     func dismissCeremony() {
@@ -1449,7 +1557,7 @@ final class RecordingDeviceAttachModel: ObservableObject {
         guard let target = ceremonyTarget, !submittingKey else { return }
         submittingKey = true
         keyEntryMessage = nil
-        let attachment = RecordingDeviceAttachment()
+        let attachment = Self.makeAttachment()
         self.attachment = attachment
         Task {
             let outcome = await attachment.attach(
@@ -1514,18 +1622,24 @@ final class RecordingDeviceAttachModel: ObservableObject {
         }
     }
 
-    /// THE ACTION ON THE TWO STORAGE SCREENS, AND IT IS A PLAIN TAP — `mint:` is left at its
-    /// default, so this cannot write a key by construction.
+    /// THE "TRY AGAIN" THAT IS A REAL SECOND TAP, AND IT IS A PLAIN ONE — `mint:` is left at
+    /// its default, so this cannot write a new key by construction.
     ///
-    /// It is the honest retry for both states. `.custodyUnreadable` may simply have been a
-    /// locked Keychain, and the same tap now restores and adopts. `.keyNotKept` re-runs the
-    /// restore, finds no key (nothing was ever stored, because custody refused it before the
-    /// recorder was asked), and lands back on the CONSENT screen — so a second mint still costs
-    /// the owner an explicit confirmation rather than inheriting the first one.
-    func retryAfterStorageFailure() {
+    /// It is the honest retry for every state whose cause can change without the owner doing
+    /// anything. `.custodyUnreadable` may simply have been a locked Keychain, and the same tap
+    /// now restores and adopts. `.keyNotKept` re-runs the restore, finds no key (nothing was
+    /// ever stored, because custody refused it before the recorder was asked), and lands back
+    /// on the CONSENT screen — so a second mint still costs the owner an explicit confirmation
+    /// rather than inheriting the first one. `.handshakeUnanswered` is the third: a recorder
+    /// that was asleep or busy answers the next attempt, and the key it never answered is still
+    /// in custody to be tried with.
+    ///
+    /// (It was called `retryAfterStorageFailure`. The name described two of its three callers
+    /// and would have made the third read as a category error.)
+    func retryPlainAttach() {
         guard let target = ceremonyTarget, !submittingKey else { return }
         submittingKey = true
-        let attachment = RecordingDeviceAttachment()
+        let attachment = Self.makeAttachment()
         self.attachment = attachment
         Task {
             let outcome = await attachment.attach(peripheralIdentifier: target.id,
@@ -1544,6 +1658,12 @@ final class RecordingDeviceAttachModel: ObservableObject {
             case .keyAcceptedNotDurable:
                 self.attachment = attachment
                 self.ceremonyScreen = .acceptedNotDurable
+            // A RETRY THAT FAILED THE SAME WAY SAYS SO AND STAYS PUT. Falling into
+            // `.didNotFinish` below would swap the one screen that offers the key field for one
+            // that does not, so the second attempt would be strictly worse than the first —
+            // which is how a "Try again" button becomes the trap it was meant to open.
+            case .unreachable(.handshakeUnanswered):
+                self.ceremonyScreen = .handshakeUnanswered
             case .recoveryRequired, .live, .unrecognised, .adoptionNotPersisted, .unreachable:
                 self.ceremonyScreen = .didNotFinish
             }
@@ -1606,7 +1726,7 @@ final class RecordingDeviceAttachModel: ObservableObject {
         submittingKey = true
         keyEntryMessage = nil
         Task {
-            let outcome = await PocketSessionKeyEntryCoordinator.live()
+            let outcome = await Self.makeKeyEntryCoordinator()
                 .submit(key: key, peripheralIdentifier: target.id, advertisedName: target.name)
             self.submittingKey = false
             if case .adopted = outcome {

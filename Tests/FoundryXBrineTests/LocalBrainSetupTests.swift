@@ -10,7 +10,17 @@ import Combine
 final class FakeSetupClock: @unchecked Sendable {
     private let lock = NSLock()
     private var t: TimeInterval = 0
-    var now: TimeInterval { lock.lock(); defer { lock.unlock() }; return t }
+    /// How many times the clock has been READ. The stall watchdog asks the clock on
+    /// every poll, so this is its heartbeat — and a heartbeat is what a rendezvous
+    /// needs. Without it the tests could only guess (`for _ in 0..<8 { yield }`) that
+    /// the watchdog had run, which is a bet on the scheduler that loses under load.
+    private var readCount = 0
+    var now: TimeInterval {
+        lock.lock(); defer { lock.unlock() }
+        readCount += 1
+        return t
+    }
+    var reads: Int { lock.lock(); defer { lock.unlock() }; return readCount }
     func advance(_ d: TimeInterval) { lock.lock(); t += d; lock.unlock() }
 }
 
@@ -40,22 +50,35 @@ final class LocalBrainSetupTests: XCTestCase {
 
     private let fastPolicy = BrainSetupPolicy(stallTimeout: 60, buildTimeout: 180, pollInterval: 2)
 
-    /// Hand the cooperative pool enough suspension points for the stall WATCHDOG to
-    /// actually run between progress reports.
-    ///
-    /// These tests race two tasks — a download loop and the watchdog polling it — and both
-    /// suspend with `Task.yield()`. A single yield does not guarantee the watchdog is
-    /// scheduled, so on the iOS runtime the download would sometimes finish first and the
-    /// stall go undetected: `LocalBrainSetupTests` passed 20/20 on macOS and failed 20/3 on
-    /// iOS, which broke CI (2026-07-28). Yielding several times makes the interleaving
-    /// reliable WITHOUT weakening any assertion — the stall must still be detected.
+    /// These tests race two tasks — a download loop and the watchdog polling it. The
+    /// rendezvous that sequences them is `yieldToWatchdog(_:)` below; see its comment
+    /// for why a fixed yield count was not enough.
     // Free function, not a method: these call sites are inside `@Sendable` closures, and
     // capturing `self` (a non-Sendable XCTestCase) is a hard error under SwiftPM's strict
     // concurrency checking even though Xcode's build accepted it.
 }
 
-private func yieldToWatchdog() async {
-    for _ in 0..<8 { await Task.yield() }
+/// Park until the watchdog has PROVABLY observed this progress report, rather than
+/// yielding a fixed number of times and hoping the scheduler cooperated.
+///
+/// Eight yields was already the second guess (one yield failed on the iOS runtime,
+/// 2026-07-28). Both guesses share the defect: a yield count is a bet on scheduler
+/// behaviour, and the bet loses under load. On 2026-08-14 this test failed twice in
+/// pre-push gates on a box running concurrent suites, and passed in isolation in
+/// 0.006s both times — a false red that blocked a real fix, twice, for 17 minutes
+/// each. That is the same shape as the Pocket BLE hang fixed the same day: a
+/// `Task.yield()` standing in for a rendezvous.
+///
+/// So this waits on the watchdog's OWN counter. Bounded, so a watchdog that never
+/// runs still fails in about a second with its own name rather than hanging the
+/// suite — and unbounded patience is what a fixed yield count silently pretends to
+/// have. The assertion it serves is unchanged: the stall must still be detected.
+private func yieldToWatchdog(_ observed: @Sendable () -> Int) async {
+    let before = observed()
+    for _ in 0..<200 {
+        await Task.yield()
+        if observed() > before { return }
+    }
 }
 
 extension LocalBrainSetupTests {
@@ -107,7 +130,7 @@ extension LocalBrainSetupTests {
                     for i in 1...100 {
                         clock.advance(3)                 // 3s per chunk ⇒ 300s total
                         onProgress(Double(i) / 100)
-                        await yieldToWatchdog()
+                        await yieldToWatchdog { clock.reads }
                     }
                 },
                 build: {}),
@@ -334,7 +357,7 @@ extension LocalBrainSetupTests {
                     for i in 1...10 {
                         clock.advance(59)                // just inside the 60s limit
                         onProgress(Double(i) * 0.001)    // 0.1% each time
-                        await yieldToWatchdog()
+                        await yieldToWatchdog { clock.reads }
                     }
                 },
                 build: {}),
@@ -362,7 +385,7 @@ extension LocalBrainSetupTests {
                         clock.advance(3)
                         onProgress(0.2)                  // backwards: not progress
                         onProgress(0.5)                  // same place: not progress
-                        await yieldToWatchdog()
+                        await yieldToWatchdog { clock.reads }
                     }
                     // The watchdog fires long before this loop ends; the cancelled-but-
                     // never-awaited download simply finishes in the background.
@@ -397,7 +420,7 @@ extension LocalBrainSetupTests {
                     onProgress(1.0)                       // every byte has landed
                     for _ in 0..<60 {                     // 180s of moving + verifying
                         clock.advance(3)
-                        await yieldToWatchdog()
+                        await yieldToWatchdog { clock.reads }
                     }
                 },
                 build: {}),

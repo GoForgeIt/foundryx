@@ -34,6 +34,19 @@ jobs:
     runs-on: [self-hosted, macOS, ios]
     timeout-minutes: 90
     steps:
+      # ── THE MACHINE-WIDE MAC BUILD SLOT ─────────────────────────────────────
+      # `concurrency: macos-build` is scoped to ONE repository; eight
+      # repositories declare that same group and it serialises nothing between
+      # them. ci/mac-slot.sh is the bound that is machine-wide — a lock
+      # directory under /Users/Shared that every runner on this Mac shares. Its
+      # executed proof (10 contenders, 2 slots, plus a lockless red control
+      # that peaks at 10) is foundry's ci/mac-slot.selftest.sh.
+      #
+      # This job is CPU-heavy end to end, so the slot spans the whole job. There
+      # is no fall-through: if no slot frees inside the wait budget this step
+      # fails and the build does not run.
+      - name: acquire the machine-wide mac build slot
+        run: bash "$GITHUB_WORKSPACE/foundryx/ci/mac-slot.sh" acquire "foundryx-ios-publish/unit-and-invariant-suites"
       - uses: actions/checkout@v4
         with: { path: foundryx }
       - uses: actions/checkout@v4
@@ -106,12 +119,30 @@ jobs:
           swift build
           # The cheap phases, and the ones that actually go red — first and alone.
           bash scripts/ci-gates.sh swift gates
+      # `if: always()`, so a failed or refused build hands its slot back at once
+      # instead of waiting for its Runner.Worker pid to disappear.
+      - name: release the machine-wide mac build slot
+        if: always()
+        run: bash "$GITHUB_WORKSPACE/foundryx/ci/mac-slot.sh" release
 
   app-compile-leak-lint:
     needs: unit-and-invariant-suites
     runs-on: [self-hosted, macOS, ios]
     timeout-minutes: 90
     steps:
+      # ── THE MACHINE-WIDE MAC BUILD SLOT ─────────────────────────────────────
+      # `concurrency: macos-build` is scoped to ONE repository; eight
+      # repositories declare that same group and it serialises nothing between
+      # them. ci/mac-slot.sh is the bound that is machine-wide — a lock
+      # directory under /Users/Shared that every runner on this Mac shares. Its
+      # executed proof (10 contenders, 2 slots, plus a lockless red control
+      # that peaks at 10) is foundry's ci/mac-slot.selftest.sh.
+      #
+      # This job is CPU-heavy end to end, so the slot spans the whole job. There
+      # is no fall-through: if no slot frees inside the wait budget this step
+      # fails and the build does not run.
+      - name: acquire the machine-wide mac build slot
+        run: bash "$GITHUB_WORKSPACE/foundryx/ci/mac-slot.sh" acquire "foundryx-ios-publish/app-compile-leak-lint"
       - uses: actions/checkout@v4
         with: { path: foundryx }
       - uses: actions/checkout@v4
@@ -147,12 +178,30 @@ jobs:
           echo "stashed $(du -sh "$CACHE" | cut -f1)"
           # keep only the 3 newest SHAs so the cache cannot become the next disk fill
           cd ~/.ci-cache/foundryx && ls -t | tail -n +4 | xargs rm -rf 2>/dev/null || true
+      # `if: always()`, so a failed or refused build hands its slot back at once
+      # instead of waiting for its Runner.Worker pid to disappear.
+      - name: release the machine-wide mac build slot
+        if: always()
+        run: bash "$GITHUB_WORKSPACE/foundryx/ci/mac-slot.sh" release
 
   ios-simulator-brine:
     needs: app-compile-leak-lint
     runs-on: [self-hosted, macOS, ios]
     timeout-minutes: 90
     steps:
+      # ── THE MACHINE-WIDE MAC BUILD SLOT ─────────────────────────────────────
+      # `concurrency: macos-build` is scoped to ONE repository; eight
+      # repositories declare that same group and it serialises nothing between
+      # them. ci/mac-slot.sh is the bound that is machine-wide — a lock
+      # directory under /Users/Shared that every runner on this Mac shares. Its
+      # executed proof (10 contenders, 2 slots, plus a lockless red control
+      # that peaks at 10) is foundry's ci/mac-slot.selftest.sh.
+      #
+      # This job is CPU-heavy end to end, so the slot spans the whole job. There
+      # is no fall-through: if no slot frees inside the wait budget this step
+      # fails and the build does not run.
+      - name: acquire the machine-wide mac build slot
+        run: bash "$GITHUB_WORKSPACE/foundryx/ci/mac-slot.sh" acquire "foundryx-ios-publish/ios-simulator-brine"
       - uses: actions/checkout@v4
         with: { path: foundryx }
       - uses: actions/checkout@v4
@@ -165,6 +214,22 @@ jobs:
           repository: MarkDucommun/brine-private
           token: ${{ secrets.CI_GITHUB_TOKEN }}
           path: brine-private
+      - name: app-hosted scenarios — App/ executing inside the real app process
+        run: |
+          export PATH="/opt/homebrew/bin:$PATH"
+          cd foundryx
+          # THE LANE THAT SEES App/. FoundryXiOSTests is HOSTLESS and cannot import the app
+          # module at all, so every scenario before this one proved the LOGIC in FoundryXKit
+          # and nothing about whether the shipped app reaches it. Measured 2026-08-13:
+          # 0 of 17 sampled scenario files drove a production entry point, and 18,441 lines
+          # of App/ had zero executable coverage. Proven by mutation: deleting the caller in
+          # App/DeviceScreen.swift turns this lane RED while the hostless pocket suites
+          # report 12 tests, 0 failures.
+          #
+          # NAME DISCIPLINE: the pre-push hook derives its phase list from THIS FILE via
+          # `grep -oE 'bash scripts/ci-gates\.sh [a-z ]+'`. A phase name with a hyphen or a
+          # digit truncates and turns every push into "UNKNOWN PHASE -> exit 2".
+          bash scripts/ci-gates.sh appscenarios
       - name: iOS runtime lane on simulator
         run: |
           export PATH="/opt/homebrew/bin:$PATH"
@@ -188,12 +253,30 @@ jobs:
             xcodebuild test -project FoundryX.xcodeproj -scheme FoundryX \
               -destination "id=$SIM_ID" CODE_SIGNING_ALLOWED=NO
           fi
+      # `if: always()`, so a failed or refused build hands its slot back at once
+      # instead of waiting for its Runner.Worker pid to disappear.
+      - name: release the machine-wide mac build slot
+        if: always()
+        run: bash "$GITHUB_WORKSPACE/foundryx/ci/mac-slot.sh" release
 
   build-sign-ship:
     needs: ios-simulator-brine
     runs-on: [self-hosted, macOS, ios]
     timeout-minutes: 90
     steps:
+      # ── THE MACHINE-WIDE MAC BUILD SLOT ─────────────────────────────────────
+      # `concurrency: macos-build` is scoped to ONE repository; eight
+      # repositories declare that same group and it serialises nothing between
+      # them. ci/mac-slot.sh is the bound that is machine-wide — a lock
+      # directory under /Users/Shared that every runner on this Mac shares. Its
+      # executed proof (10 contenders, 2 slots, plus a lockless red control
+      # that peaks at 10) is foundry's ci/mac-slot.selftest.sh.
+      #
+      # This job is CPU-heavy end to end, so the slot spans the whole job. There
+      # is no fall-through: if no slot frees inside the wait budget this step
+      # fails and the build does not run.
+      - name: acquire the machine-wide mac build slot
+        run: bash "$GITHUB_WORKSPACE/foundryx/ci/mac-slot.sh" acquire "foundryx-ios-publish/build-sign-ship"
       # The ship script is VERBATIM from Concourse and expects these exact
       # sibling dir names.
       - uses: actions/checkout@v4
@@ -222,3 +305,8 @@ jobs:
           name: FoundryX-ipa
           path: ipa-out/FoundryX.ipa
           retention-days: 14
+      # `if: always()`, so a failed or refused build hands its slot back at once
+      # instead of waiting for its Runner.Worker pid to disappear.
+      - name: release the machine-wide mac build slot
+        if: always()
+        run: bash "$GITHUB_WORKSPACE/foundryx/ci/mac-slot.sh" release
