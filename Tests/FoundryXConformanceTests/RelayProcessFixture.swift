@@ -151,6 +151,29 @@ final class RelayProcessFixture {
                                         memberName: "conformance-client")
             .write(to: communities.appendingPathComponent("\(communityPid).log"),
                    atomically: true, encoding: .utf8)
+
+        // ---- THE COMMUNITY'S BAN LIST ----------------------------------------------
+        // N2's ban gate (foundry `c8e1b23c`, `crates/foundry-relay/src/ban.rs`) runs
+        // IMMEDIATELY after the proof and BEFORE enrolment, and it FAILS CLOSED on an
+        // ABSENT list: `ban::decide` reads `<deployment>/bans/<pid>.bans` and an unreadable
+        // file DENIES — "a deployment that cannot say who is barred cannot say nobody is".
+        // The relay is RIGHT and this target does not ask for it to be weakened.
+        //
+        // What it means here is that the deployment now owes a SECOND file per community,
+        // of the same class as `bindings.toml` and the membership log, and a deployment
+        // that omits it refuses EVERY client — conforming or not. That is not a deduction:
+        // with this fixture unchanged, foundry `08db3546` served 4 of 5 and its child
+        // `c8e1b23c` served 2 of 5, and the door's own seam named the conjunct
+        // `ban-store-unreadable` on both `check-ban` and `admit-connection`.
+        //
+        // The list is EMPTY OF PRINCIPALS on purpose. A conformance deployment bars
+        // nobody; what it must be able to do is SAY so. The comment line is content, so
+        // this is a list the relay can read rather than a zero-byte file nobody meant.
+        let bans = dir.appendingPathComponent("bans")
+        try FileManager.default.createDirectory(at: bans, withIntermediateDirectories: true)
+        try "# this conformance deployment bars nobody, and can say so\n"
+            .write(to: bans.appendingPathComponent("\(communityPid).bans"),
+                   atomically: true, encoding: .utf8)
         deploymentDir = dir
 
         let p = Process()
