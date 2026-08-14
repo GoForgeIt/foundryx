@@ -15,7 +15,10 @@ import Foundation
 
 public enum CaptureLibrary {
     /// Capture-id prefixes, one per source that can open a note.
-    static let sourcePrefixes = ["omi-", "mic-"]
+    /// `pkt-` is a recording PULLED off a record-then-sync recorder (`PocketCaptureImport`).
+    /// It is its own prefix rather than a reuse of `omi-` because a capture id is the piece of
+    /// provenance that survives every re-ingest and relaunch.
+    static let sourcePrefixes = ["omi-", "mic-", "pkt-"]
 
     /// Is `name` the directory name of a voice note?
     public static func isNoteDirectory(_ name: String) -> Bool {

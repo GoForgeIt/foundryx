@@ -122,7 +122,7 @@ enum ContractElementDriver {
         // choice no document makes.
         let asciiPrologue = Data((f.boundHost + "1").utf8)
         var wirePrologue = Data(f.boundHost.utf8); wirePrologue.append(contentsOf: [0x00, 0x01])
-        let head = P3Client.conforming(host: f.boundHost, community: f.communityPid)
+        let head = P3Client.conforming(host: f.boundHost, community: f.communityPid, identity: f.identity)
         var refusedEncodings = 0
         var acceptedEncodings: [String] = []
         for (label, bytes) in [("decimal-ascii", asciiPrologue), ("u16-big-endian", wirePrologue)] {
@@ -155,7 +155,15 @@ enum ContractElementDriver {
         // built out of the relay counterpart's own types would agree with it by construction.
         let opening = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation
         let window = Double(f.authTimeoutSeconds)
-        let after = try c.exchangeThenListen(request: head, window: window, thenSend: opening)
+        // A SECOND HEAD, MINTED NOW. The one part 1 used carries a connect frame, and a
+        // frame is good for exactly one connection inside one freshness window: its nonce
+        // is spent on first use, and its timestamp is measured against the deployed
+        // auth-frame wait — the same number this probe is about to spend listening. Reusing
+        // it would make this part's verdict depend on how long the drive above it took, and
+        // it would fail as `ReplayedProof`, which on the wire is the same bytes as every
+        // other refusal.
+        let freshHead = P3Client.conforming(host: f.boundHost, community: f.communityPid, identity: f.identity)
+        let after = try c.exchangeThenListen(request: freshHead, window: window, thenSend: opening)
         let handshakeExists: PartVerdict = (after.head.upgraded && !after.trailing.isEmpty) ? .met : .unmet
         // A PROBE THAT DID NOT HAPPEN MUST REFUSE, NEVER RECORD A VALUE. "The relay sent
         // nothing" is evidence only if the listening really occurred: either the peer
@@ -240,7 +248,7 @@ enum ContractElementDriver {
         // (a) an offer the relay can meet is selected and ECHOED BY VALUE. The echoed
         // version has to be a member of what was offered; a constant is not a selection.
         let offered = "1"
-        let accepted = try c.exchange(request: P3Client.offering(offered, host: f.boundHost, community: f.communityPid))
+        let accepted = try c.exchange(request: P3Client.offering(offered, host: f.boundHost, community: f.communityPid, identity: f.identity))
         let echoed = accepted.negotiatedVersionValue
         let selectionEchoed: PartVerdict = (accepted.upgraded && echoed == offered) ? .met : .unmet
 
@@ -248,13 +256,13 @@ enum ContractElementDriver {
         // is a legal version by T10 §2.3's pinned type and range, so this reaches the
         // relay's selection rather than its parser — the case the differential calls
         // bad-version, and the one that is unreachable while negotiation is a constant.
-        let disjoint = try c.exchange(request: P3Client.offering("65535", host: f.boundHost, community: f.communityPid))
+        let disjoint = try c.exchange(request: P3Client.offering("65535", host: f.boundHost, community: f.communityPid, identity: f.identity))
         let noCommonRefused: PartVerdict = (disjoint.refused && !disjoint.upgraded) ? .met : .unmet
 
         // (c) a client that offers nothing has not negotiated, and is refused. Without
         // this the relay could serve every version-less client a default, which is the
         // downgrade the exchange exists to prevent.
-        let silent = try c.exchange(request: P3Client.offering(nil, host: f.boundHost, community: f.communityPid))
+        let silent = try c.exchange(request: P3Client.offering(nil, host: f.boundHost, community: f.communityPid, identity: f.identity))
         let absentRefused: PartVerdict = (silent.refused && !silent.upgraded) ? .met : .unmet
 
         e.parts = [("offer-selected-and-echoed-by-value", selectionEchoed),
@@ -273,12 +281,69 @@ enum ContractElementDriver {
     static let echoHeaderName = "X-Foundry-Protocol-Version"
 
     // 3 — host-bound tenancy established before the socket upgrades.
+    //
+    // MADE TO DISCRIMINATE AGAIN, 2026-08-13, and this is a repair rather than a
+    // strengthening. The drive used to be two wire observations: the bound address upgrades,
+    // the unbound one is refused and never upgrades. That was adequate while the relay had
+    // ten refusal causes and the client had only to name a host and a pin. It is not
+    // adequate now, and the reason is the auth middle:
+    //
+    //   * the relay grew EIGHT more causes (`RefusalCause::ALL` is eighteen), every one of
+    //     which writes the SAME bytes as `unmapped-host`, so "the unbound address answered
+    //     403" no longer says the refusal had anything to do with host binding;
+    //   * and it made the conforming client's admission depend on a signature, so the leg
+    //     that carried this element's real content — the bound address upgrades — can now
+    //     fail for reasons that are nothing to do with tenancy.
+    //
+    // The one refusal is CORRECT and this target does not ask for a per-cause reply; that
+    // opacity is what stops the door being an oracle. So the discrimination is recovered
+    // where the relay actually put it: the door's own CQRS seam, which records per
+    // connection which seam decided, the NORMALIZED host it derived, and the conjunct. See
+    // `DoorSeamLog` for why that is a file rather than the in-process lookup counter.
     static func hostBinding(_ c: P3Client, _ f: RelayProcessFixture) throws -> ContractElement {
         var e = ContractElement(id: "host-binding-before-upgrade", name: "host-bound tenancy established before the socket upgrades")
-        let bound = try c.exchange(request: P3Client.conforming(host: f.boundHost, community: f.communityPid))
-        let unbound = try c.exchange(request: P3Client.conforming(host: "nobody.example", community: f.communityPid))
-        e.served = bound.upgraded && unbound.refused && !unbound.upgraded
-        e.observation = "the bound address answered \(firstLine(bound)); an address the deployment does not bind answered \(firstLine(unbound)) and never upgraded"
+        let unboundHost = "nobody.example"
+        let bound = try c.exchange(request: P3Client.conforming(host: f.boundHost, community: f.communityPid, identity: f.identity))
+        let unbound = try c.exchange(request: P3Client.conforming(host: unboundHost, community: f.communityPid, identity: f.identity))
+
+        // (a) the bound address upgrades. Still the first question, and still on the wire:
+        // an element about tenancy that never sees a tenant admitted is asserting a refusal.
+        let boundUpgrades: PartVerdict = bound.upgraded ? .met : .unmet
+
+        // (b) the unbound address is refused and NEVER upgraded. A relay that upgrades and
+        // then closes has still upgraded, which is the whole of "before the socket upgrades".
+        let unboundRefused: PartVerdict = (unbound.refused && !unbound.upgraded) ? .met : .unmet
+
+        // (c) THE DISCRIMINATION. Ask the door which conjunct decided. Two halves, and both
+        // are required, because either alone is satisfiable by a relay that never resolved a
+        // host: the admission must be recorded against the host and community the client
+        // asked for, and every refusal recorded for the unbound host must name `unmapped-host`
+        // — i.e. the relay REACHED tenancy resolution and refused THERE, rather than earlier
+        // (a guard above the lookup) or later (identity, enrolment).
+        let decisions = try DoorSeamLog.read(at: f.seamLogPath)
+        let admissions = decisions.filter {
+            $0.seam == DoorSeamLog.admitConnection && $0.outcome == DoorSeamLog.accept
+                && $0.host == f.boundHost && $0.communityPid == f.communityPid
+        }
+        let unboundRefusals = decisions.filter {
+            $0.seam == DoorSeamLog.admitConnection && $0.outcome == DoorSeamLog.refuse
+                && $0.host == unboundHost
+        }
+        let conjuncts = Set(unboundRefusals.map { $0.decidingConjunct })
+        let decidedAtTheBinding: PartVerdict =
+            (!admissions.isEmpty && !unboundRefusals.isEmpty && conjuncts == [DoorSeamLog.unmappedHost])
+            ? .met : .unmet
+
+        e.parts = [("bound-host-upgrades", boundUpgrades),
+                   ("unbound-host-never-upgrades", unboundRefused),
+                   ("unbound-host-refused-at-the-binding", decidedAtTheBinding)]
+        e.served = e.parts.allSatisfy { $0.verdict == .met }
+        let recorded = unboundRefusals.isEmpty
+            ? "the door recorded no refusal against \(unboundHost) at all"
+            : "the door recorded \(unboundRefusals.count) refusal(s) against \(unboundHost), deciding on \(conjuncts.sorted().joined(separator: ", "))"
+        e.observation = "the bound address answered \(firstLine(bound)); \(unboundHost) answered \(firstLine(unbound)) and never upgraded"
+            + "; \(admissions.count) admission(s) were recorded against \(f.boundHost) bound to this deployment's community, and \(recorded)"
+            + " — read from the door's own seam, because all 18 refusal causes write identical bytes and the wire cannot tell them apart"
         return e
     }
 
@@ -317,9 +382,9 @@ enum ContractElementDriver {
         // Distinct causes, each reachable from OUTSIDE the relay. In-process the relay
         // counts these separately; on the wire they must be one answer.
         let causes: [(String, String)] = [
-            ("no community named", P3Client.namingNoCommunity(host: f.boundHost)),
-            ("a community the address is not bound to", P3Client.namingWrongCommunity(host: f.boundHost)),
-            ("an address the deployment does not bind", P3Client.conforming(host: "nobody.example", community: f.communityPid)),
+            ("no community named", P3Client.namingNoCommunity(host: f.boundHost, community: f.communityPid, identity: f.identity)),
+            ("a community the address is not bound to", P3Client.namingWrongCommunity(host: f.boundHost, identity: f.identity)),
+            ("an address the deployment does not bind", P3Client.conforming(host: "nobody.example", community: f.communityPid, identity: f.identity)),
             ("an empty address", "GET /p3 HTTP/1.1\r\nHost: \r\nx-foundry-community-pid: \(f.communityPid)\r\nx-foundry-protocol-offer: 1\r\n\r\n"),
             ("an address of nothing but spaces", "GET /p3 HTTP/1.1\r\nHost:    \r\nx-foundry-community-pid: \(f.communityPid)\r\nx-foundry-protocol-offer: 1\r\n\r\n"),
             ("a route this relay does not serve", "GET /nope HTTP/1.1\r\nHost: \(f.boundHost)\r\nx-foundry-community-pid: \(f.communityPid)\r\nx-foundry-protocol-offer: 1\r\n\r\n"),
@@ -330,8 +395,8 @@ enum ContractElementDriver {
             // offer that reads cleanly and shares no member. They are distinct causes
             // in the relay's own enum (MalformedOffer, NoCommonVersion) and must be
             // indistinguishable here, which is the whole claim.
-            ("an offer that is not a version at all", P3Client.offering("not-a-version", host: f.boundHost, community: f.communityPid)),
-            ("a legal version the relay does not speak", P3Client.offering("65535", host: f.boundHost, community: f.communityPid)),
+            ("an offer that is not a version at all", P3Client.offering("not-a-version", host: f.boundHost, community: f.communityPid, identity: f.identity)),
+            ("a legal version the relay does not speak", P3Client.offering("65535", host: f.boundHost, community: f.communityPid, identity: f.identity)),
         ]
         var replies: [(String, Data)] = []
         for (why, request) in causes {

@@ -47,8 +47,14 @@ final class ConformanceWorld: @unchecked Sendable {
     /// two. The part comparison's own non-vacuity check is global — `partsCompared > 0`
     /// — so without these two numbers, dropping every prologue part from both the
     /// driver and the register would leave the negotiation parts keeping it green.
-    let declaredPartBearingElements = 2
-    let declaredTotalParts = 6
+    /// MOVED 2026-08-13, from 2/6, when `host-binding-before-upgrade` became a conjunction.
+    /// It had been a single wire observation — the bound address upgrades, the unbound one
+    /// does not — and the relay's auth middle took that observation's discrimination away:
+    /// eighteen refusal causes now write identical bytes, so "the unbound address answered
+    /// 403" no longer says the refusal was about host binding. The third question asks the
+    /// door's own seam which conjunct decided. See `ContractElements.hostBinding`.
+    let declaredPartBearingElements = 3
+    let declaredTotalParts = 9
 
     /// How many DIRECT handshake-peer constructor sites this target's own sources hold,
     /// and which files drive the five contract elements.
@@ -62,7 +68,15 @@ final class ConformanceWorld: @unchecked Sendable {
     /// these files can see that. See `ConformancePeerCensus` for what it does and does not
     /// cover.
     let declaredInProcessPeerSites = 1
-    let declaredElementDriveSources = ["ContractElements.swift", "P3Client.swift"]
+    /// WIDENED 2026-08-13. The element drive used to be two files; making the client
+    /// conforming to the relay's auth middle gave it four more — the BIP-340 primitive, the
+    /// canonical encoder, the community's signed log, and the reader for the door's seam.
+    /// Each one is a place a peer could be constructed next to the drive, so each is named
+    /// here: a census over the two files it used to be would have stopped covering most of
+    /// the code that now decides the verdicts.
+    let declaredElementDriveSources = ["ContractElements.swift", "P3Client.swift",
+                                       "Secp256k1Schnorr.swift", "FoundryCanonicalBody.swift",
+                                       "CommunityMembershipLog.swift", "DoorSeamLog.swift"]
 
     /// How many questions the run may record `not-reached`.
     ///
@@ -114,7 +128,7 @@ enum P3ConformanceSteps {
             defineStep("a client asks for an address the deployment binds, naming the community it is bound to") { ctx, _, _ in
                 let f = try w.requireFixture()
                 w.lastExchange = try w.requireClient().exchange(
-                    request: P3Client.conforming(host: f.boundHost, community: f.communityPid))
+                    request: P3Client.conforming(host: f.boundHost, community: f.communityPid, identity: f.identity))
                 return ctx
             },
             defineCheck("the connection is upgraded") { _, _, _ in
@@ -133,12 +147,12 @@ enum P3ConformanceSteps {
             // ---------------------------------------------------------------- the non-conforming fixtures
             defineStep("a client asks for an address the deployment binds, naming no community at all") { ctx, _, _ in
                 let f = try w.requireFixture()
-                w.lastExchange = try w.requireClient().exchange(request: P3Client.namingNoCommunity(host: f.boundHost))
+                w.lastExchange = try w.requireClient().exchange(request: P3Client.namingNoCommunity(host: f.boundHost, community: f.communityPid, identity: f.identity))
                 return ctx
             },
             defineStep("a client asks for an address the deployment binds, naming a community it is not bound to") { ctx, _, _ in
                 let f = try w.requireFixture()
-                w.lastExchange = try w.requireClient().exchange(request: P3Client.namingWrongCommunity(host: f.boundHost))
+                w.lastExchange = try w.requireClient().exchange(request: P3Client.namingWrongCommunity(host: f.boundHost, identity: f.identity))
                 return ctx
             },
             defineCheck("the connection is refused") { _, _, _ in

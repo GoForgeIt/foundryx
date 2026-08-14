@@ -29,7 +29,9 @@ public enum BrainSeeder {
                 try? FileManager.default.removeItem(at: f)
             }
             try? FileManager.default.removeItem(at: dir.appendingPathComponent(".upload-watermark"))
-            try? Data().write(to: dir.appendingPathComponent(".needs-finalize"), options: [.atomic])
+            // The SHARED marker helper, not a second spelling of the literal — renaming the
+            // marker must break this file loudly rather than stop re-arming silently.
+            CaptureManager.markNeedsFinalizeOnDisk(id, baseDir: baseDir)
             CaptureEventLog.append(.brainSeedRearmed, captureId: id, baseDir: baseDir)
             rearmed += 1
         }

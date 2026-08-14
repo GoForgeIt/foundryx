@@ -42,7 +42,7 @@ final class RecorderPageBringOverFeatureTests: XCTestCase {
             registry: StepRegistry(RecorderPageSteps.make(world)))
         // THE POPULATION IS PINNED. A runner that only asserts "nothing failed" is green once
         // the scenarios have been deleted — the same shape of hole this lane exists to close.
-        XCTAssertEqual(result.passed, 3, "all three scenarios must run and pass")
+        XCTAssertEqual(result.passed, 5, "all five scenarios must run and pass")
     }
 }
 
@@ -57,6 +57,7 @@ private enum RecorderPageSteps {
         let whens = [
             "Solleva asks that recorder what it is holding",
             "I bring the offered recording over",
+            "Solleva sends what it is holding",
         ]
         let thens = [
             "Solleva says what is on the recorder",
@@ -64,6 +65,10 @@ private enum RecorderPageSteps {
             "Solleva offers nothing to bring over",
             "Solleva says it kept the recording",
             "the recorder's shelf now says that recording is in Solleva",
+            "Solleva's conversations include the one that came off the recorder",
+            "it is not presented as a recording in progress",
+            "that conversation's audio was uploaded and the conversation was finalized",
+            "the audio that went up is the ordinary audio every recording sends",
         ]
         var steps = givens.map { phrase in
             defineStep(phrase) { context, _, _ in try await world.given(phrase); return context }
@@ -90,17 +95,58 @@ private final class RecorderPageWorld {
     private static let day = "2026-03-28"
     private static let timestamp = "20260328001919"
 
-    /// A FILE THIS BUILD CAN READ: it opens on the `0xFF 0xF3` sync `PocketBLEClient.download`
-    /// trims to, and it is several notifications long, so assembling it is a real assembly.
-    private static func mp3(_ count: Int) -> Data {
-        var bytes = Data([0xff, 0xf3])
-        bytes.append(Data(repeating: 0x41, count: max(0, count - 2)))
-        return bytes
+    /// REAL AUDIO, AND IT HAS TO BE. This fixture used to be `0xFF 0xF3` followed by a run of
+    /// `0x41` — two bytes that satisfy the sync-word check and nothing else — which was enough
+    /// while the app's bring-over stopped at custody. It stops there no longer: the app now
+    /// DECODES what it pulled and writes a conversation, so a fixture that is not audio would
+    /// make every one of these scenarios assert the failure path.
+    ///
+    /// MPEG-2 Layer III, 32 kbps CBR mono at 16 kHz — the recorder's own format. Carried in the
+    /// app-scenario bundle as a RESOURCE, because this lane runs inside the shipping app on a
+    /// simulator and cannot reach the repository by `#filePath` the way the hostless suite does.
+    private static func fixtureMP3() throws -> Data {
+        guard let url = Bundle(for: RecorderPageBringOverFeatureTests.self)
+            .url(forResource: "pocket-fw16-3s", withExtension: "mp3") else {
+            throw BrineStepError("the Pocket audio fixture is not in the scenario bundle")
+        }
+        return try Data(contentsOf: url)
     }
 
     /// THE APP'S OWN MODEL. Not a stand-in with the same shape — the type `App/DeviceScreen
     /// .swift` creates with `@StateObject` on the recorder page.
     private let check = PocketRecorderCheckModel()
+
+    /// THE APP'S CAPTURE OWNER, built the way the app builds it, on a library this scenario
+    /// owns. Everything about it is shipped except the two closures that would otherwise reach
+    /// a real door — the same two seams `CaptureManager` already exposes for a phone recording.
+    private let library: URL
+    private let door = ScenarioDoor()
+    private let manager: CaptureManager
+
+    /// THE CONVERSATIONS THAT WERE ALREADY THERE when this scenario's bring-over started.
+    ///
+    /// One world serves every scenario in the feature — that is the runner's shape, and it is
+    /// the right one here because the app's model is a `@StateObject` that survives a screen's
+    /// life too. So the library ACCUMULATES: after the third bring-over it holds three
+    /// conversations, all of them real. "The only conversation in the library" is therefore the
+    /// wrong question; "the one THIS scenario produced" is the right one, and it is the
+    /// difference between these two sets.
+    private var conversationsBeforeBringOver: Set<String> = []
+
+    init() {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("recorder-page-library-\(UUID().uuidString)",
+                                    isDirectory: true)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        library = root
+        let spy = door
+        manager = CaptureManager(
+            target: DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x"),
+            baseDir: root,
+            source: ReplaySource(frames: []),
+            finalize: { id, _ in spy.finalize(id) },
+            uploadSegment: { id, seq, body in spy.upload(id, seq, body) })
+    }
 
     /// EVERY recorder this world has ever stood up, kept for the world's whole life. The
     /// fake's peripheral and central hold their stack `unowned`, so releasing one while any
@@ -116,9 +162,10 @@ private final class RecorderPageWorld {
     func given(_ phrase: String) async throws {
         switch phrase {
         case "a remembered recorder holding one recording":
+            let audio = try Self.fixtureMP3()
             try await stageRecorder(holding: [
-                .init(date: Self.day, timestamp: Self.timestamp, sizeBytes: 900,
-                      content: Self.mp3(900)),
+                .init(date: Self.day, timestamp: Self.timestamp, sizeBytes: audio.count,
+                      content: audio),
             ])
         case "a remembered recorder holding nothing":
             try await stageRecorder(holding: [])
@@ -164,14 +211,30 @@ private final class RecorderPageWorld {
                                              describing: "the check to finish")
 
         case "I bring the offered recording over":
+            conversationsBeforeBringOver = notesInLibrary()
             check.bringOver(hardwareToken: identifier.uuidString,
-                            advertisedName: Self.recorderName)
+                            advertisedName: Self.recorderName,
+                            into: manager)
             // BOTH FLAGS, because `bringOver` ends by re-running the check — and the whole
             // point of the last Then is that it does. Waiting on `isBringingOver` alone would
             // read the shelf mid-re-read and the scenario would be a race.
             try await AppScenarioHost.settle(
                 untilTrue: { !self.check.isBringingOver && !self.check.isChecking },
                 describing: "the bring-over and the shelf re-read that follows it")
+
+        // THE APP'S OWN LANE, NOT A SUBSTITUTE FOR IT. `drainPending` is what the manager's
+        // five-second timer calls for every pending capture there is; adoption already kicked
+        // it, and `drainPending` refuses to run twice at once, so this waits for the OUTCOME
+        // rather than replacing the pass already in flight.
+        case "Solleva sends what it is holding":
+            // WAIT FOR THIS SCENARIO'S CONVERSATION, not for "something finalized" — the world
+            // is shared, so earlier scenarios' captures are already in this spy.
+            let pending = try requireCaptureID()
+            for _ in 0..<300 where !door.finalized.contains(pending) {
+                await manager.drainPending()
+                await manager.retryPendingFinalizes()
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
 
         default:
             throw BrineStepError("unhandled When: \(phrase)")
@@ -180,7 +243,7 @@ private final class RecorderPageWorld {
 
     // MARK: Then
 
-    func then(_ phrase: String) throws {
+    func then(_ phrase: String) async throws {
         switch phrase {
         case "Solleva says what is on the recorder":
             guard let detail = check.detail else {
@@ -236,8 +299,133 @@ private final class RecorderPageWorld {
                         + "the app never asked custody, or it never re-read the shelf")
             }
 
+        // THE CLAIM THE WHOLE LEG IS FOR: it is a CONVERSATION, in the library the app's own
+        // capture owner hydrates from, holding the audio that came off the recorder.
+        case "Solleva's conversations include the one that came off the recorder":
+            let captureID = try requireCaptureID()
+            guard manager.captures.contains(where: { $0.captureId == captureID }) else {
+                throw BrineStepError(
+                    "the app brought a recording over and its capture owner does not know the "
+                        + "conversation exists. `PocketCaptureImport` writes a correct directory "
+                        + "either way — what is missing is `adoptCompletedCapture` in "
+                        + "App/DeviceScreen.swift, and until the next launch nothing would "
+                        + "upload it or show it")
+            }
+            let segments = try segments(of: captureID)
+            guard !segments.isEmpty else {
+                throw BrineStepError("the conversation holds no audio")
+            }
+            // ORDINARY SEGMENTS, read back with the ORDINARY decoder — if these were anything
+            // but the length-framed Opus packets every capture is made of, this returns nothing.
+            var frames = 0
+            for segment in segments {
+                let decoded = CaptureWAL.decodeSegment(try Data(contentsOf: segment))
+                guard !decoded.isEmpty else {
+                    throw BrineStepError("\(segment.lastPathComponent) is not a capture segment")
+                }
+                frames += decoded.count
+            }
+            // ~3.1 s of audio at one 20 ms packet each. Silence, one frame, or the whole file as
+            // a single packet all miss this by an order of magnitude.
+            guard (120...200).contains(frames) else {
+                throw BrineStepError("the conversation holds \(frames) frames of audio, not the "
+                                        + "~155 that 3.1 seconds makes")
+            }
+
+        case "it is not presented as a recording in progress":
+            let captureID = try requireCaptureID()
+            guard manager.active == nil, !manager.isRecordingMic else {
+                throw BrineStepError("bringing a file over put the app into a live recording")
+            }
+            guard let wal = manager.captures.first(where: { $0.captureId == captureID }) else {
+                throw BrineStepError("the conversation is not in the library")
+            }
+            wal.warmStatus()
+            guard !wal.status.streaming else {
+                throw BrineStepError("the brought-over conversation is marked as still arriving")
+            }
+            // AND THE SHIPPED SCAN REFUSES IT AS A LIVE CANDIDATE: `resumableCaptureId` only
+            // adopts a capture marked `omi`, and a pulled recording is marked `filePull`, so no
+            // microphone session can ever attach and carry on recording into it.
+            guard CaptureManager.resumableCaptureId(baseDir: library, silenceGap: 3_600) == nil
+            else {
+                throw BrineStepError("the app offers a brought-over recording to the live path")
+            }
+
+        // SCOPED TO THIS SCENARIO'S CONVERSATION, because the world is shared and the manager
+        // drains EVERY pending capture in its library — including the ones earlier scenarios
+        // brought over, which is itself the correct behaviour and not something to suppress.
+        case "that conversation's audio was uploaded and the conversation was finalized":
+            let captureID = try requireCaptureID()
+            let finalized = door.finalized.filter { $0 == captureID }
+            guard finalized.count == 1 else {
+                throw BrineStepError(
+                    "the conversation reached finalize \(finalized.count) time(s) — it must reach "
+                        + "the shipped finalize exactly once, through the same `CaptureBackend` "
+                        + "seam a phone recording uses")
+            }
+            let uploaded = door.uploaded.filter { $0.0 == captureID }
+            guard !uploaded.isEmpty else {
+                throw BrineStepError("no audio reached the shipped segment-upload seam")
+            }
+            let onDisk = try segments(of: captureID).count
+            guard Set(uploaded.map(\.1)).count == uploaded.count, uploaded.count == onDisk else {
+                throw BrineStepError("\(uploaded.count) of \(onDisk) segments reached the brain")
+            }
+
+        case "the audio that went up is the ordinary audio every recording sends":
+            let captureID = try requireCaptureID()
+            let bodies = door.uploaded.filter { $0.0 == captureID }
+            guard !bodies.isEmpty else {
+                throw BrineStepError("nothing was uploaded for this conversation")
+            }
+            for (_, _, body) in bodies where CaptureWAL.decodeSegment(body).isEmpty {
+                throw BrineStepError(
+                    "an uploaded body is not a capture segment — the brain is being handed a "
+                        + "second wire shape for this one source")
+            }
+
         default:
             throw BrineStepError("unhandled Then: \(phrase)")
         }
+    }
+
+    // MARK: What the app produced
+
+    private func notesInLibrary() -> Set<String> {
+        Set(((try? FileManager.default.contentsOfDirectory(atPath: library.path)) ?? [])
+            .filter(CaptureLibrary.isNoteDirectory))
+    }
+
+    /// The conversation THIS scenario's bring-over produced.
+    private func requireCaptureID() throws -> String {
+        let made = notesInLibrary().subtracting(conversationsBeforeBringOver)
+        guard made.count == 1, let only = made.first else {
+            throw BrineStepError(
+                "bringing one recording over produced \(made.count) new conversation(s), not "
+                    + "one (the library held \(conversationsBeforeBringOver.count) before)")
+        }
+        return only
+    }
+
+    private func segments(of captureID: String) throws -> [URL] {
+        let dir = library.appendingPathComponent(captureID, isDirectory: true)
+        return ((try? FileManager.default.contentsOfDirectory(at: dir,
+                                                              includingPropertiesForKeys: nil))
+            ?? []).filter { $0.pathExtension == "opus" }.sorted { $0.path < $1.path }
+    }
+}
+
+/// The two calls that would otherwise reach a real door, recorded — the SAME two a phone-mic
+/// recording makes, injected at the SAME two seams `CaptureManager` already exposes.
+private final class ScenarioDoor: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _finalized: [String] = []
+    private var _uploaded: [(String, UInt64, Data)] = []
+    var finalized: [String] { lock.lock(); defer { lock.unlock() }; return _finalized }
+    var uploaded: [(String, UInt64, Data)] { lock.lock(); defer { lock.unlock() }; return _uploaded }
+    func finalize(_ id: String) { lock.lock(); _finalized.append(id); lock.unlock() }
+    func upload(_ id: String, _ seq: UInt64, _ body: Data) {
+        lock.lock(); _uploaded.append((id, seq, body)); lock.unlock()
     }
 }

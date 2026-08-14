@@ -59,6 +59,41 @@ public enum CaptureIdTime {
         return UInt64(days) * 86_400 + UInt64(h * 3_600 + mi * 60 + s)
     }
 
+    /// THE INVERSE: a Unix instant → the `yyyyMMdd-HHmmss` (UTC) stamp a capture id carries.
+    ///
+    /// It exists because a capture minted from a RECORDER'S reported time cannot use
+    /// `CaptureManager.newCaptureId()`, which stamps `Date()` — a conversation that happened on
+    /// Tuesday and was collected on Friday would be dated Friday, and the id is the durable
+    /// fallback the list sorts by. `stamp(fromEpochUTC:)` and `epochUTC(fromStamp:)` are a round
+    /// trip, which is what makes that claim checkable rather than asserted.
+    ///
+    /// Same discipline as the parse: INTEGER MATH, no `DateFormatter`. `newCaptureId` builds one
+    /// per call and that is the DATEPARSE hang class this file exists to keep out of the capture
+    /// path (626–937 ms cold-cache ICU loads measured on device).
+    public static func stamp(fromEpochUTC seconds: UInt64) -> String {
+        let days = Int(seconds / 86_400)
+        let rem = Int(seconds % 86_400)
+        // civil-from-days (Howard Hinnant's algorithm) — the exact inverse of `epochUTC`.
+        let z = days + 719_468
+        let era = (z >= 0 ? z : z - 146_096) / 146_097
+        let doe = z - era * 146_097
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365
+        let y = yoe + era * 400
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+        let mp = (5 * doy + 2) / 153
+        let d = doy - (153 * mp + 2) / 5 + 1
+        let mo = mp + (mp < 10 ? 3 : -9)
+        let year = y + (mo <= 2 ? 1 : 0)
+        func pad(_ value: Int, _ width: Int) -> String {
+            let digits = String(value)
+            return digits.count >= width
+                ? digits
+                : String(repeating: "0", count: width - digits.count) + digits
+        }
+        return pad(year, 4) + pad(mo, 2) + pad(d, 2) + "-"
+            + pad(rem / 3_600, 2) + pad(rem % 3_600 / 60, 2) + pad(rem % 60, 2)
+    }
+
     private static func daysIn(month: Int, year: Int) -> Int {
         switch month {
         case 1, 3, 5, 7, 8, 10, 12: return 31

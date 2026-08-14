@@ -58,6 +58,18 @@ public struct PocketPCM: Sendable, Equatable {
     }
 }
 
+/// NOT THE PRODUCTION DECODER, AND IT MUST NOT BECOME ONE.
+///
+/// `decode(_ mp3: Data) -> PocketPCM` takes the whole recording as one `Data` and returns the
+/// whole decode as another. At fw-1.6's 32 kbps CBR, two hours is ~29 MB of MP3 that decodes to
+/// **691 MB of PCM** — so a conformance to this protocol that actually decoded a real Pocket
+/// file would take the app down, and only ever passed review because every fixture driving it
+/// is a handful of bytes. The shipped path is `PocketAudioTranslator`, which streams: it holds
+/// one read block and one 20 ms Opus packet, flat in the length of the recording.
+///
+/// This shape survives only because `PocketDurableSync` — the actor it belongs to — still has
+/// no caller outside `Tests/`. If that actor is ever wired, this is the first thing that has to
+/// go.
 public protocol PocketMP3Decoding: Sendable {
     func decode(_ mp3: Data) async throws -> PocketPCM
 }

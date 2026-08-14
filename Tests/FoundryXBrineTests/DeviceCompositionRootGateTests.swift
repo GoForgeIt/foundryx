@@ -421,4 +421,54 @@ final class DeviceCompositionRootGateTests: XCTestCase {
                               + "answer never reaches a person")
         }
     }
+
+    /// THE BRING-OVER'S CONVERSATION IS HANDED TO THE RUNNING APP.
+    ///
+    /// WHY THIS GATE IS THE WHOLE POINT. `PocketCaptureImport` can write a complete, correct,
+    /// pending-finalize capture directory and the app can still show the owner nothing: a
+    /// `CaptureManager` hydrates its library ONCE, in `loadExisting()`, at construction. A
+    /// conversation created while the app is already open is therefore invisible — and
+    /// un-uploaded — until the next launch unless somebody calls `adoptCompletedCapture`.
+    /// That is the same shape as the defect this track exists to end, where
+    /// `PocketBLEClient.download` shipped fully implemented and fully unit-tested with no
+    /// caller: every Brine scenario about the import can be green while nobody can reach it.
+    ///
+    /// `swift test` cannot compile `App/`, so this reads the file.
+    func testABroughtOverConversationIsHandedToTheRunningCaptureOwner() throws {
+        let screen = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent("App/DeviceScreen.swift"),
+            encoding: .utf8)
+
+        // NON-VACUITY FIRST: the affordance this gate is about is still on this screen.
+        XCTAssertTrue(screen.contains("PocketBringOver.run(peripheralIdentifier:"),
+                      "App/DeviceScreen.swift no longer runs the bring-over — this gate is "
+                          + "checking a file that no longer holds the boundary")
+
+        XCTAssertTrue(screen.contains("manager.adoptCompletedCapture(captureId:"),
+                      "nothing in App/ hands the brought-over conversation to the capture "
+                          + "owner, so the recording is a directory on disk that the running "
+                          + "app does not know exists and will not upload until relaunch")
+        XCTAssertTrue(screen.contains("outcome.captureID"),
+                      "the hand-off does not read the capture the bring-over actually produced")
+        // AND THE MANAGER REACHES THE PAGE THAT DOES IT. Without this the call above cannot
+        // compile — but the gate says so in words rather than leaving it to the build.
+        XCTAssertTrue(screen.contains("into: manager"),
+                      "the device page's bring-over is not given a capture owner to hand to")
+        XCTAssertTrue(screen.contains("manager: manager"),
+                      "the recording-device page is built without the capture owner")
+
+        // THE DECLARATION, HELD TOO, so the hole cannot be reopened by widening the seam back
+        // into something a caller can satisfy by omission.
+        let manager = try String(
+            contentsOf: Self.repoRoot
+                .appendingPathComponent("Sources/FoundryXKit/CaptureManager.swift"),
+            encoding: .utf8)
+        XCTAssertTrue(
+            manager.contains("public func adoptCompletedCapture(captureId: String) -> Bool"),
+            "`adoptCompletedCapture` is not the shape App/ calls")
+        XCTAssertFalse(
+            manager.contains("func adoptCompletedCapture(captureId: String, source:"),
+            "adoption grew a source parameter — it takes a capture id and nothing else, "
+                + "because it cannot be allowed to care which producer wrote the capture")
+    }
 }
