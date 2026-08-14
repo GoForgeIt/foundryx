@@ -295,7 +295,19 @@ public enum PocketMintNotVerifiedPresentation {
     /// a literal here and a literal there is a routing bug that compiles.
     public static let retryAction = "Try connecting again"
 
-    public static let actions = [retryAction, PocketKeyCustodyPresentation.entryAction]
+    /// THE TWO MOVES THIS SCREEN WAS MISSING, AND WHY THIS STATE OF ALL STATES NEEDS THEM.
+    ///
+    /// `.mintNotVerified` is reached when the recorder answered `MCU&SK&OK` and then would not
+    /// report an access-point password derived from the key Solleva sent. There are exactly two
+    /// worlds behind that, and Solleva cannot tell them apart: a firmware that took the key and
+    /// simply does not answer `APP&WIFI`, or a firmware that said yes and went on using ANOTHER
+    /// APP'S KEY (`FakePocketBLEStack.blindlyAcknowledges` — the dangerous answer to U1). In the
+    /// second world the owner needs the other app's key, or the maker's reset. Both screens
+    /// exist, fully written, and hung off the CONSENT screen only — which means "Solleva holds
+    /// no key", and is the one state a recorder Solleva has just minted for cannot produce.
+    public static let actions = [retryAction, PocketKeyCustodyPresentation.entryAction,
+                                 PocketSessionKeyEntryPresentation.entryAction,
+                                 PocketMintConsentPresentation.resetAction]
 
     public static var everyLine: [String] { [title, body] + actions }
 }

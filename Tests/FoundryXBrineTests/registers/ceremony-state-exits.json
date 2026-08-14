@@ -1,0 +1,379 @@
+{
+  "_what": "THE STATE-EXIT REGISTER. Every screen the Pocket ceremony can put a person on, together with the exits that state MUST offer and the production routing that proves each one is wired. The checker (`CeremonyStateExitRegisterTests`) recomputes every fact below from source — the kit's real `actions` arrays as VALUES, and `App/DeviceScreen.swift`'s routing table as TEXT — and asserts the computed answer EQUALS the declared one, in both directions.",
+
+  "_the_defect_this_exists_for": "A SIBLING OF `production-reachability.json`, ONE LEVEL IN. That register asks whether shipping code ever CALLS a capability. This one asks whether a person standing in a particular state can REACH one. Six instances, all the same shape — the capability exists, is implemented, is tested, and is reachable from ONE state while being orphaned from another the user actually lands in: (1) `.handshakeUnanswered` (the recorder holds a key ours does not match, so it goes silent) had NO exits at all, while `.setupUnavailable` had three; (2) `PocketFactoryResetPresentation` — a whole written screen, cost-first, with provenance — was reachable ONLY from the consent screen, which means 'Solleva holds no key', and is therefore the one state a recorder with a WRONG stored key can never produce; (3) `PocketSessionKeyEntry` hung off the same state, for the same reason; (4) the Pocket sync modules had tests and zero `App/` callers; (5) chat on a cell had no MCP tools; (6) `.didNotFinish` — what a recorder that REFUSED the key Solleva holds lands on — carried 'Try again' as its FIRST, PRIMARY button, and that title fell through `ceremonyAction`'s `default` arm and closed the entire connect sheet. Its own body reads 'Try again before you close this.'",
+
+  "_why_a_register_and_not_a_rule": "'Every screen must offer every action' is wrong and would be dangerous here. A one-tap 'forget this recorder' on `.handshakeUnanswered` is a one-tap BRICK — this firmware has no reset opcode, no unpair and no key-read opcode, custody may hold the only copy of the key in existence, and silence is not proof the key is wrong. `.acceptedNotDurable` (§3.7) must have exactly ONE action and no dismissal, because closing it loses a recorder forever. So the exits a state needs are a JUDGEMENT, and a judgement belongs in a table somebody has to edit, not in a heuristic.",
+
+  "_both_directions": "A state declared reachable with no landing site in `App/` is a failure (dead row). A state declared UNREACHABLE that acquires a `ceremonyScreen = .x` assignment is a failure (promotion demanded, with its exits). A declared exit whose action is no longer in the kit's array is a failure. An action in the kit's array that the register does not declare is a failure. `declared_actions` is compared for EQUALITY against the real values, never containment.",
+
+  "_recomputed_never_read": "The kit's action arrays are read as RUNTIME VALUES through `FoundryXKit`, and the routing table is read as the TEXT of `App/DeviceScreen.swift` (which `swift test` cannot compile). Nothing in this file is trusted: a coordinated edit that changes an action AND this register's copy of it still reds, because the exit KINDS the state requires are checked against what the routing table actually does with those titles.",
+
+  "_routing_is_screen_independent_and_that_is_the_fix": "`ceremonyAction` used to carry a `where` clause — `case PocketSetupPresentation.retryAction where ceremonyScreen == .keyNotKept || .custodyUnreadable || .handshakeUnanswered` — so 'Try again' was a retry on three screens and a sheet-dismissal on the fourth. That allowlist is the defect in miniature: a table that must be edited every time a screen gains an action, whose missing edit is invisible. The routing is now by TITLE ALONE, and this register asserts there is no `where` in the switch. Changing that back is a diff somebody has to make and defend.",
+
+  "_mutation": "Delete `PocketSessionKeyEntryPresentation.entryAction` from `PocketSetupPresentation.handshakeUnanswered.actions` -> RED twice, naming the stranded state: once because `declared_actions` no longer equals the measured array, once because the required exit `enter-a-key` is unreachable from `handshake-unanswered`. Delete the `case PocketMintConsentPresentation.resetAction` arm from `ceremonyAction` -> RED on EVERY state that requires `factory-reset`, because the title is then unrouted and falls to `default`. Restore the `where` clause -> RED on the screen-independence invariant. Add an action to a kit array without declaring it -> RED as undeclared. Wire up `.keepBothApps` -> RED demanding its exits be declared.",
+
+  "_stated_limits": "(1) THE ROUTING SCAN IS A LEXER, not a parser: it slices `ceremonyAction`'s body between two declared anchors and asks whether a constant appears in a `case` position. A constant named inside a nested closure in that body would count. The body is 40 lines of `case` arms and nothing else, and the anchors go red if it stops being that. (2) A route is proven WIRED, not proven CORRECT — that `case PocketMintConsentPresentation.resetAction:` calls `showFactoryReset()` is asserted by the declared `handler` text, but that `showFactoryReset` sets the right screen is the app-hosted scenarios' job (`features/every-state-has-a-way-out.feature`), which drives the real model. Both halves are needed and neither substitutes for the other. (3) `enterExistingKey`, `education` and `keyCustody` have exits that are not `action(title)` buttons — a submit closure, a sheet dismissal, a reveal toggle — so they declare a `non_button_exit` anchor in `App/PocketOnboardingView.swift` instead.",
+
+  "screen_enum": {
+    "file": "App/PocketOnboardingView.swift",
+    "open_anchor": "enum Screen {",
+    "_why": "the POPULATION. Every case in this enum must have a row below, so a new ceremony screen cannot be added without somebody stating what a person standing on it is able to do."
+  },
+
+  "routing_table": {
+    "file": "App/DeviceScreen.swift",
+    "open_anchor": "func ceremonyAction(_ title: String) -> CeremonyDisposition {",
+    "close_anchor": "func dismissCeremony() {",
+    "landing_pattern": "ceremonyScreen = .",
+    "routing_is_screen_independent": true,
+    "_why_screen_independent": "see `_routing_is_screen_independent_and_that_is_the_fix`. A `where` clause in this switch is how `.didNotFinish` lost its retry."
+  },
+
+  "_exit_kinds": "What an action DOES, named by consequence rather than by wording. `leave` is deliberately not a kind a state can satisfy a requirement with: closing the sheet changes nothing about the person's situation, which is the definition of the trap this register exists to forbid.",
+  "exit_kinds": [
+    "enter-a-key", "mint", "factory-reset", "retry", "retry-custody", "see-key",
+    "back-to-setup", "leave"
+  ],
+
+  "_action_routes": "Every title `ceremonyAction` handles, the constant the switch matches it by, the method it calls, and the kind of exit that is. A title with no row here is UNROUTED — it falls to `default` and closes the sheet — which is a legitimate answer for `Done`/`Close`/`Not now` and a defect for anything else.",
+  "action_routes": [
+    {
+      "id": "enter-a-key",
+      "constant": "PocketSessionKeyEntryPresentation.entryAction",
+      "handler": "showKeyEntry()",
+      "kind": "enter-a-key",
+      "why": "the field that REPLACES the key in custody. `PocketSecretStore.save` overwrites, so this is the escape that never deletes anything — which is why no state here offers a `forget`."
+    },
+    {
+      "id": "mint",
+      "constant": "PocketMintConsentPresentation.confirmAction",
+      "handler": "confirmMintAfterOwnerConsent()",
+      "kind": "mint",
+      "why": "the ONLY tap in the app that can write a key to a recorder, and the only construction of `PocketMintConsent`."
+    },
+    {
+      "id": "factory-reset",
+      "constant": "PocketMintConsentPresentation.resetAction",
+      "handler": "showFactoryReset()",
+      "kind": "factory-reset",
+      "why": "the maker's gesture, with the cost stated before the steps. It is the honest escape for an owner who cannot obtain the key — and it is the one this register was built because three states could not reach."
+    },
+    {
+      "id": "retry-custody",
+      "constant": "PocketSetupPresentation.retrySecureStorageAction",
+      "handler": "retrySecureStorageForAcceptedKey()",
+      "kind": "retry-custody",
+      "why": "§3.7's only action. It retries the KEYCHAIN and never sends a second key."
+    },
+    {
+      "id": "back-to-setup",
+      "constant": "PocketFactoryResetPresentation.retryAction",
+      "handler": "showMintConsent()",
+      "kind": "back-to-setup",
+      "why": "after the gesture, back to the decision — which re-runs restore-first and mints only on a fresh confirmation."
+    },
+    {
+      "id": "retry",
+      "constant": "PocketSetupPresentation.retryAction",
+      "handler": "retryPlainAttach()",
+      "kind": "retry",
+      "why": "a real second tap, with `mint:` left at its default so it cannot write a key from anywhere. Unconditional on the screen — the allowlist that used to guard it is what stranded `.didNotFinish`."
+    },
+    {
+      "id": "retry-connecting",
+      "constant": "PocketMintNotVerifiedPresentation.retryAction",
+      "handler": "retryPlainAttach()",
+      "kind": "retry",
+      "why": "'Try connecting again' now tries connecting. It used to hand the owner back to the consent screen, which is not a connection attempt — and on `.mintNotVerified` the plain attach restores the key just minted and answers the very question the screen leaves open."
+    },
+    {
+      "id": "see-key",
+      "constant": "PocketKeyCustodyPresentation.entryAction",
+      "handler": "showKeyCustody()",
+      "kind": "see-key",
+      "why": "§10 custody, on its own screen. Reached deliberately, hidden until asked for, and never offered on a setup screen."
+    }
+  ],
+
+  "_forbidden_action_words": "Held over EVERY action title on EVERY state below except the §10 custody screen, which is the one place a key is deliberately shown. `forget` is first because it is the button somebody will reach for on `.handshakeUnanswered`: this firmware has no reset opcode and no key-read opcode, custody may hold the only copy of the key in the world, and the screen is produced by SILENCE, which proves nothing. A one-tap forget there is a one-tap brick.",
+  "forbidden_action_words": ["forget", "reveal", "copy", "share", "export", "erase", "wipe"],
+  "custody_screen_exempt_from_forbidden_words": "keyCustody",
+
+  "states": [
+    {
+      "id": "handshake-unanswered",
+      "screen": "handshakeUnanswered",
+      "presentation": "PocketSetupPresentation.handshakeUnanswered",
+      "reachable": true,
+      "landing_sites": 2,
+      "landed_from": [
+        "attach(): case .unreachable(.handshakeUnanswered)",
+        "retryPlainAttach(): case .unreachable(.handshakeUnanswered)"
+      ],
+      "declared_actions": [
+        "Try again",
+        "I already have this recorder's key",
+        "How do I start the recorder over?"
+      ],
+      "required_exits": ["retry", "enter-a-key", "factory-reset"],
+      "forbidden_exits": ["mint"],
+      "why": "SILENCE, AND SILENCE PROVES NOTHING. A sleeping recorder, one busy with another app, and one holding a different key are the same nothing from this side of the radio. So the owner gets the three moves that cannot lose anything — ask again, replace the key, or start the recorder over — and never a mint, which would send a second key to a recorder Solleva itself may have provisioned. The reset guidance was the last one missing: it hung off the consent screen only.",
+      "why_no_forget": "custody may hold the only copy of this key in existence, and this screen is produced by evidence that proves nothing. The escape is to REPLACE the key, which the entry path already does."
+    },
+    {
+      "id": "key-refused",
+      "screen": "didNotFinish",
+      "presentation": "PocketSetupPresentation.didNotFinish",
+      "reachable": true,
+      "landing_sites": 5,
+      "landed_from": [
+        "attach(): case .recoveryRequired",
+        "confirmMintAfterOwnerConsent(): case .recoveryRequired",
+        "confirmMintAfterOwnerConsent(): the .setupUnavailable/.live/.unrecognised/.adoptionNotPersisted/.unreachable catch-all",
+        "retryPlainAttach(): the .recoveryRequired/.live/.unrecognised/.adoptionNotPersisted/.unreachable catch-all",
+        "retrySecureStorageForAcceptedKey(): case .some — the key became durable and something else failed"
+      ],
+      "declared_actions": [
+        "Try again",
+        "I already have this recorder's key",
+        "How do I start the recorder over?"
+      ],
+      "required_exits": ["retry", "enter-a-key", "factory-reset"],
+      "forbidden_exits": ["mint"],
+      "why": "THE SECOND DEADLOCK, AND THE ONE NOBODY HAD LOOKED FOR. `.recoveryRequired` is the recorder REFUSING the key Solleva holds — the state where the key is provably wrong, and the state a mistyped character lands in. Its first, primary button is 'Try again', and that title used to fall through the routing table's `default` arm and close the whole connect sheet, while the screen's own body read 'Try again before you close this.' It had the key field and no reset guidance; now it has all three."
+    },
+    {
+      "id": "custody-unreadable",
+      "screen": "custodyUnreadable",
+      "presentation": "PocketSetupPresentation.custodyUnreadable",
+      "reachable": true,
+      "landing_sites": 3,
+      "landed_from": [
+        "attach(): case .custodyUnreadable",
+        "confirmMintAfterOwnerConsent(): case .custodyUnreadable",
+        "retryPlainAttach(): case .custodyUnreadable"
+      ],
+      "declared_actions": ["Try again", "I already have this recorder's key"],
+      "required_exits": ["retry", "enter-a-key"],
+      "forbidden_exits": ["mint", "factory-reset"],
+      "why": "SOLLEVA MAY HOLD THIS RECORDER'S KEY AND SIMPLY CANNOT READ IT — a Keychain locked since restart. A retry is the honest first move because the cause changes on its own, and the field is there for an owner who has the key anyway.",
+      "why_no_factory_reset": "the least evidence of any state here. Offering a destructive gesture on the strength of a Keychain that has not been unlocked yet is proposing somebody wipe a recorder whose key is probably sitting in it. The reset stays two hops away, through a state that actually establishes something."
+    },
+    {
+      "id": "key-not-kept",
+      "screen": "keyNotKept",
+      "presentation": "PocketSetupPresentation.keyNotKept",
+      "reachable": true,
+      "landing_sites": 3,
+      "landed_from": [
+        "attach(): case .keyNotKept",
+        "confirmMintAfterOwnerConsent(): case .keyNotKept",
+        "retryPlainAttach(): case .keyNotKept"
+      ],
+      "declared_actions": ["Try again"],
+      "required_exits": ["retry"],
+      "forbidden_exits": ["mint", "factory-reset"],
+      "why": "THE RECORDER WAS NEVER ASKED. Custody ran first and refused the candidate, so nothing was written. The only broken thing is this iPhone's secure storage, and a retry is the whole of the remedy — entering a key would be a second Keychain write against the store that just refused one, and a reset would be a destructive gesture on a recorder that was not touched."
+    },
+    {
+      "id": "mint-consent",
+      "screen": "mintConsent",
+      "presentation": "PocketMintConsentPresentation",
+      "reachable": true,
+      "landing_sites": 3,
+      "landed_from": [
+        "attach(): case .setupUnavailable",
+        "retryPlainAttach(): case .setupUnavailable",
+        "showMintConsent()"
+      ],
+      "declared_actions": [
+        "Send a new key",
+        "I already have this recorder's key",
+        "How do I start the recorder over?",
+        "Not now"
+      ],
+      "required_exits": ["mint", "enter-a-key", "factory-reset"],
+      "forbidden_exits": [],
+      "why": "AN UNCLAIMED RECORDER, OR ONE SOLLEVA HOLDS NO KEY FOR. The decision screen, and the only door to a mint. It is the state that already had every exit — and the fact that three other states could reach NONE of them is what this register exists to make impossible."
+    },
+    {
+      "id": "mint-refused",
+      "screen": "mintRefused",
+      "presentation": "PocketMintRefusedPresentation",
+      "reachable": true,
+      "landing_sites": 3,
+      "landed_from": [
+        "attach(): case .mintRefused",
+        "confirmMintAfterOwnerConsent(): case .mintRefused",
+        "retryPlainAttach(): case .mintRefused"
+      ],
+      "declared_actions": [
+        "I already have this recorder's key",
+        "How do I start the recorder over?",
+        "Done"
+      ],
+      "required_exits": ["enter-a-key", "factory-reset"],
+      "forbidden_exits": ["mint", "retry"],
+      "why": "ANOTHER APP OWNS IT, AND THE RECORDER SAID SO. A refusal is PROOF — the recorder heard the key and said no — so the candidate is already out of custody and a retry would send a key the hardware has already rejected. The two moves that can change anything are the other app's key, or the maker's reset.",
+      "why_no_retry": "a refusal is evidence, unlike silence. The same key refused twice is not new information, and offering it as the primary action is how a screen becomes a loop."
+    },
+    {
+      "id": "mint-not-verified",
+      "screen": "mintNotVerified",
+      "presentation": "PocketMintNotVerifiedPresentation",
+      "reachable": true,
+      "landing_sites": 3,
+      "landed_from": [
+        "attach(): case .mintNotVerified",
+        "confirmMintAfterOwnerConsent(): case .mintNotVerified",
+        "retryPlainAttach(): case .mintNotVerified"
+      ],
+      "declared_actions": [
+        "Try connecting again",
+        "See this recorder's key",
+        "I already have this recorder's key",
+        "How do I start the recorder over?"
+      ],
+      "required_exits": ["retry", "see-key", "enter-a-key", "factory-reset"],
+      "forbidden_exits": ["mint"],
+      "why": "ACKNOWLEDGED AND UNPROVEN, WHICH IS TWO WORLDS SOLLEVA CANNOT TELL APART. Either the recorder took the key and does not answer `APP&WIFI`, or it said `MCU&SK&OK` and went on using ANOTHER APP'S key — the dangerous answer to U1. In the second world the owner needs that app's key, or the reset. Both screens existed and neither was reachable from here."
+    },
+    {
+      "id": "accepted-not-durable",
+      "screen": "acceptedNotDurable",
+      "presentation": "PocketSetupPresentation.acceptedNotDurable",
+      "reachable": true,
+      "producible_by_the_shipped_flow": false,
+      "landing_sites": 4,
+      "landed_from": [
+        "attach(): case .keyAcceptedNotDurable",
+        "confirmMintAfterOwnerConsent(): case .keyAcceptedNotDurable",
+        "retryPlainAttach(): case .keyAcceptedNotDurable",
+        "retrySecureStorageForAcceptedKey(): case .none/.some(.keyAcceptedNotDurable)"
+      ],
+      "declared_actions": ["Retry secure storage"],
+      "required_exits": ["retry-custody"],
+      "forbidden_exits": ["mint", "retry", "enter-a-key", "factory-reset"],
+      "why": "DESIGN §3.7 — THE ONE SCREEN IN THE APP WHERE CLOSING IT LOSES SOMETHING FOREVER. The recorder took a key this iPhone could not store, so custody holds the only copy in the world and it is in memory. It has exactly one action ON PURPOSE: a second offer of any kind is an invitation to leave, and leaving is the irreversible act. This is why `required_exits` is a judgement and not 'give every screen every button'.",
+      "why_not_producible": "custody now runs BEFORE the `APP&SK&` write, so a key the Keychain will not keep is never offered to a recorder. `provisionFactoryFresh` cannot return `.acceptedNotDurable` and no app-hosted scenario can stage it. The route is kept working as the backstop for that ordering — a net that has rotted is worse than none — and this row is what keeps it honest: it is REACHED by App code (four landing sites) and not PRODUCIBLE, and those are different facts."
+    },
+    {
+      "id": "factory-reset",
+      "screen": "factoryReset",
+      "presentation": "PocketFactoryResetPresentation",
+      "reachable": true,
+      "landing_sites": 1,
+      "landed_from": ["showFactoryReset()"],
+      "declared_actions": ["Try setting it up again", "Close"],
+      "required_exits": ["back-to-setup"],
+      "forbidden_exits": [],
+      "why": "THE ORPHANED SCREEN ITSELF. Fully written — cost first, the gesture, Solleva cannot do it, Solleva cannot verify it, and where the steps come from — and reachable from ONE state until this change. Its own exit is back to the decision, which re-runs restore-first."
+    },
+    {
+      "id": "enter-existing-key",
+      "screen": "enterExistingKey",
+      "presentation": "PocketSessionKeyEntryPresentation",
+      "reachable": true,
+      "landing_sites": 1,
+      "landed_from": ["showKeyEntry()"],
+      "declared_actions": [],
+      "required_exits": [],
+      "non_button_exit": {
+        "file": "App/PocketOnboardingView.swift",
+        "anchor": "onSubmitKey?(candidate)",
+        "why": "the field's exit is its SUBMIT closure, not an `action(title)` button. The value goes straight into `PocketSessionKeyEntryCoordinator` and is never echoed, logged or retained."
+      },
+      "why": "THE SCREEN THE WHOLE DEFECT CLASS WAS ABOUT. It is not a dead end — it submits, and a submission that adopts closes the ceremony — but it deliberately shows no key, offers no reveal, and has no `forget`."
+    },
+    {
+      "id": "key-custody",
+      "screen": "keyCustody",
+      "presentation": "PocketKeyCustodyPresentation",
+      "reachable": true,
+      "landing_sites": 3,
+      "landed_from": [
+        "confirmMintAfterOwnerConsent(): case .adopted",
+        "retrySecureStorageForAcceptedKey(): case .adopted",
+        "showKeyCustody()"
+      ],
+      "declared_actions": ["Done"],
+      "required_exits": [],
+      "non_button_exit": {
+        "file": "App/PocketOnboardingView.swift",
+        "anchor": "Button(PocketKeyCustodyPresentation.revealAction) { onRevealKey?() }",
+        "why": "§10's reveal is a closure the sheet owns, not a routed ceremony action. 'Done' is the routed one, and it is deliberately an unrouted title that closes — there is nothing further to do here."
+      },
+      "why": "THE ONE PLACE A KEY IS SHOWN, and it is a separately owned security change rather than a setup step. It is the single exemption from `forbidden_action_words`."
+    },
+    {
+      "id": "setup-unavailable",
+      "screen": "setupUnavailable",
+      "presentation": "PocketSetupPresentation.setupUnavailable",
+      "reachable": true,
+      "landing_sites": 0,
+      "presented_directly_by": {
+        "file": "App/DeviceScreen.swift",
+        "anchor": "PocketOnboardingView(screen: .setupUnavailable)"
+      },
+      "landed_from": ["SetupUnavailableExplanation — the 'Why isn't my recorder here?' link, with NO recorder in hand"],
+      "declared_actions": ["See what's connected", "I already have this recorder's key"],
+      "required_exits": [],
+      "why": "REACHED AS AN ANSWER, NOT BY A TAP. Nothing was connected, so there is no recorder a key could be entered FOR — which is why its own presenter routes the entry action back to the scan list rather than to a field with nothing to submit to. It carries zero `ceremonyScreen = .setupUnavailable` landing sites BY CONSTRUCTION, and that zero is asserted: the day the tap path starts landing here, this row goes red and its exits have to be stated as a tap's exits rather than a link's."
+    },
+    {
+      "id": "education",
+      "screen": "education",
+      "presentation": "PocketDeviceEducation",
+      "reachable": true,
+      "landing_sites": 0,
+      "presented_directly_by": {
+        "file": "App/DeviceScreen.swift",
+        "anchor": "PocketOnboardingView(screen: .education)"
+      },
+      "landed_from": ["the recorder page's 'How it works' sheet"],
+      "declared_actions": [],
+      "required_exits": [],
+      "non_button_exit": {
+        "file": "App/DeviceScreen.swift",
+        "anchor": ".sheet(isPresented: $showingEducation)",
+        "why": "a SHEET, whose dismissal iOS guarantees. It carries no ceremony action and needs none — it is four paragraphs about a light and a button."
+      },
+      "why": "prose, presented as a sheet from the recorder page. It is in this register because the enum population is checked for completeness, not because anything about it is at risk."
+    },
+    {
+      "id": "setup",
+      "screen": "setup",
+      "presentation": "PocketSetupPresentation.setup",
+      "reachable": false,
+      "landing_sites": 0,
+      "declared_actions": ["Set up"],
+      "required_exits": [],
+      "why": "NOT ROUTED, AND ITS ONE ACTION IS UNROUTED TOO — 'Set up' has no row in `ceremonyAction`, so it would close the sheet. That is harmless while nothing lands here and is a live dead end the moment something does, which is exactly what this row is for: wire it up and the gate demands its exits."
+    },
+    {
+      "id": "ready",
+      "screen": "ready",
+      "presentation": "PocketSetupPresentation.ready",
+      "reachable": false,
+      "landing_sites": 0,
+      "declared_actions": ["Done"],
+      "required_exits": [],
+      "why": "not routed. The shipped success path lands on `.keyCustody` (a mint) or dismisses the ceremony (an adoption), so nothing sets this."
+    },
+    {
+      "id": "keep-both-apps",
+      "screen": "keepBothApps",
+      "presentation": "PocketSetupPresentation.keepBothApps",
+      "reachable": false,
+      "landing_sites": 0,
+      "declared_actions": ["Advanced instructions", "Reset and start over"],
+      "required_exits": [],
+      "why": "NOT ROUTED, AND BOTH OF ITS ACTIONS ARE UNROUTED. 'Advanced instructions' and 'Reset and start over' are two buttons that would each close the connect sheet — a whole screen of dead ends, sitting one `ceremonyScreen =` away from shipping. 'Reset and start over' is especially bad: it reads as the factory-reset gesture and does nothing at all, while `PocketFactoryResetPresentation` is the real thing. This row is the tripwire."
+    }
+  ],
+
+  "minimum_states": 16,
+  "minimum_reachable_states": 13,
+  "minimum_action_routes": 8
+}

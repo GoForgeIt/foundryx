@@ -1504,19 +1504,32 @@ final class RecordingDeviceAttachModel: ObservableObject {
         // second key.
         case PocketSetupPresentation.retrySecureStorageAction:
             retrySecureStorageForAcceptedKey()
-        case PocketFactoryResetPresentation.retryAction,
-             PocketMintNotVerifiedPresentation.retryAction:
+        case PocketFactoryResetPresentation.retryAction:
             showMintConsent()
-        // THE SCREENS WHOSE "TRY AGAIN" RETRIES FOR REAL. Each names a situation that genuinely
-        // changes on its own — an iPhone gets unlocked, a Keychain answers, a recorder wakes up
-        // — so the word re-runs the ordinary tap rather than closing the sheet. Matched on the
-        // SCREEN as well as the title because several screens share the word, and a "Try again"
-        // that quietly dismisses is the shape of the defect this whole path exists to avoid.
-        case PocketSetupPresentation.retryAction
-            where ceremonyScreen == .keyNotKept
-                || ceremonyScreen == .custodyUnreadable
-                || ceremonyScreen == .handshakeUnanswered:
-            retryPlainAttach()
+        // "TRY AGAIN" IS A RETRY ON EVERY SCREEN THAT OFFERS IT — AND THE ALLOWLIST THAT USED TO
+        // GUARD THIS ROW WAS ITSELF THE DEFECT.
+        //
+        // It read `where ceremonyScreen == .keyNotKept || .custodyUnreadable ||
+        // .handshakeUnanswered`, so the FOURTH screen carrying the same word — `.didNotFinish`,
+        // which is what a recorder that REFUSED the key Solleva holds lands on — fell through to
+        // `default` and CLOSED THE WHOLE CONNECT SHEET. Its body says "Try again before you close
+        // this" and its first, primary button closed it. A screen-conditional route is a table
+        // that has to be edited every time a screen gains an action, and the edit that was missed
+        // is exactly this class of defect: a capability that exists, is tested, and is orphaned
+        // from the one state a user actually lands in.
+        //
+        // It is safe from every state by construction: `retryPlainAttach` leaves `mint:` at its
+        // default, so a retry cannot write a key from anywhere. And it reports honestly — with no
+        // recorder in hand there is nothing to retry, so the sheet closes rather than leaving a
+        // button that does nothing.
+        case PocketSetupPresentation.retryAction,
+             // "Try connecting again" now TRIES CONNECTING. It used to hand the owner back to the
+             // consent screen, which is not a connection attempt and is not what the word says —
+             // and on `.mintNotVerified` the plain attach is the very question the screen leaves
+             // open, because it restores the key just minted and finds out whether the recorder
+             // is holding it after all.
+             PocketMintNotVerifiedPresentation.retryAction:
+            return retryPlainAttach() ? .handled : .closeTheSheet
         case PocketKeyCustodyPresentation.entryAction:
             showKeyCustody()
         default:
@@ -1636,8 +1649,15 @@ final class RecordingDeviceAttachModel: ObservableObject {
     ///
     /// (It was called `retryAfterStorageFailure`. The name described two of its three callers
     /// and would have made the third read as a category error.)
-    func retryPlainAttach() {
-        guard let target = ceremonyTarget, !submittingKey else { return }
+    ///
+    /// - Returns: whether a retry actually STARTED. `false` means there is no recorder this
+    ///   ceremony belongs to (the §3.6 screen reached from the help link) or one is already in
+    ///   flight, and the caller turns that into an honest dismissal rather than a button that
+    ///   silently does nothing — which is the same failure, one level down, as the allowlist
+    ///   this now replaces.
+    @discardableResult
+    func retryPlainAttach() -> Bool {
+        guard let target = ceremonyTarget, !submittingKey else { return false }
         submittingKey = true
         let attachment = Self.makeAttachment()
         self.attachment = attachment
@@ -1668,6 +1688,7 @@ final class RecordingDeviceAttachModel: ObservableObject {
                 self.ceremonyScreen = .didNotFinish
             }
         }
+        return true
     }
 
     /// §10 CUSTODY. The value comes from the Keychain on demand and lives in this object only
