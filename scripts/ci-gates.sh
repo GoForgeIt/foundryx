@@ -41,7 +41,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-VALID_PHASES=(swift gates compile leak flake lint iosbrine uiproof)
+VALID_PHASES=(swift gates compile leak flake lint iosbrine appscenarios uiproof)
 PHASES=("$@")
 [ ${#PHASES[@]} -eq 0 ] && PHASES=("${VALID_PHASES[@]}")
 DD="${CI_GATES_DD:-build/ci-gates-dd}"
@@ -75,10 +75,21 @@ fi
 # Counted by the dispatch loop; a run that executed nothing must never print PASS.
 RAN=0
 
-# The three suites that encode the CQRS invariants this wave established. Named explicitly so
+# The suites that encode the invariants this repository will not regress. Named explicitly so
 # that deleting or renaming one is a LOUD failure ("no tests executed") rather than a silent
 # reduction in coverage.
-GATE_SUITES=(HangReproTests RebuildBytesIndependenceTests ResidualMainActorWorkTests)
+#
+# ProductionReachabilityRegisterTests is the REACHABILITY GATE. The first three prove the code
+# behaves; it proves the code is REACHED — that a capability the scenarios drive through an
+# injected fake is actually called by something that ships. Four capabilities reached `main` in
+# one day fully implemented, fully tested and called by nothing outside `Tests/`, and every
+# suite was green, because "correct" and "reached" are different facts and only the first had a
+# gate. It runs HERE, inside an existing phase, rather than as a new phase name: the pre-push
+# hook derives its phase list from `.github/workflows/ios-publish.yml` with
+# `grep -oE 'bash scripts/ci-gates\.sh [a-z ]+'`, so a phase name carrying a hyphen or a digit
+# truncates and turns every push into "UNKNOWN PHASE -> exit 2".
+GATE_SUITES=(HangReproTests RebuildBytesIndependenceTests ResidualMainActorWorkTests
+             ProductionReachabilityRegisterTests)
 
 # ---------------------------------------------------------------- swift: the whole package
 #
@@ -610,6 +621,54 @@ phase_lint() {
   else
     echo "  clean — every writer call site is inside a ProcessGlobalStateTestCase subclass"
   fi
+}
+
+# ------------------------------------------------- appscenarios: scenarios INSIDE the application
+# What `iosbrine` above proves and what it cannot.
+#
+# `iosbrine` runs `Tests/FoundryXBrineTests` on the iOS RUNTIME, which is a real and valuable
+# difference from macOS — it is what caught the keychain entitlement divergence. But the target
+# it runs (`FoundryXiOSTests`) is HOSTLESS and depends on the FoundryXKit LIBRARY: it cannot
+# import `App/` at all. So every scenario in it asserts against an object graph the test built,
+# and passes identically whether or not the application reaches that graph.
+#
+# That is measured, not suspected. Of 17 `*FeatureTests.swift` files sampled across capture,
+# chat, account, pocket, vault, device, sync, onboarding and search, 17 of 17 hand-build the
+# seam and 0 of 17 drive a production entry point; 7 of the 73 feature suites hold any App-side
+# fact and all 7 hold it by scanning App source as TEXT; and 345 of the 660 public types in
+# `Sources/FoundryXKit` are never named in `App/` or `Widget/` at all. `PocketBLEClient.download`
+# and `RecordingDeviceAdoption.remember` each shipped complete, covered and callerless.
+#
+# This phase runs the scenarios that are about the APPLICATION, inside it: a bundle hosted by
+# `FoundryX.app` that `@testable import`s the app module. Deleting a call site in `App/` turns
+# it red — verified by mutation, twice, on the commit that added it. Both mutations left this
+# script's other phases, and the hostless pocket suites, entirely green.
+phase_appscenarios() {
+  echo "==> [appscenarios] scenarios driving App/ inside the real app process"
+  command -v xcodegen >/dev/null || { fail "appscenarios(xcodegen-missing)"; return; }
+  xcodegen generate >/dev/null 2>&1 || { fail "appscenarios(xcodegen-failed)"; return; }
+  local udid
+  udid=$(xcrun simctl list devices available 2>/dev/null | grep -E "iPhone" | grep -Eo "[0-9A-F-]{36}" | head -1)
+  if [ -z "$udid" ]; then
+    echo "  no available iPhone simulator runtime — the app-hosted lane cannot run"
+    fail "appscenarios-no-simulator"
+    return
+  fi
+  local out="build/ci-gates-appscenarios.log"
+  mkdir -p build
+  if ! xcodebuild test -project FoundryX.xcodeproj -scheme FoundryXAppScenarios \
+       -configuration Debug -destination "id=$udid" -derivedDataPath "$DD" \
+       CODE_SIGNING_ALLOWED=NO >"$out" 2>&1; then
+    grep -aE '^\[failed\]|Failing tests|error:.*XCTAssert' "$out" | head -20
+    fail "appscenarios-suite"
+    return
+  fi
+  # A LANE THAT RAN NOTHING IS NOT A LANE THAT PASSED. `xcodebuild test` exits 0 for a bundle
+  # whose only suite was renamed out of existence, and this is the one phase whose whole value
+  # is that it exists — so the count is asserted, not printed.
+  local n; n="$(grep -aoE 'Executed [0-9]+ tests?' "$out" | grep -oE '[0-9]+' | sort -n | tail -1)"
+  echo "  appscenarios: executed ${n:-0} app-hosted test(s) on the iOS runtime, 0 failures"
+  [ "${n:-0}" -lt 1 ] && fail "appscenarios-ran-nothing(${n:-0})"
 }
 
 # ---------------------------------------------------------------- uiproof: the recording SURFACE, on a simulator

@@ -36,8 +36,13 @@ let package = Package(
                 "then-capabilities.json",
                 "fixtures/device-agnostic",
                 "fixtures/s05-device-shape-interpretation.json",
-                // The Pocket audio fixture is read by REPO PATH too (see its PROVENANCE.txt).
+                // The Pocket audio fixture is read by REPO PATH too (see its
+                // POCKET-AUDIO-PROVENANCE.txt).
                 "fixtures/pocket",
+                // The reachability register — read by repo path (`#filePath`-relative, the
+                // same mechanism `registers/p3-contract-elements.json` uses in the
+                // conformance target), not through Bundle.module.
+                "registers/production-reachability.json",
             ],
             resources: [
                 .copy("fixtures/handshake_vectors.json"),

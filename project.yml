@@ -178,6 +178,73 @@ targets:
         # Bundle.module-style lookups resolve on-device like they do under SPM.
         TARGETED_DEVICE_FAMILY: "1,2"
 
+  # ---------------------------------------------------------------- THE APP-HOSTED SCENARIO LANE
+  # The gap `FoundryXiOSTests` above CANNOT close, by construction.
+  #
+  # That target's sources are `Tests/FoundryXBrineTests` and its only code dependency is the
+  # FoundryXKit LIBRARY. It cannot import `App/`. So every scenario it runs asserts against an
+  # object graph the TEST assembled — and passes identically whether or not the shipping app
+  # ever reaches that graph. The audit behind this target sampled 17 `*FeatureTests.swift`
+  # files across capture/chat/account/pocket/vault/device/sync/onboarding/search: 17 of 17
+  # hand-build the seam, 0 of 17 drive a production entry point, and 0 of 17 assert app
+  # reachability by EXECUTING app code. Seven of the 73 feature suites hold an App-side fact
+  # at all, and all seven hold it by SCANNING App SOURCE AS TEXT (`AppSourceTree`), which by
+  # its own stated limits cannot see `#if`, dead branches, or whether a call is on a live path.
+  #
+  # The failure mode is not hypothetical and is not historical: `RecordingDeviceAdoption
+  # .remember` and `PocketBLEClient.download` each shipped fully implemented, fully
+  # scenario-covered, and with no caller in `App/` at all. The tests were green the whole time.
+  # The app was also configured differently from the tests — `App/DeviceScreen.swift` builds
+  # `RecordingDeviceAttachment()` with the zero-argument production init while the suites build
+  # it with five injected seams, so the object under test was never the object that ships.
+  #
+  # THIS TARGET IS HOSTED BY THE REAL APP. `TEST_HOST` is `FoundryX.app`, so the bundle is
+  # injected into the shipping application's process on the simulator and `@testable import
+  # FoundryX` reaches the app module — `App/` and `Sources/FoundryXKit` both, exactly as the
+  # app compiles them. Scenarios here render the app's OWN SwiftUI screens through
+  # `AppScreenProbe` and read back the real accessibility tree. Deleting a call site in `App/`
+  # therefore turns a scenario RED, which is the entire point: a test that passes whether or
+  # not the app is wired is not a test of the app.
+  #
+  # It is deliberately a SECOND target rather than a conversion of the first. Hosted tests pay
+  # a full app launch per bundle and cannot run hostless; making all 239 files pay that would
+  # buy nothing for the ones that genuinely test kit logic. This is the lane for the claims
+  # that are about the APPLICATION.
+  FoundryXAppScenarioTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/FoundryXAppScenarioTests
+      # THE SAME SCRIPTED RADIO THE HOSTLESS SUITE USES, NOT A SECOND ONE. A fake written
+      # twice is two ideas of what a recorder does, and the scenario that matters here is
+      # whether the APP reaches the shipped code — which is only worth asserting if the
+      # thing underneath it is the fake the rest of the suite already trusts. It carries an
+      # `#if APP_HOSTED_SCENARIOS` import shim because the module the kit types live in
+      # differs between the two lanes: `FoundryXKit` under SPM, the app module here.
+      - path: Tests/FoundryXBrineTests/FakePocketBluetoothStack.swift
+      # The one Brine driver, shared for the same reason: a second one is a second idea of
+      # what "the scenario passed" means. It imports no kit module, so it needs no shim.
+      - path: Tests/FoundryXBrineTests/BrineFeatureRunner.swift
+    dependencies:
+      # The APP target — not the FoundryXKit package. Depending on both would put two copies
+      # of every kit type in the process (one compiled into the app, one in the library) and
+      # `@testable import` would resolve to the copy the app is NOT running.
+      - target: FoundryX
+      - package: BrineSwift
+        product: BrineSwiftCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.goforgeit.foundryx.app-scenario-tests
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGNING_ALLOWED: NO
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/FoundryX.app/FoundryX"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        # Selects `@testable import FoundryX` over `@testable import FoundryXKit` in the
+        # shared BLE fake — see the shim at the top of FakePocketBluetoothStack.swift.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG APP_HOSTED_SCENARIOS"
+
   # Minimal app host for the one proof that must exercise the real iOS Keychain.
   # It is deliberately separate from FoundryX and the hostless logic suite: the
   # signed simulator lane below proves Security.framework behavior without
@@ -308,6 +375,19 @@ schemes:
       config: Debug
       targets:
         - FoundryXUITests
+
+  # The app-hosted scenario lane: builds the REAL app and runs the scenarios that
+  # claim things about it inside its own process. See the target comment above for
+  # why this cannot be folded into the FoundryX scheme's hostless test action.
+  FoundryXAppScenarios:
+    build:
+      targets:
+        FoundryX: all
+        FoundryXAppScenarioTests: all
+    test:
+      config: Debug
+      targets:
+        - FoundryXAppScenarioTests
 
   FoundryXKeychainProof:
     build:

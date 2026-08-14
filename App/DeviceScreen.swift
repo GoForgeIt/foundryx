@@ -899,6 +899,35 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// check consults it too — a custody label that was not asked is a guess.
     private let custody = PocketRecorderFileStore()
 
+    #if DEBUG
+    /// THE RADIO IS THE ONE THING A SCENARIO CANNOT OWN, SO IT IS THE ONE THING INJECTED.
+    ///
+    /// Everything else this model touches — the check, the inventory read, the ordering that
+    /// picks which file is offered, the presentation that turns an outcome into a sentence —
+    /// stays the shipped code, running in the shipped app's process. What no hermetic run can
+    /// have is a Bluetooth recorder, so the app-hosted scenario lane hands in an attachment
+    /// built over `FakePocketBLEStack` (the same scripted radio the hostless suite drives) and
+    /// changes nothing else.
+    ///
+    /// WHY NOT AN INITIALISER PARAMETER. This model is created by `@StateObject` inside the
+    /// view that owns it, which is the arrangement that makes it survive redraws; threading a
+    /// dependency through that would mean the shipping view carrying a parameter that exists
+    /// only for tests. A DEBUG-only static is the seam this app already uses for the harness
+    /// hooks it cannot avoid (`-SyntheticMic`, `-SyntheticOmi`, `CaptureAccountScope
+    /// .setAccountForTests`), and `#if DEBUG` means the Release binary has no such door.
+    nonisolated(unsafe) static var attachmentFactoryForScenarios:
+        (@Sendable () -> RecordingDeviceAttachment)?
+    #endif
+
+    /// The attachment this model opens sessions with: the production one unless a scenario
+    /// running inside a DEBUG build has supplied a radio.
+    private static func makeAttachment() -> RecordingDeviceAttachment {
+        #if DEBUG
+        if let factory = attachmentFactoryForScenarios { return factory() }
+        #endif
+        return RecordingDeviceAttachment()
+    }
+
     /// - Parameter hardwareToken: the DURABLE address of a stored-file recorder, which is the
     ///   authenticated peripheral identifier (`PocketAuthenticatedIdentity`) and never the
     ///   advertised name. A token that is not one is not a recorder this can reach, and it says
@@ -927,6 +956,7 @@ final class PocketRecorderCheckModel: ObservableObject {
             let outcome = await PocketRecorderCheck.run(peripheralIdentifier: identifier,
                                                         advertisedName: advertisedName,
                                                         custody: self.custody,
+                                                        attachment: Self.makeAttachment(),
                                                         shelf: shelf)
             self.isChecking = false
             self.message = PocketRecorderCheckPresentation.message(for: outcome)
@@ -959,7 +989,8 @@ final class PocketRecorderCheckModel: ObservableObject {
             let outcome = await PocketBringOver.run(peripheralIdentifier: identifier,
                                                     advertisedName: advertisedName,
                                                     recording: recording,
-                                                    custody: self.custody)
+                                                    custody: self.custody,
+                                                    attachment: Self.makeAttachment())
             self.isBringingOver = false
             self.bringOverMessage = PocketBringOverPresentation.message(for: outcome)
             // THE HAND-OFF. From here it is the ordinary drain and the ordinary finalize — the
