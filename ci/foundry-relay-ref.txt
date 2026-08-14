@@ -1,0 +1,14 @@
+# The foundry commit foundryx's conformance suite is proven against.
+#
+# WHY THIS FILE EXISTS. ios-publish checks out GoForgeIt/foundry and builds
+# foundry-relay + foundryx-relay-server from it. Unpinned, that is a build of
+# ANOTHER repository's moving HEAD: on 2026-08-14 foundry main moved four times
+# in one day (the relay's auth middle, then a server-issued challenge), and each
+# move red-lit every foundryx ship with no foundryx commit involved. A local
+# gate could pass and CI fail on the same code, because they were compiling
+# different subjects.
+#
+# Updating this ref is a DELIBERATE act: bump it, run the conformance suite
+# against the new relay locally, and land both together. That is the moment to
+# discover a contract change — not mid-ship.
+95b3d58ab1b2d6be9da428201a4bfc81eb8f53f6

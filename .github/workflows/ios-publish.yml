@@ -64,6 +64,10 @@ jobs:
           repository: GoForgeIt/foundry
           token: ${{ secrets.CI_GITHUB_TOKEN }}
           path: foundry
+          # PINNED — see ci/foundry-relay-ref.txt. An unpinned checkout builds
+          # another repo's moving HEAD; foundry main moved four times on
+          # 2026-08-14 and red-lit every ship here with no commit of ours.
+          ref: 95b3d58ab1b2d6be9da428201a4bfc81eb8f53f6
       - name: prove the keychain is usable in this session
         run: |
           # The runners are Aqua-session LaunchAgents so they share the logged-in
