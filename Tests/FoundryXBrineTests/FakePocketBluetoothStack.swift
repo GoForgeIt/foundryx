@@ -64,6 +64,18 @@ final class FakePocketBLEStack: @unchecked Sendable {
         /// exact case a bare `MCU&SK&OK` cannot distinguish from success — which is why the
         /// mint is verified by reading the access-point password back.
         case blindlyAcknowledges(holding: String)
+        /// ALREADY KEYED AND SILENT ABOUT A WRONG ONE: `MCU&SK&OK` for the key it holds, and
+        /// NOTHING AT ALL — no `MCU&SK&FAIL`, no error frame — for any other.
+        ///
+        /// THIS IS OBSERVED HARDWARE, NOT A HYPOTHETICAL. Unit PKT01_BLUE_26079bc5 on firmware
+        /// 1.6 was driven from a Mac over `bleak`: `APP&SK&<its key>` answered `MCU&SK&OK` and
+        /// `APP&LIST_DIRS` then listed five days and fourteen recordings, while the key Solleva
+        /// was holding produced no frame whatsoever until the 8-second control deadline expired.
+        /// `.keyed` — which answers `MCU&SK&FAIL` — models the POLITE firmware, and every Pocket
+        /// scenario in this repository was written against it, so the whole silent-refusal half
+        /// of the state space was unreachable from any test. That is the half the owner was
+        /// stuck in.
+        case silentToWrongKey(holding: String)
     }
 
     /// ONE FILE THIS RECORDER IS HOLDING, in the reference trace's own fields.
@@ -174,6 +186,7 @@ final class FakePocketBLEStack: @unchecked Sendable {
         case .factoryFresh:                   self.heldKey = nil
         case .keyed(let key):                 self.heldKey = key
         case .blindlyAcknowledges(let key):   self.heldKey = key
+        case .silentToWrongKey(let key):      self.heldKey = key
         }
         self.answersWiFiReadback = answersWiFiReadback
         self.map = map
@@ -408,7 +421,12 @@ final class FakePocketBLEStack: @unchecked Sendable {
     }
 
     /// The firmware's key-write policy, per modelled behaviour.
-    private func answerToKeyWrite(_ offered: String) -> String {
+    ///
+    /// `nil` IS A LEGAL ANSWER AND IT MEANS SILENCE. It used to return `String`, so every
+    /// modelled recorder was obliged to say SOMETHING back — which quietly made "the firmware
+    /// answers a wrong key with nothing at all" unrepresentable in this suite, and that is the
+    /// exact behaviour the reported deadlock was made of.
+    private func answerToKeyWrite(_ offered: String) -> String? {
         lock.lock(); defer { lock.unlock() }
         switch behaviour {
         case .factoryFresh:
@@ -423,6 +441,10 @@ final class FakePocketBLEStack: @unchecked Sendable {
         case .blindlyAcknowledges:
             // Says yes and changes nothing. `heldKey` deliberately does NOT move.
             return "MCU&SK&OK"
+        case .silentToWrongKey(let key):
+            // The write LANDED — `writtenCommands` records it above, so "Solleva sent it one
+            // key" stays checkable — and the recorder simply never speaks again about it.
+            return offered == key ? "MCU&SK&OK" : nil
         }
     }
 
