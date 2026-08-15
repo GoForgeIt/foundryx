@@ -89,9 +89,23 @@ final class FakePocketBLEStack: @unchecked Sendable {
     struct ScriptedRecording: Sendable, Equatable {
         let date: String
         let timestamp: String
+        /// HOW BIG THE FILE ACTUALLY IS, in bytes — what a fixture wants to say.
         let sizeBytes: Int
-        /// The bytes this firmware will actually put on the audio characteristic, which is NOT
-        /// required to be `sizeBytes` long.
+        /// WHAT THE FIRMWARE PUTS ON THE WIRE, which is KILOBYTES:
+        /// `MCU&F&<date>&<timestamp>&<size_kb>` (pocket-libre PROTOCOL.md, File
+        /// Listing). `sizeBytes` used to be written verbatim into that slot, so
+        /// every fixture declared bytes and the wire carried them as kilobytes —
+        /// and the test asserting 4000 -> "1 sec" agreed with the implementation
+        /// while disagreeing with the device. That is how the owner's entire
+        /// library shipped reading "0 sec" and "1 sec". Deriving it here keeps the
+        /// fixtures honest about the file AND the wire honest about the protocol.
+        /// ROUNDED, not truncated. `480_000 / 1024` truncates to 468 KB, which reads
+        /// back as 119.8s and formats as "1 min" — a fixture losing a minute to
+        /// integer division rather than to anything the protocol says. Rounding is
+        /// also the likelier firmware behaviour for a size it reports in whole KB.
+        var sizeKilobytes: Int { (sizeBytes + 512) / 1_024 }
+        /// The bytes this firmware will actually put on the audio characteristic,
+        /// which is NOT required to agree with the listed size.
         let content: Data?
         /// THE SIZE THIS FIRMWARE ANNOUNCES WHEN THE FILE IS ASKED FOR, which is a DIFFERENT
         /// number from the one it listed. Real firmware answers `LIST&<day>` and `U&<file>`
@@ -419,7 +433,7 @@ final class FakePocketBLEStack: @unchecked Sendable {
             let day = String(command.dropFirst("LIST&".count))
             let files = inventory.filter { $0.date == day }
             for file in files {
-                notifyControl("MCU&F&\(file.date)&\(file.timestamp)&\(file.sizeBytes)")
+                notifyControl("MCU&F&\(file.date)&\(file.timestamp)&\(file.sizeKilobytes)")
             }
             notifyControl("MCU&LIST&\(files.count)")
             return
