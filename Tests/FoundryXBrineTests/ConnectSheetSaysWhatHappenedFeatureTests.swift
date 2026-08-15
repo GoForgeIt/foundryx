@@ -27,12 +27,13 @@ final class ConnectSheetSaysWhatHappenedFeatureTests: ProcessGlobalStateTestCase
                 registry: StepRegistry(ConnectSheetSteps.make(world: world)))
             // Pin the POPULATION: the runner asserts only that nothing FAILED, so deleting a
             // scenario would otherwise leave this suite green.
-            XCTAssertEqual(result.passed, 7,
-                           "connect-sheet-says-what-happened must run all 7 scenarios — the "
+            XCTAssertEqual(result.passed, 9,
+                           "connect-sheet-says-what-happened must run all 9 scenarios — the "
                                + "two that hold the scan fold (and that it strands nobody), "
                                + "the three that hold one sentence per failure, the one that "
-                               + "holds the rescan a lost peripheral now gets, and the one "
-                               + "that holds the radio being released")
+                               + "holds the rescan a lost peripheral now gets, the one "
+                               + "that holds the radio being released, and the two that hold "
+                               + "the notify-before-write ordering a real recorder depends on")
         } catch {
             world.cleanup()
             throw error
@@ -142,6 +143,9 @@ private final class ConnectSheetWorld {
     private var revealed: RecordingDeviceScanList?
 
     private var stack: FakePocketBLEStack?
+    /// Whether a held notify-confirmation should eventually arrive, as a real radio's
+    /// would. False models a subscription that never takes.
+    private var releaseConfirmationAfterTap = false
     private var outcome: RecordingDeviceAttachOutcome?
     private var attachment: RecordingDeviceAttachment?
     private var secrets = InMemoryPocketSecretStore()
@@ -199,6 +203,26 @@ private final class ConnectSheetWorld {
             staged.reachability.retrievableByIdentifier = false
             staged.reachability.answersScan = false
             stack = staged
+
+        case "a recorder that has not yet confirmed it will send replies":
+            // The confirmation is HELD, then released, so the product's wait is what
+            // makes the ordering hold rather than the fake being fast.
+            let holding = FakePocketBLEStack(deviceId: Self.recorderId,
+                                             deviceName: Self.recorderName,
+                                             acceptedSecret: Self.sessionSecret)
+            holding.holdNotifyConfirmation = true
+            releaseConfirmationAfterTap = true
+            stack = holding
+
+        case "a recorder that never confirms it will send replies":
+            // Held and NEVER released: the subscription simply never takes. This is the
+            // failure that used to be reported as "couldn't reach the recorder".
+            let never = FakePocketBLEStack(deviceId: Self.recorderId,
+                                           deviceName: Self.recorderName,
+                                           acceptedSecret: Self.sessionSecret)
+            never.holdNotifyConfirmation = true
+            releaseConfirmationAfterTap = false
+            stack = never
 
         case "a recorder that connects and then never says what it can do":
             let staged = FakePocketBLEStack(deviceId: Self.recorderId,
@@ -279,6 +303,16 @@ private final class ConnectSheetWorld {
                 recovery: nil,
                 deadlines: .init(powerOn: 2, connect: 1, discovery: 1, control: 1))
             self.attachment = attachment
+            // A held confirmation is released mid-attach, the way a radio's would
+            // arrive after the subscription settles. The product must not have written
+            // anything before this fires — which is what the ordering step asserts.
+            if releaseConfirmationAfterTap {
+                let s = stack
+                Task.detached {
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                    s.confirmNotifications()
+                }
+            }
             outcome = await attachment.attach(peripheralIdentifier: stack.deviceId,
                                               advertisedName: stack.deviceName)
         default:
@@ -439,6 +473,33 @@ private final class ConnectSheetWorld {
                            "the rescan carried a service filter — a stored-file recorder "
                                + "advertises no live-audio service and would never answer it")
 
+        case "no command was written before that confirmation arrived":
+            // The assertion the recorder's protocol actually requires. Mutation-checked:
+            // delete the `wait(for: .notifying …)` in RecordingDeviceAttachment and this
+            // step reports the exact command that jumped the queue — in practice
+            // "APP&SK&…", the key itself, written into a channel with no listener.
+            if let early = (stack as? FakePocketBLEStack)?.commandWrittenBeforeNotifyConfirmed {
+                throw BrineStepError(
+                    "a command was written before the recorder confirmed it would answer: "
+                    + String(early.prefix(8)) + "… (a reply could not have arrived)")
+            }
+
+        case "the sheet says it connected but stopped responding":
+            let line = RecordingDeviceAttachPresentation.line(
+                for: .notificationsNeverEnabled)
+            guard line.contains("stopped responding") else {
+                throw BrineStepError("expected a 'stopped responding' sentence, got: \(line)")
+            }
+
+        case "that sentence does not claim the recorder could not be reached":
+            let line = RecordingDeviceAttachPresentation.line(
+                for: .notificationsNeverEnabled)
+            guard !line.lowercased().contains("couldn't reach"),
+                  !line.lowercased().contains("could not reach") else {
+                throw BrineStepError(
+                    "the line blames the link for a recorder that connected: \(line)")
+            }
+
         case "the attempt is holding no central manager afterwards":
             guard let attachment else { throw BrineStepError("no attempt was made") }
             XCTAssertFalse(attachment.isHoldingRadio,
@@ -474,6 +535,8 @@ private enum ConnectSheetSteps {
             "a recorder this iPhone cannot look up but which is still advertising",
             "a signed-in account and a discovered recorder FoundryX already holds the key for",
             "the shipped connect-failure copy",
+            "a recorder that has not yet confirmed it will send replies",
+            "a recorder that never confirms it will send replies",
         ]
         let whens = ["the connect sheet's list is drawn"]
         let asyncWhens = ["I tap that discovered device"]
@@ -494,6 +557,9 @@ private enum ConnectSheetSteps {
             "every one of those sentences is in the population the brand-free gate is held over",
             "the app finds it with a scan and adopts it anyway",
             "the attempt is holding no central manager afterwards",
+            "no command was written before that confirmation arrived",
+            "the sheet says it connected but stopped responding",
+            "that sentence does not claim the recorder could not be reached",
         ]
         var steps = givens.map { phrase in
             defineStep(phrase) { context, _, _ in

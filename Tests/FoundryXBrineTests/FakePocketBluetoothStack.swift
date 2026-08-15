@@ -288,6 +288,10 @@ final class FakePocketBLEStack: @unchecked Sendable {
     /// SECOND attachment registers before it runs, and the new session is told its link
     /// dropped before it ever opened. A real radio cannot do that; each attachment builds its
     /// own `CBCentralManager` and only ever hears its own delegate callbacks.
+    fileprivate func holdConfirmation(_ fire: @escaping () -> Void) {
+        lock.lock(); pendingNotifyConfirmations.append(fire); lock.unlock()
+    }
+
     fileprivate func deliver(_ body: @escaping (BLEEventSink) -> Void) {
         lock.lock()
         let queue = self.queue
@@ -338,7 +342,42 @@ final class FakePocketBLEStack: @unchecked Sendable {
 
     /// THE FIRMWARE'S ANSWERS. Only the reference-trace control frames, and only for the
     /// commands the adoption chain issues.
+    /// THE ORDERING THE RECORDER DEPENDS ON.
+    ///
+    /// `APP&SK&<key>` is answered over a NOTIFICATION on the metadata characteristic
+    /// (pocket-libre PROTOCOL.md: 001120A3, Write+Notify). A command written before
+    /// CoreBluetooth has confirmed the subscription has nowhere to be answered — the
+    /// recorder never sends, and the app waits forever on a link that is plainly up.
+    /// Recorded here so a scenario can assert it instead of hoping.
+    private(set) var notifyConfirmed = false
+    private(set) var commandWrittenBeforeNotifyConfirmed: String?
+    /// Widen the window so the race is deterministic under test rather than incidental.
+    var holdNotifyConfirmation = false
+    private var pendingNotifyConfirmations: [() -> Void] = []
+
+    /// Release a held confirmation, as the radio eventually would.
+    func confirmNotifications() {
+        lock.lock()
+        let pending = pendingNotifyConfirmations
+        pendingNotifyConfirmations = []
+        holdNotifyConfirmation = false
+        lock.unlock()
+        for p in pending { p() }
+    }
+
+    fileprivate func noteNotifyConfirmed() {
+        lock.lock(); notifyConfirmed = true; lock.unlock()
+    }
+
     fileprivate func handleWrite(_ data: Data, to characteristic: FakePocketBLECharacteristic) {
+        if characteristic.uuid == Self.characteristicUUID(map.command) {
+            lock.lock()
+            if !notifyConfirmed, commandWrittenBeforeNotifyConfirmed == nil {
+                commandWrittenBeforeNotifyConfirmed =
+                    String(data: data, encoding: .ascii) ?? "<non-ascii>"
+            }
+            lock.unlock()
+        }
         guard characteristic.uuid == Self.characteristicUUID(map.command),
               let text = String(data: data, encoding: .ascii),
               text.hasPrefix("APP&") else { return }
@@ -635,10 +674,16 @@ final class FakePocketBLEPeripheral: BLEPeripheral, @unchecked Sendable {
 
     func setNotifyValue(_ enabled: Bool, for characteristic: BLECharacteristic) {
         (characteristic as? FakePocketBLECharacteristic)?.isNotifying = enabled
-        stack.deliver { [weak self] sink in
+        let fire = { [weak self] in
             guard let self else { return }
-            sink.blePeripheral(self, didUpdateNotificationStateFor: characteristic, error: nil)
+            self.stack.noteNotifyConfirmed()
+            self.stack.deliver { sink in
+                sink.blePeripheral(self, didUpdateNotificationStateFor: characteristic, error: nil)
+            }
         }
+        // Held, a scenario can prove the product WAITS. Released immediately, every
+        // other scenario behaves exactly as before.
+        if stack.holdNotifyConfirmation { stack.holdConfirmation(fire) } else { fire() }
     }
 
     func maximumWriteValueLength(for type: CBCharacteristicWriteType) -> Int { 180 }

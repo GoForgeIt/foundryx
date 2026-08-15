@@ -65,3 +65,22 @@ Feature: The connect sheet is legible — a short list, and a failure that says 
     Given a signed-in account and a discovered recorder FoundryX already holds the key for
     When I tap that discovered device
     Then the attempt is holding no central manager afterwards
+
+  # THE ORDERING A REAL POCKET DEPENDS ON, asserted rather than assumed.
+  #
+  # `APP&SK&<key>` is answered over a NOTIFICATION (pocket-libre PROTOCOL.md:
+  # characteristic 001120A3, Write+Notify). CoreBluetooth confirms a subscription
+  # asynchronously, so a command written before that confirmation has nowhere to be
+  # answered — the recorder never replies and the app waits on a link that is plainly
+  # up. Build 779594 did exactly this against Nick's recorder: the attach reached
+  # providingKey, wrote the key, and nothing ever came back.
+  Scenario: no command is written to a recorder before it has confirmed it will answer
+    Given a recorder that has not yet confirmed it will send replies
+    When I tap that discovered device
+    Then no command was written before that confirmation arrived
+
+  Scenario: a recorder that never confirms it will answer is not blamed on the link
+    Given a recorder that never confirms it will send replies
+    When I tap that discovered device
+    Then the sheet says it connected but stopped responding
+    And that sentence does not claim the recorder could not be reached
