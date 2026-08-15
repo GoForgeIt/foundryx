@@ -23,6 +23,21 @@ name: ios-publish
 on:
   push:
     branches: [main]
+  # A SHIP MUST BE REQUESTABLE WITHOUT A DUMMY COMMIT.
+  #
+  # `push` is the only trigger this workflow had, and GitHub honours `[skip ci]`
+  # in the HEAD commit message — so a merge whose last commit is CI-only
+  # SILENTLY SHIPS NOTHING. That is exactly what happened on 2026-08-15: seven
+  # gates passed, `2592706..20d94fe HEAD -> main` succeeded, and no run was
+  # created, because the tip commit was a gate fix tagged [skip ci]. Nothing
+  # failed; the ship simply never existed, which is far harder to notice than a
+  # red run. The convention is right for foundry (it stops CI-only commits
+  # burning runner time) and wrong here, where the same tag suppresses the
+  # deliverable.
+  #
+  # Dispatch closes it: main can always be shipped on request, without inventing
+  # an empty commit to re-trigger a push.
+  workflow_dispatch: {}
   workflow_dispatch: {}
 
 concurrency:
