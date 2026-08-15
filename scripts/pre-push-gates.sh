@@ -86,19 +86,62 @@ resolve_conformance_bins() {
     if [ -n "${current:-}" ] && [ -x "${current}" ]; then
       echo "pre-push: $var = $current (inherited)"; continue
     fi
-    found="$(ls -t "$HOME"/Development/*/target/release/"$bin" 2>/dev/null | head -1)"
-    if [ -z "$found" ]; then
-      # Build where the crate actually lives: ~/Development/foundry tracks
-      # whatever branch is in flight, and on 2026-08-13 that branch had the
-      # crate mid-rename while main had it all along.
-      for root in "$HOME"/Development/foundry "$HOME"/Development/foundry-wt-* "$HOME"/Development/*/foundry; do
-        [ -f "$root/Cargo.toml" ] || continue
-        echo "pre-push: building $pkg ($bin) in $root"
-        if ( cd "$root" && cargo build --release -p "$pkg" --bin "$bin" -q 2>/dev/null ); then
-          found="$root/target/release/$bin"; break
-        fi
-      done
+    # BUILD THE SUBJECT CI BUILDS — the foundry commit in ci/foundry-relay-ref.txt.
+    #
+    # This used to take `ls -t ~/Development/*/target/release/$bin | head -1`, i.e.
+    # the most RECENTLY BUILT copy in any checkout, and failing that compiled
+    # whatever ~/Development/foundry had checked out. Both are unpinned: the local
+    # gate then judges foundryx against a relay nobody proved it against, while
+    # ios-publish builds the pinned ref. ci/foundry-relay-ref.txt was added to stop
+    # exactly this and only half-landed — CI honoured the pin, this gate did not.
+    #
+    # Observed, not theorised: on 2026-08-15 the working tree was 62 commits past
+    # the pin, three of them relay commits including "every cause-specific refusal
+    # names its conjunct in the seam". P3 conformance then failed five scenarios
+    # with the relay answering 403 to GET /p3/challenge — a product-looking failure
+    # caused entirely by compiling a different subject. Local and CI must compile
+    # the same relay or neither result means anything.
+    # The script cd's to the repo toplevel above, so this is relative to it.
+    pin_file="ci/foundry-relay-ref.txt"
+    pin="$(grep -vE '^\s*#|^\s*$' "$pin_file" 2>/dev/null | head -1 | tr -d '[:space:]')"
+    if [ -z "$pin" ]; then
+      echo "PRE-PUSH BLOCKED: no foundry ref pinned in $pin_file — the conformance"
+      echo "relay would be built from a moving HEAD."
+      exit 1
     fi
+    src=""
+    for root in "$HOME"/Development/foundry "$HOME"/Development/*/foundry; do
+      [ -d "$root/.git" ] && { src="$root"; break; }
+    done
+    if [ -z "$src" ]; then
+      echo "PRE-PUSH BLOCKED: no foundry git checkout found to build the pinned relay from."
+      exit 1
+    fi
+    # A detached worktree, never the working tree: building the pin must not touch
+    # whatever branch is in flight, and the worktree is reused across pushes so the
+    # cargo cache stays warm.
+    #
+    # IT LIVES BESIDE ITS SIBLINGS, not in a cache dir. foundry's crates take path
+    # dependencies OUT of the repo (crates/foundry-relay -> ../../../brine-private/
+    # core), so a worktree under ~/.cache resolves that to ~/.cache/brine-private,
+    # which does not exist — cargo then reports "failed to load manifest for
+    # workspace member crates/foundry-relay", naming the crate rather than the
+    # missing sibling. Measured: from ~/Development/<wt> the same path resolves to
+    # ~/Development/brine-private/core, which is there.
+    wt="$HOME/Development/.relay-pin-${pin:0:8}"
+    if [ ! -f "$wt/Cargo.toml" ]; then
+      git -C "$src" cat-file -e "${pin}^{commit}" 2>/dev/null || {
+        echo "PRE-PUSH BLOCKED: pinned foundry commit $pin is not in $src."
+        echo "Fetch it (git -C $src fetch origin) or correct $pin_file."
+        exit 1; }
+      mkdir -p "$(dirname "$wt")"
+      echo "pre-push: materialising pinned foundry $pin"
+      git -C "$src" worktree add --detach --force "$wt" "$pin" >/dev/null 2>&1 || {
+        echo "PRE-PUSH BLOCKED: could not create a worktree for $pin"; exit 1; }
+    fi
+    echo "pre-push: building $pkg ($bin) at pinned foundry ${pin:0:8}"
+    ( cd "$wt" && cargo build --release -p "$pkg" --bin "$bin" -q ) \
+      && found="$wt/target/release/$bin" || found=""
     if [ ! -x "${found:-/nonexistent}" ]; then
       echo "PRE-PUSH BLOCKED: could not resolve $var (binary '$bin' from package"
       echo "'$pkg'). Its conformance lane would report refusals that look like"
