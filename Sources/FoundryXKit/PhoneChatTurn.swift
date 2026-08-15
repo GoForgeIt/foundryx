@@ -39,7 +39,7 @@ public enum PhoneChatTurn {
         model: ChatViewModel,
         client: DoorClient,
         as binding: CaptureAccountScope.AccountBinding,
-        log: DoorLog? = nil,
+        log: DoorLog? = .shared,
         onEvent: (DoorEvent) -> Void = { _ in }
     ) async {
         model.beginUserTurn(text)

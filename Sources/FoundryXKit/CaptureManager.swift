@@ -1549,7 +1549,7 @@ public final class CaptureManager: ObservableObject {
 
     public init(target: DoorTarget,
                 baseDir: URL? = nil,
-                log: DoorLog? = nil,
+                log: DoorLog? = .shared,
                 source: AudioFrameSource,
                 micSource: AudioFrameSource? = nil,
                 attachToSourcesImmediately: Bool = true,

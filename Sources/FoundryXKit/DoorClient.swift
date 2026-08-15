@@ -391,7 +391,7 @@ public final class DoorClient: @unchecked Sendable {
 
     public init(target: DoorTarget,
                 session: URLSession = URLSession(configuration: .ephemeral),
-                log: DoorLog? = nil) {
+                log: DoorLog? = .shared) {
         self.target = target
         self.session = session
         self.log = log

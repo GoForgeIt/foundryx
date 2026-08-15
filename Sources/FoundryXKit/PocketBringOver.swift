@@ -383,7 +383,7 @@ public enum PocketBringOver {
         /// WAL derives the right binding for the root it was actually given.
         public init(baseDir: URL? = nil,
                     binding: CaptureAccountScope.AccountBinding? = nil,
-                    log: DoorLog? = nil) {
+                    log: DoorLog? = .shared) {
             if let baseDir {
                 self.baseDir = baseDir
                 self.binding = binding

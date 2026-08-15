@@ -921,11 +921,15 @@ final class PocketRecorderCheckModel: ObservableObject {
 
     /// The attachment this model opens sessions with: the production one unless a scenario
     /// running inside a DEBUG build has supplied a radio.
-    private static func makeAttachment() -> RecordingDeviceAttachment {
+    /// - Parameter log: the DoorLog that already reaches the relay. Passing it is the whole
+    ///   difference between a failure the owner can only screenshot and one that can be read
+    ///   afterwards: `RecordingDeviceAttachment` logs the exact reason a tap stopped, and
+    ///   with `log: nil` every one of those lines was thrown away.
+    private static func makeAttachment(log: DoorLog? = nil) -> RecordingDeviceAttachment {
         #if DEBUG
         if let factory = attachmentFactoryForScenarios { return factory() }
         #endif
-        return RecordingDeviceAttachment()
+        return RecordingDeviceAttachment(log: log)
     }
 
     /// - Parameter hardwareToken: the DURABLE address of a stored-file recorder, which is the
@@ -1061,7 +1065,8 @@ private struct RecordingDeviceConnectSheet: View {
                                     ? RecordingDeviceConnectPresentation.unnamedDeviceName
                                     : found.name,
                                 detail: attach.attaching == found.id
-                                    ? RecordingDeviceAttachPresentation.connectingLine
+                                    ? (attach.attachPhase?.line
+                                        ?? RecordingDeviceAttachPresentation.connectingLine)
                                     : "Bluetooth · Tap to connect")
                         }
                         .buttonStyle(.plain)
@@ -1323,6 +1328,12 @@ final class RecordingDeviceAttachModel: ObservableObject {
     /// The row currently being attached, so it can say `Connecting…` and the rest can be
     /// disabled. One radio, one tap at a time.
     @Published private(set) var attaching: UUID?
+    /// How far the in-flight attach has got. Nil when nothing is attaching.
+    @Published private(set) var attachPhase: RecordingDeviceAttachPhase?
+    /// The relay-bound log, kept from the tap that opened this ceremony so the key-entry leg
+    /// can report into the same channel. `submitExistingKey` has no `DeviceManager` in scope
+    /// — and a key attempt that fails is precisely the failure worth being able to read.
+    private var diagnosticLog: DoorLog?
     @Published private(set) var inlineMessage: String?
     @Published var showingCeremony = false
     @Published private(set) var ceremonyScreen: PocketOnboardingView.Screen = .setupUnavailable
@@ -1361,7 +1372,10 @@ final class RecordingDeviceAttachModel: ObservableObject {
 
     /// The attachment every path in this model opens a link with: the production one unless a
     /// scenario running inside a DEBUG build has supplied a radio and a custody store.
-    private static func makeAttachment() -> RecordingDeviceAttachment {
+    /// - Parameter log: the relay-bound log. Defaulted to the shared instance so a caller
+    ///   that has none still reports somewhere, and accepted explicitly so the device screen
+    ///   can hand over the very log its `DeviceManager` was built with.
+    private static func makeAttachment(log: DoorLog? = .shared) -> RecordingDeviceAttachment {
         #if DEBUG
         if let seam = scenarioSeam {
             return RecordingDeviceAttachment(makeCentral: seam.makeCentral,
@@ -1370,18 +1384,21 @@ final class RecordingDeviceAttachModel: ObservableObject {
                                              deadlines: seam.deadlines)
         }
         #endif
-        return RecordingDeviceAttachment()
+        return RecordingDeviceAttachment(log: log)
     }
 
     /// The same substitution for the one path that does not build an attachment itself.
-    private static func makeKeyEntryCoordinator() -> PocketSessionKeyEntryCoordinator {
+    private static func makeKeyEntryCoordinator(
+        log: DoorLog?,
+        onPhase: @escaping @Sendable (RecordingDeviceAttachPhase) -> Void
+    ) -> PocketSessionKeyEntryCoordinator {
         #if DEBUG
         if let seam = scenarioSeam {
             return .live(secrets: seam.secrets, makeCentral: seam.makeCentral,
-                         deadlines: seam.deadlines)
+                         deadlines: seam.deadlines, onPhase: onPhase)
         }
         #endif
-        return .live()
+        return .live(log: log, onPhase: onPhase)
     }
 
     func attach(_ found: DiscoveredDevice,
@@ -1391,15 +1408,25 @@ final class RecordingDeviceAttachModel: ObservableObject {
         attaching = found.id
         inlineMessage = nil
         keyEntryMessage = nil
-        let attachment = Self.makeAttachment()
+        self.diagnosticLog = device.diagnosticLog
+        let attachment = Self.makeAttachment(log: device.diagnosticLog)
         self.attachment = attachment
         let name = found.name
         let id = found.id
         ceremonyTarget = (id, name)
         self.onAdopted = onAdopted
+        // A REAL POCKET TAKES LONG ENOUGH HERE TO LOOK LIKE NOTHING HAPPENED. Seven distinct
+        // steps ran behind one static "Connecting…", so an owner watching a slow radio, a
+        // slow service discovery and a slow key handshake saw exactly the same word for all
+        // of them — and reasonably concluded the tap had done nothing.
+        attachPhase = .wakingRadio
+        attachment.observePhases { [weak self] phase in
+            Task { @MainActor in self?.attachPhase = phase }
+        }
         Task {
             let outcome = await attachment.attach(peripheralIdentifier: id, advertisedName: name)
             self.attaching = nil
+            self.attachPhase = nil
             self.attachment = nil
             self.inlineMessage = RecordingDeviceAttachPresentation.inlineMessage(for: outcome)
             switch outcome {
@@ -1746,10 +1773,18 @@ final class RecordingDeviceAttachModel: ObservableObject {
         guard let target = ceremonyTarget, !submittingKey else { return }
         submittingKey = true
         keyEntryMessage = nil
+        // The key leg is the same seven-step attach as a tap on the list, so it says the
+        // same things while it works. Seeded before the first report so the button never
+        // sits on its idle label after a tap.
+        attachPhase = .wakingRadio
+        let coordinator = Self.makeKeyEntryCoordinator(log: diagnosticLog) { [weak self] phase in
+            Task { @MainActor in self?.attachPhase = phase }
+        }
         Task {
-            let outcome = await Self.makeKeyEntryCoordinator()
+            let outcome = await coordinator
                 .submit(key: key, peripheralIdentifier: target.id, advertisedName: target.name)
             self.submittingKey = false
+            self.attachPhase = nil
             if case .adopted = outcome {
                 self.showingCeremony = false
                 self.onAdopted?()

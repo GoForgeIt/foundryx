@@ -157,7 +157,7 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
     private let bundleID: String
     private let log: DoorLog?
 
-    public init(config: OAuthConfig = .fromBundle(), bundleID: String = Bundle.main.bundleIdentifier ?? "com.goforgeit.foundryx", log: DoorLog? = nil) {
+    public init(config: OAuthConfig = .fromBundle(), bundleID: String = Bundle.main.bundleIdentifier ?? "com.goforgeit.foundryx", log: DoorLog? = .shared) {
         self.config = config
         self.bundleID = bundleID
         self.log = log

@@ -50,7 +50,7 @@ public struct HostResolver: Sendable {
     let remote: RemoteConfig
     let log: DoorLog?
 
-    public init(remote: RemoteConfig, log: DoorLog? = nil) {
+    public init(remote: RemoteConfig, log: DoorLog? = .shared) {
         self.remote = remote
         self.log = log
     }

@@ -44,7 +44,7 @@ public final class OmiRestorationSpool: @unchecked Sendable {
     /// `paused` mirrors the user's durable capture intent — a user who paused
     /// capture must NOT be recorded by a background relaunch.
     public init(baseDir: URL = CaptureWAL.documentsCaptures(),
-                log: DoorLog? = nil,
+                log: DoorLog? = .shared,
                 silenceGap: TimeInterval = CaptureSettings.silenceGapSeconds,
                 paused: @escaping () -> Bool = { true },
                 binding: CaptureAccountScope.AccountBinding? = nil,
@@ -68,7 +68,7 @@ public final class OmiRestorationSpool: @unchecked Sendable {
         binding: CaptureAccountScope.AccountBinding,
         root: URL,
         executor: DispatchQueue,
-        log: DoorLog? = nil,
+        log: DoorLog? = .shared,
         silenceGap: TimeInterval = CaptureSettings.silenceGapSeconds,
         paused: @escaping () -> Bool = { true },
         deviceContext: CaptureDeviceContextResolution? = nil

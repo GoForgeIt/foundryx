@@ -66,7 +66,7 @@ public actor DoorConnectionPool {
     /// Run one turn over the shared persistent connection for `config`'s tunnel. The request
     /// bytes + the returned frames are byte-identical to `RelayTransport.roundTrip`, so the
     /// caller parses them the same way. Reconnects + retries ONCE on a dropped connection.
-    public func turn(config: RelayConfig, request: Data, log: DoorLog? = nil) async throws -> [Data] {
+    public func turn(config: RelayConfig, request: Data, log: DoorLog? = .shared) async throws -> [Data] {
         do {
             return try await connection(for: config, log: log).turn(request)
         } catch DoorConnectionError.disconnected {
@@ -80,7 +80,7 @@ public actor DoorConnectionPool {
     /// door's ResponseEnd. If the connection is already dead when the turn starts (no frame
     /// yielded yet), it drops + reconnects + retries ONCE; a drop AFTER frames have streamed
     /// surfaces the error (we don't replay a partially-delivered response).
-    public nonisolated func turnStream(config: RelayConfig, request: Data, log: DoorLog? = nil)
+    public nonisolated func turnStream(config: RelayConfig, request: Data, log: DoorLog? = .shared)
         -> AsyncThrowingStream<Data, Error>
     {
         AsyncThrowingStream { continuation in

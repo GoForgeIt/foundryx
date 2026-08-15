@@ -268,7 +268,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
                 binding: CaptureAccountScope.AccountBinding? = nil,
                 chunkFrames: Int = 50,            // ~1s at Omi's ~50 frames/s
                 session: URLSession = URLSession(configuration: .ephemeral),
-                log: DoorLog? = nil,
+                log: DoorLog? = .shared,
                 upload: (@Sendable (UInt64, Data) async throws -> Void)? = nil) {
         self.captureId = captureId
         self.target = target

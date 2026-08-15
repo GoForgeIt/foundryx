@@ -29,7 +29,7 @@ public enum RelayHTTP {
         accept: String? = nil,
         body: Data? = nil,
         session: URLSession,
-        log: DoorLog? = nil,
+        log: DoorLog? = .shared,
         useMux: Bool = false
     ) async throws -> Response {
         let reqBytes = rawRequest(method: method, path: path, bearer: bearer,

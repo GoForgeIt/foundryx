@@ -71,7 +71,7 @@ public final class RelayTransport: NSObject, @unchecked Sendable {
 
     public init(config: RelayConfig,
                 session: URLSession = URLSession(configuration: .ephemeral),
-                log: DoorLog? = nil) {
+                log: DoorLog? = .shared) {
         self.config = config
         self.session = session
         self.log = log

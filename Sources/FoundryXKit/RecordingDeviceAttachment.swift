@@ -118,6 +118,53 @@ public enum RecordingDeviceAttachOutcome: Equatable, Sendable {
 /// holds that a row may not say "in range", because this phone cannot distinguish out-of-range
 /// from powered-off from connected-to-another-app. The connect sheet was saying exactly that
 /// and worse — "bring it closer" — for every one of these.
+/// WHERE A TAP CURRENTLY IS — the progress twin of `RecordingDeviceUnreachableReason`,
+/// which says where a tap STOPPED. Every phase here names the step whose failure is a
+/// reason there, so the line a row shows while it waits and the line it shows when it
+/// gives up are drawn from one vocabulary rather than two that drift apart.
+///
+/// The row used to show a single static "Connecting…" for the whole sequence — radio,
+/// lookup, connect, service discovery, characteristic discovery, protocol, key. Against
+/// a Pocket that sequence is slow enough for the owner to reasonably conclude the tap
+/// did nothing, which is the report that prompted this ("this step took a while, could
+/// we give some more indication"). The phases are not decoration: an owner who can see
+/// it reached `providingKey` knows the recorder answered, and one stuck at
+/// `findingDevice` knows it never did.
+public enum RecordingDeviceAttachPhase: String, Equatable, Sendable, CaseIterable {
+    /// Waiting for the radio to report powered-on. Fails as `.bluetoothOff` /
+    /// `.bluetoothNeverReported`.
+    case wakingRadio
+    /// Looking the peripheral up, and rescanning if this central has never seen it.
+    /// Fails as `.deviceNotFound`.
+    case findingDevice
+    /// `connect` issued, waiting for the link. Fails as `.connectTimedOut` /
+    /// `.connectRefused`.
+    case connecting
+    /// Listing services. Fails as `.serviceDiscoveryFailed` / `.serviceDiscoveryTimedOut`.
+    case readingServices
+    /// Listing characteristics. Fails as `.characteristicDiscoveryTimedOut`.
+    case readingCharacteristics
+    /// Negotiating the stored-file protocol. Fails as `.protocolNegotiationFailed`.
+    case negotiatingProtocol
+    /// Presenting the session key. Fails as `.handshakeUnanswered`.
+    case providingKey
+
+    /// What the row says. Present tense and about the RECORDER, not about Bluetooth
+    /// internals — an owner watching this wants to know how far their device got, not
+    /// which CoreBluetooth callback is outstanding.
+    public var line: String {
+        switch self {
+        case .wakingRadio:            return "Waking up Bluetooth…"
+        case .findingDevice:          return "Finding your recorder…"
+        case .connecting:             return "Connecting…"
+        case .readingServices:        return "Asking what it offers…"
+        case .readingCharacteristics: return "Reading what it offers…"
+        case .negotiatingProtocol:    return "Opening its recordings…"
+        case .providingKey:           return "Unlocking with your key…"
+        }
+    }
+}
+
 public enum RecordingDeviceUnreachableReason: String, Equatable, Sendable, CaseIterable {
     /// The radio reported a state other than powered-on.
     case bluetoothOff
@@ -406,6 +453,23 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
     private let deadlines: Deadlines
     private let log: DoorLog?
 
+    /// Where the current attempt has got to, for whoever is showing a row. Set before each
+    /// step rather than after, so the line names what is being WAITED ON — the step that a
+    /// slow or hanging device leaves you sitting in is exactly the one worth naming.
+    /// Deliberately not an `@Published`/Combine thing: this type is UI-framework-free and
+    /// tested without one.
+    private var onPhase: (@Sendable (RecordingDeviceAttachPhase) -> Void)?
+    private func report(_ phase: RecordingDeviceAttachPhase) {
+        let sink = lock.withLock { onPhase }
+        log?.info("recording device: \(phase.rawValue)")
+        sink?(phase)
+    }
+
+    /// Observe attach progress. Replaces any previous observer; cleared by `teardown()`.
+    public func observePhases(_ sink: (@Sendable (RecordingDeviceAttachPhase) -> Void)?) {
+        lock.withLock { onPhase = sink }
+    }
+
     private let lock = NSLock()
     private var central: BLECentral?
     private var peripheral: BLEPeripheral?
@@ -439,7 +503,7 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
                 recovery: (any PocketKeyRecoveryStore)? = KeychainPocketKeyRecoveryStore(),
                 deadlines: Deadlines = Deadlines(),
                 queue: DispatchQueue? = nil,
-                log: DoorLog? = nil) {
+                log: DoorLog? = .shared) {
         self.makeCentral = makeCentral
         self.secrets = secrets
         self.recovery = recovery
@@ -528,12 +592,14 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
             central = made
             return made
         }
+        report(.wakingRadio)
         if created.managerState == .poweredOn { fulfil(.poweredOn) }
         try await wait(for: .poweredOn, timeout: deadlines.powerOn,
                        onTimeout: .bluetoothNeverReported)
         guard created.managerState == .poweredOn else {
             throw RecordingDeviceAttachError.unreachable(.bluetoothOff)
         }
+        report(.findingDevice)
         // `retrievePeripherals(withIdentifiers:)` WAS ASSUMED TO BE A SYSTEM LOOKUP, and the
         // comment that used to sit here said so out loud: "not a per-central cache, so the
         // peripheral the pairing scan surfaced on `DeviceManager`'s central is reachable from
@@ -555,11 +621,13 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
         }
         lock.withLock { peripheral = found }
         found.routeEventsToSink()
+        report(.connecting)
         created.connect(found, options: nil)
         try await wait(for: .connected, timeout: deadlines.connect, onTimeout: .connectTimedOut)
 
         // EVERY service, because the app genuinely does not know what this device is yet.
         // Asking for one vendor's service UUID is the same mistake the scan filter was.
+        report(.readingServices)
         found.discoverServices(nil)
         try await wait(for: .services, timeout: deadlines.discovery,
                        onTimeout: .serviceDiscoveryTimedOut)
@@ -570,6 +638,7 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
             outstandingServices = services.count
             if services.isEmpty { satisfied.insert(.characteristics) }
         }
+        report(.readingCharacteristics)
         for service in services { found.discoverCharacteristics(nil, for: service) }
         try await wait(for: .characteristics, timeout: deadlines.discovery,
                        onTimeout: .characteristicDiscoveryTimedOut)
@@ -669,6 +738,11 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
     private func adoptStoredFileRecorder(
         id: UUID, advertisedName: String, mint: PocketMintConsent?
     ) async -> RecordingDeviceAttachOutcome {
+        // The graph is read; everything past here is the recorder answering for itself —
+        // transport, then the key. These are the two slowest steps against a real Pocket
+        // and the two an owner most wants distinguished: "it never answered" and "it
+        // answered but would not take my key" are completely different problems.
+        report(.negotiatingProtocol)
         switch await establishStoredFileSession(id: id, advertisedName: advertisedName,
                                                 mint: mint) {
         case .blocked(let outcome):
@@ -721,6 +795,7 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
             return .blocked(.unreachable(.noDurableIdentity))
         }
 
+        report(.providingKey)
         // THE SHIPPED CUSTODY ORDER, THROUGH THE SHIPPED COORDINATOR. Restore first; never a
         // speculative fresh write. `coexistenceAvailable` means "FoundryX holds no key for
         // this recorder" — and only THEN, and only with consent in hand, is a key minted.
@@ -863,6 +938,9 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
         lock.lock()
         guard !torndown else { lock.unlock(); return }
         torndown = true
+        // Drop the phase observer with everything else it owns. A sink that outlives the
+        // attempt is a retained view reporting progress for a device nobody is attaching.
+        onPhase = nil
         generation &+= 1
         let peripheral = self.peripheral
         let central = self.central

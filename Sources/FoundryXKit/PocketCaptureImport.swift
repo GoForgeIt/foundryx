@@ -82,7 +82,7 @@ public enum PocketCaptureImport {
         lastClockSet: Date? = nil,
         binding: CaptureAccountScope.AccountBinding?,
         baseDir: URL,
-        log: DoorLog? = nil
+        log: DoorLog? = .shared
     ) throws -> PocketImportedCapture {
         // THE SHIPPED CLOCK RULE, not a second one. `PocketConversationClock` already decides
         // what to do with a recorder whose clock is ahead of this phone or predates the moment

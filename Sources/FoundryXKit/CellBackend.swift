@@ -35,14 +35,14 @@ public struct CellBackend: CaptureBackend, @unchecked Sendable {
     /// The concrete door client the app drives for chat / models / approvals.
     public let door: DoorClient
 
-    public init(target: DoorTarget, log: DoorLog? = nil) {
+    public init(target: DoorTarget, log: DoorLog? = .shared) {
         self.target = target
         self.door = DoorClient(target: target, log: log)
     }
 
     /// Build a CellBackend for a cell URL + resolved bearer. Validates the URL is a
     /// well-formed HTTPS address.
-    public init(cellURL: String, bearer: String, log: DoorLog? = nil) throws {
+    public init(cellURL: String, bearer: String, log: DoorLog? = .shared) throws {
         let target = try Self.makeTarget(cellURL: cellURL, bearer: bearer)
         self.init(target: target, log: log)
     }

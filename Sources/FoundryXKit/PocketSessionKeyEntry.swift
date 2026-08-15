@@ -94,16 +94,23 @@ public actor PocketSessionKeyEntryCoordinator {
 
     /// The composition the app uses. A fresh `RecordingDeviceAttachment` per submission,
     /// because each one owns and tears down its own central.
+    /// - Parameter onPhase: how far the attempt has got. The key leg runs the SAME
+    ///   `RecordingDeviceAttachment.attach` as a tap on the device list, so it goes through
+    ///   the same seven steps and deserves the same reporting. Without it "Use this key"
+    ///   only greys out: the owner is given no evidence that a radio is being used at all,
+    ///   which is how a slow recorder reads as a dead button.
     public static func live(
         secrets: any PocketSecretStore = KeychainPocketSecretStore(),
         makeCentral: @escaping @Sendable (BLEEventSink, DispatchQueue, String?) -> BLECentral
             = CoreBluetoothCentral.make,
         deadlines: RecordingDeviceAttachment.Deadlines = .init(),
-        log: DoorLog? = nil
+        log: DoorLog? = .shared,
+        onPhase: (@Sendable (RecordingDeviceAttachPhase) -> Void)? = nil
     ) -> PocketSessionKeyEntryCoordinator {
         PocketSessionKeyEntryCoordinator(secrets: secrets) { id, name in
             let attachment = RecordingDeviceAttachment(
                 makeCentral: makeCentral, secrets: secrets, deadlines: deadlines, log: log)
+            attachment.observePhases(onPhase)
             return await attachment.attach(peripheralIdentifier: id, advertisedName: name)
         }
     }

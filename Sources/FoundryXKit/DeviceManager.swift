@@ -306,6 +306,19 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     }
 
     private let log: DoorLog?
+    /// The SAME log this manager was built with, so the recording-device attach chain can
+    /// report into the channel that already reaches the relay.
+    ///
+    /// `DoorLog` is not a local logger — `setRemoteSink` is wired in production from the
+    /// gateway URL in Info.plist and `flush()` POSTs the entries. `RecordingDeviceAttachment`
+    /// was constructed with `log: nil`, so every line it writes about WHERE A TAP STOPPED —
+    /// which is the entire purpose of `RecordingDeviceUnreachableReason` — was discarded at
+    /// the moment it mattered most: a failure on the owner's handset, unreadable afterwards.
+    ///
+    /// Exposing it does not widen what may be logged. The redaction rule stands: nothing that
+    /// leaves the handset carries a session key or an account scope
+    /// (`RecordingDeviceLogRedaction`), because this channel is plain text and unauthenticated.
+    public var diagnosticLog: DoorLog? { log }
     private let bleQueue = DispatchQueue(label: "foundryx.device-ble")
     /// How the central is obtained. The app never supplies one; the S04 acceptance proof
     /// supplies a fake that drives the SAME sink on the SAME queue, which is the only way
@@ -385,7 +398,7 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     /// instance (two centrals with the same restore identifier are undefined):
     /// the AppDelegate's bluetooth-restoration bootstrap and the UI's MainTabs.
     /// First caller's log wins (both wire the same remote diag sink).
-    public static func shared(log: DoorLog? = nil) -> DeviceManager {
+    public static func shared(log: DoorLog? = .shared) -> DeviceManager {
         sharedLock.lock(); defer { sharedLock.unlock() }
         if let s = sharedInstance { return s }
         let s = DeviceManager(log: log)
@@ -453,7 +466,7 @@ public final class DeviceManager: NSObject, ObservableObject, AccountAudioSource
     static let savedNameKey = "foundryx.omi.peripheral-name"
     static let savedDateKey = "foundryx.omi.last-connected"
 
-    public init(log: DoorLog? = nil,
+    public init(log: DoorLog? = .shared,
                 makeCentral: @escaping BLECentralFactory = CoreBluetoothCentral.make) {
         self.log = log
         self.makeCentral = makeCentral
@@ -1387,7 +1400,7 @@ public final class DeviceManager: ObservableObject, AccountAudioSourceExposure, 
     public static let restoreIdentifier = "foundryx.omi.central"
     private static let sharedLock = NSLock()
     private nonisolated(unsafe) static var sharedInstance: DeviceManager?   // sharedLock-guarded
-    public static func shared(log: DoorLog? = nil) -> DeviceManager {
+    public static func shared(log: DoorLog? = .shared) -> DeviceManager {
         sharedLock.lock(); defer { sharedLock.unlock() }
         if let s = sharedInstance { return s }
         let s = DeviceManager(log: log)
@@ -1415,7 +1428,7 @@ public final class DeviceManager: ObservableObject, AccountAudioSourceExposure, 
     @Published public private(set) var saved: SavedOmi?
     @Published public private(set) var batteryLevel: Int?
     public var isBatteryLow: Bool { (batteryLevel ?? 100) < 20 }
-    public init(log: DoorLog? = nil) { _ = log }
+    public init(log: DoorLog? = .shared) { _ = log }
     public static var hasSavedDevice: Bool { false }
     public func start() {
         exposureLock.lock()

@@ -72,7 +72,7 @@ public final class RemoteSession: ObservableObject {
     private let log: DoorLog?
     private var lastSignInProvider: AuthProvider?
 
-    public init(log: DoorLog? = nil) {
+    public init(log: DoorLog? = .shared) {
         self.auth = FoundryAuth(log: log)
         self.remote = RemoteConfig.fromBundle()
         self.log = log
@@ -116,10 +116,18 @@ public final class RemoteSession: ObservableObject {
 
     private func shipDiag() {
         guard let remote else { return }
-        let b = Bundle.main.infoDictionary
-        let ver = (b?["CFBundleShortVersionString"] as? String) ?? "?"
-        let build = (b?["CFBundleVersion"] as? String) ?? "?"
-        let header = "FoundryX \(ver)(\(build)) email=\(email ?? "-") status=\(status) provs=\(providers.map { $0.rawValue })"
+        // THE EMAIL IS GONE FROM THE WIRE. This header used to carry `email=…`, and
+        // `GET /diag/log` answers 200 to anyone — measured, not assumed — so the one field
+        // that identified a person was the one field a stranger could read. It was also
+        // inconsistent with this repo's own rule: `RecordingDeviceStore` keeps the account
+        // scope off this channel precisely BECAUSE the scope is computable from an email.
+        //
+        // What replaces it is strictly more useful for diagnosis and carries no person: the
+        // shared envelope's anonymous install id correlates every line from one handset —
+        // door, perf and device alike — which the email never did, because the other two
+        // producers did not emit it.
+        let header = FoundryXDiagContext.current().wireHeader
+            + " session_status=\(status) providers=\(providers.map { $0.rawValue }.joined(separator: "+"))"
         let payload = ([header] + diag).joined(separator: "\n")
         var req = URLRequest(url: remote.gatewayHTTPURL.appendingPathComponent("diag/log"))
         req.httpMethod = "POST"
@@ -192,7 +200,12 @@ public final class RemoteSession: ObservableObject {
             isSignedIn = true
             email = Self.identityLabel(id)
             identityRevision = CaptureAccountScope.identityGeneration
-            note("signIn(\(provider.rawValue)) OK email=\(id.email ?? "-")")
+            // NOT THE ADDRESS — whether there was one. `note` appends to the buffer that
+            // `shipDiag` POSTs, so this line went over the wire too; removing `email=` from
+            // the header alone would have left the address travelling one line further down.
+            // What a diagnosis needs from here is "did the provider return an identity", and
+            // that is a boolean.
+            note("signIn(\(provider.rawValue)) OK email_present=\(id.email != nil)")
             await resolve()
         } catch AuthError.cancelled {
             note("signIn cancelled")

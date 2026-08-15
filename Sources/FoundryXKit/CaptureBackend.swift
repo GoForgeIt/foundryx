@@ -38,7 +38,7 @@ extension CaptureManager {
     public convenience init(target: DoorTarget,
                             backend: CaptureBackend,
                             baseDir: URL? = nil,
-                            log: DoorLog? = nil,
+                            log: DoorLog? = .shared,
                             source: AudioFrameSource,
                             micSource: AudioFrameSource? = nil,
                             attachToSourcesImmediately: Bool = true,

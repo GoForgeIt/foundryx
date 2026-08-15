@@ -59,7 +59,7 @@ public actor DoorConnection {
     }
     private var turns: [UInt64: Turn] = [:]
 
-    public init(channel: MuxFrameChannel, log: DoorLog? = nil) {
+    public init(channel: MuxFrameChannel, log: DoorLog? = .shared) {
         self.channel = channel
         self.log = log
     }

@@ -182,7 +182,7 @@ public final class UsageSink: @unchecked Sendable {
     private let log: DoorLog?
 
     public init(ctx: UsageContext, target: DoorTarget? = nil,
-                session: URLSession = .shared, log: DoorLog? = nil) {
+                session: URLSession = .shared, log: DoorLog? = .shared) {
         self.ctx = ctx
         self.target = target
         self.session = session

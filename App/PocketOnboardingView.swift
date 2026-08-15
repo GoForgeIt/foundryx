@@ -40,6 +40,10 @@ struct PocketOnboardingView: View {
     /// invented in a SwiftUI body is a second, unasserted implementation of the app's voice.
     var keyEntryMessage: String? = nil
     var isSubmittingKey: Bool = false
+    /// How far the in-flight key attempt has got, so the button reports progress instead of
+    /// only greying out. Reported against a real recorder that took long enough for the tap
+    /// to read as a dead button.
+    var keyAttemptPhase: RecordingDeviceAttachPhase? = nil
     var onSubmitKey: ((String) -> Void)? = nil
     /// The key this recorder was set up with, and ONLY once the owner has asked to see it.
     /// `nil` covers both "not asked for yet" and "custody has none", which the screen words
@@ -345,13 +349,26 @@ struct PocketOnboardingView: View {
                         .accessibilityIdentifier("pocket-session-key-message")
                 }
 
-                Button(PocketSessionKeyEntryPresentation.submitAction) {
+                Button {
                     // HANDED OVER AND DROPPED. The coordinator owns it from here; keeping a
                     // copy in view state past the submission buys nothing and keeps a live
                     // credential in the view hierarchy for as long as the screen is up.
                     let candidate = sessionKeyDraft
                     sessionKeyDraft = ""
                     onSubmitKey?(candidate)
+                } label: {
+                    // SAY WHICH STEP, NOT JUST "BUSY". The attempt is the same seven-step
+                    // attach the device list runs, and against a real recorder it is slow
+                    // enough that a button which only greys out reads as one that did
+                    // nothing. The phase line comes from the same vocabulary the failure
+                    // messages use, so "Finding your recorder…" and a later "couldn't reach
+                    // the recorder" are visibly the same story.
+                    HStack(spacing: 8) {
+                        if isSubmittingKey { ProgressView().controlSize(.small) }
+                        Text(isSubmittingKey
+                                ? (keyAttemptPhase?.line ?? PocketSessionKeyEntryPresentation.submitAction)
+                                : PocketSessionKeyEntryPresentation.submitAction)
+                    }
                 }
                 .buttonStyle(PocketActionButtonStyle(primary: true))
                 .disabled(isSubmittingKey)

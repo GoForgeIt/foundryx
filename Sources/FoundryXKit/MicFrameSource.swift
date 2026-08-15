@@ -220,7 +220,7 @@ public final class MicFrameSource: NSObject, AccountAudioSourceExposure, @unchec
     private let exposureLock = NSLock()
     private var accountExposureClosed = false // exposureLock only
 
-    public init(log: DoorLog? = nil) {
+    public init(log: DoorLog? = .shared) {
         self.log = log
         super.init()
     }
@@ -561,7 +561,7 @@ public final class MicFrameSource: AccountAudioSourceExposure, @unchecked Sendab
     /// Parity with the iOS source's direct-PCM tap (unused on this host platform).
     public var onPCM: ((AVAudioPCMBuffer) -> Void)?
     #endif
-    public init(log: DoorLog? = nil) { _ = log }
+    public init(log: DoorLog? = .shared) { _ = log }
     public func start() {
         exposureLock.lock()
         let closed = exposureClosed

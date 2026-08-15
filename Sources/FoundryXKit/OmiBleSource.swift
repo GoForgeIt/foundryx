@@ -33,7 +33,7 @@ public final class OmiBleSource: NSObject, AudioFrameSource, @unchecked Sendable
     private var peripheral: CBPeripheral?
     private let headerBytes = 3   // Omi packet header: [seq:2][index:1]
 
-    public init(log: DoorLog? = nil) {
+    public init(log: DoorLog? = .shared) {
         self.log = log
         super.init()
     }
@@ -117,7 +117,7 @@ extension OmiBleSource: CBCentralManagerDelegate, CBPeripheralDelegate {
 public final class OmiBleSource: AudioFrameSource, @unchecked Sendable {
     public var onFrame: ((Data) -> Void)?
     public var onState: ((AudioSourceState) -> Void)?
-    public init(log: DoorLog? = nil) { _ = log }
+    public init(log: DoorLog? = .shared) { _ = log }
     public func start() { onState?(.failed("CoreBluetooth unavailable on this platform")) }
     public func stop() { onState?(.stopped) }
 }

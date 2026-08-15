@@ -130,7 +130,7 @@ public final class DoorArtifactSource: ArtifactSource, @unchecked Sendable {
     private let session: URLSession
     private let log: DoorLog?
 
-    public init(target: DoorTarget, session: URLSession = .shared, log: DoorLog? = nil) {
+    public init(target: DoorTarget, session: URLSession = .shared, log: DoorLog? = .shared) {
         self.target = target
         self.session = session
         self.log = log

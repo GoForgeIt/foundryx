@@ -12,6 +12,12 @@ import Foundation
 #if canImport(Combine)
 import Combine
 #endif
+// UIKit supplies the device/battery fields of the shipped envelope below. Guarded and
+// top-level — nesting it inside the Combine check would tie one framework's availability
+// to another's for no reason.
+#if canImport(UIKit)
+import UIKit
+#endif
 
 public final class DoorLog: ObservableObject, @unchecked Sendable {
     public enum Level: String, Sendable { case info, warn, error }
@@ -41,6 +47,31 @@ public final class DoorLog: ObservableObject, @unchecked Sendable {
     public nonisolated static let flushInterval: TimeInterval = 15
 
     public init(cap: Int = 500) { self.cap = cap }
+
+    /// THE PROCESS-WIDE DIAGNOSTIC LOG.
+    ///
+    /// Nineteen production call sites in `App/` constructed a type that accepts a `DoorLog`
+    /// and passed nothing, so everything those types reported was discarded — including
+    /// `RecordingDeviceAttachment`, whose entire `RecordingDeviceUnreachableReason` taxonomy
+    /// exists to say WHERE A TAP STOPPED, and `FoundryAuth` on the account-deletion screen,
+    /// which failed for the owner with nothing left behind to read. Measured against the
+    /// live relay afterwards: 27 lines total, and not one `recording device:` line.
+    ///
+    /// The reason they passed nothing is structural, not careless: most of those views have
+    /// no log in scope and never did. Threading one through eight view files would fix the
+    /// nineteen and lose the twentieth. A diagnostic log is genuinely process-wide, so this
+    /// is the shape that makes "every log reaches the relay" true by default rather than by
+    /// vigilance.
+    ///
+    /// Cheap when unconfigured: with no `setRemoteSink`, `flush` returns immediately and
+    /// nothing leaves the device, which is what keeps it inert under test.
+    public static let shared = DoorLog()
+
+    /// How the shipped header is built. Overridable so tests can pin the wire shape without
+    /// a device, and so a host that already knows its context does not re-read UIKit.
+    public nonisolated(unsafe) static var envelope: @Sendable () -> FoundryXDiagContext = {
+        FoundryXDiagContext.current()
+    }
 
     /// Point the log at the relay diag endpoint (e.g. `…:8788/diag/log`) and start the
     /// periodic backstop flush. Emits a one-line transport marker so the desktop/relay
@@ -106,7 +137,13 @@ public final class DoorLog: ObservableObject, @unchecked Sendable {
         shipped = entries.count
         let fmt = ISO8601DateFormatter()
         fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let body = (["FoundryX device log"] + batch.map {
+        // ONE HEADER, EVERY BATCH. It used to say "FoundryX device log" and nothing else, so
+        // a line on the relay could not be attributed to a build, a device or an install —
+        // which made the log readable and not diagnosable. Re-read per flush rather than
+        // captured once: battery and free space are the fields most likely to explain what
+        // the batch is about, and a value frozen at launch would describe a phone that no
+        // longer exists.
+        let body = ([Self.envelope().wireHeader] + batch.map {
             "\(fmt.string(from: $0.ts)) [\($0.level.rawValue.uppercased())] \($0.text)"
         }).joined(separator: "\n")
         var req = URLRequest(url: sink)
@@ -124,5 +161,119 @@ public final class DoorLog: ObservableObject, @unchecked Sendable {
         return entries
             .map { "\(fmt.string(from: $0.ts)) [\($0.level.rawValue.uppercased())] \($0.text)" }
             .joined(separator: "\n")
+    }
+}
+
+/// THE ONE ENVELOPE EVERY SHIPPED LOG LINE TRAVELS UNDER.
+///
+/// Before this there were three, and no two agreed:
+///
+///     DoorLog        "FoundryX device log"                    — nothing at all
+///     RemoteSession  "FoundryX 1.2(778840) email=… status=…"  — the only identity, and it was PII
+///     PerfTelemetry  "perf build=778840 dev=65b1b58e span=…"  — build + anonymous install
+///
+/// So a line that reached the relay could not reliably be attributed to a build, a device, or
+/// even a person's install, and the one field that DID identify anybody was an email address
+/// on an endpoint that serves `GET /diag/log` to anyone who asks.
+///
+/// This adopts the discipline already written down for the fleet in `foundry-kit-telemetry`
+/// (`standard.rs`): PINNED field names so two producers cannot name the same thing
+/// differently, and "every value is a content-free safe token or a numeric measure". The
+/// identity primitive is the one `PerfTelemetry` already chose and documented — an
+/// `identifierForVendor`-derived install id that "segments lines by install WITHOUT
+/// identifying the person" — so correlation survives and the person does not appear.
+///
+/// WHAT IS DELIBERATELY ABSENT: email, account scope, display name, coordinates. Nick asked
+/// for "which user" and "location"; on a publicly readable endpoint the honest form of
+/// "which user" is a stable anonymous install id, and the honest form of "location" is a
+/// locale + timezone (which is what actually explains behaviour) rather than a position.
+public struct FoundryXDiagContext: Sendable, Equatable {
+    /// Marketing version, e.g. "1.2".
+    public let version: String
+    /// Build number — the field that answers "is this the fix?", e.g. "778840".
+    public let build: String
+    /// Stable per-install anonymous id. Same derivation as `PerfTelemetry.installId`, so a
+    /// `perf` line and a `door` line from one handset correlate.
+    public let installId: String
+    /// Hardware identifier, e.g. "iPhone15,2" — a token, not a marketing name.
+    public let device: String
+    /// OS token, e.g. "iOS-18.2".
+    public let os: String
+    /// Battery as a percentage 0–100, or -1 when unknown. Numeric measure, per the standard.
+    public let batteryPct: Int
+    /// Charging state as a closed categorical token: charging | unplugged | full | unknown.
+    public let power: String
+    /// Locale token, e.g. "en_US".
+    public let locale: String
+    /// Timezone identifier, e.g. "America/Denver".
+    public let timezone: String
+    /// Free disk space in MB, or -1 when unknown.
+    public let freeMB: Int
+
+    public init(version: String, build: String, installId: String, device: String, os: String,
+                batteryPct: Int, power: String, locale: String, timezone: String, freeMB: Int) {
+        self.version = version; self.build = build; self.installId = installId
+        self.device = device; self.os = os; self.batteryPct = batteryPct; self.power = power
+        self.locale = locale; self.timezone = timezone; self.freeMB = freeMB
+    }
+
+    /// The wire form. ONE pinned order, `key=value`, space-separated — the shape server-side
+    /// grep and any future parser depend on, which is why it is built here and asserted in
+    /// tests rather than interpolated at each call site.
+    public var wireHeader: String {
+        "fx app=foundryx version=\(version) build=\(build) install=\(installId) "
+        + "device=\(device) os=\(os) battery=\(batteryPct) power=\(power) "
+        + "locale=\(locale) tz=\(timezone) freeMB=\(freeMB)"
+    }
+
+    /// Read the live context off this handset. Pure-Foundation fields work everywhere; the
+    /// UIKit ones degrade to explicit unknowns rather than being silently omitted, because a
+    /// missing field and an unknown field are different facts.
+    public static func current(bundle: Bundle = .main) -> FoundryXDiagContext {
+        let info = bundle.infoDictionary
+        let version = (info?["CFBundleShortVersionString"] as? String) ?? "?"
+        let build = (info?["CFBundleVersion"] as? String) ?? "?"
+
+        var install = "unknown"
+        var device = "unknown"
+        var os = "unknown"
+        var battery = -1
+        var power = "unknown"
+        #if canImport(UIKit)
+        if let idfv = UIDevice.current.identifierForVendor?.uuidString {
+            install = String(idfv.replacingOccurrences(of: "-", with: "").prefix(8)).lowercased()
+        }
+        var sysinfo = utsname(); uname(&sysinfo)
+        device = withUnsafePointer(to: &sysinfo.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 1) { String(validatingUTF8: $0) ?? "unknown" }
+        }
+        os = "\(UIDevice.current.systemName)-\(UIDevice.current.systemVersion)"
+            .replacingOccurrences(of: " ", with: "")
+        // Monitoring must be enabled or the level reads -1 forever. Enabling it is cheap and
+        // the value is exactly the kind of thing that explains a recorder that stopped.
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        let level = UIDevice.current.batteryLevel
+        battery = level < 0 ? -1 : Int((level * 100).rounded())
+        switch UIDevice.current.batteryState {
+        case .charging: power = "charging"
+        case .full:     power = "full"
+        case .unplugged: power = "unplugged"
+        default:        power = "unknown"
+        }
+        #endif
+
+        var freeMB = -1
+        if let vals = try? URL(fileURLWithPath: NSHomeDirectory())
+            .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+           let bytes = vals.volumeAvailableCapacityForImportantUsage {
+            freeMB = Int(bytes / 1_048_576)
+        }
+
+        return FoundryXDiagContext(
+            version: version, build: build, installId: install, device: device, os: os,
+            batteryPct: battery, power: power,
+            locale: Locale.current.identifier,
+            timezone: TimeZone.current.identifier,
+            freeMB: freeMB)
     }
 }

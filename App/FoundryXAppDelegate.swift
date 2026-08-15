@@ -38,7 +38,12 @@ final class FoundryXAppDelegate: NSObject, UIApplicationDelegate {
             return true
         }
 
-        let log = DoorLog()
+        // THE SHARED LOG, NOT A PRIVATE ONE. Two bootstraps each built their own
+        // DoorLog and wired a sink to it, which meant "the log" was whichever
+        // instance a given caller happened to hold — and the nineteen call sites
+        // that held none reported into nothing. Configuring the process-wide
+        // instance here is what lets every one of them reach the relay.
+        let log = DoorLog.shared
         log.setRemoteSink(
             RemoteConfig.fromBundle()?.gatewayHTTPURL
                 .appendingPathComponent("diag/log"))
