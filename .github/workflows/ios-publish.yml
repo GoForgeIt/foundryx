@@ -23,21 +23,27 @@ name: ios-publish
 on:
   push:
     branches: [main]
-  # A SHIP MUST BE REQUESTABLE WITHOUT A DUMMY COMMIT.
+  # WHY A SHIP CAN GO MISSING WITHOUT ANYTHING TURNING RED.
   #
-  # `push` is the only trigger this workflow had, and GitHub honours `[skip ci]`
-  # in the HEAD commit message — so a merge whose last commit is CI-only
-  # SILENTLY SHIPS NOTHING. That is exactly what happened on 2026-08-15: seven
-  # gates passed, `2592706..20d94fe HEAD -> main` succeeded, and no run was
-  # created, because the tip commit was a gate fix tagged [skip ci]. Nothing
-  # failed; the ship simply never existed, which is far harder to notice than a
-  # red run. The convention is right for foundry (it stops CI-only commits
-  # burning runner time) and wrong here, where the same tag suppresses the
-  # deliverable.
+  # GitHub honours the skip-ci tag in the HEAD commit message, so a merge whose
+  # TIP commit is CI-only creates no run at all. On 2026-08-15 seven gates
+  # passed, `2592706..20d94fe HEAD -> main` succeeded, and no ship existed —
+  # because the tip was a gate fix carrying that tag. Then the follow-up commit,
+  # whose whole subject was ABOUT the tag, contained the literal string and was
+  # skipped for the same reason. A silently-absent run reads exactly like a
+  # successful ship, which is far harder to notice than a red one.
   #
-  # Dispatch closes it: main can always be shipped on request, without inventing
-  # an empty commit to re-trigger a push.
-  workflow_dispatch: {}
+  # The tag is right in foundry (CI-only commits should not burn self-hosted
+  # runner time) and wrong here, where it suppresses the deliverable. So: keep
+  # the tag out of the TIP commit when main should ship, and when in doubt ask
+  # for a run rather than inventing an empty commit.
+  #
+  # `workflow_dispatch` below was ALREADY HERE — it always was. Both silent
+  # no-ships were avoidable by dispatching. Adding a second one made the file
+  # unparseable to GitHub ("workflow_dispatch is already defined", HTTP 422)
+  # while PyYAML's safe_load accepted it, silently keeping the last key — a
+  # local "YAML OK" on a file GitHub refuses. Validate workflows with a loader
+  # that REJECTS duplicate keys.
   workflow_dispatch: {}
 
 concurrency:
