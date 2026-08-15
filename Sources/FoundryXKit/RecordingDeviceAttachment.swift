@@ -942,7 +942,22 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
         guard let characteristic else {
             throw RecordingDeviceAttachError.unknownCharacteristic(token)
         }
-        peripheral.writeValue(data, for: characteristic, type: .withResponse)
+        // WITHOUT RESPONSE — the mode the recorder actually answers.
+        //
+        // This wrote `.withResponse`, and against a real Pocket every command went
+        // unanswered: build 780017 reached providingKey (the notify subscription
+        // confirmed), wrote APP&SK&<key>, and 8s later reported
+        //   outcome unreachable(handshakeUnanswered)
+        //
+        // pocket-libre, which authenticates with the SAME KEY from a Mac, writes:
+        //   commands.py:127  await client.write_gatt_char(CMD_WRITE_CHAR, payload,
+        //                                                 response=False)
+        // and CMD_WRITE_CHAR is AUDIO_META_CHAR (001120a3) — the same
+        // characteristic this app uses, subscribed for the MCU& reply on the same
+        // handle. The characteristic, the payload and the subscription all matched
+        // already; the write MODE was the last difference between the flow that
+        // works and the flow that does not.
+        peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
     }
 
     func nextTransportEvent(timeout: TimeInterval) async throws -> PocketTransportEvent {

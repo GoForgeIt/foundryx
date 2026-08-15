@@ -84,3 +84,10 @@ Feature: The connect sheet is legible — a short list, and a failure that says 
     When I tap that discovered device
     Then the sheet says it connected but stopped responding
     And that sentence does not claim the recorder could not be reached
+
+  # THE WRITE MODE, held. pocket-libre writes commands with response=False; this
+  # app wrote .withResponse and a real recorder answered none of them.
+  Scenario: commands are written in the mode the recorder answers
+    Given a signed-in account and a discovered recorder FoundryX already holds the key for
+    When I tap that discovered device
+    Then every command was written the way the recorder answers

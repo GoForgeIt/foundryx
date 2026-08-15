@@ -27,13 +27,13 @@ final class ConnectSheetSaysWhatHappenedFeatureTests: ProcessGlobalStateTestCase
                 registry: StepRegistry(ConnectSheetSteps.make(world: world)))
             // Pin the POPULATION: the runner asserts only that nothing FAILED, so deleting a
             // scenario would otherwise leave this suite green.
-            XCTAssertEqual(result.passed, 9,
-                           "connect-sheet-says-what-happened must run all 9 scenarios — the "
+            XCTAssertEqual(result.passed, 10,
+                           "connect-sheet-says-what-happened must run all 10 scenarios — the "
                                + "two that hold the scan fold (and that it strands nobody), "
                                + "the three that hold one sentence per failure, the one that "
                                + "holds the rescan a lost peripheral now gets, the one "
                                + "that holds the radio being released, and the two that hold "
-                               + "the notify-before-write ordering a real recorder depends on")
+                               + "the notify-before-write ordering a real recorder depends on, and the one that holds the write MODE it answers")
         } catch {
             world.cleanup()
             throw error
@@ -484,6 +484,21 @@ private final class ConnectSheetWorld {
                     + String(early.prefix(8)) + "… (a reply could not have arrived)")
             }
 
+        case "every command was written the way the recorder answers":
+            // pocket-libre writes commands with response=False (commands.py:127) to
+            // CMD_WRITE_CHAR = 001120a3 — the same characteristic this app uses. With
+            // .withResponse the recorder answered nothing: build 780017 reached
+            // providingKey and then reported handshakeUnanswered 8s later.
+            let types = (stack as? FakePocketBLEStack)?.commandWriteTypes ?? []
+            guard !types.isEmpty else {
+                throw BrineStepError("no command was written at all")
+            }
+            if let bad = types.firstIndex(where: { $0 != .withoutResponse }) {
+                throw BrineStepError(
+                    "command \(bad) was written .withResponse; the recorder answers "
+                    + "writes made without response")
+            }
+
         case "the sheet says it connected but stopped responding":
             let line = RecordingDeviceAttachPresentation.line(
                 for: .notificationsNeverEnabled)
@@ -558,6 +573,7 @@ private enum ConnectSheetSteps {
             "the app finds it with a scan and adopts it anyway",
             "the attempt is holding no central manager afterwards",
             "no command was written before that confirmation arrived",
+            "every command was written the way the recorder answers",
             "the sheet says it connected but stopped responding",
             "that sentence does not claim the recorder could not be reached",
         ]

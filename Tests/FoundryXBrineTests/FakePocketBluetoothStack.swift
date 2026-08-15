@@ -365,6 +365,18 @@ final class FakePocketBLEStack: @unchecked Sendable {
         for p in pending { p() }
     }
 
+    /// THE WRITE MODE THE RECORDER ANSWERS. pocket-libre writes commands with
+    /// `response=False`; this app wrote `.withResponse` and every command went
+    /// unanswered against real hardware. Recorded so a scenario can hold the mode
+    /// rather than rediscovering it on a device.
+    private(set) var commandWriteTypes: [CBCharacteristicWriteType] = []
+
+    fileprivate func noteWriteType(_ type: CBCharacteristicWriteType,
+                                   to characteristic: FakePocketBLECharacteristic) {
+        guard characteristic.uuid == Self.characteristicUUID(map.command) else { return }
+        lock.lock(); commandWriteTypes.append(type); lock.unlock()
+    }
+
     fileprivate func noteNotifyConfirmed() {
         lock.lock(); notifyConfirmed = true; lock.unlock()
     }
@@ -669,6 +681,7 @@ final class FakePocketBLEPeripheral: BLEPeripheral, @unchecked Sendable {
     func writeValue(_ data: Data, for characteristic: BLECharacteristic,
                     type: CBCharacteristicWriteType) {
         guard let characteristic = characteristic as? FakePocketBLECharacteristic else { return }
+        stack.noteWriteType(type, to: characteristic)
         stack.handleWrite(data, to: characteristic)
     }
 
