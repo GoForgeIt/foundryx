@@ -199,6 +199,9 @@ public enum RecordingDeviceUnreachableReason: String, Equatable, Sendable, CaseI
     case protocolNegotiationFailed
     /// The peripheral identifier this iPhone holds cannot make a durable identity.
     case noDurableIdentity
+    /// `setNotifyValue` was issued for the control characteristic and CoreBluetooth never
+    /// confirmed it, so nothing could have answered a command written afterwards.
+    case notificationsNeverEnabled
     /// The key handshake was issued and the recorder stopped answering part-way through.
     case handshakeUnanswered
     /// SOMETHING ELSE, SAID AS SOMETHING ELSE. The honest bucket — an error no branch above
@@ -222,6 +225,7 @@ public enum RecordingDeviceUnreachableReason: String, Equatable, Sendable, CaseI
         case .protocolCharacteristicsVanished:  return "the protocol characteristics went away"
         case .protocolNegotiationFailed:        return "protocol negotiation failed"
         case .noDurableIdentity:                return "no durable identity for this peripheral"
+        case .notificationsNeverEnabled:        return "the recorder never confirmed it would send replies"
         case .handshakeUnanswered:              return "the key handshake went unanswered"
         case .unexplained:                      return "an unmapped failure"
         }
@@ -301,6 +305,13 @@ public enum RecordingDeviceAttachPresentation {
         case .noDurableIdentity:
             return "FoundryX can't give that device a stable identity on this iPhone, so it "
                 + "can't save it to your account."
+        case .notificationsNeverEnabled:
+            // Said as the connection problem it is, not as anything about the key —
+            // the key was never sent. The recorder accepted the link and then never
+            // confirmed it would send replies, which on a real device means it went
+            // out of range or to sleep between connecting and being asked.
+            return "That device connected but stopped responding before FoundryX could "
+                + "talk to it. Wake it up, keep it close, and try again."
         case .handshakeUnanswered:
             // IT USED TO END "Tap it again." — WHICH WAS THE WHOLE OF THE REMEDY, AND THE
             // REMEDY WAS A LOOP. Solleva sends the key custody already holds; this firmware
@@ -442,7 +453,7 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
         }
     }
 
-    private enum Gate: Hashable { case poweredOn, rediscovered, connected, services, characteristics }
+    private enum Gate: Hashable { case poweredOn, rediscovered, connected, services, characteristics, notifying }
 
     private let bleQueue: DispatchQueue
     private let makeCentral: BLECentralFactory
@@ -549,6 +560,17 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
 
         let outcome = await adoptStoredFileRecorder(id: id, advertisedName: advertisedName,
                                                     mint: mint)
+        // EVERY ATTEMPT SAYS HOW IT ENDED. Only the early `reachDiscoveredGraph`
+        // failure was logged, so an attach that got all the way to `providingKey`
+        // and then failed left NOTHING behind — which is exactly what happened on
+        // build 779594: seven phase lines, then silence, and a screen blaming the
+        // link for a recorder that was demonstrably connected. The outcome is the
+        // one line that makes the phases diagnosable instead of merely present.
+        // String(describing:) is safe here BY CONSTRUCTION: no case of
+        // RecordingDeviceAttachOutcome carries a session key — the credential-hygiene
+        // gate asserts exactly that — so this cannot leak one into a log that leaves
+        // the handset.
+        log?.info("recording device: outcome \(String(describing: outcome))")
         teardown()
         return outcome
     }
@@ -784,6 +806,29 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
         }
         if let control { peripheral.setNotifyValue(true, for: control) }
         if let audio, audio !== control { peripheral.setNotifyValue(true, for: audio) }
+
+        // AND WAIT FOR IT. The two lines above only REQUEST notifications;
+        // CoreBluetooth confirms them asynchronously via
+        // didUpdateNotificationStateFor, and until that lands the recorder has not
+        // been told to send anything. Issuing APP&SK&<key> into that window is the
+        // "silent hang rather than an error" the comment above predicts — and it is
+        // what a real Pocket did on build 779594: reached providingKey, wrote the
+        // key, and no reply ever came, reported as a link failure against a
+        // recorder that was plainly connected.
+        //
+        // Bounded by the control deadline, and a timeout is its own reason rather
+        // than borrowing a neighbour's: nothing was negotiated and nothing was
+        // refused, the channel simply never opened.
+        if control != nil {
+            do {
+                try await wait(for: .notifying, timeout: deadlines.control,
+                               onTimeout: .notificationsNeverEnabled)
+            } catch {
+                let reason = RecordingDeviceAttachError.reason(of: error)
+                log?.error("recording device: unreachable — \(reason.diagnostic)")
+                return .blocked(.unreachable(reason))
+            }
+        }
 
         let transport = PocketSeamTransport(link: self, timeout: deadlines.control)
         guard let client = try? await PocketBLEClient.connect(transport: transport) else {
@@ -1101,9 +1146,26 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
         if finished { fulfil(.characteristics) }
     }
 
+    /// THE CONFIRMATION THIS USED TO THROW AWAY.
+    ///
+    /// The body was `{}`, so `setNotifyValue` was fire-and-forget and the code three lines
+    /// later could not have waited even if it wanted to — and it did not. The comment above
+    /// that call states the hazard exactly ("a write issued before the notify state settles
+    /// has nowhere to answer, which is a silent hang rather than an error") and then races
+    /// it. Observed on build 779594 against a real Pocket: the attach reached `providingKey`,
+    /// wrote APP&SK&<key>, and no reply ever arrived — the recorder had never been told to
+    /// send one yet.
     public func blePeripheral(_ peripheral: BLEPeripheral,
                               didUpdateNotificationStateFor characteristic: BLECharacteristic,
-                              error: Error?) {}
+                              error: Error?) {
+        let isControl = lock.withLock { controlCharacteristic === characteristic }
+        guard isControl else { return }
+        if let error {
+            log?.error("recording device: notify enable failed — \(error.localizedDescription)")
+            return
+        }
+        fulfil(.notifying)
+    }
 
     public func blePeripheral(_ peripheral: BLEPeripheral,
                               didUpdateValueFor characteristic: BLECharacteristic,
