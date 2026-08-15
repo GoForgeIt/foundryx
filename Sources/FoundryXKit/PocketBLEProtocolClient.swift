@@ -107,6 +107,9 @@ public struct PocketRecording: Sendable, Equatable {
     public let date: String
     public let timestamp: String
     public let sizeBytes: Int
+    /// 16kHz mono MP3 at ~32kbps = 4000 bytes/second (pocket-libre PROTOCOL.md:14).
+    /// Correct as written — the bug this comment outlived was the UNIT of sizeBytes,
+    /// which the listing parser was filling from a kilobyte field.
     public var durationSeconds: Double { Double(sizeBytes) / 4_000 }
     public init(date: String, timestamp: String, sizeBytes: Int) {
         self.date = date; self.timestamp = timestamp; self.sizeBytes = sizeBytes
@@ -284,7 +287,16 @@ public actor PocketBLEClient {
                     guard parts.count == 5, parts[0] == "MCU", parts[1] == "F",
                           validToken(String(parts[2])), validToken(String(parts[3])),
                           let size = Int(parts[4]), size >= 0 else { throw PocketProtocolError.malformedResponse }
-                    recordings.append(.init(date: String(parts[2]), timestamp: String(parts[3]), sizeBytes: size)); continue
+                    // THE FIFTH FIELD IS KILOBYTES, NOT BYTES.
+                    // pocket-libre PROTOCOL.md: `MCU&F&<date>&<timestamp>&<size_kb>`.
+                    // Stored raw as sizeBytes, every recording was reported 1024x
+                    // too small, and durationSeconds (sizeBytes / 4000) rounded the
+                    // whole library to "0 sec" and "1 sec" — which is exactly what a
+                    // real Pocket showed on build 780299: a 6222 KB file as 1 sec, a
+                    // 19 KB file as 0 sec. The divisor is right (16kHz mono ~32kbps
+                    // = 4000 bytes/s); the unit was not.
+                    recordings.append(.init(date: String(parts[2]), timestamp: String(parts[3]),
+                                            sizeBytes: size * 1_024)); continue
                 }
                 if response.hasPrefix("MCU&LIST&"), let count = Int(response.dropFirst("MCU&LIST&".count)), count == recordings.count { return recordings }
                 throw PocketProtocolError.malformedResponse
