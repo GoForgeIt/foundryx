@@ -150,6 +150,36 @@
       "why": "the first production caller of `listDates` / `listRecordings` — the path that used to close the session before returning."
     },
     {
+      "id": "pocket-presence-predicate",
+      "name": "resolve where one recording is — recorder / this phone / safe elsewhere",
+      "declared_in": "Sources/FoundryXKit/PocketPresence.swift",
+      "declaration_anchor": "    public static func presence(for key: PocketRecorderFileKey,",
+      "call_pattern": "PocketPresenceReader.presence(",
+      "reached_from": [
+        {
+          "via": "pocket-recorder-check",
+          "anchor": "                    await PocketPresenceReader.presence(for: key,"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "the shelf's own per-row resolution. It REPLACES `StoredFileCustody { foundryX, recorderOnly }`, a two-valued answer to a three-valued question: it could not say \"on this phone but not yet safe anywhere else\" — the one state that governs a reset — and `PocketInventoryReader.manifest`'s empty `heldFileIDs` default rendered a place NOBODY ASKED ABOUT as a definite `Only on the recorder`. Every destructive path now reads `answer == .yes`, so `unknown` can never be counted as a copy anybody holds."
+    },
+    {
+      "id": "pocket-durability-evidence",
+      "name": "the safety predicate's evidence — the Lore-confirmed marker, memoised, read off-main",
+      "declared_in": "Sources/FoundryXKit/PocketPresence.swift",
+      "declaration_anchor": "public final class PocketCaptureDurability: PocketDurabilityEvidence, @unchecked Sendable {",
+      "call_pattern": "PocketCaptureDurability(",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "        let durability = PocketCaptureDurability(baseDir: library, stages: stages)"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "WITHOUT A CALLER THIS ROW WOULD BE THE DEFECT ITSELF: the predicate would compile, test green, and every shelf row would honestly read `Unknown` for safety forever. It is constructed on the screen that owns the capture library, handed the stage snapshot the app already holds in memory, and resolved OFF the main actor — `CaptureRetention.isConfirmedInLore` now notes `CaptureManager.noteMainThreadDecode()` so a future caller that drags it onto main trips a hard counter."
+    },
+    {
       "id": "pocket-ble-list-dates",
       "name": "PocketBLEClient.listDates — the recorder's day index",
       "declared_in": "Sources/FoundryXKit/PocketBLEProtocolClient.swift",
@@ -430,11 +460,11 @@
   ],
   "_verdict_counts_are_equality": "Declared as exact counts, never bounds. A bound would let the unreachable roster grow by one without anybody moving this file, which is precisely how four capabilities reached `main` unreached.",
   "verdict_counts": {
-    "reachable": 18,
+    "reachable": 20,
     "undetermined": 2,
     "unreachable": 8
   },
   "_floor": "A register that lost its rows would be a silent full pass, so the population is asserted before its contents are.",
-  "minimum_capabilities": 28,
+  "minimum_capabilities": 30,
   "minimum_entry_points": 1
 }

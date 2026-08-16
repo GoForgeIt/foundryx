@@ -1,0 +1,15 @@
+# M3-the-reset-disables-itself-when-stale
+#
+# RED: PocketPresenceFeatureTests:222 "the owner's own recorder reset disabled itself — a stale shelf must move the primary action, never the enabled state". 1 failure.
+#
+--- a/Sources/FoundryXKit/PocketPresence.swift
++++ b/Sources/FoundryXKit/PocketPresence.swift
+@@ -322,7 +322,7 @@
+                                  presences: [PocketRecordingPresence]) -> ResetGate {
+         let fresh = shelfObservedAt.map { now.timeIntervalSince($0) <= shelfGoesStaleAfter }
+             ?? false
+-        return ResetGate(isEnabled: true,
++        return ResetGate(isEnabled: fresh,
+                          primaryAction: fresh ? resetAction : checkFirstAction,
+                          cost: costLine(presences))
+     }

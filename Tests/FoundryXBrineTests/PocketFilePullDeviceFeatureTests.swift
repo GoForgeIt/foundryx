@@ -57,6 +57,8 @@ private actor PocketFilePullWorld {
     private var detail: StoredFileDeviceDetailPresentation?
     private var manifest: StoredFileManifestPresentation?
     private var effects: StoredFileLiveEffectCounts?
+    /// A fixed instant so the manifest's place-ages are a fact rather than a race.
+    private let manifestReadAt = Date(timeIntervalSince1970: 1_800_000_000)
 
     func given(_ phrase: String) async {
         entry = nil; identity = nil; observed = nil; detail = nil; manifest = nil; effects = nil
@@ -84,8 +86,16 @@ private actor PocketFilePullWorld {
                 firmware: .reported("1.6"), manifest: [])
         case "the storage manifest presentation is built":
             manifest = StoredFileDevicePresentation.manifest([
-                .init(id: "a", title: "Walkthrough", sizeBytes: 88_000, custody: .foundryX),
-                .init(id: "b", title: "Wed 4:02 PM", sizeBytes: 48_000, custody: .recorderOnly)
+                .init(id: "a", title: "Walkthrough", sizeBytes: 88_000,
+                      presence: PocketRecordingPresence(
+                        onRecorder: .init(answer: .yes, observedAt: manifestReadAt),
+                        onThisPhone: .init(answer: .yes, observedAt: manifestReadAt),
+                        safeElsewhere: .neverAsked)),
+                .init(id: "b", title: "Wed 4:02 PM", sizeBytes: 48_000,
+                      presence: PocketRecordingPresence(
+                        onRecorder: .init(answer: .yes, observedAt: manifestReadAt),
+                        onThisPhone: .init(answer: .no, observedAt: manifestReadAt),
+                        safeElsewhere: .init(answer: .no, observedAt: manifestReadAt)))
             ])
         case "a stored-file device is discovered attached displayed disconnected and reconnected":
             let spy = StoredFileLiveBoundarySpy()
@@ -117,7 +127,7 @@ private actor PocketFilePullWorld {
             XCTAssertEqual(detail?.showsRecordingState, false); XCTAssertEqual(detail?.showsLiveActivity, false)
         case "each recording shows its custody and duration at 32 kilobits per second":
             XCTAssertEqual(manifest?.rows.map(\.duration), ["22 sec", "12 sec"])
-            XCTAssertEqual(manifest?.rows.map(\.custodyLabel), ["In Solleva", "Only on the recorder"])
+            XCTAssertEqual(manifest?.rows.map(\.presenceLabel), ["In Solleva", "Only on the recorder"])
         case "no active source FrameRouter WAL Live Activity or live state mutation occurs":
             XCTAssertEqual(effects, .zero)
         default: XCTFail("Unhandled assertion: \(phrase)")

@@ -91,8 +91,13 @@ struct SettingsScreen: View {
                         // THE LIST IS "Recording devices" AND THE SHEET IS "Connect a device".
                         // The two shipped titles were swapped: this screen was hardcoded
                         // "Devices" while the connect sheet wore `listTitle`.
+                        // THE BRAIN TRAVELS WITH THE PUSH. A recorder's shelf says where a
+                        // brought-over copy will end up, and this screen already owns the one
+                        // account preference that answers it — reading it a second time inside
+                        // the device page would be a second reader of one preference, which is
+                        // exactly how `foundryx.note-destination` nearly shipped.
                         DeviceScreen(device: device, manager: manager, sources: sources,
-                                     remote: remote)
+                                     remote: remote, brain: brains.choice)
                             .navigationTitle(RecordingDeviceConnectPresentation.listTitle)
                             .navigationBarTitleDisplayMode(.inline)
                     }

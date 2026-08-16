@@ -1,0 +1,16 @@
+# M2-remove-the-main-thread-gate
+#
+# RED: PocketPresenceMainThreadGateTests:76 "POSITIVE CONTROL FAILED: a deliberate main-thread read of the confirmation marker did not move the counter, so the zero above proves nothing". 1 failure — and it is the assertion that keeps the `== 0` from passing vacuously.
+#
+--- a/Sources/FoundryXKit/CaptureRetention.swift
++++ b/Sources/FoundryXKit/CaptureRetention.swift
+@@ -187,8 +187,7 @@
+     /// no-ops off-main, and any future caller that reintroduces it on main trips the
+     /// deterministic counter rather than only the callers anybody thought to look at.
+     public static func isConfirmedInLore(captureId: String, baseDir: URL) -> Bool {
+-        CaptureManager.noteMainThreadDecode()
+-        return FileManager.default.fileExists(atPath: confirmedMarkerURL(captureId: captureId, baseDir: baseDir).path)
++        FileManager.default.fileExists(atPath: confirmedMarkerURL(captureId: captureId, baseDir: baseDir).path)
+     }
+ 
+     /// Prune ONLY the cached transcript TEXT (`transcript.json`), keeping the
