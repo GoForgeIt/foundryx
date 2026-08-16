@@ -53,11 +53,15 @@ public struct RecordingDeviceCapabilityKey: RawRepresentable, Hashable, Sendable
     public static let gapRecovery = RecordingDeviceCapabilityKey("gap-recovery")
     public static let batteryLevel = RecordingDeviceCapabilityKey("battery-level")
     public static let offlineStorage = RecordingDeviceCapabilityKey("offline-storage")
+    /// HOW MUCH ROOM IS LEFT, which is a READING and not a capability: `offlineStorage` says
+    /// the device has storage of its own, and rendered as "Available" it was standing in for
+    /// a number nobody was asking for. `APP&SPACE` answers it.
+    public static let freeSpace = RecordingDeviceCapabilityKey("free-space")
 
     /// The keys this build has a meaning for. Everything else is representable but
     /// explicitly NOT understood.
     public static let understood: Set<RecordingDeviceCapabilityKey> =
-        [.firmwareVersion, .gapRecovery, .batteryLevel, .offlineStorage]
+        [.firmwareVersion, .gapRecovery, .batteryLevel, .offlineStorage, .freeSpace]
 }
 
 public enum RecordingDeviceCapabilityState: Equatable, Sendable {
@@ -190,15 +194,25 @@ public struct RecordingDeviceObservation: Equatable, Sendable {
     public let reportedName: String
     public let audioProfile: RecordingDeviceAudioProfile?
     public let declaredCapabilities: [String: String?]
+    /// WHAT THIS DEVICE STATED ON THIS SESSION, each with the instant it stated it.
+    ///
+    /// SEPARATE FROM `declaredCapabilities` ON PURPOSE, and not a widening of it. A declared
+    /// capability is a claim about what a device CAN do and it survives the link going down;
+    /// a reading is a measurement that was true at a moment and is stale the second after.
+    /// Folding free space into the capability map would put a number that decays by the hour
+    /// in the same bag as `offline-storage: Available`, which does not decay at all.
+    public let readings: [String: RecordingDeviceReading]
 
     public init(identity: RecordingDeviceIdentity,
                 reportedName: String,
                 audioProfile: RecordingDeviceAudioProfile?,
-                declaredCapabilities: [String: String?] = [:]) {
+                declaredCapabilities: [String: String?] = [:],
+                readings: [String: RecordingDeviceReading] = [:]) {
         self.identity = identity
         self.reportedName = reportedName
         self.audioProfile = audioProfile
         self.declaredCapabilities = declaredCapabilities
+        self.readings = readings
     }
 }
 

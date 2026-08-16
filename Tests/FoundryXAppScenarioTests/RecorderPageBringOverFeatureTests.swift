@@ -42,7 +42,7 @@ final class RecorderPageBringOverFeatureTests: XCTestCase {
             registry: StepRegistry(RecorderPageSteps.make(world)))
         // THE POPULATION IS PINNED. A runner that only asserts "nothing failed" is green once
         // the scenarios have been deleted — the same shape of hole this lane exists to close.
-        XCTAssertEqual(result.passed, 5, "all five scenarios must run and pass")
+        XCTAssertEqual(result.passed, 6, "all six scenarios must run and pass")
     }
 }
 
@@ -60,6 +60,8 @@ private enum RecorderPageSteps {
             "Solleva sends what it is holding",
         ]
         let thens = [
+            "that recorder's page says how full it is and when that was read",
+            "nothing on that page says a fact is unavailable",
             "Solleva says what is on the recorder",
             "Solleva offers to bring that recording over",
             "Solleva offers nothing to bring over",
@@ -187,6 +189,17 @@ private final class RecorderPageWorld {
         try await secrets.save(
             Self.secret,
             for: try PocketAuthenticatedIdentity(peripheralIdentifier: identifier.uuidString))
+        // "REMEMBERED" WAS FIXTURE PROSE UNTIL NOW, and it is a real part of the state under
+        // test. On a phone, a recorder's page exists only because the ACCOUNT STORE holds a
+        // record for it — that record is what the device list draws, what the page's inputs
+        // are projected from, and (as of Step 7) what carries the facts a check learned. The
+        // scenarios above never needed it because they read `check.detail` directly; a
+        // scenario about the PAGE does, and a fixture that says "remembered" while the store
+        // is empty is a fixture describing something else.
+        RecordingDeviceStore.recordUserPair(
+            identity: RecordingDeviceIdentity(shape: .filePull,
+                                              hardwareToken: identifier.uuidString.lowercased()),
+            displayName: Self.recorderName)
         let secrets = self.secrets
         let recovery = self.recovery
         PocketRecorderCheckModel.attachmentFactoryForScenarios = {
@@ -267,6 +280,56 @@ private final class RecorderPageWorld {
             guard offered.timestamp == Self.timestamp else {
                 throw BrineStepError("the app offered \(offered.timestamp), not the recording "
                                         + "on the recorder (\(Self.timestamp))")
+            }
+
+        // THE SIMULATOR PROOF FOR STEP 7, and the only lane that can give one.
+        //
+        // The check runs inside the shipping app's process, through the app's own model, and
+        // this step then builds the recorder's page THE WAY THE SCREEN BUILDS IT — off the
+        // account store, through `UnifiedDeviceListComposition`, into `RecordingDevicePage`.
+        // Nothing here is a stand-in: if `PocketRecorderCheck` stopped keeping what the
+        // recorder said, or the projection stopped carrying it, or the page stopped rendering
+        // it, this is red and the hostless suite is not.
+        case "that recorder's page says how full it is and when that was read":
+            let page = try recorderPage()
+            guard let space = page.readings.first(where: { $0.label == "Free space" }) else {
+                throw BrineStepError(
+                    "the recorder's page renders no free-space reading at all — it renders "
+                        + "\(page.readings.map(\.label))")
+            }
+            // 61,032 KB reported, 12,000 used ⇒ 49,032 free. Both numbers came off the
+            // recorder over the radio seam; only the subtraction happened here.
+            guard space.value == "47.9 MB free of 59.6 MB" else {
+                throw BrineStepError(
+                    "the page says free space is \(space.value ?? "(nothing)") — the recorder "
+                        + "reported \(FakePocketBLEStack.usedKilobytes) KB used of "
+                        + "\(FakePocketBLEStack.capacityKilobytes) KB")
+            }
+            guard let ago = space.observedAgo, ago.hasPrefix("read ") else {
+                throw BrineStepError(
+                    "the page states a number with no statement of when it was read")
+            }
+            // PAIRED EXISTENCE for the prohibition below: the battery is a second fact this
+            // same session measured, so "nothing says unavailable" cannot pass on a blank pane.
+            guard page.readings.first(where: { $0.label == "Battery" })?.value == "72%" else {
+                throw BrineStepError("the page did not keep the battery this session read")
+            }
+
+        case "nothing on that page says a fact is unavailable":
+            let page = try recorderPage()
+            var lines = [page.displayName, page.classCaption, page.status] + page.actions
+            lines += [page.capabilityNote, page.recordingIndicatorSentence, page.forgetWarning]
+                .compactMap { $0 }
+            lines += page.capabilities.flatMap { [$0.label, $0.value] }
+            lines += page.readings
+                .flatMap { [$0.label, $0.value, $0.observedAgo, $0.action] }.compactMap { $0 }
+            for banned in [RecordingDeviceConnectPresentation.unavailableValue,
+                           DeviceMetricsPresentation.unavailableValue] {
+                guard !lines.contains(where: { $0.contains(banned) }) else {
+                    throw BrineStepError(
+                        "the recorder's page says \"\(banned)\" one second after a session "
+                            + "that measured the facts it is talking about")
+                }
             }
 
         case "Solleva offers nothing to bring over":
@@ -391,6 +454,27 @@ private final class RecorderPageWorld {
     }
 
     // MARK: What the app produced
+
+    /// THE RECORDER'S PAGE, COMPOSED THE WAY THE SCREEN COMPOSES IT.
+    ///
+    /// `RecordingDevicePageView` reads `RecordingDeviceListModel`'s input for this identity and
+    /// calls `RecordingDevicePage.resolve`; the model in turn builds those inputs from
+    /// `UnifiedDeviceListComposition.rememberedForCurrentAccount()`. Both of those are the
+    /// shipped functions, so this is the same chain with the SwiftUI body removed — which is
+    /// the most of it a scenario can drive, and it is the half that decides every string.
+    private func recorderPage() throws -> RecordingDevicePagePresentation {
+        let identity = RecordingDeviceIdentity(shape: .filePull,
+                                               hardwareToken: identifier.uuidString.lowercased())
+        let inputs = UnifiedDeviceListComposition.inputs(
+            remembered: UnifiedDeviceListComposition.rememberedForCurrentAccount(),
+            captureSources: [])
+        guard let input = inputs.first(where: { $0.identity == identity }) else {
+            throw BrineStepError(
+                "the account does not remember the recorder this scenario just checked — it "
+                    + "remembers \(inputs.map(\.identity.hardwareToken))")
+        }
+        return RecordingDevicePage.resolve(input)
+    }
 
     private func notesInLibrary() -> Set<String> {
         Set(((try? FileManager.default.contentsOfDirectory(atPath: library.path)) ?? [])

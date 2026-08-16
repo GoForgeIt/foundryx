@@ -22,8 +22,16 @@
 //   * IT WRITES NOTHING TO THE RECORDER but the one key handshake custody already performs,
 //     and it issues no delete: `PocketRecorderCustodyPromise.text` is a promise this app now
 //     has a renderer for, on this panel.
-//   * IT DOES NOT TOUCH THE ACCOUNT STORE. A check is a READ. Re-recording the pair here would
-//     make "I looked at my recorder" indistinguishable from "I adopted it".
+//   * IT DOES NOT RE-PAIR. A check is a READ, and re-recording the PAIR here would make "I
+//     looked at my recorder" indistinguishable from "I adopted it".
+//
+//     IT DOES, HOWEVER, KEEP WHAT THE RECORDER SAID. This bullet used to read "IT DOES NOT
+//     TOUCH THE ACCOUNT STORE", which was true and was the defect: a check read the recorder's
+//     charge, its firmware and how full it is, rendered them into one panel, and dropped all
+//     three when the session closed — so the recorder's own page went on saying `Unavailable`
+//     for the facts the check had just measured. Writing an OBSERVATION is not re-pairing:
+//     `recordObservedFacts` refuses a device the account does not already remember, so a check
+//     still cannot invent a remembered device, and preference and detach are untouched.
 
 import Foundation
 
@@ -273,6 +281,13 @@ public enum PocketRecorderCheck {
         // the capability states `StoredFileDevicePresentation.detail` asks for.
         let observation = await PocketRecordingDeviceBridge.observe(
             client: client, identity: identity, advertisedName: advertisedName)
+        // KEPT BEFORE THE LISTING IS ATTEMPTED, on purpose. A recorder that answers its
+        // charge and its free space and then refuses to list its files has still told this
+        // account two true things, and the branch below returns `.inventoryFailed` without
+        // ever reaching the write — so doing it afterwards would throw away exactly the
+        // readings a person most wants when something is going wrong.
+        RecordingDeviceStore.recordObservedFacts(identity: observation.identity,
+                                                 readings: observation.readings)
         let declared = RecordingDeviceCapabilities(declared: observation.declaredCapabilities)
         do {
             let recordings = try await PocketInventoryReader.read(client: client)

@@ -51,7 +51,7 @@ Feature: One device list wires Pocket and Omi as peers
     Then the page carries the recorder-light sentence where a live device carries record and stop
     And the page offers no record or stop control
     And the page never says the device is in range
-    And the page's capability strip is battery firmware gap recovery and offline storage
+    And the page lists what this recorder can be asked — its battery, its free space and its firmware
     And the page's capability strip has no signal column
     And its education comes from the protocol it speaks and not from its shape
 
@@ -83,7 +83,7 @@ Feature: One device list wires Pocket and Omi as peers
     Given a signed-in account and a discovered recorder FoundryX already holds the key for
     When I tap that discovered device
     Then the transport client established which protocol that device speaks
-    And FoundryX authenticated it and read its battery and firmware over the radio seam
+    And FoundryX authenticated it and read its battery, its firmware and how full it is over the radio seam
     When the account's remembered devices are read back
     Then the redrawn list shows it as a peer row reading "Records on its own · Not connected"
 

@@ -31,6 +31,12 @@ Feature: Solleva's recorder page brings a recording over
     Then Solleva says it kept the recording
     And the recorder's shelf now says that recording is in Solleva
 
+  Scenario: Asking a recorder what it is holding also learns how full it is
+    Given a remembered recorder holding one recording
+    When Solleva asks that recorder what it is holding
+    Then that recorder's page says how full it is and when that was read
+    And nothing on that page says a fact is unavailable
+
   Scenario: A recording brought over becomes a conversation Solleva is holding
     Given a remembered recorder holding one recording
     When Solleva asks that recorder what it is holding

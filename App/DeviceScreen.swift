@@ -469,6 +469,7 @@ private struct RecordingDevicePageView: View {
                         .padding(.vertical, GrainSpacing.x3)
                         .overlay(alignment: .bottom) { hairline }
                 }
+                readingsStrip
                 capabilityStrip
                 captureToggle
                 actions
@@ -534,14 +535,64 @@ private struct RecordingDevicePageView: View {
         .overlay(alignment: .bottom) { hairline }
     }
 
-    /// Battery / Firmware / Gap recovery / Offline storage, in the shipped `capabilityOrder`,
-    /// for a record-then-sync recorder — and for a live device, only what it declared. There
-    /// is no `Signal` column: RSSI is meaningful only while streaming.
+    /// WHAT THE RECORDER SAID, AND HOW OLD IT IS — rendered 1:1 from
+    /// `RecordingDevicePagePresentation.readings`. Not one string in this body is invented:
+    /// the label, the number, the age and the action all come from the kit, because
+    /// `swift test` cannot compile `App/` and a line written here is a second, unasserted
+    /// implementation of the app's voice.
+    ///
+    /// TWO STATES AND NO THIRD. A fact that was read shows its value with the moment it was
+    /// read beside it. A fact nobody has ever asked shows NO number — not a dash, not `0%`,
+    /// not the shipped word `Unavailable` — and offers the action that would go and ask. The
+    /// second state is a button, because a stated absence with no way to end it is a shrug.
+    @ViewBuilder
+    private var readingsStrip: some View {
+        if !page.readings.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(page.readings.enumerated()), id: \.offset) { _, line in
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(line.label)
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(GrainColor.textMuted)
+                        Spacer(minLength: GrainSpacing.x2)
+                        if let value = line.value {
+                            VStack(alignment: .trailing, spacing: GrainSpacing.x1) {
+                                Text(value)
+                                    .grainTextStyle(.caption)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(GrainColor.ink)
+                                // THE AGE IS NOT OPTIONAL DECORATION. A number with no
+                                // statement of when it was read is the `Unavailable` defect
+                                // with a number painted over it.
+                                if let ago = line.observedAgo {
+                                    Text(ago)
+                                        .grainTextStyle(.caption)
+                                        .foregroundStyle(GrainColor.textFaint)
+                                }
+                            }
+                        } else if let action = line.action {
+                            Button(action) { perform(action) }
+                                .buttonStyle(.grain(.outlined))
+                        }
+                    }
+                    .padding(.vertical, GrainSpacing.x2)
+                    .accessibilityElement(children: .combine)
+                }
+            }
+            .padding(.top, GrainSpacing.x2)
+            .overlay(alignment: .bottom) { hairline }
+        }
+    }
+
+    /// What this device DECLARED it can do — for a recorder, that it has storage of its own.
+    /// There is no `Signal` column: RSSI is meaningful only while streaming.
     ///
     /// AND NO STRIP AT ALL when there is nothing true to put in it. This screen used to draw
     /// four rows for every device, so the iPhone's own microphone reported Battery, Firmware,
     /// Gap recovery and Offline storage as `Unavailable` — the `N/A · N/A · N/A` strip that
-    /// started this track, respelled in the shipped word.
+    /// started this track, respelled in the shipped word. Battery and firmware have left this
+    /// strip entirely: they were never capabilities, they were readings with nowhere to live,
+    /// and they are in `readingsStrip` above.
     @ViewBuilder
     private var capabilityStrip: some View {
         if !page.capabilities.isEmpty || page.capabilityNote != nil { capabilityLines }
