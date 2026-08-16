@@ -10,6 +10,33 @@ import Foundation
 /// `STE` is still not asked: nobody has decoded what its integer means, and a number whose
 /// meaning is unknown is not a fact worth rendering.
 public enum PocketRecordingDeviceBridge {
+
+    /// HOW FULL THE RECORDER IS — ASKED AFTER THE LISTING, NEVER BEFORE IT.
+    ///
+    /// THE DEFECT THIS SEPARATION CLOSES. `APP&SPACE` runs inside `protected(.information)`,
+    /// and `protected` calls `retire(...)` on `.timeout`. `try?` swallows the throw but NOT the
+    /// retirement — so a firmware that silently ignores this command (rather than answering
+    /// `MCU&UNKNOWN`, which is `.unsupportedOperation` and retires nothing) takes the whole
+    /// authenticated session down, and the listing that follows throws `.unauthenticated`. The
+    /// owner is then told "Solleva connected to this recorder, but it didn't say what it's
+    /// holding" about a recorder that would have listed perfectly well, and the ONE thing they
+    /// opened the page for is gone in exchange for a number.
+    ///
+    /// These bytes have never been issued to a real recorder from this app — the free-space
+    /// delta is probe P3 and it has not run. So the order is: get the thing that matters
+    /// first, then ask the question that might cost the session. A reading that does not arrive
+    /// renders as the never-asked state, with the action that would ask, which is the direction
+    /// this whole strip is built in.
+    public static func storageReading(client: PocketBLEClient,
+                                      now: Date = Date()) async -> RecordingDeviceReading? {
+        guard let storage = try? await client.storage() else { return nil }
+        return RecordingDeviceReading(
+            value: RecordingDeviceReadingPresentation.freeSpace(
+                usedKilobytes: storage.usedKilobytes,
+                capacityKilobytes: storage.capacityKilobytes),
+            observedAt: now)
+    }
+
     /// The protocol this bridge speaks, as an identifier education and any other
     /// protocol-keyed content attaches to (design §5). It is NOT a shape and NOT a reported
     /// name: a second stored-file recorder speaking something else gets a different id, and
@@ -40,21 +67,10 @@ public enum PocketRecordingDeviceBridge {
             readings[RecordingDeviceCapabilityKey.firmwareVersion.rawValue] =
                 RecordingDeviceReading(value: firmware, observedAt: now)
         }
-        // SPACE IS ASKED LAST, AND THAT ORDER IS LOAD-BEARING. `protected(_:)` retires the
-        // whole client on a `.timeout`, so a firmware that simply never answers this command
-        // would take the authenticated session down with it — and the caller that runs
-        // straight on to list the recorder's files (`PocketRecorderCheck.read`) would report
-        // "it didn't say what it's holding" for a recorder that said it perfectly well. A
-        // firmware without the command answers `MCU&UNKNOWN`, which is `.unsupportedOperation`
-        // and retires nothing; putting the one read that can silently vanish at the end means
-        // the two facts already gathered are kept either way.
-        if let storage = try? await client.storage() {
-            readings[RecordingDeviceCapabilityKey.freeSpace.rawValue] = RecordingDeviceReading(
-                value: RecordingDeviceReadingPresentation.freeSpace(
-                    usedKilobytes: storage.usedKilobytes,
-                    capacityKilobytes: storage.capacityKilobytes),
-                observedAt: now)
-        }
+        // SPACE IS NOT ASKED HERE. See `storageReading(client:now:)` — this used to end with
+        // that read, ordered last among BAT/FW/SPACE, on a comment claiming the order protected
+        // the listing. It did not: all three of these reads precede the listing, so ordering
+        // among themselves protects the two READINGS and nothing else.
         let trimmed = advertisedName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return RecordingDeviceObservation(
             identity: identity.recordingDeviceIdentity,

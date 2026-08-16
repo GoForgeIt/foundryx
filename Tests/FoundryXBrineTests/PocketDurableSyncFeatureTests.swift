@@ -40,10 +40,13 @@ private actor PocketDurableWorld {
     var delays: [TimeInterval] = []; var ordered: [PocketInventoryCandidate] = []
     var outcomes: [PocketImportOutcome] = []; var times: [PocketConversationTime] = []
     var ambient: [PocketAmbientResult] = []; var deleteCommands = 0
+    /// Every frame the census saw in this scenario's window, so the zero above can be shown
+    /// to be a zero the instrument could have seen something in.
+    var composedInWindow: [String] = []
     var liveEffects = StoredFileLiveEffectCounts()
     let store = PocketMemoryStore(); let decoder = PocketFixtureDecoder(); let sink = PocketJobSink()
 
-    func given(_ phrase: String) async { delays=[]; ordered=[]; outcomes=[]; times=[]; ambient=[]; deleteCommands=0; liveEffects = .init(); await store.clear(); await sink.clear() }
+    func given(_ phrase: String) async { delays=[]; ordered=[]; outcomes=[]; times=[]; ambient=[]; deleteCommands=0; composedInWindow=[]; liveEffects = .init(); await store.clear(); await sink.clear() }
     func candidate(_ date: String="20260808", _ time: String="120000", _ size: Int=6) -> PocketInventoryCandidate {
         .init(key: .init(identity: identity, date: date, timestamp: time), announcedSize: size, closureEvidence: true)
     }
@@ -86,8 +89,21 @@ private actor PocketDurableWorld {
             _ = await sync.importFile(c, payload: mp3(count: 4), evidence: goodEvidence)
             _ = await sync.importFile(c, payload: mp3(count: 8), evidence: goodEvidence)
             _ = await sync.importFile(c, payload: mp3(count: 8), evidence: goodEvidence)
-            deleteCommands = await PocketRecorderCommandLedger.shared.composed(since: mark)
-                .filter(\.namesADeletion).count
+            // THE PAIRED EXISTENCE ASSERTION, WITHOUT WHICH THE ZERO BELOW IS A ZERO ABOUT
+            // NOTHING. `PocketDurableSync` composes no recorder command at all — it takes bytes
+            // that are already on this phone — so `composed(since:)` over this leg is the EMPTY
+            // SET, and a filter over the empty set is zero no matter what the filter says. That
+            // is the same defect this step was written to replace, restated in newer
+            // vocabulary. So the window is made non-empty on purpose: one real, non-delete
+            // frame is put through the real gate and the real census, and the scenario asserts
+            // BOTH that the census saw it AND that the sync leg added no deletion beside it.
+            _ = await PocketRecorderCommandGate.admit(frame: "APP&LIST_DIRS", ownerConsent: nil)
+            await PocketRecorderCommandLedger.shared.record(
+                .init(frame: "APP&LIST_DIRS", disposition: .putOnTheWire))
+            _ = await sync.importFile(candidate("20260810","recover2",8), payload: mp3(count: 8), evidence: goodEvidence)
+            let seen = await PocketRecorderCommandLedger.shared.composed(since: mark)
+            composedInWindow = seen.map(\.frame)
+            deleteCommands = seen.filter(\.namesADeletion).count
         case "the complete Pocket sync lifecycle runs":
             let spy = StoredFileLiveBoundarySpy()
             StoredFileDeviceLifecycle.runFullLinkLifecycle(liveBoundaries: spy)
@@ -110,7 +126,13 @@ private actor PocketDurableWorld {
             XCTAssertNil(times[0].warning); XCTAssertNotNil(times[1].warning); XCTAssertNotNil(times[2].warning); XCTAssertNotEqual(times[2].timeline, times[2].recorderReported)
         case "both use the same conversation and Activity flow and neither posts a content notification": XCTAssertEqual(ambient.map{$0.activityLineageCount}, [1,1]); XCTAssertEqual(ambient.map{$0.notificationCount}, [0,0])
         case "no recorder delete is issued and the shipped deletion promise remains visible":
-            XCTAssertEqual(deleteCommands, 0)
+            XCTAssertTrue(composedInWindow.contains("APP&LIST_DIRS"),
+                          "the census saw \(composedInWindow) — it did not even see the frame "
+                              + "this scenario deliberately put in front of it, so the zero "
+                              + "below is a zero about an instrument that is not reading")
+            XCTAssertEqual(deleteCommands, 0,
+                           "the durable-sync, retry and recovery legs composed \(deleteCommands) "
+                               + "deletion(s) for a recorder: \(composedInWindow)")
             XCTAssertEqual(PocketRecorderCustodyPromise.automaticDeleteCommands, 0)
             XCTAssertEqual(PocketRecorderCustodyPromise.text, "Solleva never deletes anything you didn't ask it to.")
         case "no FrameRouter, Live Activity, recording pill, or currently-recording state is reached":

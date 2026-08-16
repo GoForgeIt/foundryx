@@ -56,7 +56,7 @@ final class PocketPresenceMainThreadGateTests: XCTestCase {
             CachedTranscript(transcript: "hello", title: nil, summary: nil, fetchedAt: 1),
             captureId: "cap-gate", baseDir: libraryRoot, markConfirmed: true)
 
-        let durability = PocketCaptureDurability(baseDir: libraryRoot, stages: [:])
+        let durability = PocketCaptureDurability(baseDir: libraryRoot, stages: [:], brain: .myComputer)
         CaptureManager.resetMainThreadTranscriptDecodesForTests()
         let presence = await Task.detached {
             await PocketPresenceReader.presence(for: key, listedAt: Date(),
@@ -83,7 +83,7 @@ final class PocketPresenceMainThreadGateTests: XCTestCase {
     /// a recording confirmed AFTER the object was built still reads safe.
     func testConfirmationIsMemoisedAndAbsenceIsNot() async throws {
         let libraryRoot = makeRoot("memo")
-        let durability = PocketCaptureDurability(baseDir: libraryRoot, stages: [:])
+        let durability = PocketCaptureDurability(baseDir: libraryRoot, stages: [:], brain: .myComputer)
 
         XCTAssertFalse(durability.confirmedInLore("cap-later"),
                        "premise: nothing has confirmed this capture yet")

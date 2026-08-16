@@ -123,15 +123,25 @@ final class PocketShelfReadModelTests: XCTestCase {
     /// the panel inventing device state.
     func testRestatingTheManifestChangesNothingTheRecorderSaid() {
         let recordings = shelf()
+        let listedAt = Date(timeIntervalSince1970: 1_800_000_000)
         let before = StoredFileDevicePresentation.detail(
             name: "PKT01_BLUE_26079bc5",
             link: .connected,
             battery: .reported("72%"),
             firmware: .reported("1.6"),
-            manifest: PocketInventoryReader.manifest(recordings))
+            manifest: PocketInventoryReader.manifest(recordings, listedAt: listedAt))
+        // THE SAME RESTATEMENT, IN THE VOCABULARY THAT SURVIVED THE MERGE. A row no longer
+        // carries a two-valued custody label; it carries the three-place reading, and "this
+        // phone holds it" is one answer inside it.
+        let held = PocketRecordingPresence(
+            onRecorder: PocketPlaceReading(answer: .yes, observedAt: listedAt),
+            onThisPhone: PocketPlaceReading(answer: .yes, observedAt: listedAt),
+            safeElsewhere: PocketPlaceReading(answer: .no, observedAt: listedAt))
         let after = before.withManifest(
-            PocketInventoryReader.manifest(recordings,
-                                           heldFileIDs: ["2026-03-28/20260328001919"]))
+            PocketInventoryReader.manifest(
+                recordings,
+                presences: ["2026-03-28/20260328001919": held],
+                listedAt: listedAt))
 
         XCTAssertEqual(after.name, before.name)
         XCTAssertEqual(after.eyebrow, before.eyebrow)
@@ -143,10 +153,16 @@ final class PocketShelfReadModelTests: XCTestCase {
 
         // AND THE COLUMN THAT WAS SUPPOSED TO MOVE, MOVED. Without this the assertions above
         // are satisfied by a function that returns its receiver unchanged.
-        XCTAssertEqual(before.manifest.rows.map(\.custodyLabel),
-                       ["Only on the recorder", "Only on the recorder"])
-        XCTAssertEqual(after.manifest.rows.map(\.custodyLabel),
-                       ["In Solleva", "Only on the recorder"])
+        // THE FACT FIRST, so this cannot be satisfied by a rewording, and the WORDS second,
+        // so it cannot be satisfied by a row that knows and does not say.
+        XCTAssertEqual(before.manifest.rows.map { $0.presence.onThisPhone.answer },
+                       [.unknown, .unknown],
+                       "a phone nobody asked about is being drawn as a definite no")
+        XCTAssertEqual(after.manifest.rows.map { $0.presence.onThisPhone.answer },
+                       [.yes, .unknown])
+        XCTAssertEqual(after.manifest.rows.map(\.presenceLabel),
+                       [PocketPresencePresentation.onThisPhoneOnlyLabel,
+                        PocketPresencePresentation.phoneNotCheckedLabel])
         XCTAssertEqual(after.manifest.rows.map(\.title), before.manifest.rows.map(\.title),
                        "restating custody must not reorder or retitle the shelf")
     }

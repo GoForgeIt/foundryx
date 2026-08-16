@@ -305,6 +305,22 @@ public enum PocketBringOverPresentation {
     public static let unreadableRecordingLine =
         "Solleva couldn't read this recording, so nothing was kept. It's still on the recorder."
 
+    /// THE OWNER WALKED AWAY, OR LOCKED THEIR PHONE, AND CAME BACK TO A PAGE THAT SAID NOTHING.
+    ///
+    /// A bring-over over BLE can take hours for a long file — this file's own `inProgressLine`
+    /// says so — and the recorder page stops the errand when it disappears or the app leaves
+    /// the foreground, which is the right call for a radio session and the wrong thing to do
+    /// silently. Backgrounding is not an exotic case: it is what a person DOES during a slow
+    /// transfer. Before this line, `cancel()` tore the session down, wrote `left-the-page` to a
+    /// log nobody reads, and left the message nil, so the page a person returned to looked
+    /// exactly like one where nothing had ever been asked for.
+    ///
+    /// It says the same three things every other stopped-transfer line says: what stopped, that
+    /// nothing was removed from the recorder, and how to start again.
+    public static let leftTheRecorderLine =
+        "Solleva stopped bringing this recording over when it left the recorder's page. "
+        + "Nothing was removed from the recorder — tap Bring it over to start again."
+
     /// Every line this affordance can render, so a claim about it is held over the POPULATION
     /// rather than over whichever string a test author remembered.
     ///
@@ -314,7 +330,7 @@ public enum PocketBringOverPresentation {
     /// button would be the same sentence twice on one screen.
     public static let everyLine: [String] = [
         actionTitle, inProgressLine, broughtOverLine, alreadyHeldLine,
-        transferIncompleteLine, unreadableRecordingLine,
+        transferIncompleteLine, unreadableRecordingLine, leftTheRecorderLine,
     ]
 
     /// The line an outcome earns. `.recorderUnavailable` carries its own, because the reason a

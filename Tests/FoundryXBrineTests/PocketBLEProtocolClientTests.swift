@@ -95,7 +95,10 @@ private enum PocketSteps {
 }
 
 private actor PocketEventRecorder { var events: [String] = []; func record(_ event: String) { events.append(event) } }
-private actor PocketFakeTransport: PocketBLETransport {
+/// Shared with `PocketRecorderDeleteConsentFeatureTests`, which drives the SHIPPED
+/// `PocketBLEClient.write` over it to prove the delete refusal is a behaviour of the client
+/// and not merely a correct opinion held by the gate.
+actor PocketFakeTransport: PocketBLETransport {
     enum Action: Sendable { case control(String), audio(Data), timeout, stall, disconnect, suspend }
     let characteristics: Set<String>; let constructedGeneration: UInt64; var actions: [Action]; var lateEvents: [PocketTransportEvent] = []; var writes: [(characteristic: String, data: Data)] = []; var isClosed = false; var deliveredLateEvents = 0; private var suspension: CheckedContinuation<Void, Never>?
     init(characteristics: Set<String>, actions: [Action], generation: UInt64 = 1) { self.characteristics = characteristics; self.actions = actions; constructedGeneration = generation }

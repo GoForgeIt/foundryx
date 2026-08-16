@@ -427,16 +427,33 @@ public enum PocketRecorderCheck {
         let observation = await PocketRecordingDeviceBridge.observe(
             client: client, identity: identity, advertisedName: advertisedName)
         // KEPT BEFORE THE LISTING IS ATTEMPTED, on purpose. A recorder that answers its
-        // charge and its free space and then refuses to list its files has still told this
-        // account two true things, and the branch below returns `.inventoryFailed` without
-        // ever reaching the write — so doing it afterwards would throw away exactly the
-        // readings a person most wants when something is going wrong.
+        // charge and then refuses to list its files has still told this account two true
+        // things, and the branch below returns `.inventoryFailed` without ever reaching the
+        // write — so doing it afterwards would throw away exactly the readings a person most
+        // wants when something is going wrong.
         RecordingDeviceStore.recordObservedFacts(identity: observation.identity,
                                                  readings: observation.readings)
         let declared = RecordingDeviceCapabilities(declared: observation.declaredCapabilities)
         do {
             let recordings = try await PocketInventoryReader.read(client: client)
             let listedAt = Date()
+            // FREE SPACE IS ASKED ONLY NOW — AFTER THE LISTING HAS ALREADY SUCCEEDED.
+            //
+            // `APP&SPACE` runs inside `protected(.information)`, which RETIRES the whole
+            // authenticated session on a timeout. Asked before the listing (which is where it
+            // used to live), a firmware that silently ignores the command would turn every
+            // "Connect and check now" into "it didn't say what it's holding" for a recorder
+            // that would have listed fine — trading the one thing the owner opened the page
+            // for against a number. These bytes have never been issued to a real recorder from
+            // this app; probe P3 has not run. So the listing is banked first, and a free-space
+            // reading that never arrives renders as the never-asked state with the action that
+            // would ask it.
+            if let space = await PocketRecordingDeviceBridge.storageReading(client: client,
+                                                                            now: listedAt) {
+                RecordingDeviceStore.recordObservedFacts(
+                    identity: observation.identity,
+                    readings: [RecordingDeviceCapabilityKey.freeSpace.rawValue: space])
+            }
             shelf?.note(recordings)
             // EACH PLACE IS ASKED, ONE FILE AT A TIME, and only when a caller handed over an
             // authority for it. "Is this on the phone" and "is this safe elsewhere" are two

@@ -16,7 +16,7 @@ final class PocketPresenceFeatureTests: XCTestCase {
         let result = try await BrineFeatureRunner.run(
             "where-a-recording-is-and-what-a-reset-costs",
             registry: StepRegistry(PocketPresenceSteps.make(world)))
-        XCTAssertEqual(result.passed, 6)
+        XCTAssertEqual(result.passed, 8)
     }
 }
 
@@ -26,7 +26,9 @@ private enum PocketPresenceSteps {
             "a recording brought off a recorder, confirmed in the person's library, whose local audio has since been cleared away",
             "a recorder whose shelf Solleva has just read, and a phone it has not been asked about",
             "a recorder holding three recordings, one of which Solleva already has",
-            "a person who keeps their notes on this phone alone"
+            "a person who keeps their notes on this phone alone",
+            "a person whose notes go to their computer",
+            "a recorder this phone has never been asked about"
         ]
         let whens = [
             "the last look at that recorder is an hour old",
@@ -45,7 +47,10 @@ private enum PocketPresenceSteps {
             "the first thing it asks for is a fresh look at the recorder",
             "forgetting the recorder repeats what forgetting costs",
             "Solleva does not say that recording is safe elsewhere",
-            "the sentence about where a copy goes is this phone's own, not the computer's"
+            "the sentence about where a copy goes is this phone's own, not the computer's",
+            "forgetting the recorder says Solleva has not checked what it is holding",
+            "it does not claim Solleva already has everything the recorder listed",
+            "starting the recorder over says the same thing about what it has not checked"
         ]
         var steps = givens.map { phrase in
             defineStep(phrase) { context, _, _ in try await world.given(phrase); return context }
@@ -89,6 +94,18 @@ private final class PocketPresenceWorld: @unchecked Sendable {
     /// Whether this scenario handed the resolver an authority over this phone. FALSE is the
     /// state the old two-valued custody label could not express at all.
     private var phoneWasAsked = true
+    /// WHICH BRAIN IS ON. It is what decides whether a segment upload-ack is evidence of
+    /// anywhere other than this phone, so a scenario that does not state it is a scenario
+    /// about no particular person. Defaulted to the computer tier — the tier every other
+    /// scenario in this file was written against — so only the two tier scenarios move it.
+    private var brain: BrainChoice = .myComputer
+    /// THE STAGES A REAL RUN WOULD HAND OVER. `[:]` here was the defect the phone-only
+    /// scenario shipped with: a floor that is never handed a stage cannot be observed to
+    /// accept the wrong one.
+    private var stages: [String: CaptureStage] = [:]
+    /// nil ⇒ nobody has read this recorder's shelf. DISTINCT from `[]`, which is a shelf
+    /// that WAS read and is holding nothing.
+    private var shelfReading: [PocketRecordingPresence]?
 
     // MARK: - Given
 
@@ -110,7 +127,7 @@ private final class PocketPresenceWorld: @unchecked Sendable {
             // that stops the predicate passing by always answering yes.
             _ = try await hold(date: "2026-03-28", timestamp: "20260328102020",
                                captureID: "cap-unconfirmed")
-            durability = PocketCaptureDurability(baseDir: libraryRoot, stages: [:])
+            durability = PocketCaptureDurability(baseDir: libraryRoot, stages: stages, brain: brain)
 
         case "a recorder whose shelf Solleva has just read, and a phone it has not been asked about":
             subject = PocketRecorderFileKey(identity: identity, date: "2026-03-28",
@@ -133,10 +150,23 @@ private final class PocketPresenceWorld: @unchecked Sendable {
                 PocketRecordingPresence(onRecorder: onRecorderNow,
                                         onThisPhone: .neverAsked, safeElsewhere: .neverAsked)
             ]
+            shelfReading = shelfPresences
 
         case "a person who keeps their notes on this phone alone":
+            brain = .justMyPhone
             destination = PocketDestinationPresentation.line(for: .justMyPhone)
-            durability = PocketCaptureDurability(baseDir: libraryRoot, stages: [:])
+
+        // THE POSITIVE CONTROL for the tier rule, and the reason the phone-only scenario is
+        // not vacuous. The two scenarios run the SAME finished recording through the SAME
+        // WAL and differ in exactly one fact: which brain is on. If the predicate were made
+        // to always answer no, this reds; if the tier is ignored, the other one reds.
+        case "a person whose notes go to their computer":
+            brain = .myComputer
+            destination = PocketDestinationPresentation.line(for: .myComputer)
+
+        case "a recorder this phone has never been asked about":
+            shelfReadAt = nil
+            shelfReading = nil
 
         default:
             throw BrineStepError("Unhandled given: \(phrase)")
@@ -159,6 +189,18 @@ private final class PocketPresenceWorld: @unchecked Sendable {
                 .write(to: cdir.appendingPathComponent(CaptureWAL.segName(0)))
             try await LocalBackend(baseDir: libraryRoot, stt: PhoneBrainSTT())
                 .finalize(captureId: captureID, meta: nil)
+
+            // THE FLOOR, HANDED OVER THE WAY THE RUNNING APP HANDS IT OVER — and this is the
+            // whole point of the scenario. `App/DeviceScreen.swift` passes
+            // `manager.captureStages()`, and on the phone-only tier every one of those
+            // captures reaches `.savedToComputer`, because `CaptureBackend.swift:71` gives
+            // that tier `uploadSegment: { _, _, _ in }` — a closure that succeeds by doing
+            // nothing — and the WAL's ack then means, in the file's own words, "durably on
+            // this phone". Passing `[:]` here (which is what this step used to do) tested a
+            // predicate that was never shown the value that breaks it.
+            stages = [captureID: .savedToComputer]
+            durability = PocketCaptureDurability(baseDir: libraryRoot,
+                                                  stages: stages, brain: brain)
             subject = try await hold(date: "2026-04-01", timestamp: "20260401080000",
                                      captureID: captureID)
             presence = await resolveOffMain()
@@ -238,16 +280,22 @@ private final class PocketPresenceWorld: @unchecked Sendable {
         case "forgetting the recorder repeats what forgetting costs":
             let warning = RecordingDevicePage.forgetWarning(for: .recordThenSync)
             let message = PocketRecorderCostPresentation.forgetMessage(warning: warning,
-                                                                       presences: shelfPresences)
+                                                                       presences: shelfReading)
             XCTAssertTrue(message.contains(warning),
                           "the forget confirmation dropped the shipped key warning")
             forgetMessage = message
 
         case "Solleva does not say that recording is safe elsewhere":
             let p = try XCTUnwrap(presence)
+            XCTAssertEqual(stages["cap-phone-only"], .savedToComputer,
+                           "this scenario did not even reach the state it exists to forbid — "
+                               + "the capture never became savedToComputer, so a predicate "
+                               + "that accepts that stage would still pass here")
             XCTAssertFalse(p.isDurableElsewhere,
-                           "the phone-only brain saves with markConfirmed: false, so nothing "
-                               + "left this phone — calling it safe elsewhere is a false promise")
+                           "a recording whose ONLY copy is on this phone is called safe "
+                               + "elsewhere. On the phone-only tier the segment ack is "
+                               + "self-issued, so savedToComputer means \"durably on this "
+                               + "phone\" — one tap from a delete that takes the last copy")
 
         case "the sentence about where a copy goes is this phone's own, not the computer's":
             XCTAssertEqual(destination, PocketDestinationPresentation.phoneOnlyLine)
@@ -259,6 +307,45 @@ private final class PocketPresenceWorld: @unchecked Sendable {
                            BrainChoice.allCases.count,
                            "two brains share one sentence about where the copy goes: "
                                + "\(PocketDestinationPresentation.everyLine)")
+
+        case "forgetting the recorder says Solleva has not checked what it is holding":
+            // THE UNREAD SHELF, EXACTLY AS THE PAGE HAS IT. `shelfReading` is nil here because
+            // nothing has checked, which is the state a freshly opened recorder page is in.
+            let warning = RecordingDevicePage.forgetWarning(for: .recordThenSync)
+            let message = PocketRecorderCostPresentation.forgetMessage(warning: warning,
+                                                                       presences: shelfReading)
+            XCTAssertTrue(message.contains(warning),
+                          "the forget confirmation dropped the shipped key warning")
+            XCTAssertTrue(message.contains(PocketRecorderCostPresentation.shelfNotCheckedLine),
+                          "the confirmation reads \"\(message)\" — a destructive gesture on a "
+                              + "recorder nobody checked must say it has not checked")
+            forgetMessage = message
+
+        case "it does not claim Solleva already has everything the recorder listed":
+            let message = try XCTUnwrap(forgetMessage)
+            // THE POSITIVE CONTROL. The reassurance IS a real sentence this type says — for a
+            // shelf that was READ and cost nothing. If it stopped existing, this assertion
+            // would be about a string nothing produces and could never fail.
+            let reassurance = PocketRecorderCostPresentation.costLine([])
+            XCTAssertEqual(reassurance,
+                           "Solleva already has every recording this recorder listed.",
+                           "the reassurance this scenario forbids on an unread shelf is no "
+                               + "longer produced for a read one either — the assertion below "
+                               + "is now about a sentence nothing says")
+            XCTAssertFalse(message.contains(reassurance),
+                           "forgetting a recorder nobody checked told the owner Solleva "
+                               + "already holds everything it listed, immediately before "
+                               + "destroying the key that reaches it")
+
+        case "starting the recorder over says the same thing about what it has not checked":
+            let gate = PocketRecorderCostPresentation.resetGate(shelfObservedAt: shelfReadAt,
+                                                                now: now,
+                                                                presences: shelfReading)
+            XCTAssertEqual(gate.cost, PocketRecorderCostPresentation.shelfNotCheckedLine)
+            XCTAssertTrue(gate.isEnabled,
+                          "the owner's own reset disabled itself on an unchecked recorder")
+            XCTAssertEqual(gate.primaryAction,
+                           PocketRecorderCostPresentation.checkFirstAction)
 
         default:
             throw BrineStepError("Unhandled assertion: \(phrase)")
@@ -282,6 +369,9 @@ private final class PocketPresenceWorld: @unchecked Sendable {
         destination = nil
         shelfReadAt = nil
         phoneWasAsked = true
+        brain = .myComputer
+        stages = [:]
+        shelfReading = nil
     }
 
     private func makeRoot(_ name: String) -> URL {
@@ -334,7 +424,7 @@ private final class PocketPresenceWorld: @unchecked Sendable {
     private func resolveGate() -> PocketRecorderCostPresentation.ResetGate {
         PocketRecorderCostPresentation.resetGate(shelfObservedAt: shelfReadAt,
                                                  now: now,
-                                                 presences: shelfPresences)
+                                                 presences: shelfReading)
     }
 
     private func line(_ lines: [PocketPlaceLine], _ place: String) throws -> PocketPlaceLine {

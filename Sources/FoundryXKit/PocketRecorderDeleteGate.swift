@@ -78,30 +78,75 @@ public enum PocketRecorderWire {
 /// Deliberately the same shape as `PocketMintConsent`, for the same reason: a recorder is the
 /// only place some recordings exist, and an operation that can lose one may not be reachable by
 /// omission, by a default argument, or by a caller that happened to pass `true`. There is no
-/// public initialiser and exactly one factory, and the factory is named for what the owner has
-/// to have done. A code path that wants a deletion has to hold one of these, and the only way to
-/// get one is to say, in code, that a person chose this recording.
+/// public initialiser, and the two factories are named for the two things the owner has to have
+/// done — the ruling's two paths, and no third. A code path that wants a deletion has to hold
+/// one of these, and the only way to get one is to say, in code, which path authorised it.
 ///
 /// IT NAMES ONE RECORDING. Consent is not a mode. A value of this type authorises the removal of
 /// the single file it carries and nothing else, so a path that obtained consent for one
 /// recording cannot spend it on another.
 ///
-/// WHAT IT IS NOT: it is not the safety predicate. Whether Solleva can PROVE it already holds
-/// this recording somewhere else is a separate question with a separate answer (the Presence
-/// row), and the two are kept apart on purpose — a deletion needs both, and computing a second
-/// opinion about safety inside the consent is how a recording gets lost.
+/// IT DOES NOT COMPUTE SAFETY — IT REQUIRES IT. This distinction is the whole design, and the
+/// first version of this file got it wrong: it enforced CONSENT and advertised PROOF. Whether
+/// Solleva can prove it already holds this recording somewhere else is a question with exactly
+/// one answer in this app — the Presence row's `PocketRecordingPresence.isDurableElsewhere`,
+/// resolved once by `PocketShelfReadModel.presences` and drawn on the shelf. This type does not
+/// recompute it (two answers to "is this safe" is how a recording gets lost) but it will not
+/// come into existence without being SHOWN it. The factories are failable and return nil for
+/// any reading that does not say yes, which includes every reading nobody asked for.
+///
+/// WHY FAILABLE RATHER THAN A CHECK AT THE CALL SITE. Nick's ruling is *"nothing is ever
+/// removed from the recorder unless we can prove we already hold it somewhere else."* A call
+/// site that must remember to check is a rule that holds until somebody forgets; a factory that
+/// cannot return a value is a rule that holds because the alternative does not compile.
 public struct PocketDeleteConsent: Sendable, Equatable {
+
+    /// WHICH OF THE RULING'S TWO PATHS AUTHORISED THIS, kept because they are genuinely
+    /// different acts and the ledger is the audit trail for both. "This person chose this
+    /// recording" and "this person armed this recorder, and this recording later met the bar"
+    /// are not the same sentence, and a ledger that files them under one name cannot answer the
+    /// only question anybody will ever ask it: which of the two removed my recording.
+    public enum Provenance: String, Sendable, Equatable, CaseIterable {
+        /// Path 1 — an explicit tap on this recording.
+        case ownerChose
+        /// Path 2 — the owner-armed automatic clear, off by default and recorder-scoped.
+        case ownerArmedThisRecorder
+    }
 
     /// The one recording this consent authorises the removal of.
     public let file: PocketRecorderFileKey
+    /// Which path authorised it.
+    public let provenance: Provenance
 
-    /// The owner was shown this recording, was told it would be removed from the recorder, and
-    /// chose it. The ONLY way to obtain a value of this type.
-    public static func ownerChoseThisRecording(_ file: PocketRecorderFileKey) -> PocketDeleteConsent {
-        PocketDeleteConsent(file: file)
+    /// PATH 1. The owner was shown this recording, was told it would be removed from the
+    /// recorder, and chose it — AND the shelf's own reading says we already hold it elsewhere.
+    ///
+    /// - Parameter provenSafeBy: the reading the row was drawn from. nil is returned unless it
+    ///   says yes, so `unknown` — a place nobody asked about — can never authorise a removal.
+    public static func ownerChoseThisRecording(
+        _ file: PocketRecorderFileKey,
+        provenSafeBy presence: PocketRecordingPresence
+    ) -> PocketDeleteConsent? {
+        guard presence.isDurableElsewhere else { return nil }
+        return PocketDeleteConsent(file: file, provenance: .ownerChose)
     }
 
-    private init(file: PocketRecorderFileKey) { self.file = file }
+    /// PATH 2. The owner turned on this recorder's automatic clear, and this recording has since
+    /// synced. The SAME predicate, deliberately — an armed control is a standing choice, not a
+    /// lower bar, and the ruling says so: *"never retroactive to recordings whose safety we
+    /// cannot currently demonstrate."*
+    public static func ownerArmedThisRecorder(
+        _ file: PocketRecorderFileKey,
+        provenSafeBy presence: PocketRecordingPresence
+    ) -> PocketDeleteConsent? {
+        guard presence.isDurableElsewhere else { return nil }
+        return PocketDeleteConsent(file: file, provenance: .ownerArmedThisRecorder)
+    }
+
+    private init(file: PocketRecorderFileKey, provenance: Provenance) {
+        self.file = file
+        self.provenance = provenance
+    }
 
     /// Whether this consent authorises the frame about to be composed. Both the day and the
     /// instant must match: a recorder names its files by `(date, timestamp)`, so a comparison

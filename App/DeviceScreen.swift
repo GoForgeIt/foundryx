@@ -1049,7 +1049,11 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// WHERE EVERY LISTED RECORDING IS, as of the last check. The reset's cost and the forget
     /// confirmation both read this, so the number a person is shown before a destructive
     /// gesture is the SAME reading the rows are drawn from - never a second count.
-    @Published private(set) var presences: [PocketRecordingPresence] = []
+    /// nil ⇒ NOBODY HAS READ THIS RECORDER'S SHELF, which is the state every freshly opened
+    /// page is in — nothing checks a recorder until the owner taps. It is DISTINCT from `[]`,
+    /// a shelf that was read and is holding nothing, and keeping them distinct is what stops
+    /// the Forget confirmation reassuring a person about a recorder Solleva never spoke to.
+    @Published private(set) var presences: [PocketRecordingPresence]?
     /// When the recorder last answered a listing. `nil` means it never has on this screen, and
     /// a stale or absent reading changes the reset's primary action, never its enabled state.
     @Published private(set) var shelfObservedAt: Date?
@@ -1148,7 +1152,7 @@ final class PocketRecorderCheckModel: ObservableObject {
             message = PocketRecorderCheckPresentation.notThisRecorderLine
             detail = nil
             offeredRecording = nil
-            presences = []
+            presences = nil
             shelfObservedAt = nil
             return
         }
@@ -1160,7 +1164,7 @@ final class PocketRecorderCheckModel: ObservableObject {
         detail = nil
         offeredRecording = nil
         shelfRecordings = []
-        presences = []
+        presences = nil
         shelfObservedAt = nil
         beginErrand(PocketErrandCommand.shelfSubject)
         // A FRESH ATTACHMENT PER CHECK. An attachment's `teardown()` retires its own link and
@@ -1351,6 +1355,12 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// drop can both fire for one departure.
     func cancel() {
         guard isChecking || isBringingOver else { return }
+        // A STOPPED TRANSFER SAYS SO. `left-the-page` is a closed LOG token and is never
+        // rendered; without this line the owner who locked their phone during an hours-long
+        // pull comes back to a page showing nothing happened and no reason why. Only the
+        // bring-over earns a sentence: a stopped CHECK costs nothing and leaves the page in
+        // exactly the state a person who has not tapped anything expects.
+        if isBringingOver { bringOverMessage = PocketBringOverPresentation.leftTheRecorderLine }
         errand?.cancel()
         errand = nil
         attachment?.teardown()

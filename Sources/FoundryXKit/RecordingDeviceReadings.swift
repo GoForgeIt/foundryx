@@ -107,6 +107,12 @@ public enum RecordingDeviceReadingPresentation {
 
     public static var labels: [String] { order.map(label(for:)) }
 
+    /// Every line this strip can draw, so a claim about this surface's COPY is held over the
+    /// population rather than over whichever string somebody remembered. Named `everyLine` to
+    /// match the other presentation families, because the gates that scan them take the union
+    /// and a family missing this property is a family the gates cannot see.
+    public static var everyLine: [String] { labels + [askAction] }
+
     /// The one action that reads these facts, named where the reading lives so a line can
     /// never state an absence without stating the way out of it.
     public static var askAction: String { RecordingDevicePage.connectAndCheckAction }

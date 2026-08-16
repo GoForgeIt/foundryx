@@ -225,7 +225,17 @@ public actor PocketBLEClient {
         try await protected(.information) {
             try await write("SPACE")
             let value = try await matchingValue(prefix: "MCU&SPA&", operation: .information).split(separator: "&", omittingEmptySubsequences: false)
-            guard value.count == 2, let used = Int(value[0]), let total = Int(value[1]), used >= 0, total >= 0 else { throw PocketProtocolError.malformedResponse }
+            // `used > total` IS A DECODE ERROR, NOT A FULL DISK. These bytes have never been
+            // exchanged with a real recorder — probe P3 has not run — so the field ORDER in
+            // `MCU&SPA&<a>&<b>` is read from a third-party decode. If the firmware answers
+            // `<total>&<used>`, every reading arrives inverted; the presentation layer clamps
+            // with `max(0, capacity - used)` and the owner is shown "0 KB free of <n>" stamped
+            // "read just now" — a confident wrong number, and the exact pressure that makes
+            // somebody delete something. Refusing it renders the never-asked state instead,
+            // which is honest and offers the action that would ask again.
+            guard value.count == 2, let used = Int(value[0]), let total = Int(value[1]),
+                  used >= 0, total >= 0, used <= total
+            else { throw PocketProtocolError.malformedResponse }
             return PocketStorage(usedKilobytes: used, capacityKilobytes: total)
         }
     }
@@ -502,6 +512,26 @@ public actor PocketBLEClient {
                 .init(frame: frame, disposition: .couldNotBeSent))
             throw PocketProtocolError.transportFailure
         }
+    }
+
+    /// DRIVE THE SHIPPED COMPOSER WITH AN ARBITRARY FRAME. Test-only, and named so.
+    ///
+    /// WHAT IT EXISTS FOR, AND WHY A TEXT SCAN WAS NOT ENOUGH. `write(_:ownerConsent:)` is
+    /// private and no public seam on this client can express the delete opcode, so until now
+    /// NOTHING drove the production refusal: the gate's scenario called
+    /// `PocketRecorderCommandGate.admit` directly, and the wiring was held only by counting the
+    /// string `PocketRecorderCommandGate.admit(` in this file. That count survives the mutation
+    /// that matters — keep the call, discard the result (`_ = await admit(…)`) — under which
+    /// this client would have written every deletion handed to it while all three delete
+    /// scenarios stayed green.
+    ///
+    /// It composes nothing itself: it is a pass-through to the one composer, so a scenario
+    /// exercises the SHIPPED gate, the SHIPPED census and the SHIPPED throw rather than a
+    /// re-implementation of them. It carries no default for `ownerConsent`, so a test cannot
+    /// authorise a deletion by omission either.
+    func composeForTesting(_ command: String,
+                           ownerConsent: PocketDeleteConsent?) async throws {
+        try await write(command, ownerConsent: ownerConsent)
     }
 
     private func retire(reason: String) async {

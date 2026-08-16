@@ -49,3 +49,14 @@ Feature: Where a recording is, and what starting the recorder over would cost
     When a recording is finished and transcribed on the phone
     Then Solleva does not say that recording is safe elsewhere
     And the sentence about where a copy goes is this phone's own, not the computer's
+
+  Scenario: The very same finished recording IS safe once it goes to a computer
+    Given a person whose notes go to their computer
+    When a recording is finished and transcribed on the phone
+    Then Solleva says that recording is safe elsewhere
+
+  Scenario: Forgetting a recorder nobody has checked does not claim we hold everything
+    Given a recorder this phone has never been asked about
+    Then forgetting the recorder says Solleva has not checked what it is holding
+    And it does not claim Solleva already has everything the recorder listed
+    And starting the recorder over says the same thing about what it has not checked

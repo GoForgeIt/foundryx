@@ -770,8 +770,16 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
         case .blocked(let outcome):
             return outcome
         case .ready(let client, let identity):
-            let observation = await PocketRecordingDeviceBridge.observe(
+            var observation = await PocketRecordingDeviceBridge.observe(
                 client: client, identity: identity, advertisedName: advertisedName)
+            // AND HOW FULL IT IS, ASKED LAST ON THIS PATH TOO. Nothing follows it here but
+            // `close()`, so a session this read retires costs nothing — but it is the same
+            // ordering rule as the check's, written the same way, so the two paths cannot
+            // drift into disagreeing about when it is safe to ask.
+            if let space = await PocketRecordingDeviceBridge.storageReading(client: client) {
+                observation = observation.withReading(
+                    space, for: RecordingDeviceCapabilityKey.freeSpace.rawValue)
+            }
             await client.close()
             switch RecordingDeviceAdoption.remember(observation) {
             case .recorded:

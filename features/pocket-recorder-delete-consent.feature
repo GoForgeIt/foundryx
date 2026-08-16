@@ -35,6 +35,18 @@ Feature: Solleva never deletes anything you did not ask it to
     Then there is exactly one way to make that choice, and it names the one recording
     And nothing can make that choice without going through it
 
+  Scenario: A recording Solleva cannot prove it holds elsewhere cannot be chosen for removal
+    Given a recording that is on the recorder and nowhere else Solleva can prove
+    Then a person's choice to remove it cannot even be recorded
+    And the same is true when Solleva has simply never checked
+    And a recording Solleva can prove it holds elsewhere CAN be chosen, so the bar is not just always-no
+
+  Scenario: Turning on automatic clearing is a second path, and it meets the same bar
+    Given a recording that is on the recorder and nowhere else Solleva can prove
+    Then arming a recorder to clear itself cannot record a choice about that recording either
+    And a recording Solleva holds elsewhere can be cleared by an armed recorder
+    And Solleva can tell the two paths apart afterwards
+
   Scenario: A recorder listing what it holds is never read as a recording being deleted
     Given the answers a recorder gives while it is listing what it holds
     Then not one of them reads as a recording having been removed

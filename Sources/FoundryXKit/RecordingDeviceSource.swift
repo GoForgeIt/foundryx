@@ -214,6 +214,20 @@ public struct RecordingDeviceObservation: Equatable, Sendable {
         self.declaredCapabilities = declaredCapabilities
         self.readings = readings
     }
+
+    /// The same observation with one more reading folded in. Used where a fact is asked for
+    /// AFTER the rest of the observation was taken — free space, which is deliberately the
+    /// last thing asked on any session because the command can retire it.
+    public func withReading(_ reading: RecordingDeviceReading,
+                            for key: String) -> RecordingDeviceObservation {
+        var merged = readings
+        merged[key] = reading
+        return RecordingDeviceObservation(identity: identity,
+                                          reportedName: reportedName,
+                                          audioProfile: audioProfile,
+                                          declaredCapabilities: declaredCapabilities,
+                                          readings: merged)
+    }
 }
 
 /// One row of the ONE list, after the catalog has evaluated it.

@@ -29,7 +29,7 @@ final class PocketRecorderDeleteConsentFeatureTests: XCTestCase {
         let result = try await BrineFeatureRunner.run(
             "pocket-recorder-delete-consent",
             registry: StepRegistry(PocketDeleteConsentSteps.make(world)))
-        XCTAssertEqual(result.passed, 5)
+        XCTAssertEqual(result.passed, 7)
     }
 
     /// THE DEFECT, MEASURED RATHER THAN ASSERTED. The gate that shipped scanned composed
@@ -50,6 +50,7 @@ private enum PocketDeleteConsentSteps {
             "the way a person's choice to remove a recording is carried",
             "the answers a recorder gives while it is listing what it holds",
             "the recorder panel a person reads before bringing anything over",
+            "a recording that is on the recorder and nowhere else Solleva can prove",
         ]
         let whens = [
             "Solleva brings one over, retries a failed one, runs its retention sweep, and "
@@ -57,6 +58,14 @@ private enum PocketDeleteConsentSteps {
             "something inside Solleva asks that recorder to forget a recording nobody chose",
         ]
         let thens = [
+            "a person's choice to remove it cannot even be recorded",
+            "the same is true when Solleva has simply never checked",
+            "a recording Solleva can prove it holds elsewhere CAN be chosen, so the bar is not "
+                + "just always-no",
+            "arming a recorder to clear itself cannot record a choice about that recording "
+                + "either",
+            "a recording Solleva holds elsewhere can be cleared by an armed recorder",
+            "Solleva can tell the two paths apart afterwards",
             "Solleva composed commands to that recorder",
             "not one of them was a delete",
             "the recorder is never asked",
@@ -129,6 +138,22 @@ private actor PocketDeleteConsentWorld {
     private var admission: PocketRecorderCommandGate.Admission?
     private var commandsOnTheWireDuringRefusal: [String] = []
     private var listingReplies: [String] = []
+    /// A recording whose safety Solleva cannot demonstrate — the state the ruling forbids a
+    /// deletion in, and the one every unchecked recorder is in.
+    private var unprovenFile: PocketRecorderFileKey?
+
+    private static let then = Date(timeIntervalSince1970: 1_800_000_000)
+    /// Brought over, and nowhere else yet. The state a recording is in for the whole window
+    /// between the transfer landing and the drain finishing.
+    static let onlyHere = PocketRecordingPresence(
+        onRecorder: PocketPlaceReading(answer: .yes, observedAt: then),
+        onThisPhone: PocketPlaceReading(answer: .yes, observedAt: then),
+        safeElsewhere: PocketPlaceReading(answer: .no, observedAt: then))
+    /// Safe somewhere that is neither the recorder nor only this phone.
+    static let provenSafe = PocketRecordingPresence(
+        onRecorder: PocketPlaceReading(answer: .yes, observedAt: then),
+        onThisPhone: PocketPlaceReading(answer: .yes, observedAt: then),
+        safeElsewhere: PocketPlaceReading(answer: .yes, observedAt: then))
     /// HELD, NOT DROPPED. A `CaptureManager` released while its own drain is in flight takes
     /// the drain with it, and the send leg then contributes nothing to the census for a reason
     /// that has nothing to do with deletions.
@@ -190,6 +215,11 @@ private actor PocketDeleteConsentWorld {
              "the recorder panel a person reads before bringing anything over":
             break
 
+        case "a recording that is on the recorder and nowhere else Solleva can prove":
+            unprovenFile = PocketRecorderFileKey(
+                identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: "peripheral"),
+                date: Self.day, timestamp: "20260328001919")
+
         case "the answers a recorder gives while it is listing what it holds":
             // THE REAL COLLISION, IN THE REAL FRAMES. `APP&LIST_DIRS` is answered
             // `MCU&DIRS&<date>`, of which `MCU&D` — the delete acknowledgement — is a strict
@@ -226,10 +256,50 @@ private actor PocketDeleteConsentWorld {
         case "something inside Solleva asks that recorder to forget a recording nobody chose":
             guard let stack else { throw BrineStepError("no recorder was staged") }
             let before = stack.commandsWritten
-            // THE FRAME A DELETE WOULD BE, composed with no owner behind it. This is the gate
-            // the shipped `PocketBLEClient.write` consults before anything reaches the radio.
+            // THROUGH THE SHIPPED CLIENT, NOT THROUGH THE GATE DIRECTLY.
+            //
+            // This step used to call `PocketRecorderCommandGate.admit` itself, which proved the
+            // gate DECIDES correctly and nothing about whether the client OBEYS it. The
+            // mutation that mattered — keep the call in `write`, discard its result — left that
+            // version green while this client wrote every deletion handed to it. Driving the
+            // real `write` over a real fake transport is what makes the refusal a behaviour
+            // rather than an opinion.
             let frame = "APP&D&\(Self.day)&20260328001919"
-            admission = await PocketRecorderCommandGate.admit(frame: frame, ownerConsent: nil)
+            let transport = PocketFakeTransport(
+                characteristics: PocketCharacteristicMap.primary.required,
+                actions: [.control("MCU&SK&OK")])
+            let client = try await PocketBLEClient.connect(transport: transport)
+            try await client.authenticate(secret: "0123456789abcdef")
+            let writesBeforeTheDelete = await transport.writes.count
+            do {
+                try await client.composeForTesting("D&\(Self.day)&20260328001919",
+                                                    ownerConsent: nil)
+                XCTFail("the shipped client PUT A DELETION ON THE WIRE for a recording nobody "
+                            + "chose — it consulted the gate and then ignored the answer")
+                admission = .admitted
+            } catch let error as PocketProtocolError {
+                XCTAssertEqual(error, .deletionNobodyChose,
+                               "the client refused, but for the wrong reason: \(error)")
+                admission = .refused(.nobodyChoseThisRecording)
+            }
+            // AND THE RADIO GENUINELY SAW NOTHING. The throw alone could be produced by a
+            // client that wrote first and threw afterwards.
+            let writesAfter = await transport.writes.count
+            XCTAssertEqual(writesAfter, writesBeforeTheDelete,
+                           "\(writesAfter - writesBeforeTheDelete) byte-write(s) reached the "
+                               + "transport for a deletion nobody chose")
+            // POSITIVE CONTROL: the same seam, the same client, a NON-delete frame — which must
+            // reach the radio. Without it, a client that refuses everything passes above.
+            try await client.composeForTesting("LIST_DIRS", ownerConsent: nil)
+            let writesAfterControl = await transport.writes.count
+            XCTAssertEqual(writesAfterControl, writesBeforeTheDelete + 1,
+                           "POSITIVE CONTROL FAILED: an ordinary command did not reach the "
+                               + "transport either, so the refusal above proves nothing")
+            // NO SECOND `admit` HERE. The client's own consult already put exactly one refused
+            // deletion into the census; asking the gate again would double-count the very
+            // population the next assertion measures — and it was that direct call, not the
+            // client, that this step used to test.
+            _ = frame
             commandsOnTheWireDuringRefusal = Array(stack.commandsWritten.dropFirst(before.count))
             composed = await PocketRecorderCommandLedger.shared.composed(since: try requireMark())
 
@@ -386,14 +456,82 @@ private actor PocketDeleteConsentWorld {
             XCTAssertEqual(composed.filter { $0.disposition == .putOnTheWire }
                                .filter(\.namesADeletion), [])
 
+        // MARK: the safety predicate is required, not remembered
+
+        case "a person's choice to remove it cannot even be recorded":
+            let file = try XCTUnwrap(unprovenFile)
+            // ON THE RECORDER, ON THIS PHONE, AND NOTHING ANYWHERE ELSE. This is the reading a
+            // recording has the moment it has been brought over and before the drain and
+            // finalize have put it anywhere that survives losing the phone.
+            XCTAssertNil(PocketDeleteConsent.ownerChoseThisRecording(file, provenSafeBy: Self.onlyHere),
+                         "a consent was minted for a recording Solleva cannot prove it holds "
+                             + "anywhere but this phone — the ruling's invariant is that "
+                             + "nothing leaves the recorder unless we can prove otherwise")
+
+        case "the same is true when Solleva has simply never checked":
+            let file = try XCTUnwrap(unprovenFile)
+            XCTAssertNil(PocketDeleteConsent.ownerChoseThisRecording(file,
+                                                                     provenSafeBy: .nothingAsked),
+                         "an UNASKED place authorised a deletion. unknown must never read as "
+                             + "yes on the one predicate a removal turns on")
+
+        case "a recording Solleva can prove it holds elsewhere CAN be chosen, so the bar is not just always-no":
+            // THE POSITIVE CONTROL. Without it, a factory hard-coded to return nil satisfies
+            // both assertions above and makes the affordance Step 6 ships impossible rather
+            // than safe.
+            let file = try XCTUnwrap(unprovenFile)
+            let consent = try XCTUnwrap(
+                PocketDeleteConsent.ownerChoseThisRecording(file, provenSafeBy: Self.provenSafe),
+                "POSITIVE CONTROL FAILED: no reading at all can authorise a removal, so the "
+                    + "two refusals above prove nothing about the predicate")
+            XCTAssertEqual(consent.file, file)
+
+        case "arming a recorder to clear itself cannot record a choice about that recording either":
+            let file = try XCTUnwrap(unprovenFile)
+            XCTAssertNil(PocketDeleteConsent.ownerArmedThisRecorder(file, provenSafeBy: Self.onlyHere),
+                         "the armed automatic clear took a LOWER bar than a person's own tap. "
+                             + "The ruling is explicit that it is never retroactive to "
+                             + "recordings whose safety we cannot currently demonstrate")
+            XCTAssertNil(PocketDeleteConsent.ownerArmedThisRecorder(file,
+                                                                    provenSafeBy: .nothingAsked))
+
+        case "a recording Solleva holds elsewhere can be cleared by an armed recorder":
+            let file = try XCTUnwrap(unprovenFile)
+            let armed = try XCTUnwrap(
+                PocketDeleteConsent.ownerArmedThisRecorder(file, provenSafeBy: Self.provenSafe),
+                "POSITIVE CONTROL FAILED: the armed path can never authorise anything")
+            XCTAssertEqual(armed.provenance, .ownerArmedThisRecorder)
+
+        case "Solleva can tell the two paths apart afterwards":
+            let file = try XCTUnwrap(unprovenFile)
+            let chose = try XCTUnwrap(
+                PocketDeleteConsent.ownerChoseThisRecording(file, provenSafeBy: Self.provenSafe))
+            let armed = try XCTUnwrap(
+                PocketDeleteConsent.ownerArmedThisRecorder(file, provenSafeBy: Self.provenSafe))
+            XCTAssertNotEqual(chose.provenance, armed.provenance,
+                              "both paths file under one name, so the ledger cannot answer the "
+                                  + "only question anybody will ask it: which of the two "
+                                  + "removed my recording")
+            XCTAssertEqual(Set(PocketDeleteConsent.Provenance.allCases.map(\.rawValue)).count, 2)
+
         // MARK: consent cannot be made by accident
 
         case "there is exactly one way to make that choice, and it names the one recording":
             let key = PocketRecorderFileKey(
                 identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: "peripheral"),
                 date: Self.day, timestamp: "20260328001919")
-            let consent = PocketDeleteConsent.ownerChoseThisRecording(key)
+            // THE SAFETY PREDICATE, HANDED OVER, because there is no other way to obtain one.
+            // This is the reading the shelf row was drawn from — the ONE answer to "is this
+            // safe" in this app — and the factory is failable so an unproven recording cannot
+            // produce a consent at all.
+            let safe = PocketRecordingPresence(
+                onRecorder: PocketPlaceReading(answer: .yes, observedAt: Date()),
+                onThisPhone: PocketPlaceReading(answer: .yes, observedAt: Date()),
+                safeElsewhere: PocketPlaceReading(answer: .yes, observedAt: Date()))
+            let consent = try XCTUnwrap(
+                PocketDeleteConsent.ownerChoseThisRecording(key, provenSafeBy: safe))
             XCTAssertEqual(consent.file, key)
+            XCTAssertEqual(consent.provenance, .ownerChose)
             // IT AUTHORISES THAT RECORDING AND NO OTHER. Consent is not a mode.
             XCTAssertTrue(consent.authorises(frame: "APP&D&\(Self.day)&20260328001919"))
             XCTAssertFalse(consent.authorises(frame: "APP&D&\(Self.day)&20260328002020"),
@@ -415,23 +553,59 @@ private actor PocketDeleteConsentWorld {
             // NO PUBLIC INITIALISER, EXACTLY ONE FACTORY — asserted the way
             // `PocketMintConsent` is: over the source, because a type's shape is not
             // observable from a call site that is not allowed to exist.
-            XCTAssertTrue(declaration.contains("private init(file: PocketRecorderFileKey)"),
-                          "PocketDeleteConsent's initialiser is not private, so any call site "
-                              + "can conjure consent")
+            // MEASURED OVER THE TYPE'S OWN BODY rather than pinned to one spelling of the
+            // signature: the previous form named the parameter list literally, so adding the
+            // provenance field reddened a gate about privacy for a reason that had nothing to
+            // do with privacy. What matters is that EVERY initialiser is private.
+            let consentBody = Self.body(ofType: "PocketDeleteConsent", in: declaration)
+            XCTAssertGreaterThan(Self.occurrences(of: "private init(", in: consentBody), 0,
+                                 "PocketDeleteConsent has no private initialiser to find — the "
+                                     + "assertion below is measuring nothing")
+            XCTAssertEqual(Self.occurrences(of: "public init(", in: consentBody), 0,
+                           "PocketDeleteConsent's initialiser is not private, so any call site "
+                               + "can conjure consent")
+            XCTAssertEqual(Self.occurrences(of: "init(", in: consentBody),
+                           Self.occurrences(of: "private init(", in: consentBody),
+                           "PocketDeleteConsent has an initialiser that is neither private nor "
+                               + "counted — internal is enough to conjure consent from any "
+                               + "file in this module")
             let factories = Self.occurrences(
                 of: "public static func", in: Self.body(ofType: "PocketDeleteConsent",
                                                         in: declaration))
-            XCTAssertEqual(factories, 1,
-                           "PocketDeleteConsent has \(factories) factories — exactly one way to "
-                               + "say a person chose this, or it is not a choice")
-            // AND NOTHING CONSTRUCTS ONE YET: the verb is Step 6, and a consent constructed
+            // TWO FACTORIES, WHICH IS THE RULING'S SHAPE AND NOT A RELAXATION. Nick named two
+            // paths and no third: an explicit tap, and an owner-armed automatic clear. They are
+            // separately named so the ledger can say which one removed a recording, and they
+            // are held at exactly two so a third way in cannot arrive unnoticed.
+            XCTAssertEqual(factories, 2,
+                           "PocketDeleteConsent has \(factories) factories — the ruling names "
+                               + "two paths to a deletion and no third")
+            let named = Set(PocketDeleteConsent.Provenance.allCases.map(\.rawValue))
+            XCTAssertEqual(named, ["ownerChose", "ownerArmedThisRecorder"],
+                           "the ledger cannot tell the ruling's two paths apart: \(named)")
+            // AND NEITHER IS CONSTRUCTED YET: the verb is Step 6, and a consent constructed
             // today would be a consent no person was ever asked for.
-            let sites = try Self.constructionSites(of: "ownerChoseThisRecording(")
-            XCTAssertEqual(sites, [],
-                           "owner consent for a deletion is constructed in \(sites) while no "
-                               + "screen can ask for it")
-            // THE SINGLE COMPOSER. One place writes to the recorder's command characteristic,
-            // and that place consults the gate.
+            for factory in ["ownerChoseThisRecording(", "ownerArmedThisRecorder("] {
+                let sites = try Self.constructionSites(of: factory)
+                XCTAssertEqual(sites, [],
+                               "owner consent for a deletion is constructed in \(sites) while "
+                                   + "no screen can ask for it")
+            }
+            // THE SINGLE COMPOSER, COUNTED OVER THE WHOLE MODULE.
+            //
+            // This used to scan `PocketBLEProtocolClient.swift` ALONE, which is the file the
+            // one composer happens to live in today — and `RecordingDeviceAttachment.write(_:to:)`
+            // and `PocketSeamTransport.write` are INTERNAL to FoundryXKit, so any other file in
+            // the module could have written to the command characteristic without passing the
+            // gate or the census, and this gate would have stayed green. A delete composed in a
+            // new file was exactly the shape it could not see.
+            var composers: [String] = []
+            for (path, code) in try Self.kitSources() where
+                Self.occurrences(of: "transport.write(", in: code) > 0 {
+                composers.append(path)
+            }
+            XCTAssertEqual(composers, ["Sources/FoundryXKit/PocketBLEProtocolClient.swift"],
+                           "commands for a recorder are composed in \(composers) — the gate is "
+                               + "not the only door")
             let client = try Self.kitSource("Sources/FoundryXKit/PocketBLEProtocolClient.swift")
             XCTAssertEqual(Self.occurrences(of: "transport.write(", in: client), 1,
                            "there is more than one place composing commands for a recorder, so "
@@ -466,10 +640,28 @@ private actor PocketDeleteConsentWorld {
                 "the panel that offers a bring-over dropped the deletion promise")
 
         case "it no longer claims Solleva cannot delete at all":
+            // THE POPULATION IS EVERY COPY FAMILY THIS SURFACE CAN DRAW, NOT THE THREE THAT
+            // EXISTED WHEN THIS GATE WAS WRITTEN. The presence rows, the reset's cost, the
+            // forget confirmation and the destination sentence all landed on this page after
+            // this scan was written, and none of them was in it — so a line re-promising
+            // "never deletes anything from your recorder" in any of them would have shipped
+            // unseen by the gate whose entire job is to see it.
             let everyLine = PocketRecorderCheckPresentation.everyLine
                 + PocketBringOverPresentation.everyLine
                 + PocketMintConsentPresentation.everyLine
+                + PocketRecorderCostPresentation.everyLine
+                + PocketDestinationPresentation.everyLine
+                + PocketPresencePresentation.everyLine
+                + RecordingDeviceReadingPresentation.everyLine
+                + [PocketRecorderCustodyPromise.text]
             XCTAssertFalse(everyLine.isEmpty)
+            // AND THE SCAN CAN SEE A VIOLATION WHEN THERE IS ONE. Without this the loop below
+            // is a loop that has never been shown to reject anything.
+            XCTAssertTrue(
+                (everyLine + ["Solleva never deletes anything from your recorder."])
+                    .contains { $0.contains("never deletes anything from your recorder") },
+                "POSITIVE CONTROL FAILED: the needle this gate searches for cannot be found "
+                    + "even when it is deliberately present, so the loop below proves nothing")
             for line in everyLine {
                 XCTAssertFalse(line.contains("never deletes anything from your recorder"),
                                "\"\(line)\" still promises Solleva cannot delete, which stops "
@@ -481,6 +673,11 @@ private actor PocketDeleteConsentWorld {
         case "nothing Solleva does on its own is counted as something a person asked for":
             // THE INVARIANT THAT WAS ALREADY CORRECTLY NAMED AND MUST NOT BE WEAKENED. It is
             // no *automatic* delete — never was it no delete.
+            // NOTE FOR STEP 6. `automaticDeleteCommands` is a CONSTANT compared to a literal —
+            // no change to any code path this app runs can falsify it, and it becomes literally
+            // false the day the owner-armed auto-clear ships. It is kept only until there is an
+            // armed path to restate it about ("no delete on an UNARMED recorder"); the real
+            // instrument is the census assertion below, which reads the population.
             XCTAssertEqual(PocketRecorderCustodyPromise.automaticDeleteCommands, 0)
             let unchosen = await PocketRecorderCommandGate.admit(
                 frame: "APP&D&2026-03-28&20260328001919", ownerConsent: nil)
@@ -530,6 +727,24 @@ private actor PocketDeleteConsentWorld {
     }
 
     /// Every production file — App-side or kit-side — whose CODE constructs consent.
+    /// EVERY SWIFT FILE IN THE MODULE, as (relative path, comment-stripped code). The unit the
+    /// "single composer" claim has to be made over: the write seam is module-internal.
+    private static func kitSources() throws -> [(String, String)] {
+        let kit = AppSourceTree.repoRoot.appendingPathComponent("Sources", isDirectory: true)
+        var out: [(String, String)] = []
+        guard let walk = FileManager.default.enumerator(at: kit, includingPropertiesForKeys: nil)
+        else { return out }
+        for case let url as URL in walk where url.pathExtension == "swift" {
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            out.append((AppSourceTree.relativePath(url), AppSourceTree.code(of: text)))
+        }
+        // A walk that found nothing would make every claim below vacuously true.
+        XCTAssertGreaterThan(out.count, 50,
+                             "the module walk found \(out.count) files — the scan below is "
+                                 + "measuring almost nothing")
+        return out.sorted { $0.0 < $1.0 }
+    }
+
     private static func constructionSites(of needle: String) throws -> [String] {
         var hits = try AppSourceTree.filesContaining(needle)
         let kit = AppSourceTree.repoRoot.appendingPathComponent("Sources", isDirectory: true)

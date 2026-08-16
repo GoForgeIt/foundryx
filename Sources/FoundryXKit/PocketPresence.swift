@@ -328,7 +328,26 @@ public enum PocketRecorderCostPresentation {
         presences.filter(\.isOnlyOnTheRecorder).count
     }
 
-    public static func costLine(_ presences: [PocketRecordingPresence]) -> String {
+    /// WHAT A SHELF NOBODY READ COSTS: not nothing — UNKNOWN.
+    ///
+    /// THE DEFECT THIS SENTENCE CLOSES, and it was the most expensive one on this surface.
+    /// `presences` used to be a bare array, and `[]` — the state of every freshly opened
+    /// recorder page, because nothing checks a recorder until the owner taps — fell into
+    /// `case 0` and printed *"Solleva already has every recording this recorder listed."*
+    /// Forget is reachable with no check at all, so the confirmation for the gesture that
+    /// destroys the session key — after which every recording the recorder still holds alone
+    /// is unreachable forever — stated as a FACT that this phone holds everything, about a
+    /// recorder Solleva had never spoken to. One screen away, this same file is careful to
+    /// render an unasked place as "Solleva hasn't checked this iPhone".
+    ///
+    /// `nil` is therefore a distinct state from `[]` and the type carries it: `nil` means
+    /// nobody read the shelf, `[]` means the shelf was read and is holding nothing.
+    public static let shelfNotCheckedLine =
+        "Solleva hasn't checked what this recorder is holding."
+
+    /// - Parameter presences: nil ⇒ nobody has read this recorder's shelf.
+    public static func costLine(_ presences: [PocketRecordingPresence]?) -> String {
+        guard let presences else { return shelfNotCheckedLine }
         let n = onlyOnTheRecorder(presences)
         switch n {
         case 0:  return "Solleva already has every recording this recorder listed."
@@ -339,7 +358,7 @@ public enum PocketRecorderCostPresentation {
 
     public static func resetGate(shelfObservedAt: Date?,
                                  now: Date,
-                                 presences: [PocketRecordingPresence]) -> ResetGate {
+                                 presences: [PocketRecordingPresence]?) -> ResetGate {
         let fresh = shelfObservedAt.map { now.timeIntervalSince($0) <= shelfGoesStaleAfter }
             ?? false
         return ResetGate(isEnabled: true,
@@ -350,13 +369,14 @@ public enum PocketRecorderCostPresentation {
     /// Forgetting states its cost in the SAME terms as the reset, because it is the same cost:
     /// the key goes, and every recording the recorder still holds alone becomes unreachable.
     public static func forgetMessage(warning: String?,
-                                     presences: [PocketRecordingPresence]) -> String {
+                                     presences: [PocketRecordingPresence]?) -> String {
         guard let warning, !warning.isEmpty else { return costLine(presences) }
         return warning + "\n\n" + costLine(presences)
     }
 
     public static var everyLine: [String] {
         [resetAction, checkFirstAction,
+         costLine(nil),
          costLine([]),
          costLine([oneOnlyOnTheRecorder]),
          costLine([oneOnlyOnTheRecorder, oneOnlyOnTheRecorder])]
