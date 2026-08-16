@@ -22,6 +22,24 @@ public enum BrainChoice: String, CaseIterable, Sendable {
         case .foundryCloud: return "Solleva Cloud"
         }
     }
+
+    /// DOES A SEGMENT UPLOAD-ACK MEAN THE BYTES REACHED SOMEWHERE THAT IS NOT THIS PHONE?
+    ///
+    /// For `.justMyPhone` it does NOT, and the app's own code says so: `CaptureManager`'s
+    /// brain-seam initialiser passes `uploadSegment: localMode ? { @Sendable _, _, _ in } : nil`
+    /// — a closure that succeeds by doing nothing — and documents that on this tier the WAL's
+    /// ack means *"durably on this phone"*. Reading `CaptureStage.savedToComputer` as proof of
+    /// another place is therefore false exactly where it is most expensive: the phone-only tier
+    /// is the one where the phone holds the only copy.
+    ///
+    /// It lives on the choice rather than at the call site because the call sites are the
+    /// safety predicate and, next, the delete. One of them forgetting is a lost recording.
+    public var uploadAckProvesAnotherPlace: Bool {
+        switch self {
+        case .justMyPhone:              return false
+        case .myComputer, .foundryCloud: return true
+        }
+    }
 }
 
 /// Durable brain selection. MIGRATION-SAFE default: an install that has already

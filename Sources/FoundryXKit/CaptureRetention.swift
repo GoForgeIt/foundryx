@@ -176,8 +176,19 @@ public enum TranscriptCacheStore {
     }
 
     /// True once we've durably confirmed this capture reached Lore.
+    ///
+    /// GATE INTEGRITY (track `pocket_presence_and_a_durability_predicate`): this is the SAME
+    /// shape as `hasCachedTranscript` above — a `fileExists`, a synchronous stat — and it had
+    /// no main-thread gate at all. It is now asked ONCE PER LISTED RECORDING by the recorder
+    /// shelf's presence resolution, so an unmeasured main-actor caller would be per-row disk on
+    /// the main thread, which is the pathology this app has already paid for twice. It is
+    /// legitimate OFF the main actor (the retention sweep, `loadSidecar`,
+    /// `PocketCaptureDurability`) and a bug ON it, so it is counted AT THE OPERATION — the gate
+    /// no-ops off-main, and any future caller that reintroduces it on main trips the
+    /// deterministic counter rather than only the callers anybody thought to look at.
     public static func isConfirmedInLore(captureId: String, baseDir: URL) -> Bool {
-        FileManager.default.fileExists(atPath: confirmedMarkerURL(captureId: captureId, baseDir: baseDir).path)
+        CaptureManager.noteMainThreadDecode()
+        return FileManager.default.fileExists(atPath: confirmedMarkerURL(captureId: captureId, baseDir: baseDir).path)
     }
 
     /// Prune ONLY the cached transcript TEXT (`transcript.json`), keeping the

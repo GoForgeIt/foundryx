@@ -980,6 +980,21 @@ public final class CaptureManager: ObservableObject {
     /// root, or one still holding the previous account's root across a switch, disagrees. So the
     /// producer asks the owner rather than guessing.
     public var captureLibraryRoot: URL { baseDir }
+
+    /// EVERY CAPTURE'S STAGE, AS A MEMORY-ONLY SNAPSHOT.
+    ///
+    /// The recorder shelf's safety predicate reads a capture's stage as its FLOOR
+    /// (`savedToComputer` — every segment ACK'd). Asking each WAL individually from an off-main
+    /// resolution would be a main-actor hop per listed recording, and re-deriving the stage
+    /// from disk would be a second enumeration of somebody's segments. Both are already-paid-for
+    /// pathologies in this file's history, so the shelf takes ONE snapshot of what the app is
+    /// already holding in memory and resolves against that.
+    public func captureStages() -> [String: CaptureStage] {
+        var stages: [String: CaptureStage] = [:]
+        stages.reserveCapacity(captures.count)
+        for wal in captures { stages[wal.captureId] = wal.status.stage }
+        return stages
+    }
     private let log: DoorLog?
     private let source: AudioFrameSource
     /// Optional SECOND frame source: the phone's own microphone (a `MicFrameSource`).

@@ -206,7 +206,12 @@ private final class RecorderPageWorld {
         // THE APP'S ENTRY POINT, WITH THE APP'S ARGUMENTS. `hardwareToken` is the peripheral
         // identifier, which is exactly what `input.identity.hardwareToken` carries on the page.
         case "Solleva asks that recorder what it is holding":
-            check.run(hardwareToken: identifier.uuidString, advertisedName: Self.recorderName)
+            // THE SAME TWO ARGUMENTS THE SHIPPING PAGE PASSES, from the same manager: the
+            // capture library the `.lore-confirmed` marker lives in, and the memory-only
+            // stage snapshot. Omitting them would drive a DIFFERENT call than `DeviceScreen`
+            // makes, which is the gap this whole scenario file exists to close.
+            check.run(hardwareToken: identifier.uuidString, advertisedName: Self.recorderName,
+                      library: manager.captureLibraryRoot, stages: manager.captureStages())
             try await AppScenarioHost.settle(untilTrue: { !self.check.isChecking },
                                              describing: "the check to finish")
 
@@ -293,10 +298,23 @@ private final class RecorderPageWorld {
                 throw BrineStepError("the shelf has no rows after the bring-over — the app "
                                         + "never re-read it")
             }
-            guard row.custodyLabel == "In Solleva" else {
+            // THE FACT, NOT ONE REMEMBERED STRING. This used to compare against the literal
+            // "In Solleva", which was the whole two-valued custody vocabulary. Now the phone
+            // and "safe elsewhere" are SEPARATE places, so a file that has landed but has not
+            // yet been finalized and confirmed truthfully reads "In Solleva, on this iPhone
+            // only" — and asserting the old literal would fail on a row that is RIGHT. What
+            // this scenario means is that the phone answered YES, so that is what it asks.
+            guard row.presence.onThisPhone.isYes else {
                 throw BrineStepError(
-                    "the row still reads \"\(row.custodyLabel)\" after the file landed. Either "
+                    "the row still reads \"\(row.presenceLabel)\" after the file landed "
+                        + "(on this phone: \(row.presence.onThisPhone.answer.rawValue)). Either "
                         + "the app never asked custody, or it never re-read the shelf")
+            }
+            // AND IT IS STILL SAID IN WORDS. A presence nothing renders is a fact the person
+            // never sees, which is the half of this that a struct assertion alone cannot hold.
+            guard row.presenceLabel.contains("In Solleva") else {
+                throw BrineStepError(
+                    "the phone answered yes and the row says \"\(row.presenceLabel)\"")
             }
 
         // THE CLAIM THE WHOLE LEG IS FOR: it is a CONVERSATION, in the library the app's own

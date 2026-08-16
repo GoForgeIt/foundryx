@@ -69,6 +69,17 @@ private actor PocketCheckNowWorld {
     /// The identifier the check is asked for, which is NOT always the one the radio can find.
     private var targetIdentifier: UUID?
     private var outcome: PocketRecorderCheckOutcome?
+    private var custodyRoots: [URL] = []
+
+    /// A real, empty custody directory this world owns.
+    private func emptyCustodyRoot() -> URL {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("pocket-checknow-custody-\(UUID().uuidString)",
+                                    isDirectory: true)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        custodyRoots.append(root)
+        return root
+    }
 
     func given(_ phrase: String) async throws {
         outcome = nil
@@ -135,8 +146,16 @@ private actor PocketCheckNowWorld {
             secrets: secrets,
             recovery: nil,
             deadlines: .init(powerOn: 5, connect: 5, discovery: 5, control: 5))
+        // AN EMPTY CUSTODY STORE, NOT AN ABSENT ONE. `nil` custody means "the phone was never
+        // asked", and since `StoredFileCustody` was retired for `PocketRecordingPresence` that
+        // now renders as `Unknown` rather than as a definite no — correctly. What this scenario
+        // is about is a recorder whose files this phone genuinely does NOT hold, which is what
+        // the shipping screen always asks (`DeviceScreen` passes a `PocketRecorderFileStore` on
+        // every check), so the store is real and empty.
+        let emptyCustody = PocketRecorderFileStore(root: emptyCustodyRoot())
         outcome = await PocketRecorderCheck.run(peripheralIdentifier: targetIdentifier,
                                                 advertisedName: stack.deviceName,
+                                                custody: emptyCustody,
                                                 attachment: attachment)
     }
 
@@ -169,7 +188,7 @@ private actor PocketCheckNowWorld {
 
         case "every listed recording says it is only on the recorder":
             let detail = try requireDetail()
-            XCTAssertEqual(detail.manifest.rows.map(\.custodyLabel),
+            XCTAssertEqual(detail.manifest.rows.map(\.presenceLabel),
                            ["Only on the recorder", "Only on the recorder"],
                            "a file that has never been brought over is labelled as though "
                                + "Solleva were holding a copy of it")

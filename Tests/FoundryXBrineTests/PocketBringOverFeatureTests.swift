@@ -483,7 +483,7 @@ private actor PocketBringOverWorld {
                 $0.title == PocketRecordingLabel.title(date: recording.date,
                                                        timestamp: recording.timestamp)
             }
-            XCTAssertEqual(row?.custodyLabel, "In Solleva",
+            XCTAssertEqual(row?.presenceLabel, "In Solleva",
                            "a file Solleva is holding a verified copy of is still listed as "
                                + "only on the recorder")
 
@@ -644,7 +644,7 @@ private actor PocketBringOverWorld {
 
         case "that recording is still listed as only on the recorder":
             let detail = try await checkedShelf()
-            XCTAssertEqual(detail.manifest.rows.map(\.custodyLabel), ["Only on the recorder"],
+            XCTAssertEqual(detail.manifest.rows.map(\.presenceLabel), ["Only on the recorder"],
                            "a file that never landed is claimed as one Solleva is holding")
 
         case "no conversation was created":

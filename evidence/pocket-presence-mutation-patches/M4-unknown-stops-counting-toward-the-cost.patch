@@ -1,0 +1,15 @@
+# M4-unknown-stops-counting-toward-the-cost
+#
+# RED: PocketPresenceFeatureTests:228 count 1 != 2 and :230 "the cost reads '1 recording is on the recorder and not on this iPhone.'" — twice, once for the reset's cost line and once for the forget confirmation. 4 failures.
+#
+--- a/Sources/FoundryXKit/PocketPresence.swift
++++ b/Sources/FoundryXKit/PocketPresence.swift
+@@ -80,7 +80,7 @@
+     /// this phone does not. `unknown` counts toward the cost, because a place nobody asked
+     /// about is not a copy anybody holds.
+     public var isOnlyOnTheRecorder: Bool {
+-        onRecorder.answer == .yes && onThisPhone.answer != .yes
++        onRecorder.answer == .yes && onThisPhone.answer == .no
+     }
+ }
+ 

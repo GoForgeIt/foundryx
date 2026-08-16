@@ -1,0 +1,14 @@
+# M1-drop-the-lore-confirmed-disjunct
+#
+# RED: PocketPresenceFeatureTests:177 "a recording confirmed in the person's library reads NOT safe once its local audio is cleared away"; :181 label "In Solleva, on this iPhone only" != "In Solleva, and safe elsewhere"; PocketPresenceMainThreadGateTests:68 "premise: this recording IS confirmed". 3 failures.
+#
+--- a/Sources/FoundryXKit/PocketPresence.swift
++++ b/Sources/FoundryXKit/PocketPresence.swift
+@@ -145,7 +145,6 @@
+     public static func durableElsewhere(captureID: String?,
+                                         evidence: (any PocketDurabilityEvidence)?) -> Bool {
+         guard let captureID, !captureID.isEmpty, let evidence else { return false }
+-        if evidence.confirmedInLore(captureID) { return true }
+         return evidence.stage(of: captureID) == .savedToComputer
+     }
+ }

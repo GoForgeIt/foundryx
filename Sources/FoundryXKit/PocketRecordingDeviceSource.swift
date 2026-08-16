@@ -75,25 +75,39 @@ public enum RecordingDeviceLinkState: String, Equatable, Sendable {
     case connected, reconnecting, disconnected
 }
 
-public enum StoredFileCustody: Equatable, Sendable {
-    case foundryX
-    case recorderOnly
-}
+// `StoredFileCustody { foundryX, recorderOnly }` USED TO LIVE HERE, AND IT IS RETIRED.
+//
+// It was a two-valued answer to a three-valued question. It could not say "on this phone, but
+// not yet safe anywhere else" — the one state that decides whether clearing the recorder is
+// safe — and it could not say "nobody asked", so a caller that never consulted custody rendered
+// every row as `.recorderOnly` with exactly the confidence of a row that had asked and been
+// told no. `PocketRecordingPresence` (`PocketPresence.swift`) replaces it: three places, three
+// answers each, and an `observedAt` per place.
 
 public struct StoredFileManifestItem: Equatable, Sendable {
     public let id: String
     public let title: String
     public let sizeBytes: Int
-    public let custody: StoredFileCustody
-    public init(id: String, title: String, sizeBytes: Int, custody: StoredFileCustody) {
-        self.id = id; self.title = title; self.sizeBytes = sizeBytes; self.custody = custody
+    public let presence: PocketRecordingPresence
+    public init(id: String, title: String, sizeBytes: Int, presence: PocketRecordingPresence) {
+        self.id = id; self.title = title; self.sizeBytes = sizeBytes; self.presence = presence
     }
 }
 
 public struct StoredFileManifestRowPresentation: Equatable, Sendable {
     public let title: String
     public let duration: String
-    public let custodyLabel: String
+    /// The one-line summary. `Solleva hasn't checked this iPhone` is the sentence the old
+    /// two-valued label had no way to say.
+    public let presenceLabel: String
+    /// The three places, each with its own answer and its own age. `unknown` renders as
+    /// `Unknown`, and a place nobody asked about carries the age `never checked`.
+    public let places: [PocketPlaceLine]
+    /// THE READING ITSELF, carried alongside the rendered lines so the reset's cost and the
+    /// forget confirmation are computed from the SAME reading the rows are drawn from. A
+    /// second count of "how many are only on the recorder", derived from the strings, is how
+    /// a screen ends up showing two different numbers for one fact.
+    public let presence: PocketRecordingPresence
 }
 
 public struct StoredFileManifestPresentation: Equatable, Sendable {
@@ -112,11 +126,17 @@ public struct StoredFileDeviceDetailPresentation: Equatable, Sendable {
 }
 
 public enum StoredFileDevicePresentation {
-    public static func manifest(_ items: [StoredFileManifestItem]) -> StoredFileManifestPresentation {
+    /// - Parameter now: the instant the ages are rendered against. Injected rather than read
+    ///   from the clock inside the presentation, so a scenario can state a reading's age as a
+    ///   fact instead of racing it.
+    public static func manifest(_ items: [StoredFileManifestItem],
+                                now: Date = Date()) -> StoredFileManifestPresentation {
         StoredFileManifestPresentation(rows: items.map {
             .init(title: $0.title,
                   duration: duration(sizeBytes: $0.sizeBytes),
-                  custodyLabel: $0.custody == .foundryX ? "In Solleva" : "Only on the recorder")
+                  presenceLabel: PocketPresencePresentation.label($0.presence),
+                  places: PocketPresencePresentation.lines($0.presence, now: now),
+                  presence: $0.presence)
         })
     }
 
@@ -125,7 +145,8 @@ public enum StoredFileDevicePresentation {
         link: RecordingDeviceLinkState,
         battery: RecordingDeviceCapabilityState,
         firmware: RecordingDeviceCapabilityState,
-        manifest items: [StoredFileManifestItem]
+        manifest items: [StoredFileManifestItem],
+        now: Date = Date()
     ) -> StoredFileDeviceDetailPresentation {
         StoredFileDeviceDetailPresentation(
             name: name,
@@ -141,7 +162,7 @@ public enum StoredFileDevicePresentation {
             // used to render is the exact anti-pattern this replaces.
             battery: battery.reportedValue ?? RecordingDeviceConnectPresentation.unavailableValue,
             firmware: firmware.reportedValue ?? RecordingDeviceConnectPresentation.unavailableValue,
-            manifest: manifest(items),
+            manifest: manifest(items, now: now),
             showsRecordingState: false,
             showsLiveActivity: false)
     }

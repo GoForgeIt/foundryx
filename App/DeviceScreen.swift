@@ -35,6 +35,11 @@ struct DeviceScreen: View {
     /// Computer pairing = the existing sign-in → resolve-designated-host flow
     /// (SignInView / RemoteSession) — reused here, not rebuilt.
     @ObservedObject var remote: RemoteSession
+    /// WHERE A BROUGHT-OVER RECORDING WILL END UP. Passed in rather than read here: this is
+    /// the SAME account preference the Settings brain picker owns (`SettingsScreen` holds the
+    /// `BrainStore` that pushed this screen), and a second reader of one preference is how two
+    /// preferences meaning the same thing start.
+    let brain: BrainChoice
 
     @StateObject private var list = RecordingDeviceListModel()
     @State private var showingComputerPairing = false
@@ -208,6 +213,7 @@ struct DeviceScreen: View {
                                     manager: manager,
                                     sources: sources,
                                     isSavedOmi: isSavedOmi(identity),
+                                    brain: brain,
                                     onChange: refresh)
         } else {
             // The device left the list while its page was being pushed. Say so rather than
@@ -409,6 +415,11 @@ private struct RecordingDevicePageView: View {
     /// nothing else. It used to double as "can this device be connected at all" — see
     /// `canReachDevice` below for why that was wrong.
     let isSavedOmi: Bool
+    /// The brain that is on, which decides the one sentence the shelf says about where a
+    /// brought-over copy goes. `LocalBackend` saves with `markConfirmed: false`, so on the
+    /// phone-only tier `safe elsewhere` can never be true and the copy borrows no other tier's
+    /// promise.
+    let brain: BrainChoice
     let onChange: () -> Void
 
     @State private var showingEducation = false
@@ -423,6 +434,8 @@ private struct RecordingDevicePageView: View {
     /// when the screen opens. `false` renders the sentence that tells the owner to write the
     /// key down, which is the safe direction to be wrong in.
     @State private var recoveryCopyExists = false
+    /// The maker's reset ceremony, reached from the shelf's own cost line.
+    @State private var showingFactoryReset = false
     /// What the recorder said it is holding, the last time this screen asked it.
     @StateObject private var check = PocketRecorderCheckModel()
     /// Whether this app is still the thing in front of the owner. A backgrounded transfer is
@@ -488,6 +501,11 @@ private struct RecordingDevicePageView: View {
                 PocketOnboardingView(screen: .education) { _ in showingEducation = false }
             }
         }
+        .sheet(isPresented: $showingFactoryReset) {
+            NavigationStack {
+                PocketOnboardingView(screen: .factoryReset) { _ in showingFactoryReset = false }
+            }
+        }
         .sheet(isPresented: $showingKeyCustody, onDismiss: {
             // THE REVEALED VALUE DIES WITH THE SHEET. Holding it in view state past the screen
             // that showed it keeps a live credential in the hierarchy for no reason.
@@ -513,7 +531,11 @@ private struct RecordingDevicePageView: View {
             Button("Cancel", role: .cancel) {}
             Button(RecordingDevicePage.forgetAction, role: .destructive) { forget() }
         } message: {
-            Text(page.forgetWarning ?? "")
+            // THE COST, IN THE SAME TERMS AS THE RESET. Forgetting deletes this app's key, so
+            // every recording the recorder still holds ALONE becomes unreachable - and until
+            // this line shipped the confirmation stated the mechanism and never the number.
+            Text(PocketRecorderCostPresentation.forgetMessage(warning: page.forgetWarning,
+                                                              presences: check.presences))
         }
         // LEAVING THE PAGE STOPS THE ERRAND. Without this the check or the transfer carried on
         // with nobody watching it — a `CBCentralManager` still connected to the recorder, a
@@ -685,15 +707,21 @@ private struct RecordingDevicePageView: View {
                                     Text(row.title)
                                         .grainTextStyle(.body)
                                         .foregroundStyle(GrainColor.ink)
-                                    // CUSTODY, ON EVERY ROW, AND NOW IT CAN SAY BOTH THINGS.
+                                    // WHERE THIS RECORDING IS, ON EVERY ROW, IN THREE PLACES.
                                     // It read "Only on the recorder" for every row in every
-                                    // build until the bring-over below shipped, because
-                                    // nothing had ever produced a `.foundryX` row. The check
-                                    // asks custody per file, so this label is a fact about
-                                    // this phone's disk rather than a default.
-                                    Text(row.custodyLabel)
+                                    // build until the bring-over shipped, and then it could
+                                    // only ever say one of two things - never "on this phone
+                                    // but not yet safe anywhere else", and never "nobody
+                                    // asked". Each place carries its own answer and its own
+                                    // age, and every string comes from the kit.
+                                    Text(row.presenceLabel)
                                         .grainTextStyle(.caption)
                                         .foregroundStyle(GrainColor.textFaint)
+                                    ForEach(Array(row.places.enumerated()), id: \.offset) { _, place in
+                                        Text(placeLine(place))
+                                            .grainTextStyle(.caption)
+                                            .foregroundStyle(GrainColor.textFaint)
+                                    }
                                 }
                                 Spacer(minLength: GrainSpacing.x2)
                                 Text(row.duration)
@@ -714,10 +742,61 @@ private struct RecordingDevicePageView: View {
                         .foregroundStyle(GrainColor.textFaint)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.top, GrainSpacing.x3)
+
+                    // WHERE THE COPY GOES, IN THE TERMS OF THE BRAIN THAT IS ON. On the
+                    // phone-only tier this says so, and does not borrow the computer's
+                    // sentence for a durability the code cannot deliver there.
+                    Text(PocketRecorderCheckPresentation.destinationNote(for: brain))
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.textFaint)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, GrainSpacing.x2)
+
+                    resetGate
                 }
             }
             .padding(.top, GrainSpacing.x6)
         }
+    }
+
+    /// ONE PLACE, AS A LINE. Composed from the kit's own three fields so no sentence about
+    /// where a recording is exists only inside a SwiftUI body.
+    private func placeLine(_ place: PocketPlaceLine) -> String {
+        "\(place.place): \(place.answer) - \(place.age)"
+    }
+
+    /// STARTING THE RECORDER OVER, WITH ITS COST, AND IT NEVER DISABLES ITSELF.
+    ///
+    /// It is the owner's recorder. A shelf reading that has gone stale is a reason to LOOK
+    /// again - so it changes the PRIMARY ACTION to "Check the recorder first" and leaves the
+    /// button enabled. An app that takes away the way out precisely when it is least sure is
+    /// the shape this exists to refuse.
+    @ViewBuilder
+    private var resetGate: some View {
+        let gate = PocketRecorderCostPresentation.resetGate(
+            shelfObservedAt: check.shelfObservedAt, now: Date(), presences: check.presences)
+        VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+            Text(gate.cost)
+                .grainTextStyle(.caption)
+                .foregroundStyle(GrainColor.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+            Button {
+                if gate.primaryAction == PocketRecorderCostPresentation.checkFirstAction {
+                    check.run(hardwareToken: input.identity.hardwareToken,
+                              advertisedName: input.displayName,
+                              library: manager.captureLibraryRoot,
+                              stages: manager.captureStages(),
+                              brain: brain)
+                } else {
+                    showingFactoryReset = true
+                }
+            } label: {
+                Text(gate.primaryAction).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.grain(.outlined))
+            .disabled(!gate.isEnabled)
+        }
+        .padding(.top, GrainSpacing.x4)
     }
 
     /// THE CALLER `PocketBLEClient.download` NEVER HAD.
@@ -781,8 +860,15 @@ private struct RecordingDevicePageView: View {
         // connect action, tapping it would have turned on a different device's live capture.
         // It was unreachable only because `canConnect` was hard-coded to `isSavedOmi`.
         case RecordingDevicePage.connectAndCheckAction:
+            // THE SAFETY EVIDENCE, HANDED OVER AT THE CALL. Without it every row's "safe
+            // elsewhere" is honestly `Unknown` and every recording counts toward the reset's
+            // cost - which is the right default and the wrong answer for a phone that is in
+            // fact holding them.
             check.run(hardwareToken: input.identity.hardwareToken,
-                      advertisedName: input.displayName)
+                      advertisedName: input.displayName,
+                      library: manager.captureLibraryRoot,
+                      stages: manager.captureStages(),
+                      brain: brain)
         case RecordingDevicePage.connectAction:
             if sources.isEnabled(CaptureSourceDescriptor.omiId) {
                 device.reconnect()
@@ -909,6 +995,14 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// reason the check reads the unpresented shelf: durations and titles cannot be ordered.
     @Published private(set) var offeredRecording: PocketRecording?
 
+    /// WHERE EVERY LISTED RECORDING IS, as of the last check. The reset's cost and the forget
+    /// confirmation both read this, so the number a person is shown before a destructive
+    /// gesture is the SAME reading the rows are drawn from - never a second count.
+    @Published private(set) var presences: [PocketRecordingPresence] = []
+    /// When the recorder last answered a listing. `nil` means it never has on this screen, and
+    /// a stale or absent reading changes the reset's primary action, never its enabled state.
+    @Published private(set) var shelfObservedAt: Date?
+
     /// WHERE A BROUGHT-OVER FILE GOES, and what makes a row able to say "In Solleva". The
     /// check consults it too — a custody label that was not asked is a guess.
     private let custody = PocketRecorderFileStore()
@@ -920,6 +1014,12 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// cleared whenever an errand starts, because a listing from a recorder we are in the
     /// middle of re-asking is not a listing.
     private var shelfRecordings: [PocketRecording] = []
+
+    /// THE SAFETY EVIDENCE THE LAST CHECK WAS BUILT WITH, kept so a bring-over can restate the
+    /// shelf with the SAME authority the session used. Rebuilding it from a second reading of
+    /// the brain and the library would be a second opinion on "is this safe", and the delete
+    /// ruling is explicit that two answers to that question is how a recording gets lost.
+    private var durability: PocketCaptureDurability?
 
     /// THE RADIO THE IN-FLIGHT ERRAND IS HOLDING, and the Task driving it.
     ///
@@ -981,12 +1081,24 @@ final class PocketRecorderCheckModel: ObservableObject {
     ///   authenticated peripheral identifier (`PocketAuthenticatedIdentity`) and never the
     ///   advertised name. A token that is not one is not a recorder this can reach, and it says
     ///   so rather than silently doing nothing.
-    func run(hardwareToken: String, advertisedName: String) {
+    /// - Parameter library: the capture library this phone's conversations live in, so a row
+    ///   can say a recording is SAFE ELSEWHERE from the `.lore-confirmed` marker the retention
+    ///   sweep is written to preserve.
+    /// - Parameter stages: a memory-only snapshot of what the app already knows about each
+    ///   capture's upload stage - the predicate's floor. Taken on the main actor at the call
+    ///   and resolved against off-main, so a shelf of N recordings costs no per-row hop.
+    /// - Parameter brain: which brain is on. REQUIRED, with no default, because it is what
+    ///   decides whether a segment upload-ack is evidence of anywhere other than this phone.
+    ///   See `BrainChoice.uploadAckProvesAnotherPlace`.
+    func run(hardwareToken: String, advertisedName: String,
+             library: URL, stages: [String: CaptureStage], brain: BrainChoice) {
         guard !isChecking, !isBringingOver else { return }
         guard let identifier = UUID(uuidString: hardwareToken) else {
             message = PocketRecorderCheckPresentation.notThisRecorderLine
             detail = nil
             offeredRecording = nil
+            presences = []
+            shelfObservedAt = nil
             return
         }
         isChecking = true
@@ -997,6 +1109,8 @@ final class PocketRecorderCheckModel: ObservableObject {
         detail = nil
         offeredRecording = nil
         shelfRecordings = []
+        presences = []
+        shelfObservedAt = nil
         beginErrand(PocketErrandCommand.shelfSubject)
         // A FRESH ATTACHMENT PER CHECK. An attachment's `teardown()` retires its own link and
         // generation, so reusing one is a session that can never come back up. NAMED, rather
@@ -1005,6 +1119,11 @@ final class PocketRecorderCheckModel: ObservableObject {
         self.attachment = attachment
         let custody = self.custody
         let identity = Self.custodyIdentity(for: hardwareToken)
+        // THE SAFETY EVIDENCE, BUILT ONCE PER CHECK AND KEPT. `brain` is what withdraws the
+        // stage floor on the phone-only tier, where an upload-ack means "durably on this
+        // phone" and nothing more.
+        let durability = PocketCaptureDurability(baseDir: library, stages: stages, brain: brain)
+        self.durability = durability
         errand = Task { [weak self] in
             // THE SHELF IS ASKED FOR HERE AND NOWHERE ELSE. Choosing which file to bring over
             // needs the recorder's own fields, not the row titles; reading it on a second
@@ -1013,6 +1132,7 @@ final class PocketRecorderCheckModel: ObservableObject {
             let outcome = await PocketRecorderCheck.run(peripheralIdentifier: identifier,
                                                         advertisedName: advertisedName,
                                                         custody: custody,
+                                                        durability: durability,
                                                         attachment: attachment,
                                                         shelf: shelf)
             // THE OWNER LEFT WHILE THIS RAN. `cancel()` has already torn the radio down, said
@@ -1024,7 +1144,12 @@ final class PocketRecorderCheckModel: ObservableObject {
             self.message = PocketRecorderCheckPresentation.message(for: outcome)
             self.shelfRecordings = shelf.recordings
             if case .checked(let panel) = outcome {
-                await self.rebuildShelf(panel, identity: identity)
+                // THE CHECK ALREADY RESOLVED EVERY PLACE, off the main actor, inside the
+                // session. Re-resolving here would be a second answer to "is this safe", which
+                // is the shape the delete ruling forbids — so the panel it built is STATED, not
+                // recomputed. `rebuildShelf` exists for the other case: custody moved after the
+                // session closed and nothing but this phone's disk can know it.
+                await self.stateShelf(panel, identity: identity, presences: panel.manifest.rows.map(\.presence))
             }
             // BUSY UNTIL THE SHELF IS ACTUALLY RESTATED, and this order is load-bearing. The
             // shipped code dropped `isChecking` and THEN awaited the offer, so for one
@@ -1042,14 +1167,45 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// and for the same reason: the custody column costs one disk stat per listed file, and a
     /// SwiftUI body that derived it would pay that on every invalidation. So it is recomputed
     /// when a COMMAND says custody moved, and at no other time.
+    ///
+    /// THE RE-READ CARRIES THE SAFETY EVIDENCE TOO. A bring-over that landed changes BOTH of a
+    /// row's phone-side facts — this phone now holds it, and once the drain and finalize have
+    /// run it becomes safe elsewhere — so re-reading without the evidence would redraw the row
+    /// it just changed as `Unknown` and put the recording straight back into the reset's cost.
+    /// It is the SAME `PocketShelfReadModel.presences` the session itself used, so the shelf
+    /// after a transfer and the shelf during a check cannot disagree about whether a recording
+    /// is safe. Two answers to that question is how a recording gets lost.
     private func rebuildShelf(_ panel: StoredFileDeviceDetailPresentation,
                               identity: RecordingDeviceIdentity) async {
+        let resolved = await PocketShelfReadModel.presences(shelfRecordings,
+                                                            identity: identity,
+                                                            custody: custody,
+                                                            durability: durability,
+                                                            askedAt: Date())
+        await stateShelf(panel, identity: identity,
+                         presences: shelfRecordings.map {
+                             resolved["\($0.date)/\($0.timestamp)"] ?? .nothingAsked
+                         })
+    }
+
+    /// THE ONE PLACE THE PAGE'S SHELF STATE IS PUBLISHED. Every field that describes the shelf
+    /// moves together or not at all: a manifest whose rows disagree with `presences` is a page
+    /// where the row says one thing and the reset's cost says another.
+    private func stateShelf(_ panel: StoredFileDeviceDetailPresentation,
+                            identity: RecordingDeviceIdentity,
+                            presences: [PocketRecordingPresence]) async {
         shelfRebuildCountForTests += 1
-        let held = await PocketShelfReadModel.heldFileIDs(shelfRecordings,
-                                                          custody: custody,
-                                                          identity: identity)
+        var byID: [String: PocketRecordingPresence] = [:]
+        for (recording, presence) in zip(shelfRecordings, presences) {
+            byID["\(recording.date)/\(recording.timestamp)"] = presence
+        }
         detail = panel.withManifest(PocketInventoryReader.manifest(shelfRecordings,
-                                                                   heldFileIDs: held))
+                                                                   presences: byID))
+        // THE SHELF WAS ANSWERED. Both facts come from the one reading: the cost of a reset,
+        // and how old that cost is. A check that did NOT reach the recorder leaves both alone,
+        // so a stale number is never redrawn as a fresh one.
+        self.presences = presences
+        self.shelfObservedAt = Date()
         // THE NEXT ONE, not the same one forever. `offered(_:)` is ordering only, and
         // ordering is stable — so bringing a file over and re-reading the shelf re-elected
         // the same winner, and a person with a backlog could bring over exactly one
