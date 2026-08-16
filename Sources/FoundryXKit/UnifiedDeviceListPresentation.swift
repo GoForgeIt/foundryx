@@ -128,6 +128,10 @@ public struct RecordingDeviceListInput: Equatable, Sendable, Identifiable {
     /// never to the reported name. `nil` means no connection has established what this device
     /// speaks, so no device-education bundle can honestly be offered for it.
     public let negotiatedProtocol: String?
+    /// WHAT THIS DEVICE SAID, AND WHEN — carried straight off the account's store record, so
+    /// the page can state a fact and its age without a session being open. An empty map is a
+    /// device nobody has ever asked, which is a state this page now says out loud.
+    public let readings: [String: RecordingDeviceReading]
 
     public init(identity: RecordingDeviceIdentity,
                 displayName: String,
@@ -137,7 +141,8 @@ public struct RecordingDeviceListInput: Equatable, Sendable, Identifiable {
                 liveActivity: RecordingDeviceLiveActivity = .none,
                 lastConnected: Date? = nil,
                 isRemembered: Bool = false,
-                negotiatedProtocol: String? = nil) {
+                negotiatedProtocol: String? = nil,
+                readings: [String: RecordingDeviceReading] = [:]) {
         self.identity = identity
         self.displayName = displayName
         self.declaredCapabilities = declaredCapabilities
@@ -147,6 +152,7 @@ public struct RecordingDeviceListInput: Equatable, Sendable, Identifiable {
         self.lastConnected = lastConnected
         self.isRemembered = isRemembered
         self.negotiatedProtocol = negotiatedProtocol
+        self.readings = readings
     }
 
     public var deviceClass: RecordingDeviceClass {
@@ -390,20 +396,24 @@ public struct RecordingDevicePagePresentation: Equatable, Sendable {
     /// The band where a live device carries record / pause / stop. Non-nil for a
     /// record-then-sync device, and it is the design's single most important sentence.
     public let recordingIndicatorSentence: String?
-    /// The capability strip, selected BY CLASS (design §2's table).
+    /// The capability strip: what this device DECLARED it can do, and only that.
     ///
-    /// A record-then-sync device gets all four shipped `capabilityOrder` lines, `Unavailable`
-    /// included, because §6a's resting state is exactly that plus the note saying the link is
-    /// why. A live device gets only what it actually declared — an iPhone microphone has no
-    /// battery, no firmware, no gap recovery and no offline storage, and printing four
-    /// permanently-`Unavailable` rows for it is `N/A · N/A · N/A` respelled.
+    /// IT NO LONGER RENDERS `Unavailable` FOR ANYBODY. A record-then-sync device used to get
+    /// all four `capabilityOrder` lines with `Unavailable` in three of them, plus a note
+    /// explaining that the link was why. Those three were not capabilities at all — they were
+    /// READINGS with no durable home, and they now live in `readings` below, where an unasked
+    /// fact says so and offers to be asked. What is left here is the same rule a live device
+    /// always had: show what the device declared, and nothing else.
     ///
     /// `Signal` appears in no strip: RSSI is meaningful only while streaming.
     public let capabilities: [RecordingDeviceCapabilityLine]
-    /// Why the capabilities read Unavailable, when the reason is the link rather than the
-    /// device. Absent while connected, and absent for a class whose strip carries no
-    /// `Unavailable` line to explain.
+    /// A note under the strip. Nothing produces one today: it existed to explain the word
+    /// `Unavailable`, and there is no longer an `Unavailable` on this page to explain.
     public let capabilityNote: String?
+    /// WHAT THIS DEVICE SAID, AND HOW OLD IT IS. Empty for a device whose facts are not
+    /// measurable — a phone microphone has no battery of its own and no firmware this app can
+    /// read, and offering to go and ask for one would be an action that cannot complete.
+    public let readings: [RecordingDeviceReadingLine]
     public let showsRecordControl: Bool
     public let showsLiveActivity: Bool
     /// The actions offered, in order.
@@ -418,6 +428,7 @@ public struct RecordingDevicePagePresentation: Equatable, Sendable {
                 recordingIndicatorSentence: String?,
                 capabilities: [RecordingDeviceCapabilityLine],
                 capabilityNote: String?,
+                readings: [RecordingDeviceReadingLine] = [],
                 showsRecordControl: Bool,
                 showsLiveActivity: Bool,
                 actions: [String],
@@ -428,6 +439,7 @@ public struct RecordingDevicePagePresentation: Equatable, Sendable {
         self.recordingIndicatorSentence = recordingIndicatorSentence
         self.capabilities = capabilities
         self.capabilityNote = capabilityNote
+        self.readings = readings
         self.showsRecordControl = showsRecordControl
         self.showsLiveActivity = showsLiveActivity
         self.actions = actions
@@ -445,11 +457,17 @@ public enum RecordingDevicePage {
         + "and this iPhone never hears it live. The light on the device is the only recording "
         + "indicator there is: solid amber means recording."
 
-    /// Why the strip reads Unavailable while the link is down — a fact about FoundryX, not
-    /// an accusation about the recorder.
-    public static let disconnectedCapabilityNote =
-        "Battery and firmware read Unavailable because FoundryX isn't connected to this "
-        + "recorder right now — not because the recorder is off."
+    // THE DISCONNECTED-CAPABILITY NOTE IS DELETED, NOT DEPRECATED.
+    //
+    // It read: "Battery and firmware read Unavailable because FoundryX isn't connected to this
+    // recorder right now — not because the recorder is off." It was the best available answer
+    // while those two rows could only say `Unavailable`: an apology, printed under a strip of
+    // absences, explaining that the absence was ours.
+    //
+    // A recorder's facts are now kept, so a disconnected page shows the last number the
+    // recorder actually stated together with how old it is, or — for a fact nobody has ever
+    // asked — no number at all beside the action that would ask. Neither of those needs
+    // explaining, and a note explaining a word the page no longer prints is worse than none.
 
     public static let connectAndCheckAction = "Connect and check now"
     public static let educationAction = "How this recorder works"
@@ -509,18 +527,29 @@ public enum RecordingDevicePage {
     ///   * FORGET, from `input.isRemembered`. The caller passed `shape != .builtInMic`, so a
     ///     Bluetooth route was offered a "deletes FoundryX's key" warning for a key that does
     ///     not exist, over a store record that does not exist, and the row came straight back.
+    /// - Parameter now: the clock the reading ages are measured against. A parameter rather
+    ///   than a `Date()` inside, because "read 20 minutes ago" is an assertable claim only if
+    ///   a scenario can state the moment it is claimed from.
     public static func resolve(_ input: RecordingDeviceListInput,
-                               canConnect: Bool = true) -> RecordingDevicePagePresentation {
+                               canConnect: Bool = true,
+                               now: Date = Date()) -> RecordingDevicePagePresentation {
         let deviceClass = input.deviceClass
         let declared = RecordingDeviceCapabilities(declared: input.declaredCapabilities)
         let connected = input.link == .connected
-        // THE STRIP IS A CLASS FACT (design §2's table). Only a record-then-sync device's
-        // strip states `Unavailable` for something it could report when connected; a live
-        // device shows what it declared, and an iPhone microphone therefore shows no strip
-        // rather than four rows of "Unavailable" for things it does not have.
-        let capabilities = deviceClass == .recordThenSync
-            ? RecordingDeviceConnectPresentation.capabilityLines(declared)
-            : RecordingDeviceConnectPresentation.reportedCapabilityLines(declared)
+        // ONE RULE FOR EVERY CLASS NOW: show what the device DECLARED. The record-then-sync
+        // branch that used to sit here rendered all four `capabilityOrder` rows so three of
+        // them could say `Unavailable` — battery, firmware and gap recovery — which is the
+        // `N/A · N/A · N/A` strip in the shipped word. Two of those three were never
+        // capabilities; they were readings with nowhere durable to live, and they are below.
+        let capabilities = RecordingDeviceConnectPresentation.reportedCapabilityLines(declared)
+        // THE READINGS ARE A CLASS FACT, and this is the one place that decides it. A
+        // record-then-sync recorder can be asked for its charge, its room and its firmware,
+        // so an unasked fact there is a question with an answer somebody can go and get. A
+        // phone microphone cannot be asked any of the three, so offering to go and ask would
+        // be an action that can never complete — which is exactly the trap §6c names.
+        let readings = deviceClass == .recordThenSync
+            ? RecordingDeviceReadingPresentation.lines(input.readings, now: now)
+            : []
 
         var actions: [String] = []
         if canConnect {
@@ -558,11 +587,10 @@ public enum RecordingDevicePage {
                 ? nil
                 : recorderIndicatorSentence,
             capabilities: capabilities,
-            // The note explains an `Unavailable` the LINK is responsible for. Only the
-            // record-then-sync strip has one, and only while the link is down.
-            capabilityNote: deviceClass == .recordThenSync && !connected
-                ? disconnectedCapabilityNote
-                : nil,
+            // NOTHING TO EXPLAIN. The note existed to say why the strip read `Unavailable`;
+            // no strip reads `Unavailable` any more. See the deleted constant above.
+            capabilityNote: nil,
+            readings: readings,
             showsRecordControl: deviceClass.carriesRecordControl,
             showsLiveActivity: deviceClass.mayContributeLiveSurface,
             actions: actions,
@@ -628,7 +656,11 @@ public enum UnifiedDeviceListComposition {
                 lastConnected: record.lastConnected,
                 // IT CAME OUT OF THE STORE, so there is genuinely something to un-remember.
                 isRemembered: true,
-                negotiatedProtocol: negotiatedProtocol[identity]))
+                negotiatedProtocol: negotiatedProtocol[identity],
+                // AND SO DID THESE. The readings are the only reason this page can state a
+                // number while the link is down; before they were durable, the projection had
+                // nothing to carry and the strip said `Unavailable` for everything.
+                readings: record.readings))
         }
 
         for source in captureSources {

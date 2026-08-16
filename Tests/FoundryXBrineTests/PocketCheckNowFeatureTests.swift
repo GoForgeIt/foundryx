@@ -237,9 +237,17 @@ private actor PocketCheckNowWorld {
             // custody flow reads them twice on a successful restore — once as
             // `PocketOnboardingCoordinator`'s confirmation that the key was accepted, once as
             // `PocketRecordingDeviceBridge.observe`'s facts — which is exactly what the
-            // adoption path has always done. It is pinned rather than tolerated: a third read
+            // adoption path has always done. It is pinned rather than tolerated: a fourth read
             // appearing here is a regression somebody should have to look at.
-            XCTAssertEqual(commands, ["SK&\(Self.secret)", "BAT", "FW", "BAT", "FW",
+            //
+            // `SPACE` IS THE ONE ADDITION, AND IT IS THE POINT OF STEP 7. It sits after the
+            // two facts `observe` already read and before the listing, which is where the
+            // bridge issues it — deliberately LAST of the three information reads, because
+            // `protected(_:)` retires the whole client on a timeout and the listing that
+            // follows would then report "it didn't say what it's holding" for a recorder that
+            // answered everything it was asked. This line is the only thing in the repository
+            // that would notice that order changing.
+            XCTAssertEqual(commands, ["SK&\(Self.secret)", "BAT", "FW", "BAT", "FW", "SPACE",
                                       "LIST_DIRS", "LIST&2026-03-27", "LIST&2026-03-28"])
 
         case "the recorder was sent no download, no delete and no WiFi command":

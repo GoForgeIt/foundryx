@@ -1,8 +1,14 @@
 import Foundation
 
 /// Bridges an already-authenticated Pocket protocol session into the vendor-neutral catalog.
-/// It deliberately asks T1 only for evidenced battery and firmware facts; `SPACE` and `STE`
-/// are neither queried nor interpreted by this device-list path.
+///
+/// IT NOW ASKS `APP&SPACE`, AND KEEPS WHAT IT HEARS. This comment used to say `SPACE` was
+/// "neither queried nor interpreted by this device-list path", and that was accurate: the
+/// opcode was decoded, `PocketBLEClient.storage()` was implemented and unit-tested, and a
+/// tree-wide search for callers outside `Tests/` returned nothing. So the one question an
+/// owner opens this page to ask — how much room is left — had no answer anywhere in the app.
+/// `STE` is still not asked: nobody has decoded what its integer means, and a number whose
+/// meaning is unknown is not a fact worth rendering.
 public enum PocketRecordingDeviceBridge {
     /// The protocol this bridge speaks, as an identifier education and any other
     /// protocol-keyed content attaches to (design §5). It is NOT a shape and NOT a reported
@@ -10,26 +16,52 @@ public enum PocketRecordingDeviceBridge {
     /// therefore none of this one's education.
     public static let protocolIdentifier = "pocket-stored-file/v1"
 
+    /// - Parameter now: this phone's clock at the moment the recorder answered — the stamp
+    ///   every reading carries. Injected so a scenario can state an age rather than sleep for
+    ///   one, and NEVER the recorder's own clock: a Pocket ships with an unset clock
+    ///   (`PocketConversationClock`), so dating a reading by it would put it in 1970.
     public static func observe(
         client: PocketBLEClient,
         identity: PocketAuthenticatedIdentity,
-        advertisedName: String?
+        advertisedName: String?,
+        now: Date = Date()
     ) async -> RecordingDeviceObservation {
         var capabilities: [String: String?] = [
             RecordingDeviceCapabilityKey.offlineStorage.rawValue: nil
         ]
+        var readings: [String: RecordingDeviceReading] = [:]
         if let battery = try? await client.batteryLevel() {
             capabilities[RecordingDeviceCapabilityKey.batteryLevel.rawValue] = "\(battery)%"
+            readings[RecordingDeviceCapabilityKey.batteryLevel.rawValue] =
+                RecordingDeviceReading(value: "\(battery)%", observedAt: now)
         }
         if let firmware = try? await client.firmwareVersion() {
             capabilities[RecordingDeviceCapabilityKey.firmwareVersion.rawValue] = firmware
+            readings[RecordingDeviceCapabilityKey.firmwareVersion.rawValue] =
+                RecordingDeviceReading(value: firmware, observedAt: now)
+        }
+        // SPACE IS ASKED LAST, AND THAT ORDER IS LOAD-BEARING. `protected(_:)` retires the
+        // whole client on a `.timeout`, so a firmware that simply never answers this command
+        // would take the authenticated session down with it — and the caller that runs
+        // straight on to list the recorder's files (`PocketRecorderCheck.read`) would report
+        // "it didn't say what it's holding" for a recorder that said it perfectly well. A
+        // firmware without the command answers `MCU&UNKNOWN`, which is `.unsupportedOperation`
+        // and retires nothing; putting the one read that can silently vanish at the end means
+        // the two facts already gathered are kept either way.
+        if let storage = try? await client.storage() {
+            readings[RecordingDeviceCapabilityKey.freeSpace.rawValue] = RecordingDeviceReading(
+                value: RecordingDeviceReadingPresentation.freeSpace(
+                    usedKilobytes: storage.usedKilobytes,
+                    capacityKilobytes: storage.capacityKilobytes),
+                observedAt: now)
         }
         let trimmed = advertisedName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return RecordingDeviceObservation(
             identity: identity.recordingDeviceIdentity,
             reportedName: trimmed.isEmpty ? "Unnamed recording device" : trimmed,
             audioProfile: nil,
-            declaredCapabilities: capabilities)
+            declaredCapabilities: capabilities,
+            readings: readings)
     }
 }
 
@@ -62,12 +94,24 @@ public enum RecordingDeviceAdoption {
     /// `reportedName` is DISPLAY metadata and nothing else — the durable address is
     /// `observation.identity`, which for a stored-file recorder is the authenticated
     /// peripheral token, never the advertised name.
+    ///
+    /// AND IT KEEPS WHAT THE DEVICE SAID. The pair used to be the ONLY thing that survived
+    /// this call: the battery and firmware the bridge had just read went out of scope here
+    /// and were gone, so the very first thing a person saw after adopting a recorder was a
+    /// page reporting `Unavailable` for the two facts the adoption had just measured.
     @discardableResult
     public static func remember(
         _ observation: RecordingDeviceObservation
     ) -> RecordingDeviceDetachOutcome {
-        RecordingDeviceStore.recordUserPair(identity: observation.identity,
-                                            displayName: observation.reportedName)
+        let outcome = RecordingDeviceStore.recordUserPair(identity: observation.identity,
+                                                          displayName: observation.reportedName)
+        // Only against a pair that landed. Writing readings for a device the store could not
+        // record would be a fact filed under an address the account does not hold.
+        if case .recorded = outcome {
+            RecordingDeviceStore.recordObservedFacts(identity: observation.identity,
+                                                     readings: observation.readings)
+        }
+        return outcome
     }
 }
 

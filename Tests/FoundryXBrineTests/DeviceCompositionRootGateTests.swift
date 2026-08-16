@@ -422,6 +422,80 @@ final class DeviceCompositionRootGateTests: XCTestCase {
         }
     }
 
+    /// THE READINGS REACH A PERSON, AND THE UNASKED ONES OFFER TO BE ASKED.
+    ///
+    /// WHY THIS CANNOT BE A BRINE SCENARIO. `RecordingDevicePagePresentation.readings` is
+    /// asserted over in `features/pocket-recorder-readings.feature`, and every one of those
+    /// assertions would go on passing if `App/DeviceScreen.swift` rendered none of it — which
+    /// is exactly the state `detail.battery` and `detail.firmware` are in on `main` today:
+    /// built by `StoredFileDevicePresentation.detail`, asserted by
+    /// `features/pocket-file-pull-device.feature`, and drawn nowhere. `swift test` cannot
+    /// compile `App/`, so the boundary is read off the file.
+    ///
+    /// IT ALSO HOLDS THE SHAPE, not merely the mention. A strip that printed `line.value`
+    /// unconditionally would render `Optional("84%")` for a fact that was read and the empty
+    /// string for one that was not — a plausible-looking blank where the whole point is an
+    /// offer to go and ask. So the two branches are named.
+    func testTheRecorderPageRendersItsReadingsAndOffersToTakeTheMissingOnes() throws {
+        let screen = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent("App/DeviceScreen.swift"),
+            encoding: .utf8)
+
+        // Non-vacuity first: this gate must be reading the file that holds the page.
+        XCTAssertTrue(screen.contains("RecordingDevicePage.resolve("),
+                      "the device page is no longer built in App/DeviceScreen.swift — this "
+                          + "gate is checking a file that no longer holds the boundary")
+
+        XCTAssertTrue(screen.contains("page.readings"),
+                      "App/DeviceScreen.swift never reads `page.readings`, so the battery, "
+                          + "free space and firmware a session went and measured reach no "
+                          + "surface — the presentation would be built, asserted and drawn "
+                          + "nowhere, which is the defect the reachability register exists for")
+        // COMPOSED, NOT MERELY DECLARED. `screen.contains("readingsStrip")` is what this
+        // assertion said first, and MUT-4 walked straight past it: deleting the one line in
+        // the page body that renders the strip left the `private var readingsStrip` and a
+        // doc comment mentioning it, so the substring was still there and the gate stayed
+        // green over a page that draws nothing. What is checked now is a LINE whose whole
+        // content is the reference — which is what a SwiftUI body composition looks like and
+        // what a declaration never does.
+        let composes = screen.split(separator: "\n", omittingEmptySubsequences: false)
+            .contains { $0.trimmingCharacters(in: .whitespaces) == "readingsStrip" }
+        XCTAssertTrue(composes,
+                      "`readingsStrip` is declared but never composed into the page body, so "
+                          + "the recorder's readings are built and drawn nowhere")
+        for branch in ["if let value = line.value", "if let ago = line.observedAgo",
+                       "} else if let action = line.action {"] {
+            XCTAssertTrue(screen.contains(branch),
+                          "App/DeviceScreen.swift does not carry `\(branch)`. A fact that was "
+                              + "read must render its value AND its age; a fact nobody asked "
+                              + "must render neither and offer the action instead")
+        }
+        // AND THE OFFER IS THE REAL ONE. `perform` is the same switch the page's own actions
+        // go through, so this button opens a session rather than being decorative.
+        XCTAssertTrue(screen.contains("Button(action) { perform(action) }"),
+                      "the \"nobody has asked\" row's action is not wired to `perform`, so the "
+                          + "page states an absence and offers a control that does nothing")
+
+        // THE NAMED RESIDUE, MEASURED RATHER THAN CLAIMED.
+        //
+        // `StoredFileDevicePresentation.detail` still falls back to
+        // `RecordingDeviceConnectPresentation.unavailableValue` for its `battery` and
+        // `firmware`. Step 7 says the word becomes unreachable for a Pocket recorder, and the
+        // honest way to hold that for these two fields is to measure that NOTHING RENDERS
+        // THEM: the shelf panel draws the manifest and the custody promise, never the hero
+        // pair. If a future change starts drawing them, this goes red and that change has to
+        // decide what an unread battery says there — which is the decision Step 7 made
+        // everywhere a person can actually see.
+        for unrendered in ["detail.battery", "detail.firmware"] {
+            XCTAssertFalse(screen.contains(unrendered),
+                           "App/DeviceScreen.swift now renders `\(unrendered)`, which falls "
+                               + "back to the word \"Unavailable\" for a fact nobody read. "
+                               + "Readings are the surface for that now (`page.readings`), and "
+                               + "the two words this step removed cannot come back through a "
+                               + "presentation nobody re-examined")
+        }
+    }
+
     /// THE BRING-OVER'S CONVERSATION IS HANDED TO THE RUNNING APP.
     ///
     /// WHY THIS GATE IS THE WHOLE POINT. `PocketCaptureImport` can write a complete, correct,

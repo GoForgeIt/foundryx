@@ -487,15 +487,56 @@
       "reached_from": [],
       "verdict": "undetermined",
       "why": "INSTANCE 4. `link_provider_sub` was added to a handler the iOS client never calls, with a comment claiming it fixed the client path; every test passed because the tests called the handler directly. From THIS side the measurable fact is that no production or test file in this repository mentions it at all — asserted by `absent_locally`, so the day a client call appears the row goes red and demands a real verdict. The gate says `undetermined` and names the reason. It does NOT say `unreachable`: this repository is not where that question can be answered."
+    },
+    {
+      "id": "pocket-ble-storage",
+      "name": "PocketBLEClient.storage — APP&SPACE, how full the recorder is",
+      "declared_in": "Sources/FoundryXKit/PocketBLEProtocolClient.swift",
+      "declaration_anchor": "public func storage() async throws -> PocketStorage {",
+      "call_pattern": ".storage(",
+      "reached_from": [
+        {
+          "via": "pocket-device-bridge-observe",
+          "anchor": "if let storage = try? await client.storage() {"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "INSTANCE 1, THIRD HALF, AND THE ONE THIS STEP CLOSES. `APP&SPACE` is the only command in the decoded fw-1.6 surface that answers the question a person opens the recorder page to ask, and until Step 7 it had ZERO callers outside `Tests/` — decoded, implemented, unit-tested, unreached, and unenumerated in this very register, which is the third state this row exists to end. Two things had kept it there: nothing durable could hold the answer (a session read facts and dropped them at close), and a Brine gate in `UnifiedRecordingDeviceListFeatureTests` positively ASSERTED that the bridge never writes `SPACE` — a description of the gap promoted to a rule. Both are corrected in the same change."
+    },
+    {
+      "id": "pocket-ble-device-state",
+      "name": "PocketBLEClient.deviceState — APP&STE, an integer nobody has decoded",
+      "declared_in": "Sources/FoundryXKit/PocketBLEProtocolClient.swift",
+      "declaration_anchor": "public func deviceState() async throws -> Int",
+      "call_pattern": "deviceState()",
+      "reached_from": [],
+      "tested_from": [
+        "Tests/FoundryXBrineTests/PocketBLEProtocolClientTests.swift"
+      ],
+      "verdict": "unreachable",
+      "why": "UNREACHABLE ON PURPOSE, AND IT SHOULD STAY THAT WAY UNTIL SOMEBODY DECODES IT. The command is real and the client parses its reply, but `MCU&STE&<n>` is an integer whose MEANING is unknown: pocket-libre's PROTOCOL.md names the opcode and not the enumeration, and no capture has ever correlated a value with a state of the device. Wiring it would put a number on a surface with nothing true to say about it, which is the fabricated-firmware defect (`DeviceMetricsPresentation`'s `2.4.1`) with a different field. This row is here so the symbol is ENUMERATED rather than merely unreached — the state Step 7 refuses to leave any of the three information reads in."
+    },
+    {
+      "id": "pocket-ble-device-info",
+      "name": "PocketBLEClient.deviceInfo — all four information reads on one session",
+      "declared_in": "Sources/FoundryXKit/PocketBLEProtocolClient.swift",
+      "declaration_anchor": "public func deviceInfo() async -> PocketDeviceInfo {",
+      "call_pattern": "deviceInfo()",
+      "reached_from": [],
+      "tested_from": [
+        "Tests/FoundryXBrineTests/PocketBLEProtocolClientTests.swift"
+      ],
+      "verdict": "unreachable",
+      "why": "AN AGGREGATE THE SHIPPED PATH DELIBERATELY DOES NOT USE. `deviceInfo()` asks BAT, FW, SPACE and STE and returns all four as `PocketField`s. Three of those are now read individually by `PocketRecordingDeviceBridge.observe`; the fourth is `deviceState`, declared unreachable above because nobody has decoded what its integer means. So calling this would issue one extra command per session to obtain a value no surface may render — and it would do it on a client whose `protected(_:)` retires the whole session on a timeout, which is exactly the risk the bridge orders its reads to contain. Kept rather than deleted because it is the honest shape of a full information sweep the day STE is decoded; enumerated rather than silent because 'present, unreached and unenumerated' is the state this register exists to make impossible."
     }
   ],
   "_verdict_counts_are_equality": "Declared as exact counts, never bounds. A bound would let the unreachable roster grow by one without anybody moving this file, which is precisely how four capabilities reached `main` unreached.",
   "verdict_counts": {
-    "reachable": 20,
+    "reachable": 23,
     "undetermined": 2,
-    "unreachable": 8
+    "unreachable": 10
   },
   "_floor": "A register that lost its rows would be a silent full pass, so the population is asserted before its contents are.",
-  "minimum_capabilities": 30,
+  "minimum_capabilities": 35,
   "minimum_entry_points": 1
 }

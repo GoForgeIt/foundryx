@@ -41,16 +41,50 @@ public struct RecordingDeviceRecord: Codable, Equatable, Sendable {
     /// never enters the comparison at all.
     public var userPreferred: Bool
 
+    /// WHAT THIS DEVICE SAID, AND WHEN — keyed by `RecordingDeviceCapabilityKey.rawValue`.
+    ///
+    /// THE SIXTH FIELD, AND THE ONE THAT ENDS "UNAVAILABLE". Before it, a session read a
+    /// recorder's battery, firmware and free space and every one of those facts died when the
+    /// session closed, because there was nowhere durable to put them — so the device page,
+    /// which is composed from THIS record and not from the session, said `Unavailable` for all
+    /// three one second after reading them.
+    ///
+    /// AN ABSENT KEY IS "NOBODY ASKED", never "zero" and never "unavailable". See
+    /// `RecordingDeviceReadings.swift` for the two states and why there is no third.
+    public var readings: [String: RecordingDeviceReading]
+
     public init(identity: RecordingDeviceIdentity,
                 displayName: String,
                 lastConnected: Date? = nil,
                 userDetached: Bool = false,
-                userPreferred: Bool = false) {
+                userPreferred: Bool = false,
+                readings: [String: RecordingDeviceReading] = [:]) {
         self.identity = identity
         self.displayName = displayName
         self.lastConnected = lastConnected
         self.userDetached = userDetached
         self.userPreferred = userPreferred
+        self.readings = readings
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case identity, displayName, lastConnected, userDetached, userPreferred, readings
+    }
+
+    /// DECODED WITH A DEFAULT, DELIBERATELY. Every record already on a person's disk was
+    /// written before this field existed, and the synthesised initialiser would throw
+    /// `keyNotFound` on every one of them — which `readLocked` correctly reports as
+    /// `unreadable`, which would un-pair every device the person owns on the first launch
+    /// after the upgrade.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        identity = try container.decode(RecordingDeviceIdentity.self, forKey: .identity)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        lastConnected = try container.decodeIfPresent(Date.self, forKey: .lastConnected)
+        userDetached = try container.decode(Bool.self, forKey: .userDetached)
+        userPreferred = try container.decode(Bool.self, forKey: .userPreferred)
+        readings = try container.decodeIfPresent([String: RecordingDeviceReading].self,
+                                                 forKey: .readings) ?? [:]
     }
 }
 
@@ -163,6 +197,14 @@ public final class RecordingDeviceStore {
         try writeLocked(records)
     }
 
+    /// The same read-modify-write `mutate` performs, reachable from this type's extensions in
+    /// other files. It is one method rather than two so a second mutator cannot acquire a
+    /// different idea of what happens to a record that is not there.
+    func mutateRecord(_ identity: RecordingDeviceIdentity,
+                      _ change: (inout RecordingDeviceRecord) -> Void) throws {
+        try mutate(identity, change)
+    }
+
     private func mutate(_ identity: RecordingDeviceIdentity,
                         _ change: (inout RecordingDeviceRecord) -> Void) throws {
         lock.lock(); defer { lock.unlock() }
@@ -242,7 +284,11 @@ extension RecordingDeviceStore {
                 // A re-pair must not lose the connection history the account already had.
                 lastConnected: date ?? existing?.lastConnected,
                 userDetached: false,
-                userPreferred: true))
+                userPreferred: true,
+                // NOR WHAT THE RECORDER ALREADY TOLD IT. This constructs a WHOLE new record
+                // over the top of the old one, so a field left out here is a field a re-pair
+                // silently erases — the same trap `lastConnected` is carried forward for.
+                readings: existing?.readings ?? [:]))
             try store.prefer(identity)   // at most one preferred device, always
             return .recorded(scope: store.scope)
         } catch {

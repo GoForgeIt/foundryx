@@ -214,7 +214,8 @@ private enum UnifiedDeviceListSteps {
             "the page carries the recorder-light sentence where a live device carries record and stop",
             "the page offers no record or stop control",
             "the page never says the device is in range",
-            "the page's capability strip is battery firmware gap recovery and offline storage",
+            "the page lists what this recorder can be asked — its battery, its free space "
+                + "and its firmware",
             "the page's capability strip has no signal column",
             "its education comes from the protocol it speaks and not from its shape",
             "neither page renders a capability it can never fill",
@@ -233,7 +234,7 @@ private enum UnifiedDeviceListSteps {
             "the Pocket is remembered under its stored-file identity",
             "the redrawn list shows it as a peer row reading \"Records on its own · Not connected\"",
             "the transport client established which protocol that device speaks",
-            "FoundryX authenticated it and read its battery and firmware over the radio seam",
+            "FoundryX authenticated it and read its battery, its firmware and how full it is over the radio seam",
             "the app says setup isn't available yet instead of adding a row",
             "FoundryX sent that recorder nothing at all",
             "the account does not remember that recorder",
@@ -826,26 +827,36 @@ private final class UnifiedDeviceListWorld {
                                    + "advertising while another app holds it, so a Pocket "
                                    + "sitting on the table would read \"not in range\"")
             }
-            XCTAssertEqual(page.capabilityNote, RecordingDevicePage.disconnectedCapabilityNote,
-                           "a disconnected page reads Unavailable without saying that the LINK "
-                               + "is why — which reads as an accusation about the recorder")
+            // THIS ASSERTION USED TO REQUIRE THE OPPOSITE, and it was right to at the time.
+            // It read `XCTAssertEqual(page.capabilityNote, disconnectedCapabilityNote)` —
+            // "a disconnected page reads Unavailable without saying that the LINK is why".
+            // The note was an apology printed under a strip of absences. Step 7 keeps a
+            // recorder's readings durably, so a disconnected page states the last number the
+            // recorder gave with its age, or offers to go and ask; there is no `Unavailable`
+            // left to explain, and a note explaining a word the page no longer prints is
+            // worse than none. The claim is corrected in the change that falsified it.
+            XCTAssertNil(page.capabilityNote,
+                         "the page explains an `Unavailable` it does not render")
 
-        case "the page's capability strip is battery firmware gap recovery and offline storage":
+        case "the page lists what this recorder can be asked — its battery, its free space "
+             + "and its firmware":
             let page = try requirePage()
-            XCTAssertEqual(page.capabilities.map(\.label),
-                           RecordingDeviceConnectPresentation.capabilityLabels,
-                           "the strip is not the shipped `capabilityOrder`")
-            XCTAssertEqual(page.capabilities.map(\.label),
-                           ["Battery", "Firmware", "Gap recovery", "Offline storage"])
-            // Offline storage is a CLASS fact and survives the link being down; battery and
-            // firmware are live readings and do not.
+            XCTAssertEqual(page.readings.map(\.label), ["Battery", "Free space", "Firmware"],
+                           "the readings strip is not the shipped reading order")
+            // NOBODY HAS CHECKED THIS RECORDER, so all three state that — with no number, no
+            // dash, no zero, and the action that would go and ask.
+            for line in page.readings {
+                XCTAssertNil(line.value,
+                             "\(line.label) rendered \(line.value ?? "") for a recorder this "
+                                 + "account has never checked")
+                XCTAssertEqual(line.action, RecordingDevicePage.connectAndCheckAction)
+            }
+            // Offline storage is a CLASS fact and survives the link being down — it is the
+            // one thing on this page that is true without anybody having asked.
+            XCTAssertEqual(page.capabilities.map(\.label), ["Offline storage"])
             XCTAssertEqual(
                 page.capabilities.first { $0.label == "Offline storage" }?.value,
                 RecordingDeviceConnectPresentation.availableValue)
-            XCTAssertEqual(page.capabilities.first { $0.label == "Battery" }?.value,
-                           RecordingDeviceConnectPresentation.unavailableValue,
-                           "a battery nobody read rendered as something other than the shipped "
-                               + "unavailable word — `N/A` is the value this replaces")
 
         case "the page's capability strip has no signal column":
             let page = try requirePage()
@@ -891,11 +902,18 @@ private final class UnifiedDeviceListWorld {
                                    + "\(page.capabilities.map { "\($0.label) \($0.value)" }) — a "
                                    + "phone microphone and a Bluetooth route have no battery, "
                                    + "no firmware, no gap recovery and no offline storage, and "
-                                   + "four rows of \"Unavailable\" for them is `N/A · N/A · "
+                                   + "four rows of \"Unavailable\" for them was `N/A · N/A · "
                                    + "N/A` in the shipped word")
                 XCTAssertNil(page.capabilityNote,
                              "\(page.displayName) explains an Unavailable it does not render, "
                                  + "with copy written for a recorder's resting state")
+                // NOR A READING IT COULD NEVER TAKE. A phone microphone has no charge of its
+                // own and no firmware this app can read, so a row saying "nobody has asked"
+                // beside "Connect and check now" would be an action that cannot complete —
+                // the §6c trap in a strip instead of a button.
+                XCTAssertEqual(page.readings, [],
+                               "\(page.displayName) offers to go and ask for "
+                                   + "\(page.readings.map(\.label)), which nothing can ask it")
             }
 
         case "neither page offers to forget a device the account does not remember":
@@ -1105,7 +1123,7 @@ private final class UnifiedDeviceListWorld {
                            "class and education attach to the protocol the transport "
                                + "NEGOTIATED (design §5) — nothing else may supply it")
 
-        case "FoundryX authenticated it and read its battery and firmware over the radio seam":
+        case "FoundryX authenticated it and read its battery, its firmware and how full it is over the radio seam":
             guard let stack = attachStack else {
                 throw BrineStepError("no discovered recorder was staged")
             }
@@ -1115,11 +1133,27 @@ private final class UnifiedDeviceListWorld {
                               + "produced the row above did not come from the protocol: "
                               + "\(commands)")
             XCTAssertTrue(commands.contains("BAT") && commands.contains("FW"),
-                          "the discovery bridge never asked the device for the only two facts "
-                              + "it is allowed to ask for: \(commands)")
-            XCTAssertFalse(commands.contains("SPACE") || commands.contains("STE"),
-                           "this path asked for SPACE/STE — the bridge is documented as "
-                               + "neither querying nor interpreting them: \(commands)")
+                          "the discovery bridge never asked the device for two of the three "
+                              + "facts a person opens this page for: \(commands)")
+            // SPACE IS NOW EXPECTED, AND THIS ASSERTION USED TO FORBID IT.
+            //
+            // It read `XCTAssertFalse(commands.contains("SPACE") || commands.contains("STE"))`,
+            // citing the bridge's own comment that it "neither queries nor interprets" them.
+            // That comment was a description of a gap, and the gate turned the gap into a
+            // rule: `APP&SPACE` is the ONE command that answers "how much room is left", it
+            // was decoded and implemented, and this assertion is a large part of why it went
+            // on having no production caller. Step 7 asks it and keeps the answer.
+            //
+            // STE IS STILL FORBIDDEN, and for a reason that has not changed: nobody has
+            // decoded what its integer means, so nothing could honestly be rendered from it.
+            // The half of this assertion that was load-bearing is kept; the half that was
+            // pinning a defect in place is deleted.
+            XCTAssertTrue(commands.contains("SPACE"),
+                          "the bridge never asked how full the recorder is, so its page can "
+                              + "only ever say it does not know: \(commands)")
+            XCTAssertFalse(commands.contains("STE"),
+                           "this path asked for STE — nobody has decoded what that integer "
+                               + "means, so nothing true can be rendered from it: \(commands)")
             XCTAssertFalse(stack.isConnected,
                            "the probe left its own link up after adopting — a connect probe "
                                + "must not sit on the radio a person is no longer looking at")

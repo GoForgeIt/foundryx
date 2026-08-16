@@ -139,6 +139,17 @@ final class FakePocketBLEStack: @unchecked Sendable {
     /// "this build's command is not one I know" — `MCU&UNKNOWN` — which is a different answer
     /// from a recorder that lists nothing.
     private let answersInventory: Bool
+
+    /// WHAT `APP&SPACE` ANSWERS, in the recorder's own kilobytes.
+    ///
+    /// The capacity is the one a real Pocket on fw 1.6 reported in the PacketLogger decode
+    /// this protocol client was built from, and it is the same number
+    /// `PocketBLEProtocolClientTests` pins. The used figure is a scenario choice and nothing
+    /// else — it is stated here rather than spread across step definitions so that a scenario
+    /// asserting "47.9 MB free of 59.6 MB" is asserting arithmetic over a measured capacity,
+    /// not over a plausible-looking 8 GB somebody typed.
+    static let capacityKilobytes = 61_032
+    static let usedKilobytes = 12_000
     private let map: PocketCharacteristicMap
 
     /// HOW A DEVICE FAILS TO BE REACHED, as the shapes a real radio actually produces. The
@@ -438,6 +449,13 @@ final class FakePocketBLEStack: @unchecked Sendable {
             response = "MCU&BAT&72"
         } else if command == "FW" {
             response = "MCU&FW&1.6"
+        } else if command == "SPACE" {
+            // `MCU&SPA&<used_kb>&<total_kb>`, and the CAPACITY IS THE REFERENCE TRACE'S OWN:
+            // 61032 KB is the number a real Pocket on fw 1.6 reported in the decode this
+            // client was built from (`PocketBLEProtocolClientTests` pins the same value).
+            // Inventing a plausible 8 GB here would make every scenario about free space an
+            // assertion over a number nobody measured.
+            response = "MCU&SPA&\(Self.usedKilobytes)&\(Self.capacityKilobytes)"
         } else if command == "LIST_DIRS", answersInventory {
             // THE DAYS, THEN THE COUNT — the reference trace's own two-frame shape. The count
             // frame is what makes an interrupted sequence detectable, so it is emitted here
