@@ -986,6 +986,27 @@ public final class VaultFunnelModel: ObservableObject {
 
     // MARK: browser hand-off
 
+    /// Map a checkout-attempt failure onto the funnel's terminal state.
+    ///
+    /// The distinction that matters is whether SIGNING IN AGAIN is the remedy. It is, for a
+    /// missing or expired credential — including the client's own pre-flight refusal to send
+    /// a headerless request — and it is NOT for a server-side rejection that would mint an
+    /// equivalent token and loop. Getting that wrong sends the owner around the sign-in
+    /// carousel forever, which is exactly why `statusCheckRejected` exists separately.
+    static func checkoutAttemptFailure(from error: Error) -> VaultProvisionFailure {
+        guard let signup = error as? VaultSignupError else { return .provisioningFailed }
+        switch signup {
+        case .credentialUnavailable, .credentialExpired, .unauthorized:
+            return .signInExpired
+        case .requestRejected:
+            return .statusCheckRejected
+        case .provisioning(let reason):
+            return .server(reason)
+        case .server, .malformedResponse:
+            return .provisioningFailed
+        }
+    }
+
     /// The plans CTA. Persist the checkout attempt FIRST (return-recon model), then open
     /// the external browser. Whether the browser completes with a return URL or the user
     /// dismisses it, we land in "Checking payment" and let reconcile decide — the server
@@ -1008,8 +1029,22 @@ public final class VaultFunnelModel: ObservableObject {
         do {
             attempt = try await service.createCheckoutAttempt(plan: plan, idToken: idToken())
         } catch {
-            // Couldn't even register the attempt — return to plans so the user can retry.
-            state = .plans(selected: plan)
+            // A SILENT bounce back to plans is what shipped, and it is indistinguishable
+            // from "the button doesn't work": tapping a price returned the owner to the
+            // price list with no message and nothing to act on. Reported 2026-08-16 as
+            // "I tried to go through the vault setup and it doesn't link out after
+            // choosing price anymore".
+            //
+            // The most common cause never reaches the network at all. VaultSignupClient
+            // refuses to send a headerless request that production maps to 401, so an
+            // empty or expired id_token throws credentialUnavailable BEFORE the POST —
+            // which is why the signup service logged NO /signup/checkout-attempt for a
+            // failed attempt. There was no request to log, so any diagnosis that starts
+            // at the server is looking in the wrong place.
+            //
+            // `.failed` is a terminal, ESCAPABLE stop that renders a reason and a way
+            // out, and `.signInExpired` already carries the right remedy.
+            state = .failed(Self.checkoutAttemptFailure(from: error))
             return
         }
         // Persist BEFORE opening the browser so reconcile works even if we're killed.
