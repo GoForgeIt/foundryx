@@ -105,6 +105,35 @@ public enum PocketInventoryReader {
     }
 }
 
+/// THE THREE COMMANDS THE RECORDER SURFACE ISSUES, as a closed vocabulary.
+///
+/// An ERRAND is one trip to the recorder: it starts when the owner asks for something and
+/// stops when the recorder has answered or failed to. `custody.commit` is the one thing an
+/// errand can do that OUTLIVES it — a file taken into this phone's keeping — and it is
+/// separate from `errand.stop` on purpose: an errand that stopped without one kept nothing,
+/// and that difference is the whole diagnosis when somebody says the transfer "worked" and
+/// the recording is not here.
+///
+/// These are constants rather than literals because the app issues them and the scenarios
+/// look for them; two spellings of `errand.start` is a gate that passes while the app logs
+/// nothing findable.
+public enum PocketErrandCommand {
+    /// A trip to the recorder began. `subject` says which errand: `shelf` or `bring-over`.
+    public static let start = "errand.start"
+    /// That trip ended. `outcome` is `DoorLog.succeeded` or a reason token.
+    public static let stop = "errand.stop"
+    /// A recording is now in this phone's keeping. `subject` is the recorder's own name for
+    /// the file — `<date>/<timestamp>` — never a title.
+    public static let custodyCommit = "custody.commit"
+
+    /// The whole vocabulary, in the order an errand that keeps something issues them.
+    public static let every: [String] = [start, stop, custodyCommit]
+
+    /// The two errands this surface runs, as `subject` tokens.
+    public static let shelfSubject = "shelf"
+    public static let bringOverSubject = "bring-over"
+}
+
 #if canImport(CoreBluetooth)
 
 /// What one check established.
@@ -227,6 +256,61 @@ public final class PocketRecorderShelfNote: @unchecked Sendable {
     public var recordings: [PocketRecording] { lock.withLock { storage } }
     fileprivate func note(_ recordings: [PocketRecording]) {
         lock.withLock { storage = recordings }
+    }
+}
+
+/// THE SHELF, RE-STATED FROM WHAT THIS PHONE HOLDS — WITHOUT TOUCHING THE RADIO.
+///
+/// WHAT THIS EXISTS FOR, MEASURED. `App/DeviceScreen.swift` ended every bring-over by calling
+/// its own `run(…)` again: a second full attach — power-on gate, connect, discovery, key
+/// handshake — plus a second `LIST_DIRS` and a second `LIST&` per day, to learn ONE fact the
+/// phone's own disk already knew, namely that the file it had just written is here. One tap
+/// on "Bring it over" therefore cost TWO authenticated sessions, and the second one asked the
+/// recorder a question whose answer could not have changed.
+///
+/// Custody is the authority on what this phone holds — the SAME authority the transfer
+/// consults — so re-asking it is a stat per listed file and no radio time at all. The listing
+/// itself cannot have changed: nothing but this app writes to that recorder, and if the owner
+/// pressed record in between, the next deliberate check is what should discover it, not a
+/// silent re-read they never asked for.
+public enum PocketShelfReadModel {
+
+    /// Which of these recordings this phone is already holding, asked one file at a time.
+    ///
+    /// Per recording rather than a manifest fetch, for the reason `PocketBringOver.offeredNext`
+    /// gives: `alreadyHeld` is the only authority on the question, and a second index of it
+    /// would be a second answer to "do we have this" — the shape that loses recordings.
+    public static func heldFileIDs(_ recordings: [PocketRecording],
+                                   custody: any PocketRecorderFileCustody,
+                                   identity: RecordingDeviceIdentity) async -> Set<String> {
+        var held: Set<String> = []
+        for recording in recordings {
+            let key = PocketRecorderFileKey(identity: identity,
+                                            date: recording.date,
+                                            timestamp: recording.timestamp)
+            if await custody.alreadyHeld(key) { held.insert("\(recording.date)/\(recording.timestamp)") }
+        }
+        return held
+    }
+}
+
+extension StoredFileDeviceDetailPresentation {
+    /// THE SAME PANEL, WITH ONLY THE CUSTODY COLUMN RE-STATED.
+    ///
+    /// Name, link, battery and firmware are facts the RECORDER supplied on the session that
+    /// is now closed; re-deriving them here would be this file inventing device state. Only
+    /// the manifest moves, because only custody can have changed.
+    public func withManifest(_ items: [StoredFileManifestItem])
+        -> StoredFileDeviceDetailPresentation {
+        StoredFileDeviceDetailPresentation(
+            name: name,
+            eyebrow: eyebrow,
+            linkLabel: linkLabel,
+            battery: battery,
+            firmware: firmware,
+            manifest: StoredFileDevicePresentation.manifest(items),
+            showsRecordingState: showsRecordingState,
+            showsLiveActivity: showsLiveActivity)
     }
 }
 

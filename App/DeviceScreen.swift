@@ -425,6 +425,9 @@ private struct RecordingDevicePageView: View {
     @State private var recoveryCopyExists = false
     /// What the recorder said it is holding, the last time this screen asked it.
     @StateObject private var check = PocketRecorderCheckModel()
+    /// Whether this app is still the thing in front of the owner. A backgrounded transfer is
+    /// an errand nobody is watching, and it stops — see the `onChange` at the end of `body`.
+    @Environment(\.scenePhase) private var scenePhase
 
     /// DOES THIS BUILD HAVE A TRANSPORT THAT CAN ACTUALLY ATTACH THIS DEVICE?
     ///
@@ -511,6 +514,17 @@ private struct RecordingDevicePageView: View {
             Button(RecordingDevicePage.forgetAction, role: .destructive) { forget() }
         } message: {
             Text(page.forgetWarning ?? "")
+        }
+        // LEAVING THE PAGE STOPS THE ERRAND. Without this the check or the transfer carried on
+        // with nobody watching it — a `CBCentralManager` still connected to the recorder, a
+        // Task still publishing into a screen that no longer existed, and `isChecking` stuck
+        // true, which the model's own busy guard then read as "already checking" forever.
+        .onDisappear { check.cancel() }
+        // AND BACKGROUNDING COUNTS AS LEAVING. `onDisappear` does not fire when the app goes
+        // to the background with this page on top — which is exactly what happens when a
+        // transfer is slow and the owner puts the phone in their pocket.
+        .onChange(of: scenePhase) { phase in
+            if phase != .active { check.cancel() }
         }
     }
 
@@ -899,6 +913,35 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// check consults it too — a custody label that was not asked is a guess.
     private let custody = PocketRecorderFileStore()
 
+    /// WHAT THE RECORDER LAST SAID IT IS HOLDING, in the protocol's own fields.
+    ///
+    /// This is the read model's SOURCE, and keeping it is what lets a bring-over restate the
+    /// shelf without opening a second session for facts the first one already paid for. It is
+    /// cleared whenever an errand starts, because a listing from a recorder we are in the
+    /// middle of re-asking is not a listing.
+    private var shelfRecordings: [PocketRecording] = []
+
+    /// THE RADIO THE IN-FLIGHT ERRAND IS HOLDING, and the Task driving it.
+    ///
+    /// THE DEFECT THESE CLOSE. Both used to be unnamed: the attachment was built inline as an
+    /// argument and the Task was discarded, so nothing in the app had a reference to either.
+    /// Navigating away mid-pull therefore left the Task running, the `CBCentralManager` open
+    /// and the connection up, reporting to a screen that no longer existed — and the model
+    /// went on believing it was checking, so the next tap was refused by its own busy guard.
+    private var attachment: RecordingDeviceAttachment?
+    private var errand: Task<Void, Never>?
+    /// Which errand is running (`shelf` / `bring-over`), and the token that makes
+    /// `errand.stop` fire EXACTLY ONCE — whether the errand finished or the owner left.
+    private var runningErrandSubject: String?
+
+    /// Test seam: how many times the shelf read model has been REBUILT. The acceptance
+    /// instrument for this surface's command/query split, and the same idiom
+    /// `CaptureManager.rebuildCountForTests` is (`Sources/FoundryXKit/CaptureManager.swift`):
+    /// a stored, published read model whose recomputation has exactly one choke point, so
+    /// "the view never recomputes the shelf on its own" is a number rather than a hope.
+    /// Internal — reachable only from the app-hosted scenario bundle's `@testable import`.
+    private(set) var shelfRebuildCountForTests = 0
+
     #if DEBUG
     /// THE RADIO IS THE ONE THING A SCENARIO CANNOT OWN, SO IT IS THE ONE THING INJECTED.
     ///
@@ -921,11 +964,13 @@ final class PocketRecorderCheckModel: ObservableObject {
 
     /// The attachment this model opens sessions with: the production one unless a scenario
     /// running inside a DEBUG build has supplied a radio.
-    /// - Parameter log: the DoorLog that already reaches the relay. Passing it is the whole
-    ///   difference between a failure the owner can only screenshot and one that can be read
-    ///   afterwards: `RecordingDeviceAttachment` logs the exact reason a tap stopped, and
-    ///   with `log: nil` every one of those lines was thrown away.
-    private static func makeAttachment(log: DoorLog? = nil) -> RecordingDeviceAttachment {
+    /// - Parameter log: the DoorLog that already reaches the relay. NO DEFAULT, and that is
+    ///   the fix. It defaulted to `nil` while its sibling 450 lines down this same file
+    ///   defaulted to `.shared` — so the slowest and most failure-prone path in the app was
+    ///   the one whose telemetry was thrown away. `RecordingDeviceAttachment` logs the exact
+    ///   `RecordingDeviceUnreachableReason` a tap stopped on, and with `log: nil` every one of
+    ///   those lines went nowhere; a required parameter is how that cannot recur by omission.
+    private static func makeAttachment(log: DoorLog) -> RecordingDeviceAttachment {
         #if DEBUG
         if let factory = attachmentFactoryForScenarios { return factory() }
         #endif
@@ -945,47 +990,181 @@ final class PocketRecorderCheckModel: ObservableObject {
             return
         }
         isChecking = true
-        detail = nil
         message = nil
+        // INVALIDATION, NOT A REBUILD. A listing from a recorder we are in the middle of
+        // re-asking is not a listing, so the read model goes to "unknown" rather than sitting
+        // there stale. It is deliberately NOT counted as a rebuild: nothing was recomputed.
+        detail = nil
         offeredRecording = nil
-        Task {
-            // A FRESH ATTACHMENT PER CHECK, which is `run`'s default. An attachment's
-            // `teardown()` retires its own link and generation, so reusing one is a session
-            // that can never come back up.
-            //
+        shelfRecordings = []
+        beginErrand(PocketErrandCommand.shelfSubject)
+        // A FRESH ATTACHMENT PER CHECK. An attachment's `teardown()` retires its own link and
+        // generation, so reusing one is a session that can never come back up. NAMED, rather
+        // than built inline as an argument, because `cancel()` has to be able to reach it.
+        let attachment = Self.makeAttachment(log: DoorLog.shared)
+        self.attachment = attachment
+        let custody = self.custody
+        let identity = Self.custodyIdentity(for: hardwareToken)
+        errand = Task { [weak self] in
             // THE SHELF IS ASKED FOR HERE AND NOWHERE ELSE. Choosing which file to bring over
             // needs the recorder's own fields, not the row titles; reading it on a second
             // session would be a second Bluetooth connection for facts this one already had.
             let shelf = PocketRecorderShelfNote()
             let outcome = await PocketRecorderCheck.run(peripheralIdentifier: identifier,
                                                         advertisedName: advertisedName,
-                                                        custody: self.custody,
-                                                        attachment: Self.makeAttachment(),
+                                                        custody: custody,
+                                                        attachment: attachment,
                                                         shelf: shelf)
-            self.isChecking = false
+            // THE OWNER LEFT WHILE THIS RAN. `cancel()` has already torn the radio down, said
+            // so in the command stream and released the screen's state; publishing here would
+            // be an answer to a question nobody is still asking.
+            guard let self, !Task.isCancelled else { return }
+            self.errand = nil
+            self.attachment = nil
             self.message = PocketRecorderCheckPresentation.message(for: outcome)
-            if case .checked(let panel) = outcome { self.detail = panel }
-            // THE NEXT ONE, not the same one forever. `offered(_:)` is ordering only, and
-            // ordering is stable — so bringing a file over and re-reading the shelf re-elected
-            // the same winner, and a person with a backlog could bring over exactly one
-            // recording per recorder for the life of the device, paying a Bluetooth session
-            // each time to be handed the file they already had.
-            //
-            // Custody is the authority on what is already here; asking it is one disk read per
-            // listed file and no radio time at all, and it is the SAME authority the bring-over
-            // itself consults, so the shelf cannot disagree with the transfer about what we hold.
-            self.offeredRecording = await PocketBringOver.offeredNext(
-                shelf.recordings,
-                custody: self.custody,
-                identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: hardwareToken))
+            self.shelfRecordings = shelf.recordings
+            if case .checked(let panel) = outcome {
+                await self.rebuildShelf(panel, identity: identity)
+            }
+            // BUSY UNTIL THE SHELF IS ACTUALLY RESTATED, and this order is load-bearing. The
+            // shipped code dropped `isChecking` and THEN awaited the offer, so for one
+            // suspension the page said the check was finished while it was still deciding what
+            // to offer — a window in which the button is enabled over a shelf that is not
+            // there yet. It also makes every observer of this flag race the offer.
+            self.isChecking = false
+            self.finishErrand(outcome: Self.token(for: outcome))
         }
     }
 
-    /// ONE FILE, ON ONE SESSION, AND THEN THE SHELF IS READ AGAIN.
+    /// THE ONE PLACE THE SHELF READ MODEL IS RECOMPUTED.
     ///
-    /// The re-read is not cosmetic: custody is the only thing that knows whether the file
-    /// landed, so the row's "In Solleva" has to come from asking the disk again rather than
-    /// from this method having been optimistic.
+    /// STORED, NEVER COMPUTED IN THE VIEW — the `CaptureManager.rebuildVisibleCaptures` idiom,
+    /// and for the same reason: the custody column costs one disk stat per listed file, and a
+    /// SwiftUI body that derived it would pay that on every invalidation. So it is recomputed
+    /// when a COMMAND says custody moved, and at no other time.
+    private func rebuildShelf(_ panel: StoredFileDeviceDetailPresentation,
+                              identity: RecordingDeviceIdentity) async {
+        shelfRebuildCountForTests += 1
+        let held = await PocketShelfReadModel.heldFileIDs(shelfRecordings,
+                                                          custody: custody,
+                                                          identity: identity)
+        detail = panel.withManifest(PocketInventoryReader.manifest(shelfRecordings,
+                                                                   heldFileIDs: held))
+        // THE NEXT ONE, not the same one forever. `offered(_:)` is ordering only, and
+        // ordering is stable — so bringing a file over and re-reading the shelf re-elected
+        // the same winner, and a person with a backlog could bring over exactly one
+        // recording per recorder for the life of the device, paying a Bluetooth session
+        // each time to be handed the file they already had.
+        //
+        // Custody is the authority on what is already here; asking it is one disk read per
+        // listed file and no radio time at all, and it is the SAME authority the bring-over
+        // itself consults, so the shelf cannot disagree with the transfer about what we hold.
+        self.offeredRecording = await PocketBringOver.offeredNext(
+            shelfRecordings,
+            custody: self.custody,
+            identity: identity)
+    }
+
+    /// THE CUSTODY IDENTITY, DERIVED THE WAY CUSTODY ITSELF DERIVES IT.
+    ///
+    /// THE DEFECT THIS CLOSES, found by the scenario that counts sessions. Custody addresses a
+    /// file by `PocketRecorderFileKey`, whose device component comes from
+    /// `PocketAuthenticatedIdentity` — and that type LOWERCASES the peripheral identifier
+    /// (`Sources/FoundryXKit/PocketOnboarding.swift:17`). This model was building
+    /// `RecordingDeviceIdentity(shape:.filePull, hardwareToken:)` from the RAW token instead.
+    /// Handed the uppercase form `UUID.uuidString` produces, every `alreadyHeld` question was
+    /// asked about a device key custody has never written, so the answer was always no: the
+    /// shelf claimed "Only on the recorder" for a file sitting on this phone, and
+    /// `offeredNext` — the whole of the fix that stopped the recorder re-offering the same
+    /// recording forever — excluded nothing and re-offered it anyway.
+    ///
+    /// One derivation, in one place, so the shelf cannot disagree with the transfer about what
+    /// we hold. The fallback is unreachable for any token this model accepts (`run` has already
+    /// parsed it as a UUID) and exists so this function is total rather than optional.
+    private static func custodyIdentity(for hardwareToken: String) -> RecordingDeviceIdentity {
+        (try? PocketAuthenticatedIdentity(peripheralIdentifier: hardwareToken))?
+            .recordingDeviceIdentity
+            ?? RecordingDeviceIdentity(shape: .filePull, hardwareToken: hardwareToken)
+    }
+
+    // MARK: - The command path
+
+    /// `errand.start`, recorded before the radio is touched so a run that never came back is
+    /// still legible as a run that was attempted.
+    private func beginErrand(_ subject: String) {
+        runningErrandSubject = subject
+        DoorLog.shared.command(PocketErrandCommand.start, subject: subject)
+    }
+
+    /// `errand.stop`, EXACTLY ONCE per start. Guarded by the subject token rather than by a
+    /// flag on the Task, because the two ways an errand ends — it finished, or the owner walked
+    /// away — both arrive here and only one of them may write.
+    private func finishErrand(outcome: String) {
+        guard let subject = runningErrandSubject else { return }
+        runningErrandSubject = nil
+        DoorLog.shared.command(PocketErrandCommand.stop, subject: subject, outcome: outcome)
+    }
+
+    /// A CLOSED TOKEN, never the diagnostic sentence. The wire form is space-separated
+    /// `key=value`, so an outcome carrying spaces would corrupt every parser downstream — and
+    /// the reason in full is already an `error` entry written by `RecordingDeviceAttachment`.
+    private static func token(for outcome: PocketRecorderCheckOutcome) -> String {
+        switch outcome {
+        case .checked:              return DoorLog.succeeded
+        case .inventoryFailed:      return "inventory-refused"
+        case .unavailable(let attach):
+            switch attach {
+            case .unreachable:      return "unreachable"
+            case .live, .unrecognised, .adopted, .adoptionNotPersisted:
+                return "not-this-recorder"
+            default:                return "setup-unavailable"
+            }
+        }
+    }
+
+    private static func token(for outcome: PocketBringOverOutcome) -> String {
+        switch outcome {
+        case .broughtOver:          return DoorLog.succeeded
+        case .alreadyHeld:          return "already-held"
+        case .transferIncomplete:   return "transfer-incomplete"
+        case .unreadableRecording:  return "unreadable"
+        case .recorderUnavailable:  return "recorder-unavailable"
+        }
+    }
+
+    /// THE SCREEN WENT AWAY MID-ERRAND.
+    ///
+    /// Mirrors `RecordingDeviceAttachModel.cancel()` and closes the same hole one layer over:
+    /// this model held no reference to either the attachment or the Task, so leaving the
+    /// recorder page mid-pull left a `CBCentralManager` connected to a device nobody was
+    /// looking at, a Task publishing into a dead screen, and `isChecking` stuck true — which
+    /// the model's own busy guard then read as "a check is already running" forever.
+    ///
+    /// Idempotent, and silent when there is nothing to stop: `onDisappear` and a `scenePhase`
+    /// drop can both fire for one departure.
+    func cancel() {
+        guard isChecking || isBringingOver else { return }
+        errand?.cancel()
+        errand = nil
+        attachment?.teardown()
+        attachment = nil
+        isChecking = false
+        isBringingOver = false
+        finishErrand(outcome: "left-the-page")
+    }
+
+    /// ONE FILE, ON ONE SESSION, AND THE SHELF RESTATED FROM THIS PHONE'S OWN DISK.
+    ///
+    /// WHAT THIS USED TO DO AND WHY IT WAS WRONG. It ended by calling `self.run(…)` — a second
+    /// full attach (power-on gate, connect, discovery, key handshake), a second `LIST_DIRS` and
+    /// a second `LIST&` per day — to learn ONE fact the phone's own disk already knew: that the
+    /// file it had just written is here. One tap therefore cost TWO authenticated sessions, and
+    /// the second asked the recorder a question whose answer could not have changed.
+    ///
+    /// The re-read is still not cosmetic — custody is the only thing that knows whether the
+    /// file landed, so the row's "In Solleva" still comes from asking the disk rather than from
+    /// this method having been optimistic. It just asks the DISK, which is the authority, and
+    /// not the radio, which is not.
     /// - Parameter manager: the capture owner the finished conversation is handed to. Without
     ///   this the recording would be a complete, correct, pending-finalize capture directory
     ///   that NOTHING in the running app knows exists — `loadExisting()` runs once, at
@@ -1001,12 +1180,18 @@ final class PocketRecorderCheckModel: ObservableObject {
         }
         isBringingOver = true
         bringOverMessage = nil
-        Task {
+        beginErrand(PocketErrandCommand.bringOverSubject)
+        let attachment = Self.makeAttachment(log: DoorLog.shared)
+        self.attachment = attachment
+        let custody = self.custody
+        let identity = Self.custodyIdentity(for: hardwareToken)
+        let panel = detail
+        errand = Task { [weak self] in
             let outcome = await PocketBringOver.run(peripheralIdentifier: identifier,
                                                     advertisedName: advertisedName,
                                                     recording: recording,
-                                                    custody: self.custody,
-                                                    attachment: Self.makeAttachment(),
+                                                    custody: custody,
+                                                    attachment: attachment,
                                                     // THE OWNER'S OWN LIBRARY, ASKED FOR RATHER
                                                     // THAN GUESSED. The conversation must land in
                                                     // the directory this manager hydrates from;
@@ -1014,15 +1199,33 @@ final class PocketRecorderCheckModel: ObservableObject {
                                                     // agree today and is not guaranteed to.
                                                     destination: .init(
                                                         baseDir: manager.captureLibraryRoot))
-            self.isBringingOver = false
+            guard let self, !Task.isCancelled else { return }
+            self.errand = nil
+            self.attachment = nil
             self.bringOverMessage = PocketBringOverPresentation.message(for: outcome)
             // THE HAND-OFF. From here it is the ordinary drain and the ordinary finalize — the
             // same two an Omi or phone-mic conversation runs, with nothing Pocket-shaped in
             // either of them.
             if let captureID = outcome.captureID {
                 manager.adoptCompletedCapture(captureId: captureID)
+                // CUSTODY MOVED, AND THAT IS WHAT INVALIDATES THE SHELF. The command is
+                // recorded first and the read model recomputed second, so the record of what
+                // happened cannot be lost to whatever the recompute does next.
+                // BUILT, NOT INTERPOLATED. `features/voice-notes-language.feature` scans this
+                // file's string LITERALS for retired words, and an interpolation carrying the
+                // identifier `recording` reads to that lexer as user-facing copy about a
+                // "recording". The token is the recorder's own name for the file either way.
+                let fileToken = recording.date + "/" + recording.timestamp
+                DoorLog.shared.command(PocketErrandCommand.custodyCommit,
+                                       subject: fileToken,
+                                       outcome: DoorLog.succeeded)
+                if let panel { await self.rebuildShelf(panel, identity: identity) }
             }
-            self.run(hardwareToken: hardwareToken, advertisedName: advertisedName)
+            // BUSY UNTIL THE SHELF HAS CAUGHT UP — see the same note in `run`. Dropped before
+            // the rebuild, the page would offer a "Bring it over" button over a shelf that
+            // still names the file it has just finished bringing over.
+            self.isBringingOver = false
+            self.finishErrand(outcome: Self.token(for: outcome))
         }
     }
 }

@@ -312,7 +312,27 @@ final class FakePocketBLEStack: @unchecked Sendable {
         let sink = self.sink
         lock.unlock()
         guard let queue, let sink else { return }
+        // WHAT THE RECORDER SAID AND SOMEBODY HEARD. The sink is held WEAKLY, so this is a
+        // true measurement rather than a bookkeeping flag: an event counted here was handed
+        // to an object that was still alive to receive it, and an event this counter does not
+        // move is one that reached nobody. It is the only way "the app stopped listening when
+        // I left the page" is a checkable claim instead of a reassurance.
+        lock.lock(); handedToTransport += 1; lock.unlock()
         queue.async { body(sink) }
+    }
+
+    private var handedToTransport = 0
+
+    /// How many radio events this recorder has handed to a LIVE transport.
+    var notificationsHandedToTransport: Int {
+        lock.lock(); defer { lock.unlock() }; return handedToTransport
+    }
+
+    /// Whether anything in the app is still bound as this radio's delegate. `false` is the
+    /// strong form of "nobody is listening": the sink reference is weak, so this goes false
+    /// when the last owner of the transport is released, not when a flag is set.
+    var transportIsListening: Bool {
+        lock.lock(); defer { lock.unlock() }; return sink != nil
     }
 
     fileprivate var currentCentral: FakePocketBLECentral? {
