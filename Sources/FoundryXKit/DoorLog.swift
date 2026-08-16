@@ -32,6 +32,83 @@ public final class DoorLog: ObservableObject, @unchecked Sendable {
     @Published public private(set) var entries: [Entry] = []
     private let cap: Int
 
+    // MARK: - The command side of the split
+
+    /// SOMETHING THE APP DID, as opposed to something it noticed.
+    ///
+    /// WHY THIS TYPE EXISTS. Everything this log has ever held is a sentence at a level, so
+    /// "the app issued a delete" and "the app saw a disconnect" are the same kind of line and
+    /// neither can be found without grepping English. The recorder surface is the first place
+    /// that has to tell them apart — an errand that ran, an errand that stopped, and a file
+    /// taken into custody are the three facts a slow failure is diagnosed from, and two of
+    /// them are things the app CHOSE to do.
+    ///
+    /// Every field is a content-free token or a device-supplied identifier, the same
+    /// discipline `FoundryXDiagContext` is held to: `subject` carries the recorder's own name
+    /// for a file (`<date>/<timestamp>`), never a title, a transcript or an account.
+    public struct Command: Sendable, Equatable {
+        public let ts: Date
+        /// A dotted name from a closed vocabulary — see `PocketErrandCommand`.
+        public let name: String
+        /// What the command was about, as a token.
+        public let subject: String
+        /// How it ended, or `nil` while it is still running. A command with no outcome that
+        /// never gains one is itself the finding.
+        public let outcome: String?
+
+        public init(ts: Date, name: String, subject: String, outcome: String?) {
+            self.ts = ts; self.name = name; self.subject = subject; self.outcome = outcome
+        }
+    }
+
+    /// THE COMMAND STREAM. Ordered, bounded by the same ring `entries` is, and separate from
+    /// the observations so a command can be found by NAME rather than by phrasing.
+    @Published public private(set) var commands: [Command] = []
+
+    /// Record a command. Safe from any thread — hops to main for the @Published write, the
+    /// same way `log(_:_:)` does.
+    ///
+    /// IT ALSO WRITES AN ENTRY, and that is not redundancy. `flush()` ships `entries` and
+    /// nothing else, so a command that lived only in the new stream would be a line the
+    /// on-call reader used to be able to see and now cannot — a diagnostic regression sold as
+    /// an improvement. The entry's text is a PINNED wire form for the same reason
+    /// `FoundryXDiagContext.wireHeader` is: a server-side grep depends on it.
+    public func command(_ name: String, subject: String = "", outcome: String? = nil) {
+        let made = Command(ts: Date(), name: name, subject: subject, outcome: outcome)
+        if Thread.isMainThread {
+            appendCommand(made)
+        } else {
+            DispatchQueue.main.async { [weak self] in self?.appendCommand(made) }
+        }
+    }
+
+    /// Every command issued under one name, in order.
+    public func commands(named name: String) -> [Command] {
+        commands.filter { $0.name == name }
+    }
+
+    private func appendCommand(_ made: Command) {
+        commands.append(made)
+        if commands.count > cap { commands.removeFirst(commands.count - cap) }
+        // AN OUTCOME THAT IS NOT THE HAPPY ONE IS FINDABLE ABOVE `info`. `nil` is "still
+        // running" and every deliberate success says so in its own word, so the levels stay
+        // honest without this file knowing any surface's vocabulary.
+        let level: Level = (made.outcome == nil || made.outcome == Self.succeeded) ? .info : .warn
+        append(level, Self.wireForm(made))
+    }
+
+    /// The outcome token a command uses when it did exactly what it set out to do. A closed
+    /// value rather than each caller's adjective, so the level rule above has something to
+    /// compare against.
+    public static let succeeded = "ok"
+
+    /// ONE PINNED WIRE FORM for a command line: `cmd <name> subject=<subject>[ outcome=<o>]`.
+    static func wireForm(_ command: Command) -> String {
+        var text = "cmd \(command.name) subject=\(command.subject)"
+        if let outcome = command.outcome { text += " outcome=\(outcome)" }
+        return text
+    }
+
     // Remote diagnostics sink (M5 R1b): when set, new entries are shipped (batched,
     // best-effort) to the relay's /diag/log so the phone's BLE/audio/capture/chat
     // behavior is observable SERVER-SIDE — no need to copy logs off the device.
