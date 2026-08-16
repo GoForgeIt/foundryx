@@ -176,8 +176,25 @@ public enum PocketPostCaptureParity {
     }
 }
 
+/// THE PROMISE A PERSON READS, AND WHAT MAKES IT TRUE.
+///
+/// It used to say *"Solleva never deletes anything from your recorder."* That was a description
+/// of a missing feature rather than a policy, and it was about to become a lie: Nick's ruling of
+/// 2026-08-16 is that a person MAY remove a recording from their own recorder once Solleva can
+/// prove it already holds it somewhere else, either by choosing it or by arming an automatic
+/// clear that is off by default.
+///
+/// So the promise is the one that survives that: nothing is removed that the owner did not ask
+/// for. `PocketRecorderCommandGate` is what makes it a policy instead of a sentence — every
+/// command this app composes for a recorder passes it, and a deletion nobody chose is refused
+/// before the radio and recorded as refused.
 public enum PocketRecorderCustodyPromise {
-    public static let text = "Solleva never deletes anything from your recorder."
+    public static let text = "Solleva never deletes anything you didn't ask it to."
+
+    /// THE INVARIANT THAT WAS ALWAYS CORRECTLY NAMED — no *automatic* delete, which is a
+    /// different and weaker claim than no delete. Kept as the declared policy; the PROOF is
+    /// `PocketRecorderCommandLedger`, because a constant equal to zero is a claim no mutation
+    /// can falsify and this one was asserted in four suites for months.
     public static let automaticDeleteCommands = 0
 }
 

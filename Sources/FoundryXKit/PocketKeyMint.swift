@@ -230,7 +230,7 @@ public enum PocketMintConsentPresentation {
     public static let whatItCouldCost =
         "If the recorder does take the new key: the other app can no longer connect to it, and "
         + "any recording still only on the recorder may be out of reach until you set that app "
-        + "up again. Solleva never deletes anything from the recorder."
+        + "up again. Setting up a key never removes a recording from the recorder."
 
     /// The recorder's WiFi password changes too — a real, separate consequence that a person
     /// who joined that network on purpose would otherwise discover by failing to join it.

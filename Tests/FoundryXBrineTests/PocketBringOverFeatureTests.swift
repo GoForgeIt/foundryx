@@ -682,8 +682,13 @@ private actor PocketBringOverWorld {
 
         case "the recorder was sent no delete command and the deletion promise is still shown":
             let commands = try requireCommands()
+            // THIS SCAN USED TO LOOK FOR THE SUBSTRING `DEL`, AND THE OPCODE IS ONE LETTER.
+            // The recorder's delete is `APP&D&<date>&<timestamp>`, which contains no `DEL` —
+            // so a bring-over that composed a real delete passed this check unchanged. It now
+            // reads the opcode FIELD, which is also what keeps `MCU&DIRS` (a directory listing)
+            // from being read as `MCU&D` (a deletion) on a prefix match.
             for command in commands {
-                XCTAssertFalse(command.uppercased().contains("DEL"),
+                XCTAssertFalse(PocketRecorderWire.namesADeletion("APP&" + command),
                                "the bring-over issued \"\(command)\" — no automatic delete, ever")
             }
             XCTAssertEqual(PocketRecorderCustodyPromise.automaticDeleteCommands, 0)

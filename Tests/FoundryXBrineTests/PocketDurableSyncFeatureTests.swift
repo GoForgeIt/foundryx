@@ -74,7 +74,20 @@ private actor PocketDurableWorld {
                      PocketConversationClock.resolve(reported: Date(timeIntervalSince1970: 3_000_000), broughtOver: now, lastClockSet: set, calendar: cal)]
         case "ambient processing notices an action in each":
             ambient = [PocketPostCaptureParity.ambientResult(conversationID: "p", enabled: true), PocketPostCaptureParity.ambientResult(conversationID: "o", enabled: true)]
-        case "sync, retry, retention, and downstream recovery run": deleteCommands = PocketRecorderCustodyPromise.automaticDeleteCommands
+        // THIS USED TO READ `deleteCommands = PocketRecorderCustodyPromise.automaticDeleteCommands`
+        // — a constant assigned to a variable and then asserted equal to zero, which no change to
+        // any code path this app runs could falsify. The population that CAN falsify it is the
+        // census `PocketBLEClient.write` keeps, and `features/pocket-recorder-delete-consent.feature`
+        // drives the real bring-over / retry / sweep / send legs into it. Here the same census is
+        // read across this suite's own sync, retry and recovery.
+        case "sync, retry, retention, and downstream recovery run":
+            let mark = await PocketRecorderCommandLedger.shared.mark()
+            let sync = PocketDurableSync(store: store, decoder: decoder, finalized: sink), c = candidate("20260810","recover",8)
+            _ = await sync.importFile(c, payload: mp3(count: 4), evidence: goodEvidence)
+            _ = await sync.importFile(c, payload: mp3(count: 8), evidence: goodEvidence)
+            _ = await sync.importFile(c, payload: mp3(count: 8), evidence: goodEvidence)
+            deleteCommands = await PocketRecorderCommandLedger.shared.composed(since: mark)
+                .filter(\.namesADeletion).count
         case "the complete Pocket sync lifecycle runs":
             let spy = StoredFileLiveBoundarySpy()
             StoredFileDeviceLifecycle.runFullLinkLifecycle(liveBoundaries: spy)
@@ -96,7 +109,10 @@ private actor PocketDurableWorld {
         case "device time is used, uncertain time is labeled, and future grouping is clamped without losing the reported value":
             XCTAssertNil(times[0].warning); XCTAssertNotNil(times[1].warning); XCTAssertNotNil(times[2].warning); XCTAssertNotEqual(times[2].timeline, times[2].recorderReported)
         case "both use the same conversation and Activity flow and neither posts a content notification": XCTAssertEqual(ambient.map{$0.activityLineageCount}, [1,1]); XCTAssertEqual(ambient.map{$0.notificationCount}, [0,0])
-        case "no recorder delete is issued and the shipped deletion promise remains visible": XCTAssertEqual(deleteCommands, 0); XCTAssertEqual(PocketRecorderCustodyPromise.text, "Solleva never deletes anything from your recorder.")
+        case "no recorder delete is issued and the shipped deletion promise remains visible":
+            XCTAssertEqual(deleteCommands, 0)
+            XCTAssertEqual(PocketRecorderCustodyPromise.automaticDeleteCommands, 0)
+            XCTAssertEqual(PocketRecorderCustodyPromise.text, "Solleva never deletes anything you didn't ask it to.")
         case "no FrameRouter, Live Activity, recording pill, or currently-recording state is reached":
             XCTAssertEqual(liveEffects.storedFileLifecycleEvents, 5)
             XCTAssertEqual(liveEffects.activeSourceSelections, 0)

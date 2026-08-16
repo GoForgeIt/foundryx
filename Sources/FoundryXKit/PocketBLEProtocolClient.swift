@@ -8,6 +8,9 @@ public enum PocketProtocolError: Error, Sendable, Equatable, CustomStringConvert
     case unauthenticated, busy, cancelled, malformedSecret, authenticationRejected
     case unsupportedProtocol, unsupportedOperation, malformedResponse
     case timeout(PocketOperation), stall, transportFailure, disconnected
+    /// A delete was composed for a recording no person chose. Refused before the radio, never
+    /// reported to the owner as a failure of the recorder — because it is not one.
+    case deletionNobodyChose
 
     public var description: String {
         switch self {
@@ -23,6 +26,7 @@ public enum PocketProtocolError: Error, Sendable, Equatable, CustomStringConvert
         case .stall: "download stalled"
         case .transportFailure: "transport failure"
         case .disconnected: "disconnected"
+        case .deletionNobodyChose: "a deletion nobody chose"
         }
     }
 }
@@ -467,9 +471,37 @@ public actor PocketBLEClient {
         } catch { throw mapError(error, operation: operation) }
     }
 
-    private func write(_ command: String) async throws {
-        do { try await transport.write(Data("APP&\(command)".utf8), to: characteristicMap.command) }
-        catch { throw PocketProtocolError.transportFailure }
+    /// THE ONE PLACE THIS APP COMPOSES A COMMAND FOR A RECORDER, and therefore the one place a
+    /// deletion could ever be composed.
+    ///
+    /// Two things happen here that did not before. Every composed frame is written to
+    /// `PocketRecorderCommandLedger`, which is the POPULATION the deletion promise is asserted
+    /// over — before it existed, "Solleva issued no delete" was a constant equal to zero and a
+    /// scan for the substring `DEL`, and the recorder's delete opcode is the single letter `D`,
+    /// so neither could have seen a real one. And every frame passes
+    /// `PocketRecorderCommandGate.admit` first, which admits everything except a deletion for a
+    /// recording no owner chose. `ownerConsent` defaults to nil so no caller can authorise a
+    /// deletion by omission — the same shape `attach`'s `mint:` parameter uses for the same
+    /// reason.
+    ///
+    /// Nothing in this repository composes a deletion today. This is the door, standing before
+    /// the verb is written, so that writing the verb is not a gate-breaking change.
+    private func write(_ command: String, ownerConsent: PocketDeleteConsent? = nil) async throws {
+        let frame = "APP&\(command)"
+        if case .refused(let refusal) = await PocketRecorderCommandGate.admit(
+            frame: frame, ownerConsent: ownerConsent) {
+            await diagnostics("refused a deletion nobody chose: \(refusal.rawValue)")
+            throw PocketProtocolError.deletionNobodyChose
+        }
+        do {
+            try await transport.write(Data(frame.utf8), to: characteristicMap.command)
+            await PocketRecorderCommandLedger.shared.record(
+                .init(frame: frame, disposition: .putOnTheWire))
+        } catch {
+            await PocketRecorderCommandLedger.shared.record(
+                .init(frame: frame, disposition: .couldNotBeSent))
+            throw PocketProtocolError.transportFailure
+        }
     }
 
     private func retire(reason: String) async {

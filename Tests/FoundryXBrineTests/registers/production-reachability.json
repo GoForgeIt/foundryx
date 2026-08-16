@@ -417,6 +417,37 @@
       "why": "THE THIRD VERDICT, ON REAL CODE. Calling this `unreachable` would be a guess dressed as a measurement; calling it `reachable` would be the original disease. What IS determined is printed beside it: its only known existential holder, `pocket-fast-sync-coordinator`, is declared `unreachable` — so the likely truth is that this conformance is dead too, and the way to find out is to make the coordinator reachable, not to make this checker cleverer."
     },
     {
+      "id": "pocket-recorder-command-gate",
+      "name": "PocketRecorderCommandGate — the one door a recorder command passes through",
+      "declared_in": "Sources/FoundryXKit/PocketRecorderDeleteGate.swift",
+      "declaration_anchor": "public enum PocketRecorderCommandGate {",
+      "call_pattern": "PocketRecorderCommandGate.admit(",
+      "reached_from": [
+        {
+          "via": "pocket-ble-download",
+          "anchor": "if case .refused(let refusal) = await PocketRecorderCommandGate.admit("
+        }
+      ],
+      "verdict": "reachable",
+      "why": "THE DELETION PROMISE, AS A GATE RATHER THAN AN ABSENCE. Nick's ruling of 2026-08-16 allows an owner to remove a recording once Solleva can prove it holds it elsewhere, so the old proposed gate — an enumeration asserting no delete verb exists — would have locked out a wire form (`APP&D&<date>&<timestamp>`) that is already decoded and public. This is the replacement: every frame `PocketBLEClient.write` composes passes `admit`, and a deletion for a recording no owner chose is refused before the radio. It is registered because a gate nothing calls is exactly the class of defect this register exists for — an unreached gate is indistinguishable from no gate."
+    },
+    {
+      "id": "pocket-recorder-command-ledger",
+      "name": "PocketRecorderCommandLedger — the census the deletion promise is asserted over",
+      "declared_in": "Sources/FoundryXKit/PocketRecorderDeleteGate.swift",
+      "declaration_anchor": "public actor PocketRecorderCommandLedger {",
+      "call_pattern": "PocketRecorderCommandLedger.shared.record(",
+      "reached_from": [
+        {
+          "via": "pocket-ble-download",
+          "anchor": "await PocketRecorderCommandLedger.shared.record(",
+          "sites": 2
+        }
+      ],
+      "verdict": "reachable",
+      "why": "THE POPULATION, WHICH DID NOT EXIST. `PocketRecorderCustodyPromise.automaticDeleteCommands = 0` is a constant, asserted in four suites, that no code path could falsify; `PocketBringOverFeatureTests` scanned composed commands for the substring `DEL` and the recorder's delete opcode is the single letter `D`. Neither could have seen a real delete. This is the census `PocketBLEClient.write` writes every composed frame to — two sites, one for a frame that reached the radio and one for a frame the radio refused, because the invariant is about what the code COMPOSES and hiding an unsent frame would blind the gate to the thing it exists to see."
+    },
+    {
       "id": "foundry-link-provider-sub",
       "name": "the iOS client reaching the handler that links provider + sub",
       "declared_in": null,
@@ -430,11 +461,11 @@
   ],
   "_verdict_counts_are_equality": "Declared as exact counts, never bounds. A bound would let the unreachable roster grow by one without anybody moving this file, which is precisely how four capabilities reached `main` unreached.",
   "verdict_counts": {
-    "reachable": 18,
+    "reachable": 20,
     "undetermined": 2,
     "unreachable": 8
   },
   "_floor": "A register that lost its rows would be a silent full pass, so the population is asserted before its contents are.",
-  "minimum_capabilities": 28,
+  "minimum_capabilities": 30,
   "minimum_entry_points": 1
 }

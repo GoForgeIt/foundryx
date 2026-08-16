@@ -530,6 +530,13 @@ public enum PocketBringOver {
             case .unauthenticated, .busy, .malformedSecret, .authenticationRejected,
                  .unsupportedProtocol:
                 return .recorderUnavailable(PocketRecorderCheckPresentation.keyUnusableLine)
+            case .deletionNobodyChose:
+                // UNREACHABLE FROM HERE AND NAMED ANYWAY. A bring-over composes no deletion —
+                // that is the invariant `features/pocket-recorder-delete-consent.feature`
+                // holds. If one ever appears on this path the gate refuses it, and the owner
+                // is told the recording did not come over rather than being told a story about
+                // their recorder: nothing was taken from it, which is the whole point.
+                return .transferIncomplete
             }
         } catch {
             // THE BYTES ARRIVED AND THIS PHONE COULD NOT PROVE IT IS HOLDING THEM. Custody has
