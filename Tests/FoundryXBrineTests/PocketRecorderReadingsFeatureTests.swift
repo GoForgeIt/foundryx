@@ -282,8 +282,18 @@ private actor ReadingsWorld {
             transport: ReadingsFakeTransport(frames: frames))
         try await client.authenticate(secret: Self.secret)
         let auth = try PocketAuthenticatedIdentity(peripheralIdentifier: Self.peripheral)
-        let observed = await PocketRecordingDeviceBridge.observe(
+        var observed = await PocketRecordingDeviceBridge.observe(
             client: client, identity: auth, advertisedName: "PKT01_BLUE_26079bc5", now: now)
+        // FREE SPACE IS A SEPARATE ASK, AND IT IS ASKED LAST — the same sequence the shipped
+        // paths use. It left `observe` because `APP&SPACE` runs inside
+        // `protected(.information)`, which retires the whole session on a timeout: read before
+        // a listing it would take the listing down with it, and the owner would be told the
+        // recorder never said what it was holding. This scenario drives the same two calls in
+        // the same order the app does rather than modelling one merged one.
+        if let space = await PocketRecordingDeviceBridge.storageReading(client: client, now: now) {
+            observed = observed.withReading(
+                space, for: RecordingDeviceCapabilityKey.freeSpace.rawValue)
+        }
         observation = observed
         await client.close()
         switch RecordingDeviceStore.recordObservedFacts(identity: observed.identity,

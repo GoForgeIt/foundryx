@@ -1252,7 +1252,11 @@ final class PocketRecorderCheckModel: ObservableObject {
         shelfRebuildCountForTests += 1
         var byID: [String: PocketRecordingPresence] = [:]
         for (recording, presence) in zip(shelfRecordings, presences) {
-            byID["\(recording.date)/\(recording.timestamp)"] = presence
+            // BUILT, NOT INTERPOLATED — the same rule the bring-over's `fileToken` follows and
+            // for the same reason: `features/voice-notes-language.feature` scans this file's
+            // string LITERALS for retired words, and an interpolation carrying the identifier
+            // `recording` reads to that lexer as user-facing copy about a "recording".
+            byID[recording.date + "/" + recording.timestamp] = presence
         }
         detail = panel.withManifest(PocketInventoryReader.manifest(shelfRecordings,
                                                                    presences: byID))

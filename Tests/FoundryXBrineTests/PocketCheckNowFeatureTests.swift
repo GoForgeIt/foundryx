@@ -240,15 +240,27 @@ private actor PocketCheckNowWorld {
             // adoption path has always done. It is pinned rather than tolerated: a fourth read
             // appearing here is a regression somebody should have to look at.
             //
-            // `SPACE` IS THE ONE ADDITION, AND IT IS THE POINT OF STEP 7. It sits after the
-            // two facts `observe` already read and before the listing, which is where the
-            // bridge issues it — deliberately LAST of the three information reads, because
-            // `protected(_:)` retires the whole client on a timeout and the listing that
-            // follows would then report "it didn't say what it's holding" for a recorder that
-            // answered everything it was asked. This line is the only thing in the repository
-            // that would notice that order changing.
-            XCTAssertEqual(commands, ["SK&\(Self.secret)", "BAT", "FW", "BAT", "FW", "SPACE",
-                                      "LIST_DIRS", "LIST&2026-03-27", "LIST&2026-03-28"])
+            // `SPACE` IS THE ONE ADDITION, AND IT COMES AFTER THE LISTING — WHICH IS THE
+            // WHOLE CORRECTION.
+            //
+            // It first shipped BEFORE the listing, last among the three information reads, on
+            // a comment claiming that order protected the listing. It did not: all three of
+            // those reads precede the listing, so ordering among themselves protects the two
+            // READINGS and nothing else. `APP&SPACE` runs inside `protected(.information)`,
+            // which RETIRES the whole client on a `.timeout`, and `try?` swallows the throw
+            // but not the retirement — so a firmware that silently ignores the command (rather
+            // than answering `MCU&UNKNOWN`, which retires nothing) took the session down and
+            // the listing threw `.unauthenticated`. Every "Connect and check now" would then
+            // report "it didn't say what it's holding" for a recorder that would have listed
+            // perfectly well, trading the one thing the owner opened the page for against a
+            // number. These bytes have never been issued to a real recorder; probe P3 has not
+            // run. So the listing is banked first.
+            //
+            // This line is the only thing in the repository that would notice that order
+            // moving back.
+            XCTAssertEqual(commands, ["SK&\(Self.secret)", "BAT", "FW", "BAT", "FW",
+                                      "LIST_DIRS", "LIST&2026-03-27", "LIST&2026-03-28",
+                                      "SPACE"])
 
         case "the recorder was sent no download, no delete and no WiFi command":
             let commands = try requireCommands()

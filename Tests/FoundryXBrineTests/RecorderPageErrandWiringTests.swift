@@ -118,7 +118,11 @@ final class RecorderPageErrandWiringTests: XCTestCase {
         // EXISTENCE OVER THE SAME POPULATION: `run` is still there and the page still calls
         // it. A `bringOver` that stopped re-attaching because the check was deleted would
         // pass the prohibition and lose the feature.
-        XCTAssertTrue(code.contains("func run(hardwareToken: String, advertisedName: String)"),
+        // NAMED WITHOUT ITS PARAMETER LIST. Pinning the full signature made this existence
+        // assertion red every time the check gained an argument — it gained `library:`,
+        // `stages:` and `brain:` on the way here — for a reason that had nothing to do with
+        // the check having been deleted, which is the only thing it exists to notice.
+        XCTAssertTrue(code.contains("func run(hardwareToken: String, advertisedName: String"),
                       "the check itself is gone")
         XCTAssertTrue(code.contains("check.run(hardwareToken: input.identity.hardwareToken,"),
                       "nothing on the page starts a check any more")

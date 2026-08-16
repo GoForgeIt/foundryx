@@ -113,7 +113,7 @@
       "reached_from": [
         {
           "via": "recording-device-attachment",
-          "anchor": "let observation = await PocketRecordingDeviceBridge.observe("
+          "anchor": "var observation = await PocketRecordingDeviceBridge.observe("
         }
       ],
       "verdict": "reachable",
@@ -158,11 +158,11 @@
       "reached_from": [
         {
           "via": "pocket-recorder-check",
-          "anchor": "                    await PocketPresenceReader.presence(for: key,"
+          "anchor": "                await PocketPresenceReader.presence(for: key,"
         }
       ],
       "verdict": "reachable",
-      "why": "the shelf's own per-row resolution. It REPLACES `StoredFileCustody { foundryX, recorderOnly }`, a two-valued answer to a three-valued question: it could not say \"on this phone but not yet safe anywhere else\" — the one state that governs a reset — and `PocketInventoryReader.manifest`'s empty `heldFileIDs` default rendered a place NOBODY ASKED ABOUT as a definite `Only on the recorder`. Every destructive path now reads `answer == .yes`, so `unknown` can never be counted as a copy anybody holds."
+      "why": "the shelf's own per-row resolution. It REPLACES `StoredFileCustody { foundryX, recorderOnly }`, a two-valued answer to a three-valued question: it could not say \"on this phone but not yet safe anywhere else\" — the one state that governs a reset — and `PocketInventoryReader.manifest`'s empty `heldFileIDs` default rendered a place NOBODY ASKED ABOUT as a definite `Only on the recorder`. Every destructive path now reads `answer == .yes`, so `unknown` can never be counted as a copy anybody holds. CALLED FROM EXACTLY ONE RESOLVER, `PocketShelfReadModel.presences`, which both the authenticated session and the post-transfer shelf rebuild go through. Two call sites resolving presence independently would be two answers to `is this recording safe`, and the delete ruling names that as how a recording gets lost."
     },
     {
       "id": "pocket-durability-evidence",
@@ -173,7 +173,7 @@
       "reached_from": [
         {
           "via": "device-screen",
-          "anchor": "        let durability = PocketCaptureDurability(baseDir: library, stages: stages)"
+          "anchor": "        let durability = PocketCaptureDurability(baseDir: library, stages: stages, brain: brain)"
         }
       ],
       "verdict": "reachable",
@@ -497,11 +497,11 @@
       "reached_from": [
         {
           "via": "pocket-device-bridge-observe",
-          "anchor": "if let storage = try? await client.storage() {"
+          "anchor": "        guard let storage = try? await client.storage() else { return nil }"
         }
       ],
       "verdict": "reachable",
-      "why": "INSTANCE 1, THIRD HALF, AND THE ONE THIS STEP CLOSES. `APP&SPACE` is the only command in the decoded fw-1.6 surface that answers the question a person opens the recorder page to ask, and until Step 7 it had ZERO callers outside `Tests/` — decoded, implemented, unit-tested, unreached, and unenumerated in this very register, which is the third state this row exists to end. Two things had kept it there: nothing durable could hold the answer (a session read facts and dropped them at close), and a Brine gate in `UnifiedRecordingDeviceListFeatureTests` positively ASSERTED that the bridge never writes `SPACE` — a description of the gap promoted to a rule. Both are corrected in the same change."
+      "why": "INSTANCE 1, THIRD HALF, AND THE ONE THIS STEP CLOSES. `APP&SPACE` is the only command in the decoded fw-1.6 surface that answers the question a person opens the recorder page to ask, and until Step 7 it had ZERO callers outside `Tests/` — decoded, implemented, unit-tested, unreached, and unenumerated in this very register, which is the third state this row exists to end. Two things had kept it there: nothing durable could hold the answer (a session read facts and dropped them at close), and a Brine gate in `UnifiedRecordingDeviceListFeatureTests` positively ASSERTED that the bridge never writes `SPACE` — a description of the gap promoted to a rule. Both are corrected in the same change. REACHED VIA `PocketRecordingDeviceBridge.storageReading`, NOT `observe`, and the split is deliberate: `APP&SPACE` runs inside `protected(.information)`, which RETIRES the authenticated session on a timeout, and `try?` swallows the throw but not the retirement. Asked before the listing — where it first shipped — a firmware that silently ignores the command turned every `Connect and check now` into `it didn't say what it's holding` for a recorder that would have listed perfectly well. The listing is banked first now, and this read is the last thing any session does."
     },
     {
       "id": "pocket-ble-device-state",
