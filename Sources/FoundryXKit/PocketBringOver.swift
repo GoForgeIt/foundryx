@@ -349,6 +349,49 @@ public enum PocketBringOver {
     /// The comparator is NOT re-implemented here: `PocketDurableSync.ordered(_:)` is the
     /// shipped backlog order (newest day first, shorter file breaks the tie) and a second
     /// spelling of it would drift from the one the sync path uses.
+    /// THE NEXT one the shelf offers — the smallest this phone does not already hold.
+    ///
+    /// `offered(_:)` below is ordering ONLY, and ordering alone re-offers the same file
+    /// forever: bring it over, re-read the shelf, and the winner of the comparator is still
+    /// the winner, because nothing subtracts what is already here. A person with a backlog
+    /// could bring over exactly one recording per recorder, for the life of the device, at
+    /// the cost of a Bluetooth handshake every time.
+    ///
+    /// The exclusion key is (date, timestamp) — the recorder's OWN name for a file, which is
+    /// what both the shelf listing and the custody key are built from. Deliberately not the
+    /// size: two takes can be the same length, and a file that changed size between listings
+    /// is a different fact worth noticing rather than silently re-offering.
+    ///
+    /// Pure and synchronous so the choice is testable without a disk. The caller supplies
+    /// what it holds; see `offeredNext(_:custody:identity:)` for the async form that asks
+    /// custody.
+    public static func offered(_ recordings: [PocketRecording],
+                               excluding held: Set<PocketRecordingRequest>) -> PocketRecording? {
+        offered(recordings.filter { !held.contains($0.request) })
+    }
+
+    /// The async form: ask custody which files are already here, then offer the next one.
+    ///
+    /// Asks per recording rather than fetching a manifest, because `alreadyHeld` is the only
+    /// authority on the question and a second index of it would be a second answer to
+    /// "do we have this" — the shape that loses recordings.
+    ///
+    /// A recording whose bytes are held but which has NOT become a conversation is still
+    /// "held" here, and that is correct: re-pulling it over the radio would cost the owner a
+    /// session to re-fetch bytes already on the phone. The import retries off the held file.
+    public static func offeredNext(_ recordings: [PocketRecording],
+                                   custody: any PocketRecorderFileCustody,
+                                   identity: RecordingDeviceIdentity) async -> PocketRecording? {
+        var held: Set<PocketRecordingRequest> = []
+        for recording in recordings {
+            let key = PocketRecorderFileKey(identity: identity,
+                                            date: recording.date,
+                                            timestamp: recording.timestamp)
+            if await custody.alreadyHeld(key) { held.insert(recording.request) }
+        }
+        return offered(recordings, excluding: held)
+    }
+
     public static func offered(_ recordings: [PocketRecording]) -> PocketRecording? {
         // The identity is a placeholder because ordering reads only day, size and instant —
         // and a real one is not knowable from a shelf listing alone.

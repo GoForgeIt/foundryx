@@ -965,7 +965,19 @@ final class PocketRecorderCheckModel: ObservableObject {
             self.isChecking = false
             self.message = PocketRecorderCheckPresentation.message(for: outcome)
             if case .checked(let panel) = outcome { self.detail = panel }
-            self.offeredRecording = PocketBringOver.offered(shelf.recordings)
+            // THE NEXT ONE, not the same one forever. `offered(_:)` is ordering only, and
+            // ordering is stable — so bringing a file over and re-reading the shelf re-elected
+            // the same winner, and a person with a backlog could bring over exactly one
+            // recording per recorder for the life of the device, paying a Bluetooth session
+            // each time to be handed the file they already had.
+            //
+            // Custody is the authority on what is already here; asking it is one disk read per
+            // listed file and no radio time at all, and it is the SAME authority the bring-over
+            // itself consults, so the shelf cannot disagree with the transfer about what we hold.
+            self.offeredRecording = await PocketBringOver.offeredNext(
+                shelf.recordings,
+                custody: self.custody,
+                identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: hardwareToken))
         }
     }
 

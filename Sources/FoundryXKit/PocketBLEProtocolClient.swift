@@ -97,7 +97,10 @@ public struct PocketDeviceInfo: Sendable, Equatable {
 
 /// The protocol request tuple. It is deliberately not `Identifiable`: T1 makes no durable
 /// identity claim for the pair.
-public struct PocketRecordingRequest: Sendable, Equatable {
+/// Hashable so it can be a SET member: the bring-over shelf subtracts the files this phone
+/// already holds before offering the next one, and (date, timestamp) is the recorder's own
+/// name for a file — the same pair the custody key is built from.
+public struct PocketRecordingRequest: Sendable, Equatable, Hashable {
     public let date: String
     public let timestamp: String
     public init(date: String, timestamp: String) { self.date = date; self.timestamp = timestamp }

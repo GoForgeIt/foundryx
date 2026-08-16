@@ -184,15 +184,15 @@
       "name": "choosing the one file worth pulling first",
       "declared_in": "Sources/FoundryXKit/PocketBringOver.swift",
       "declaration_anchor": "public static func offered(_ recordings: [PocketRecording]) -> PocketRecording? {",
-      "call_pattern": "PocketBringOver.offered(",
+      "call_pattern": "PocketBringOver.offeredNext(",
       "reached_from": [
         {
           "via": "device-screen",
-          "anchor": "self.offeredRecording = PocketBringOver.offered(shelf.recordings)"
+          "anchor": "self.offeredRecording = await PocketBringOver.offeredNext("
         }
       ],
       "verdict": "reachable",
-      "why": "the only reason the check reads the unpresented shelf."
+      "why": "the only reason the check reads the unpresented shelf. MOVED 2026-08-16: the anchor was the ordering-only `offered(_:)`, which is stable and therefore re-elected the SAME file after every bring-over — one recording per recorder, forever, at a Bluetooth session each. The reached call is now `offeredNext(_:custody:identity:)`, which subtracts what custody already holds. `offered(_:)` remains, reached by the exclusion overload, and is covered by PocketOffersTheNextRecordingTests."
     },
     {
       "id": "pocket-bring-over-run",
