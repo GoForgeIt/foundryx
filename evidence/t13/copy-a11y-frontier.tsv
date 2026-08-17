@@ -2,6 +2,21 @@
 #
 # One row per customer-facing literal: kind<TAB>path<TAB>literal.
 #
+# 2026-08-16 — ONE ROW REMOVED, AND THE REASON MATTERS MORE THAN THE ROW.
+# `customer-facing-string  App/DeviceScreen.swift  Use this device for capture` is gone
+# because the string MOVED to `RecordingDevicePage.captureToggleLabel`, where
+# `RecorderPageCopyAndTokenGateTests` now requires every sentence on the recorder page to
+# live. It was the last literal written directly into that page's SwiftUI body.
+#
+# THE TENSION THIS EXPOSES, STATED RATHER THAN QUIETLY RESOLVED. This oracle only sees a
+# literal that is the FIRST ARGUMENT of `Text(` / `Button(` / `Label(` (see
+# `scripts/derive-copy-a11y-frontier.py:22`). Copy that lives on a kit presentation type as
+# `public static let` is invisible to it: 383 of its rows are App-side and 34 are kit-side,
+# and almost all of this app's customer-facing copy is kit-side. So a gate that pushes copy
+# OUT of view bodies — which is the right place for it, and what Step 10 of the pocket
+# delivery plan asks for — also pushes it off this frontier. The frontier is not wrong; its
+# COVERAGE is narrower than its name suggests, and nobody has widened it.
+#
 # Emitted by scripts/derive-copy-a11y-frontier.py — an INDEPENDENT implementation in
 # another language — and NOT by the Swift check it pins. The two agree row for row: 432
 # rows over 220 files, 152 `a11y-identifier` and 280 `customer-facing-string`.
@@ -268,7 +283,6 @@ customer-facing-string	App/ConversationFacesView.swift	\u{2022}
 customer-facing-string	App/DeviceScreen.swift	Cancel
 customer-facing-string	App/DeviceScreen.swift	Close
 customer-facing-string	App/DeviceScreen.swift	Computer memory
-customer-facing-string	App/DeviceScreen.swift	Use this device for capture
 customer-facing-string	App/KilnConversationView.swift	Done
 customer-facing-string	App/OnboardingEndingViews.swift	Make your first voice note
 customer-facing-string	App/OnboardingEndingViews.swift	Next

@@ -474,6 +474,11 @@ public enum RecordingDevicePage {
     public static let forgetAction = "Forget this recorder"
     public static let disconnectAction = "Disconnect"
     public static let connectAction = "Connect"
+    /// The capture toggle's own label. IT LIVES HERE RATHER THAN IN THE VIEW because it was the
+    /// last user-facing string in `App/DeviceScreen.swift` written as a literal in a SwiftUI
+    /// body, and `RecorderPageCopyAndTokenGateTests` now forbids that outright — a line invented
+    /// in a body is a line no copy review, no language lexer and no population gate can see.
+    public static let captureToggleLabel = "Use this device for capture"
 
     /// Forgetting a record-then-sync recorder is a real lockout, so it says so (design §6a).
     ///

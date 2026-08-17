@@ -689,7 +689,7 @@ private struct RecordingDevicePageView: View {
                 get: { source.enabled },
                 set: { sources.setEnabled(source.id, $0); onChange() }
             )) {
-                Text("Use this device for capture")
+                Text(RecordingDevicePage.captureToggleLabel)
                     .grainTextStyle(.body)
                     .foregroundStyle(GrainColor.ink)
             }
