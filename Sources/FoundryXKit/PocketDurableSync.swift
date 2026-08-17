@@ -164,7 +164,19 @@ public enum PocketRecorderClockPresentation {
         "The recorder's clock is ahead of this phone, so this recording is filed under the day "
         + "it arrived."
 
-    public static let everyLine: [String] = [recorderAheadLine]
+    /// WHEN THE RECORDER'S OWN TIME COULD NOT BE READ AT ALL.
+    ///
+    /// It exists because the alternative was silence. `PocketRecordingLabel.reportedInstant`
+    /// returns nil for a spelling this build has never seen, and its one production caller
+    /// wrote `?? Date()` — so the recording was filed under the day somebody happened to
+    /// collect it, with no warning, on a screen whose whole clock rule is that a suspect time
+    /// says so. The parser now reads both spellings the measured device uses; this is the line
+    /// for the third one, which will exist eventually and must not arrive silently.
+    public static let timeNotReportedLine =
+        "This recorder didn't say when this recording was made, so it's filed under the day it "
+        + "arrived."
+
+    public static let everyLine: [String] = [recorderAheadLine, timeNotReportedLine]
 }
 
 /// WHAT A BROUGHT-OVER RECORDING'S TIME IS, AND WHEN THIS APP IS ALLOWED TO DOUBT IT.
@@ -207,7 +219,27 @@ public enum PocketRecorderClockPresentation {
 /// or the `APP&T` write — which has never been issued to any real device, and which would be a
 /// WRITE on a path that otherwise only reads.
 public enum PocketConversationClock {
-    public static func resolve(reported: Date, broughtOver: Date, calendar: Calendar) -> PocketConversationTime {
+
+    /// - Parameter reported: the instant the RECORDER says the recording was made, or nil when
+    ///   it named its file in a way this build cannot read.
+    ///
+    ///   IT IS OPTIONAL ON PURPOSE, and that is the whole fix. The caller used to write
+    ///   `reportedInstant(…) ?? Date()`, which turns "the recorder did not tell us when this
+    ///   was made" into "it was made just now" — indistinguishable, downstream, from a recorder
+    ///   that genuinely reported the current instant, and therefore un-warnable: `reported >
+    ///   broughtOver` cannot fire when `reported` IS `broughtOver`. Passing the absence through
+    ///   means the one function that decides a conversation's date is the one that knows the
+    ///   date is unknown.
+    public static func resolve(reported: Date?, broughtOver: Date, calendar: Calendar) -> PocketConversationTime {
+        guard let reported else {
+            // FILED UNDER THE ARRIVAL DAY, AND IT SAYS SO. The recording still comes over — it
+            // is the owner's either way, and refusing the transfer over an unreadable timestamp
+            // would cost them the audio to protect its metadata.
+            return .init(timeline: calendar.startOfDay(for: broughtOver),
+                         recorderReported: broughtOver,
+                         broughtOver: broughtOver,
+                         warning: PocketRecorderClockPresentation.timeNotReportedLine)
+        }
         // THE ONLY DEVICE-SOURCED PROOF THERE IS. Everything else is a guess, and the previous
         // version of this line shipped a guess to nineteen recordings at once.
         let recorderIsAhead = reported > broughtOver

@@ -42,13 +42,53 @@ import Foundation
 /// per phone and would need a time zone this app cannot know (the recorder's clock is not the
 /// phone's — see `PocketConversationClock`). So the digits are re-spaced, not re-interpreted.
 public enum PocketRecordingLabel {
+
+    /// THE SIX FIELDS A RECORDER'S TIMESTAMP CARRIES, IN EITHER SPELLING IT USES.
+    ///
+    /// ONE DEVICE, TWO SPELLINGS, MEASURED. `PKT01_BLUE_26079bc5` on firmware 1.6 lists both
+    /// bare `20260807142852` and PH-prefixed `PH260811175026` — see
+    /// `foundry-hearth/reference/pocket-ble-protocol.md`, hazard 3. Nine of the nineteen
+    /// recordings on that device carry the second spelling, and nothing distinguishes them to
+    /// the person holding it: same recorder, same shelf, same kind of recording.
+    ///
+    /// SO NEITHER SPELLING IS "THE" FORMAT. This returns the normalised `yyyyMMddHHmmss` digits
+    /// for whichever one it was handed, and nil for anything else. It is the ONLY place either
+    /// spelling is interpreted; every other use of a timestamp in this app — the file key, the
+    /// removal frame, the receipt, the storage path — carries the recorder's own characters
+    /// through untouched, because `(date, timestamp)` is only a stable identity if nothing
+    /// normalises it on the way to the wire.
+    ///
+    /// THE CENTURY IS TAKEN FROM THE `date` FIELD THE RECORDER SENT ALONGSIDE, not assumed to
+    /// be 2000. The listing frame is `MCU&F&<date>&<stamp>&<KB>`, so a full four-digit year is
+    /// always present in the same frame as the two-digit one, and using it means a device that
+    /// someday reports `PH99…` is dated from what it said rather than from what this file
+    /// guessed in 2026.
+    static func normalisedDigits(date: String, timestamp: String) -> String? {
+        let characters = Array(timestamp)
+        if characters.count == 14, characters.allSatisfy(\.isNumber) {
+            return timestamp
+        }
+        // `PH` + `yyMMddHHmmss`. The prefix is matched exactly rather than by "two letters":
+        // an unrecognised prefix is an unrecognised firmware, and guessing at one is how a
+        // recording gets a plausible date nobody measured.
+        guard characters.count == 14,
+              timestamp.hasPrefix("PH") else { return nil }
+        let rest = characters[2...]
+        guard rest.allSatisfy(\.isNumber) else { return nil }
+        // The century from the four-digit year the same frame carried.
+        let day = Array(date.filter(\.isNumber))
+        guard day.count == 8 else { return nil }
+        let century = String(day[0..<2])
+        return century + String(rest)
+    }
+
     public static func title(date: String, timestamp: String) -> String {
-        let digits = Array(timestamp)
-        guard digits.count == 14, digits.allSatisfy(\.isNumber) else {
+        guard let normalised = normalisedDigits(date: date, timestamp: timestamp) else {
             // A firmware that reports something this build has never seen gets its own value
             // shown back to it, never a plausible-looking invention.
             return "\(date) · \(timestamp)"
         }
+        let digits = Array(normalised)
         return "\(date) · \(String(digits[8..<10]))\(":")\(String(digits[10..<12]))"
     }
 
@@ -62,8 +102,10 @@ public enum PocketRecordingLabel {
     /// is unknown, and dating it to the moment somebody happened to collect it is exactly the
     /// invention `title(date:timestamp:)` above refuses to make.
     public static func reportedInstant(date: String, timestamp: String) -> Date? {
-        let digits = Array(timestamp)
-        guard digits.count == 14, digits.allSatisfy(\.isNumber) else { return nil }
+        guard let normalised = normalisedDigits(date: date, timestamp: timestamp) else {
+            return nil
+        }
+        let digits = Array(normalised)
         let stamp = String(digits[0..<8]) + "-" + String(digits[8..<14])
         guard let seconds = CaptureIdTime.epochUTC(fromStamp: stamp) else { return nil }
         return Date(timeIntervalSince1970: TimeInterval(seconds))
@@ -87,8 +129,40 @@ public enum PocketInventoryReader {
         for day in try await client.listDates() where !days.contains(day) { days.append(day) }
         var found: [PocketRecording] = []
         for day in days { found += try await client.listRecordings(on: day) }
-        return found.sorted {
-            $0.date == $1.date ? $0.timestamp > $1.timestamp : $0.date > $1.date
+        return ordered(found)
+    }
+
+    /// NEWEST FIRST, BY WHEN THE RECORDING WAS MADE — not by how its name happens to sort.
+    ///
+    /// THE DEFECT THIS REPLACES. The old comparator was `$0.timestamp > $1.timestamp`, and its
+    /// comment justified itself with "both of which are fixed-width and therefore correctly
+    /// ordered as text". That is true of ONE spelling. The measured device uses two, and `"P"`
+    /// is greater than every digit in ASCII — so every PH-prefixed recording sorted to the top
+    /// of its day regardless of when it was made, and on a shelf that is nine-of-nineteen
+    /// PH-prefixed the whole day reads in an order that is neither chronological nor arrival.
+    ///
+    /// So the comparison is on the PARSED instant. The tiebreak is stated rather than left to
+    /// the sort: two recordings whose instants are equal, or whose instants this build cannot
+    /// read at all, fall back to the raw token so the order is at least STABLE and the same on
+    /// every run. A recording with no readable instant sorts BELOW every recording that has
+    /// one, because "we do not know when this was made" is not a claim that it is recent.
+    ///
+    /// It is separate from `read(client:)` so it can be driven without a radio: the ordering is
+    /// the part that was wrong, and it was unreachable by any test that did not own a
+    /// Bluetooth session.
+    public static func ordered(_ recordings: [PocketRecording]) -> [PocketRecording] {
+        recordings.sorted { left, right in
+            guard left.date == right.date else { return left.date > right.date }
+            let leftInstant = PocketRecordingLabel.reportedInstant(date: left.date,
+                                                                   timestamp: left.timestamp)
+            let rightInstant = PocketRecordingLabel.reportedInstant(date: right.date,
+                                                                     timestamp: right.timestamp)
+            switch (leftInstant, rightInstant) {
+            case let (l?, r?) where l != r: return l > r
+            case (nil, _?):                 return false
+            case (_?, nil):                 return true
+            default:                        return left.timestamp > right.timestamp
+            }
         }
     }
 

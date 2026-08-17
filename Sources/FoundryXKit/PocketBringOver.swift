@@ -651,8 +651,13 @@ public enum PocketBringOver {
                 fromHeldFile: held,
                 recorder: deviceIdentity,
                 displayName: advertisedName,
+                // NO `?? Date()`. An unreadable timestamp is passed through AS AN ABSENCE, so
+                // `PocketConversationClock` files it under the arrival day and says so, instead
+                // of this line inventing an instant the recorder never stated — which is exactly
+                // the invention `reportedInstant`'s own doc comment refuses to make one function
+                // away.
                 recorderReported: PocketRecordingLabel.reportedInstant(
-                    date: recording.date, timestamp: recording.timestamp) ?? Date(),
+                    date: recording.date, timestamp: recording.timestamp),
                 binding: destination.binding,
                 baseDir: destination.baseDir,
                 log: destination.log)

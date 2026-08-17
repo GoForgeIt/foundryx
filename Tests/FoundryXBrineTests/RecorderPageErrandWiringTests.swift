@@ -32,8 +32,29 @@ final class RecorderPageErrandWiringTests: XCTestCase {
         let code = AppSourceTree.code(of: try source())
         XCTAssertTrue(code.contains("final class PocketRecorderCheckModel"),
                       "\(Self.path) no longer declares the model these gates are about")
-        XCTAssertTrue(code.contains("@StateObject private var check = PocketRecorderCheckModel()"),
+        // OWNERSHIP, IN TWO HALVES, BECAUSE THE DECLARATION ALONE STOPPED BEING ENOUGH.
+        //
+        // This used to pin ONE SPELLING — `@StateObject private var check =
+        // PocketRecorderCheckModel()` — and Step 10 legitimately changed it: the model became
+        // an init parameter so the simulator proof can mount the page with an answered shelf,
+        // which a device with no radio cannot otherwise reach. The gate went red for a change
+        // that did not break the property it is about.
+        //
+        // So the property is asserted instead of the spelling, and it is asserted on BOTH
+        // halves. The view must still OWN the model with `@StateObject` (an `@ObservedObject`
+        // here is the recreated-every-body-pass defect that loses a running errand), and
+        // PRODUCTION must still get a real one without asking — a seam whose default was
+        // removed would hand every live call site whatever the last test passed.
+        XCTAssertTrue(code.contains("@StateObject private var check"),
                       "no view owns the check model, so nothing on this page can reach a recorder")
+        XCTAssertTrue(code.contains("_check = StateObject(wrappedValue: check)")
+                        || code.contains("@StateObject private var check = PocketRecorderCheckModel()"),
+                      "the check model is declared but never initialised into the view's own "
+                        + "storage, so the page holds no errand across a body pass")
+        XCTAssertTrue(code.contains("check: PocketRecorderCheckModel = PocketRecorderCheckModel()")
+                        || code.contains("@StateObject private var check = PocketRecorderCheckModel()"),
+                      "the model is injectable with NO production default, so a live recorder "
+                        + "page depends on every call site remembering to build one")
     }
 
     /// THE LINK THE APP-HOSTED LANE STANDS IN FOR. `cancel()` proven to stop the errand is

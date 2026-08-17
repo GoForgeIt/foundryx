@@ -77,7 +77,7 @@ public enum PocketCaptureImport {
         fromHeldFile file: URL,
         recorder identity: RecordingDeviceIdentity,
         displayName: String,
-        recorderReported: Date,
+        recorderReported: Date?,
         broughtOverAt: Date = Date(),
         binding: CaptureAccountScope.AccountBinding?,
         baseDir: URL,
