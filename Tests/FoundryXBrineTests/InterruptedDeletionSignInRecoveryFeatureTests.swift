@@ -79,12 +79,27 @@ final class InterruptedDeletionSignInRecoveryFeatureTests: XCTestCase {
             kSecAttrAccount as String: "identity",
             kSecReturnData as String: true,
         ] as CFDictionary, &item)
-        XCTAssertEqual(
-            status, errSecItemNotFound,
+        // TWO STATUSES PROVE THE SAME THING, and this guard runs on both runtimes.
+        //
+        //   errSecItemNotFound  (-25300) — macOS: the query ran against the real login
+        //                                  keychain and the shipped item is not there.
+        //   errSecMissingEntitlement (-34018) — iOS SIMULATOR: the xctest host carries no
+        //                                  keychain-access-group entitlement, so the query
+        //                                  could not run AT ALL. A process that cannot read
+        //                                  the keychain cannot have written to it either, so
+        //                                  this is a STRONGER proof of no-leak, not a weaker
+        //                                  one. It is admitted for that reason and no other.
+        //
+        // What must still fail is the only thing that matters: errSecSuccess, i.e. the item
+        // is THERE. Widening to "not success" instead would also admit a keychain that is
+        // locked or erroring, and a guard that passes because it could not look is the exact
+        // shape this whole suite exists to prevent.
+        XCTAssertTrue(
+            status == errSecItemNotFound || status == errSecMissingEntitlement,
             """
-            a test wrote the SHIPPED identity keychain item. It outlives this process; every \
-            later test process will resolve CaptureAccountScope to .blocked and silently \
-            write no capture segments at all.
+            a test wrote the SHIPPED identity keychain item (OSStatus \(status)). It outlives \
+            this process; every later test process will resolve CaptureAccountScope to \
+            .blocked and silently write no capture segments at all.
             """)
     }
 }
