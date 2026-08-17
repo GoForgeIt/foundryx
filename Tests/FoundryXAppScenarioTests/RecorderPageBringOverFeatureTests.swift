@@ -224,7 +224,8 @@ private final class RecorderPageWorld {
             // stage snapshot. Omitting them would drive a DIFFERENT call than `DeviceScreen`
             // makes, which is the gap this whole scenario file exists to close.
             check.run(hardwareToken: identifier.uuidString, advertisedName: Self.recorderName,
-                      library: manager.captureLibraryRoot, stages: manager.captureStages())
+                      library: manager.captureLibraryRoot, stages: manager.captureStages(),
+                      brain: .myComputer)
             try await AppScenarioHost.settle(untilTrue: { !self.check.isChecking },
                                              describing: "the check to finish")
 

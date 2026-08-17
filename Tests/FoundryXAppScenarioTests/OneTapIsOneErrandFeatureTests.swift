@@ -165,7 +165,8 @@ private final class OneErrandWorld {
             stack.reachability.refusesToConnect = true
 
         case "Solleva has asked that recorder what it is holding":
-            check.run(hardwareToken: identifier.uuidString, advertisedName: Self.recorderName)
+            check.run(hardwareToken: identifier.uuidString, advertisedName: Self.recorderName,
+                      library: library, stages: [:], brain: .myComputer)
             try await AppScenarioHost.settle(untilTrue: { !self.check.isChecking },
                                              describing: "the check to finish")
             guard check.offeredRecording != nil else {
@@ -224,7 +225,8 @@ private final class OneErrandWorld {
         // genuinely mid-flight when the page goes away, rather than incidentally so.
         case "I ask what the recorder is holding and leave the page before it answers":
             stack.holdNotifyConfirmation = true
-            check.run(hardwareToken: identifier.uuidString, advertisedName: Self.recorderName)
+            check.run(hardwareToken: identifier.uuidString, advertisedName: Self.recorderName,
+                      library: library, stages: [:], brain: .myComputer)
             // WAIT UNTIL THE RADIO IS ACTUALLY IN USE. Cancelling before the app has reached
             // the device would prove nothing — the positive control for the whole scenario.
             try await AppScenarioHost.settle(
@@ -237,7 +239,8 @@ private final class OneErrandWorld {
 
         case "I ask what that recorder is holding":
             wireAtWhen = stack.commandsWritten
-            check.run(hardwareToken: identifier.uuidString, advertisedName: Self.recorderName)
+            check.run(hardwareToken: identifier.uuidString, advertisedName: Self.recorderName,
+                      library: library, stages: [:], brain: .myComputer)
             try await AppScenarioHost.settle(untilTrue: { !self.check.isChecking },
                                              describing: "the check to finish")
 
@@ -276,10 +279,19 @@ private final class OneErrandWorld {
                 throw BrineStepError("the shelf has \(rows.count) row(s), not the two files "
                                         + "on the recorder — it was not rebuilt")
             }
-            guard rows.contains(where: { $0.custodyLabel == "In Solleva" }) else {
+            // THE FACT FIRST, then that it is said in words. A row's custody is no longer a
+            // two-valued label — it is one answer inside the three-place reading — so
+            // asserting the sentence alone would pass on a row that says "In Solleva" while
+            // knowing nothing, and would red on a rewording that changed nothing.
+            guard rows.contains(where: { $0.presence.onThisPhone.answer == .yes }) else {
                 throw BrineStepError(
-                    "every row still reads \"Only on the recorder\" after the file landed. "
-                        + "The shelf was restated without asking custody")
+                    "no row says this phone holds the file after it landed. The shelf was "
+                        + "restated without asking custody")
+            }
+            guard rows.contains(where: { $0.presenceLabel.contains("In Solleva") }) else {
+                throw BrineStepError(
+                    "a row knows this phone holds the file and does not say so: "
+                        + "\(rows.map(\.presenceLabel))")
             }
 
         case "Solleva offers a different recording to bring over next":

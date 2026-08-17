@@ -195,8 +195,35 @@ enum DemoSeed {
         AppPlacementStore.clear(inAccountRoot: base)
     }
 
+    /// A REMEMBERED RECORDER, SO THE RECORDER PAGE CAN BE PHOTOGRAPHED.
+    ///
+    /// WHAT THIS UNBLOCKS. The recorder page's readings strip, its reset gate, its Forget
+    /// confirmation and the deletion promise under its section note ALL render with no radio at
+    /// all — they need only a device this account remembers. Until this seeder existed there
+    /// was no way to reach that page in a simulator, so four user-facing surfaces changed with
+    /// no simulator proof, one of which (the Forget confirmation) was reassuring people about a
+    /// recorder nobody had checked. A screenshot of that alert is what would have caught it.
+    ///
+    /// IT SEEDS NO READINGS ON PURPOSE. This is the state a person is in the first time they
+    /// open the page — nothing checked, every reading absent — which is precisely the state the
+    /// cost line used to lie about. `RecordingDevicePageProofUITests` photographs it.
+    ///
+    /// SELF-CLEANING, for the reason the capture seeding below self-cleans: the simulator's app
+    /// container survives between runs, so a record written by an earlier launch would let this
+    /// proof pass while reading the PREVIOUS run's state.
+    private static func seedRememberedRecorder() {
+        guard let store = RecordingDeviceStore.current() else { return }
+        try? store.replaceAll([])
+        _ = try? store.upsert(RecordingDeviceRecord(
+            identity: RecordingDeviceIdentity(
+                shape: .filePull,
+                hardwareToken: "8f14e45f-ceea-467a-9f7b-1c2d3e4f5a6b"),
+            displayName: "PKT01_BLUE_26079bc5"))
+    }
+
     static func seedIfRequested() {
         guard ProcessInfo.processInfo.arguments.contains("-MainPreview") else { return }
+        seedRememberedRecorder()
         let base = CaptureWAL.documentsCaptures()
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         // A deterministic demo starts with NO pending speaker-confirms — otherwise a prior

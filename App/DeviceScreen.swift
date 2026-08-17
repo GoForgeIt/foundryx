@@ -490,6 +490,22 @@ private struct RecordingDevicePageView: View {
                 captureToggle
                 actions
                 recorderShelf
+                // THE COST OF STARTING OVER IS A PAGE-LEVEL FACT, NOT A CONSEQUENCE OF A
+                // SUCCESSFUL LISTING.
+                //
+                // THE DEFECT THIS MOVE CLOSES, found by trying to photograph the thing. This
+                // section used to live inside `if let detail = check.detail`, so it appeared
+                // only after a check had REACHED the recorder — which made two of its own
+                // states unreachable. `resetGate` answers `shelfObservedAt == nil` with "Check
+                // the recorder first", and `costLine(nil)` says Solleva has not checked what
+                // the recorder is holding; neither could ever be drawn, because both describe
+                // the state before the first successful check. A gate whose whole design is
+                // that a stale or absent reading moves the primary action and never the enabled
+                // state cannot be gated on the reading being present.
+                //
+                // It also puts the reset's cost on the same screen as Forget without either
+                // needing a radio, which is what makes both photographable.
+                resetGate
             }
             .padding(.horizontal, GrainSpacing.x4)
             .padding(.bottom, GrainSpacing.x8)
@@ -802,8 +818,6 @@ private struct RecordingDevicePageView: View {
                         .foregroundStyle(GrainColor.textFaint)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.top, GrainSpacing.x2)
-
-                    resetGate
                 }
             }
             .padding(.top, GrainSpacing.x6)
