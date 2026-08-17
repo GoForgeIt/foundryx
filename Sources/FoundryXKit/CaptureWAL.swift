@@ -30,6 +30,13 @@ public struct CaptureStatus: Sendable, Equatable, Identifiable {
     public var startedAt: Date
     public var streaming: Bool
     public var lastSyncError: String?
+    /// TRUE when a durable WAL write was REFUSED (this capture has no account binding) or
+    /// failed outright. The capture is still accepting frames, but they are NOT on disk —
+    /// which is the one thing "recording" must never be allowed to mean silently.
+    public var durableWritesRefused: Bool = false
+    /// Frames accepted but not yet durable. Non-zero with `durableWritesRefused` means
+    /// exactly this much audio exists only in memory.
+    public var heldFrames: Int = 0
     public var pendingSegments: Int { max(0, totalSegments - syncedSegments) }
 }
 
@@ -83,6 +90,12 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     private var nextSeq: UInt64 = 0      // next segment seq (io queue only)
     private var streaming = false        // mutated on io; read in computeStatus (@unchecked)
     private var lastError: String?       // last sync failure detail (@unchecked)
+    /// A durable WAL write was refused (no account binding) or failed. The frames it was
+    /// supposed to carry are still in `buffer`; they were not written and were not dropped.
+    /// Read in `computeStatus` off the io queue exactly as `streaming` is — a word-sized
+    /// scalar, never the `buffer` array itself.
+    private var durableWritesRefused = false
+    private var heldFrameCount = 0       // == buffer.count, mutated on io (@unchecked)
 
     /// The durable UPLOAD WATERMARK: the highest CONTIGUOUSLY-ACK'd segment seq
     /// (−1 ⇒ none yet). Resume always starts at `watermark + 1`, so a giant capture
@@ -321,6 +334,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         io.async { [weak self] in
             guard let self else { return }
             self.buffer.append(frame)
+            self.heldFrameCount = self.buffer.count
             if self.buffer.count >= self.chunkFrames { self.flushLocked() }
         }
     }
@@ -363,12 +377,22 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
 
     // MARK: segment write (durable-on-phone)
 
+    /// A refused durable write is NOT a written one. The buffered frames stay buffered and
+    /// `nextSeq` does not advance, so nothing is consumed by a write that did not happen —
+    /// and `status` says so, because a capture that accepts audio it cannot save must not
+    /// keep presenting itself as an ordinary recording.
+    private func noteDurableRefusal(_ reason: String) {
+        durableWritesRefused = true
+        lastError = reason
+        log?.error("capture \(captureId): \(reason)")
+        publish()
+    }
+
     private func flushLocked() {
         guard !buffer.isEmpty else { return }
         ensureNextSeqLoadedOnIO()   // derive the resume seq before the first append (io queue)
-        let seq = nextSeq; nextSeq += 1
+        let seq = nextSeq
         let body = CaptureWAL.encodeSegment(buffer)
-        buffer.removeAll(keepingCapacity: true)
         let url = dir.appendingPathComponent(CaptureWAL.segName(seq))
         do {
             guard try performDurableMutation({
@@ -377,14 +401,31 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
                 try body.write(to: url, options: [.atomic]) // temp + atomic rename
                 return true
             }) == true else {
-                log?.warn(
-                    "capture \(captureId): rejected WAL segment \(seq) for stale account binding")
+                // THE AUDIO IS NOT DROPPED. This used to clear `buffer` and advance
+                // `nextSeq` BEFORE attempting the write, then return on refusal with a
+                // `warn` into an in-memory DoorLog nobody reads — so on a device whose
+                // account binding is `.blocked` (the locked-phone background relaunch the
+                // scope documents), a capture opened, reported `.recording`, accepted every
+                // frame, and the frames were gone. Hold them and say so instead.
+                noteDurableRefusal(
+                    "segment \(seq) refused: this capture has no account binding, so it "
+                    + "cannot be saved. \(buffer.count) frame(s) are held in memory and "
+                    + "NOT on disk.")
                 return
             }
+            // Consume the frames only now that they are durable.
+            buffer.removeAll(keepingCapacity: true)
+            heldFrameCount = 0
+            nextSeq += 1
+            durableWritesRefused = false
             invalidateStatusCache()   // a new segment changes total/bytes → force a rescan next warm
             log?.info("capture \(captureId): wrote segment \(seq) (\(body.count)B) to WAL")
         } catch {
-            log?.error("capture \(captureId): WAL write seg \(seq) failed: \(error.localizedDescription)")
+            // Same rule for a filesystem failure: an unwritten segment must not consume
+            // the frames that were supposed to be in it.
+            noteDurableRefusal(
+                "WAL write seg \(seq) failed: \((error as NSError).localizedDescription). "
+                + "\(buffer.count) frame(s) are held in memory and NOT on disk.")
         }
     }
 
@@ -802,6 +843,8 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         s.stage = stage
         let incomplete = dir.appendingPathComponent(".incomplete")
         s.lastSyncError = (try? String(contentsOf: incomplete, encoding: .utf8)) ?? lastError
+        s.durableWritesRefused = durableWritesRefused
+        s.heldFrames = heldFrameCount
         return s
     }
 
