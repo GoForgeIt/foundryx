@@ -177,6 +177,150 @@ public enum TierComparison {
     }
 }
 
+// MARK: - The ambient step's claim about the sample nudge
+
+/// What actually happened when the ambient step tried to fire its sample nudge.
+///
+/// This exists because the step used to ASSERT a nudge had gone out with no idea whether
+/// one had. `AmbientNotifier.postPreview` opened with
+/// `guard let binding = CaptureAccountScope.currentAccountBinding() else { return }` — and
+/// during onboarding no account is bound, so it posted nothing and returned silently while
+/// the very next line of the view announced "We just sent a sample nudge". That is the same
+/// shape as `CaptureWAL.performDurableMutation`, which discarded every durable write and
+/// reported success: a guard that swallows the work and lets the caller claim it happened.
+///
+/// The rule this type encodes: the screen may only claim a nudge was sent when one was
+/// actually handed to iOS and accepted. Every other outcome says what went wrong instead.
+public enum AmbientNudgeAttempt: String, Sendable, Equatable, CaseIterable {
+    /// The step has fired the request and is waiting to hear back. Nothing is claimed yet.
+    case pending
+    /// A notification request really was handed to `UNUserNotificationCenter` and accepted.
+    /// This is the ONLY outcome that may claim a nudge was sent.
+    case scheduled
+    /// The user was asked for notification permission and said no (or had said no before),
+    /// so iOS would drop the nudge. Ambient intelligence is still on.
+    case refused
+    /// Nothing could be scheduled — the request was rejected, or the account scope moved
+    /// under the request. Ambient intelligence is still on.
+    case unavailable
+}
+
+/// What the ambient step SAYS once the user has turned it on.
+public struct OnboardingAmbientConfirmation: Sendable, Equatable {
+    public let headline: String
+    public let detail: String
+    /// SF Symbol for the headline. A bell with a badge is reserved for a real send.
+    public let symbolName: String
+    /// Does this copy assert that a notification was delivered? True for exactly one
+    /// outcome — `.scheduled`.
+    public let claimsNudgeSent: Bool
+    /// Should the user be pointed at iOS Settings to fix it? Only when they refused.
+    public let pointsToSystemSettings: Bool
+
+    public init(headline: String, detail: String, symbolName: String,
+                claimsNudgeSent: Bool, pointsToSystemSettings: Bool) {
+        self.headline = headline
+        self.detail = detail
+        self.symbolName = symbolName
+        self.claimsNudgeSent = claimsNudgeSent
+        self.pointsToSystemSettings = pointsToSystemSettings
+    }
+
+    /// Everything the step says, as one string — what the honesty check reads.
+    public var spokenText: String { headline + " " + detail }
+}
+
+/// The ambient step's words, as a decision rather than a literal in a SwiftUI body.
+///
+/// `swift test` cannot compile `App/`, so a string written inside a `View` body is
+/// untestable by construction — which is exactly how the false claim shipped. The copy
+/// lives here so the invariant ("only a scheduled nudge may claim a nudge") is held by a
+/// test, and `App/OnboardingFlowView.swift` renders whatever this returns.
+public enum OnboardingAmbientStepCopy {
+    /// The agent-name line, appended to every outcome — it is true regardless.
+    static let agentNameLine = "Your agent answers to “Foundry” — rename it in Settings."
+
+    public static func confirmation(for attempt: AmbientNudgeAttempt) -> OnboardingAmbientConfirmation {
+        switch attempt {
+        case .pending:
+            // In flight. Ambient intelligence IS on — that write already happened — but
+            // nothing about the nudge is known yet, so nothing about it is claimed.
+            return OnboardingAmbientConfirmation(
+                headline: "On",
+                detail: "Checking whether the sample nudge can go out. " + agentNameLine,
+                symbolName: "bell",
+                claimsNudgeSent: false,
+                pointsToSystemSettings: false)
+        case .scheduled:
+            return OnboardingAmbientConfirmation(
+                headline: "On — check your lock screen",
+                detail: "We just sent a sample nudge so the first real one is never a surprise. "
+                    + agentNameLine,
+                symbolName: "bell.badge.fill",
+                claimsNudgeSent: true,
+                pointsToSystemSettings: false)
+        case .refused:
+            // The one failure the user can fix, so it says where. Note the wording: iOS
+            // would DROP the nudge, so there is nothing on the lock screen to look for —
+            // saying "check your lock screen" here would send them hunting for nothing.
+            return OnboardingAmbientConfirmation(
+                headline: "On — notifications are turned off",
+                // "Solleva", not "FoundryX": CFBundleDisplayName is Solleva (project.yml:57),
+                // so that is the row the user will actually be looking for in iOS Settings.
+                detail: "Ambient intelligence is on, but notifications for Solleva are off, "
+                    + "so there is no sample to look at. Turn them on in iOS Settings → "
+                    + "Notifications → Solleva. " + agentNameLine,
+                symbolName: "bell.slash.fill",
+                claimsNudgeSent: false,
+                pointsToSystemSettings: true)
+        case .unavailable:
+            // Nothing was handed to iOS, or the request was rejected. Ambient intelligence
+            // is still on and real nudges still work, so say that rather than implying the
+            // whole feature failed.
+            return OnboardingAmbientConfirmation(
+                headline: "On — the sample did not go out",
+                detail: "Ambient intelligence is on. The sample nudge could not be scheduled "
+                    + "just now — real ones will still arrive while you are taking a note. "
+                    + agentNameLine,
+                symbolName: "bell.slash.fill",
+                claimsNudgeSent: false,
+                pointsToSystemSettings: false)
+        }
+    }
+
+    /// Ways of writing "a notification went out". Deliberately a list of ASSERTIONS of
+    /// past delivery — "sending", "can go out", "couldn't send" are not claims and must
+    /// not match, or the check would forbid honest failure copy too.
+    ///
+    /// Used two ways: against this file's own copy (the flag and the words must agree),
+    /// and against `App/`'s source (no App-side literal may assert a delivery, because a
+    /// literal cannot know whether one happened).
+    public static let deliveryClaimPhrases = [
+        "we just sent",
+        "we sent",
+        "we've sent",
+        "just sent",
+        "sent a sample",
+        "sent a nudge",
+        "sent you a",
+        "check your lock screen",
+    ]
+
+    /// What the claim has to be ABOUT for this check to care. Required so the same
+    /// predicate can be swept over unrelated `App/` source without manufacturing a red:
+    /// "we sent your invite" is not this defect, and a guard that reddened for it would be
+    /// a gate saying "your code is broken" when it means "I matched the wrong thing".
+    public static let nudgeSubjectWords = ["nudge", "notification", "lock screen"]
+
+    /// Does `text` assert that a NUDGE was delivered? Both halves are required: an
+    /// assertion of past delivery AND a subject that is the nudge.
+    public static func assertsANudgeWasSent(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        return deliveryClaimPhrases.contains { lowered.contains($0) }
+            && nudgeSubjectWords.contains { lowered.contains($0) }
+    }
+}
+
 /// Where this person's voice notes should live.
 ///
 /// This is NOT a new preference. The three-way choice already exists as `BrainChoice`

@@ -606,9 +606,26 @@ struct OnboardingVoiceStandalone: View {
 
 // MARK: - Step 3: ambient opt-in
 
+/// What the sample nudge actually did, held where the view can watch it.
+///
+/// `AmbientNotifier.postPreview` reports from whatever queue `UNUserNotificationCenter`
+/// calls back on, so the outcome needs a MainActor-isolated home. A `@MainActor final
+/// class` is implicitly Sendable, which is what lets the `@Sendable` report closure carry
+/// it across that boundary without dragging the (non-Sendable) view along.
+@MainActor
+final class AmbientNudgeReport: ObservableObject {
+    @Published private(set) var attempt: AmbientNudgeAttempt = .pending
+
+    func record(_ attempt: AmbientNudgeAttempt) { self.attempt = attempt }
+}
+
 struct OnboardingAmbientStep: View {
     let onDone: () -> Void
     @State private var enabled = false
+    /// The step used to announce "We just sent a sample nudge" on the line after calling a
+    /// function that, with no account bound, posted nothing and returned silently. It now
+    /// says whatever actually happened (FX-4a).
+    @StateObject private var nudge = AmbientNudgeReport()
 
     var body: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x4) {
@@ -630,9 +647,14 @@ struct OnboardingAmbientStep: View {
             }
 
             if enabled {
-                Label("On — check your lock screen", systemImage: "bell.badge.fill")
-                    .grainTextStyle(.body).foregroundStyle(GrainColor.sage)
-                Text("We just sent a sample nudge so the first real one is never a surprise. Your agent answers to “Foundry” — rename it in Settings.")
+                // Every word here comes from FoundryXKit, keyed on what the notifier
+                // actually reported — a literal in this body could not know, and that is
+                // precisely how the false claim shipped.
+                let said = OnboardingAmbientStepCopy.confirmation(for: nudge.attempt)
+                Label(said.headline, systemImage: said.symbolName)
+                    .grainTextStyle(.body)
+                    .foregroundStyle(said.claimsNudgeSent ? GrainColor.sage : GrainColor.textMuted)
+                Text(said.detail)
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             }
 
@@ -649,8 +671,13 @@ struct OnboardingAmbientStep: View {
                         _ = AmbientPrefs.setAgentName("Foundry")
                     }
                     // Deterministic first-feel: fire the sample nudge NOW, while
-                    // they're looking, so the first real one is familiar.
-                    AmbientNotifier.postPreview()
+                    // they're looking, so the first real one is familiar — and ask for
+                    // notification permission HERE, at the step that promises one.
+                    // Whatever comes back is what the screen says; nothing is assumed.
+                    let sink = nudge
+                    AmbientNotifier.postPreview { outcome in
+                        Task { @MainActor in sink.record(outcome) }
+                    }
                     enabled = true
                 }
                 GrainButton("Not now", variant: .outlined, size: .regular) { onDone() }
