@@ -775,7 +775,7 @@ private struct RecordingDevicePageView: View {
                                     }
                                 }
                                 Spacer(minLength: GrainSpacing.x2)
-                                Text(row.duration)
+                                Text(row.size)
                                     .grainTextStyle(.caption)
                                     .fontWeight(.semibold)
                                     .foregroundStyle(GrainColor.textMuted)

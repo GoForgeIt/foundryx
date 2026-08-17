@@ -156,7 +156,12 @@ public struct StoredFileManifestItem: Equatable, Sendable {
 
 public struct StoredFileManifestRowPresentation: Equatable, Sendable {
     public let title: String
-    public let duration: String
+    /// HOW BIG THE RECORDING IS, in the recorder's own unit.
+    ///
+    /// THIS FIELD USED TO BE `duration` AND USED TO HOLD "44 min". See
+    /// `PocketMeasuredFigures` — no recorder has ever told this app how long a recording is,
+    /// and the divisor that manufactured the minutes came from a firmware nobody here runs.
+    public let size: String
     /// The one-line summary. `Solleva hasn't checked this iPhone` is the sentence the old
     /// two-valued label had no way to say.
     public let presenceLabel: String
@@ -193,7 +198,7 @@ public enum StoredFileDevicePresentation {
                                 now: Date = Date()) -> StoredFileManifestPresentation {
         StoredFileManifestPresentation(rows: items.map {
             .init(title: $0.title,
-                  duration: duration(sizeBytes: $0.sizeBytes),
+                  size: extent(sizeBytes: $0.sizeBytes),
                   presenceLabel: PocketPresencePresentation.label($0.presence),
                   places: PocketPresencePresentation.lines($0.presence, now: now),
                   presence: $0.presence)
@@ -227,8 +232,37 @@ public enum StoredFileDevicePresentation {
             showsLiveActivity: false)
     }
 
-    /// Pocket fw-1.6 lists bytes at a fixed 32 kbps CBR: 4,000 bytes per second.
-    public static func duration(sizeBytes: Int) -> String {
+    /// HOW BIG ONE RECORDING IS — the single string a shelf row prints about its extent.
+    ///
+    /// IT ASKS `PocketMeasuredFigures` FIRST, on every row, and that is the wiring rather than
+    /// a formality. The register is where the reason lives: no Pocket has ever told this app
+    /// how long a recording lasts, so re-admitting a duration is a one-line change THERE,
+    /// beside the paragraph explaining why it was withheld and what would settle it — and
+    /// never a quiet edit in a view.
+    ///
+    /// What the recorder DOES state is kilobytes, in `MCU&F&<date>&<stamp>&<KB>`, recorded
+    /// verbatim on 2026-08-16 against `PKT01_BLUE_26079bc5` on firmware 1.6. So kilobytes are
+    /// what a row prints, through the same formatter the free-space reading uses — one unit
+    /// vocabulary on the page, not two.
+    ///
+    /// AND THE DIVIDE IS LOSSLESS. `PocketBLEClient` stores a listed file as `KB * 1024`
+    /// (`PocketBLEProtocolClient.swift:316`), so `/ 1_024` hands back the recorder's own
+    /// integer unchanged. This row is a rendering of the wire, not a conversion of it.
+    public static func extent(sizeBytes: Int) -> String {
+        guard PocketMeasuredFigures.shelfRowMayStateDuration else {
+            return RecordingDeviceReadingPresentation.size(kilobytes: max(0, sizeBytes) / 1_024)
+        }
+        return durationFromUnmeasuredBitrate(sizeBytes: sizeBytes)
+    }
+
+    /// The old row string, kept ONLY as what `extent` would print if the duration figure were
+    /// ever measured and re-admitted. It divides by 4,000 bytes/second — a constant that came
+    /// from a third-party decode of firmware 1.3.3 and from a fixture this repo encoded itself
+    /// to match that belief. Nothing has ever measured it against a recorder.
+    ///
+    /// NOT `public`. A caller that reaches past `extent` is a caller that has bypassed the
+    /// register, which is exactly how "44 min" got onto the page in the first place.
+    static func durationFromUnmeasuredBitrate(sizeBytes: Int) -> String {
         let seconds = max(0, sizeBytes) / 4_000
         if seconds >= 3_600 {
             let hours = seconds / 3_600, minutes = seconds % 3_600 / 60

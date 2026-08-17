@@ -184,7 +184,13 @@ private actor PocketCheckNowWorld {
             XCTAssertEqual(detail.manifest.rows.map(\.title),
                            ["2026-03-28 · 00:19", "2026-03-27 · 09:15"],
                            "the recorder's own reported instants are not listed newest first")
-            XCTAssertEqual(detail.manifest.rows.map(\.duration), ["2 min", "24 sec"])
+            // THE RECORDER'S OWN NUMBER. `MCU&F&<date>&<stamp>&<KB>` states kilobytes; a
+            // duration was never stated by anything (`PocketMeasuredFigures`).
+            // EXACTLY WHAT CAME OFF THE WIRE. `MCU&F&…&<KB>` is kilobytes, the client stores it
+            // as `KB * 1024`, so the row's divide-by-1024 returns the recorder's own integer
+            // with nothing lost. A duration was never stated by anything
+            // (`PocketMeasuredFigures`).
+            XCTAssertEqual(detail.manifest.rows.map(\.size), ["469 KB", "94 KB"])
 
         case "every listed recording says it is only on the recorder":
             let detail = try requireDetail()

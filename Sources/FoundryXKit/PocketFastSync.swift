@@ -35,12 +35,45 @@ public struct PocketFastSyncPresentation: Sendable, Equatable {
     public let passwordLabel: String
     public let hasPasswordField: Bool
     public static let setup = PocketFastSyncPresentation(
-        title: "FAST SYNC", body: "Much faster for long backlogs. Your phone leaves its normal network while it runs.",
+        title: "FAST SYNC", body: offerBody,
         primaryAction: "Turn on Fast sync", passwordLabel: "Already known", hasPasswordField: false)
+
+    /// WHAT THE OFFER SAYS, AND WHY IT NO LONGER SAYS "MUCH FASTER".
+    ///
+    /// It asks `PocketMeasuredFigures` whether anyone has timed this, and nobody has: the WiFi
+    /// transfer has never been performed — the HTTP endpoint the device serves files from is
+    /// still UNCONFIRMED upstream in pocket-libre — and the Bluetooth leg was never timed
+    /// either, because the 2026-08-16 bench deliberately refused `APP&U` on the owner's own
+    /// recorder. The "~150x" behind the old sentence is a flagged guess.
+    ///
+    /// So the offer states the MECHANISM, which is true and is also the part a person needs:
+    /// their phone is about to leave its network. A superlative is the prose form of the same
+    /// unmeasured number, and hedging it ("often much faster") would be the guess with a hedge
+    /// in front of it.
+    static var offerBody: String {
+        guard PocketMeasuredFigures.fastSyncOfferMayClaimSpeed else {
+            return "Uses the recorder's own WiFi instead of Bluetooth. "
+                + "Your phone leaves its normal network while it runs."
+        }
+        return "Much faster for long backlogs. Your phone leaves its normal network while it runs."
+    }
     public static let settings = PocketFastSyncPresentation(
         title: "Fast sync", body: "Uses the recorder's WiFi. Your phone leaves its normal network while it runs.",
         primaryAction: "Use recorder WiFi", passwordLabel: "Already known", hasPasswordField: false)
     public static let sheetWarning = "Your phone leaves its normal WiFi while this runs. Internet may be unavailable until it reconnects."
+
+    /// EVERY STRING THIS FAMILY CAN PUT IN FRONT OF A PERSON.
+    ///
+    /// It did not exist, and that absence was load-bearing. The gates that scan copy
+    /// populations take the union of the families' `everyLine`, so a family without one is a
+    /// family the gates CANNOT SEE — which is how `setup.body` shipped opening with "Much
+    /// faster for long backlogs" while `PocketFastSyncProgress` two types below was carefully
+    /// refusing to print a rate without `measuredRate`. The same claim, one screen earlier, in
+    /// words instead of digits, where nothing was looking.
+    public static var everyLine: [String] {
+        [setup, settings].flatMap { [$0.title, $0.body, $0.primaryAction, $0.passwordLabel] }
+            + [sheetWarning]
+    }
 }
 
 public struct PocketFastSyncProgress: Sendable, Equatable {
