@@ -624,11 +624,18 @@ struct RecordingDevicePageView: View {
         // Task still publishing into a screen that no longer existed, and `isChecking` stuck
         // true, which the model's own busy guard then read as "already checking" forever.
         .onDisappear { check.cancel() }
-        // AND BACKGROUNDING COUNTS AS LEAVING. `onDisappear` does not fire when the app goes
-        // to the background with this page on top — which is exactly what happens when a
-        // transfer is slow and the owner puts the phone in their pocket.
+        // A SCREENSHOT IS NOT A DEPARTURE, AND THIS VIEW DOES NOT GET TO DECIDE THAT.
+        //
+        // This used to read `if phase != .active { check.cancel() }`. iOS reports `.inactive`
+        // for a screenshot, Control Center, the app switcher and a notification banner — none
+        // of which is the owner leaving — so the one gesture a person makes to SHOW somebody
+        // their transfer running was the gesture that killed it.
+        //
+        // The rule now lives in `PocketErrandScenePhasePolicy` and the survival in
+        // `PocketBackgroundLease`, both in the kit, because nothing in this repository can
+        // execute a SwiftUI body — which is precisely how that comparison shipped untested.
         .onChange(of: scenePhase) { phase in
-            if phase != .active { check.cancel() }
+            check.sceneChanged(to: PocketErrandScenePhase(phase))
         }
     }
 
@@ -1343,6 +1350,30 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// `errand.stop` fire EXACTLY ONCE — whether the errand finished or the owner left.
     private var runningErrandSubject: String?
 
+    /// THE BACKGROUND TIME AN ERRAND IS HOLDING.
+    ///
+    /// A bring-over is the slowest thing this app does — a Bluetooth file pull that can run for
+    /// minutes — and the one thing a person reliably does while it runs is put the phone down.
+    /// Without this the system suspends the process seconds after the app leaves the screen:
+    /// the `CBCentralManager` callbacks stop, the `Task` never resumes, and the page comes back
+    /// having quietly done nothing. Taken at `beginErrand` and released at `finishErrand`,
+    /// which are the ONE start and the ONE stop every errand on this page passes through.
+    private let lease: PocketBackgroundLease
+
+    /// Whether an errand is currently protected. Read by `sceneChanged(to:)` and by the
+    /// app-hosted scenarios, which is the only lane able to execute any of this.
+    var isHoldingBackgroundTime: Bool { lease.isHeld }
+
+    #if DEBUG
+    /// THE SYSTEM'S BACKGROUND-TIME BUDGET IS THE SECOND THING A SCENARIO CANNOT OWN.
+    ///
+    /// Same seam, same reason and same `#if DEBUG` door as the radio above: a hermetic run
+    /// cannot make iOS refuse an assertion or take one back, and those are exactly the two
+    /// states the honest half of this fix is about. Everything else — when time is taken, that
+    /// it is taken once, that every exit path gives it back — stays the shipped code.
+    nonisolated(unsafe) static var backgroundTimeForScenarios: PocketBackgroundTime?
+    #endif
+
     /// Test seam: how many times the shelf read model has been REBUILT. The acceptance
     /// instrument for this surface's command/query split, and the same idiom
     /// `CaptureManager.rebuildCountForTests` is (`Sources/FoundryXKit/CaptureManager.swift`):
@@ -1373,7 +1404,25 @@ final class PocketRecorderCheckModel: ObservableObject {
 
     /// The production constructor. Every call site that is not the proof mount uses it, and it
     /// is the default argument of `RecordingDevicePageView.init`.
-    init() {}
+    init() {
+        lease = PocketBackgroundLease(time: Self.backgroundTime())
+        // THE SYSTEM TOOK THE TIME BACK. The lease has already handed the assertion in by the
+        // time this runs — not doing so is what gets an app terminated — so the process is
+        // about to be suspended and the errand cannot make progress. It STOPS, and says so,
+        // rather than being frozen mid-transfer with the page claiming it is working.
+        lease.onExpiry = { [weak self] in
+            self?.cancel(outcome: PocketErrandScenePhasePolicy.stoppedWithoutBackgroundTimeToken)
+        }
+    }
+
+    /// The background-time budget this model leases from: the system's, unless a scenario
+    /// running inside a DEBUG build has supplied one.
+    private static func backgroundTime() -> PocketBackgroundTime {
+        #if DEBUG
+        if let supplied = backgroundTimeForScenarios { return supplied }
+        #endif
+        return .live
+    }
 
     #if DEBUG || PERF_HARNESS
     /// THE PROOF MOUNT'S CONSTRUCTOR — a model already in the state being photographed.
@@ -1390,6 +1439,9 @@ final class PocketRecorderCheckModel: ObservableObject {
          proofDetail: StoredFileDeviceDetailPresentation? = nil,
          proofMessage: String? = nil,
          proofOfferedRecording: PocketRecording? = nil) {
+        // A PHOTOGRAPH RUNS NO ERRAND, so it never takes any time — but the lease must exist
+        // or the model has a stored property this initialiser leaves unset.
+        lease = PocketBackgroundLease(time: Self.backgroundTime())
         isChecking = proofIsChecking
         detail = proofDetail
         message = proofMessage
@@ -1616,6 +1668,12 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// still legible as a run that was attempted.
     private func beginErrand(_ subject: String) {
         runningErrandSubject = subject
+        // BACKGROUND TIME IS TAKEN HERE BECAUSE THIS IS WHERE EVERY ERRAND BEGINS. Five entry
+        // points reach it — the check, the bring-over, both removal paths and the fast sync —
+        // and taking the assertion at each of them instead would be four chances to forget.
+        // A refusal is not an error: the errand runs unprotected, and `sceneChanged(to:)` then
+        // reads that as "an actual departure stops this", which is the truth.
+        lease.begin(subject: subject)
         DoorLog.shared.command(PocketErrandCommand.start, subject: subject)
     }
 
@@ -1623,6 +1681,11 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// flag on the Task, because the two ways an errand ends — it finished, or the owner walked
     /// away — both arrive here and only one of them may write.
     private func finishErrand(outcome: String) {
+        // THE RELEASE IS OUTSIDE THE GUARD, AND THAT IS DELIBERATE. `errand.stop` is written
+        // exactly once per start; the background time must be given back on EVERY path that
+        // could possibly hold it, including one that raced the token. `end()` is silent when
+        // nothing is held, and an assertion that outlives its errand is how iOS kills the app.
+        lease.end()
         guard let subject = runningErrandSubject else { return }
         runningErrandSubject = nil
         DoorLog.shared.command(PocketErrandCommand.stop, subject: subject, outcome: outcome)
@@ -1693,7 +1756,14 @@ final class PocketRecorderCheckModel: ObservableObject {
     ///
     /// Idempotent, and silent when there is nothing to stop: `onDisappear` and a `scenePhase`
     /// drop can both fire for one departure.
-    func cancel() {
+    /// - Parameter outcome: the closed token the command record carries. It defaults to the
+    ///   deliberate departure, and the scene path passes its own so a transfer that ran out of
+    ///   background time can be told apart in the log from one the owner walked away from.
+    func cancel(outcome: String = "left-the-page") {
+        // UNCHANGED, AND ON PURPOSE. A removal or a fast sync in flight is NOT stopped here —
+        // it never was — and it must not have its background time taken away either, or
+        // walking away would suspend the very errand this guard declines to cancel. Every
+        // errand releases through `finishErrand`.
         guard isChecking || isBringingOver else { return }
         // A STOPPED TRANSFER SAYS SO. `left-the-page` is a closed LOG token and is never
         // rendered; without this line the owner who locked their phone during an hours-long
@@ -1707,7 +1777,30 @@ final class PocketRecorderCheckModel: ObservableObject {
         attachment = nil
         isChecking = false
         isBringingOver = false
-        finishErrand(outcome: "left-the-page")
+        finishErrand(outcome: outcome)
+    }
+
+    /// THE APP MOVED, AND WHAT THAT MEANS FOR AN ERRAND IN FLIGHT.
+    ///
+    /// THE DEFECT THIS REPLACES was one comparison in the view — `if phase != .active {
+    /// check.cancel() }` — and iOS reports `.inactive` for a SCREENSHOT, Control Center, the
+    /// app switcher and a notification banner. So photographing the progress killed the
+    /// transfer, which is exactly what Nick hit on his own phone with recordings waiting.
+    ///
+    /// The rule itself is `PocketErrandScenePhasePolicy`, in the kit, because `swift test`
+    /// cannot compile `App/` and a decision written in a SwiftUI body is a decision nothing can
+    /// hold. What is left here is the wiring: ask, and do what it says.
+    func sceneChanged(to phase: PocketErrandScenePhase) {
+        switch PocketErrandScenePhasePolicy.decide(phase: phase,
+                                                   isHoldingBackgroundTime: lease.isHeld) {
+        case .carryOn:
+            return
+        // NOT HOLDING TIME AND NO LONGER ON SCREEN. The process is about to be suspended
+        // whatever this model wants, so the errand stops and says so — with its OWN token, so
+        // the log can tell "the system would not let it finish" from "the owner walked away".
+        case .stopTheErrand:
+            cancel(outcome: PocketErrandScenePhasePolicy.stoppedWithoutBackgroundTimeToken)
+        }
     }
 
     /// ONE FILE, ON ONE SESSION, AND THE SHELF RESTATED FROM THIS PHONE'S OWN DISK.

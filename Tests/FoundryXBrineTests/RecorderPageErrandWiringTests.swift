@@ -77,6 +77,95 @@ final class RecorderPageErrandWiringTests: XCTestCase {
                       """)
     }
 
+    /// A SCREENSHOT IS NOT A DEPARTURE, AND THE VIEW MUST NOT DECIDE THAT FOR ITSELF.
+    ///
+    /// The shipped line was `.onChange(of: scenePhase) { phase in if phase != .active {
+    /// check.cancel() } }`. iOS reports `.inactive` for a screenshot, Control Center, the app
+    /// switcher and a notification banner — so the one comparison killed a transfer for four
+    /// things that are not somebody leaving, which is exactly what Nick hit on his own phone.
+    ///
+    /// Both halves are here on purpose. The PROHIBITION is over the comparison; the
+    /// EXISTENCE half is that the phase still reaches the model, because a page that stopped
+    /// observing scene changes altogether would satisfy the prohibition and lose the
+    /// background-time release the model now owns.
+    func testAMomentaryInterruptionDoesNotCancelTheErrand() throws {
+        let code = AppSourceTree.code(of: try source())
+        let collapsed = code.components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }.joined(separator: " ")
+        XCTAssertFalse(collapsed.contains("if phase != .active { check.cancel() }"),
+                       """
+                       the recorder page still cancels the errand for ANY phase that is not \
+                       .active. iOS reports .inactive for a screenshot, Control Center, the \
+                       app switcher and a notification banner, and none of those is the owner \
+                       leaving — so taking a picture of the progress kills the transfer.
+                       """)
+        XCTAssertFalse(collapsed.contains("phase != .active"),
+                       """
+                       the recorder page still decides what a scene phase means with a raw \
+                       comparison. That decision belongs to \
+                       `PocketErrandScenePhasePolicy`, where `swift test` can hold it: nothing \
+                       in this repository can execute a SwiftUI body.
+                       """)
+        XCTAssertTrue(code.contains("check.sceneChanged(to: PocketErrandScenePhase(phase))"),
+                      """
+                      the page no longer hands the scene phase to the model, so nothing \
+                      releases the background time an errand is holding when the app is \
+                      actually put away.
+                      """)
+    }
+
+    /// A TRANSFER THAT SURVIVES BACKGROUNDING NEEDS THE SYSTEM'S PERMISSION TO.
+    ///
+    /// Declining to cancel is not continuing: iOS suspends a backgrounded process within
+    /// seconds, and a suspended app's Bluetooth callbacks and Task continuations stop dead. So
+    /// the model must TAKE background time when an errand starts, and give it back when the
+    /// errand ends — and both must happen at the errand choke points rather than at one of the
+    /// five entry points somebody remembered.
+    func testTheErrandHoldsBackgroundTimeAndGivesItBack() throws {
+        let model = try checkModelBody()
+        XCTAssertTrue(model.contains("PocketBackgroundLease("),
+                      """
+                      the check model holds no background-time lease, so a bring-over that is \
+                      still running when the phone goes in a pocket is suspended by the system \
+                      mid-transfer with the page still claiming it is working.
+                      """)
+        // AT THE CHOKE POINTS. `beginErrand`/`finishErrand` are the one start and the one stop
+        // every errand on this page passes through — the check, the bring-over, the two
+        // removals and the fast sync. Taking the assertion anywhere else is five call sites
+        // and four chances to forget.
+        let begin = try slice(of: model, from: "private func beginErrand(", upTo: "\n    ///")
+        XCTAssertTrue(begin.contains("lease.begin(subject:"),
+                      "an errand starts without taking background time")
+        let finish = try slice(of: model, from: "private func finishErrand(", upTo: "\n    ///")
+        XCTAssertTrue(finish.contains("lease.end()"),
+                      """
+                      an errand can stop without giving the background time back. An assertion \
+                      that outlives its errand is how iOS terminates the app.
+                      """)
+        // AND PRODUCTION LEASES FROM THE SYSTEM. The scenario seam is `#if DEBUG`, so a
+        // Release binary has no door — but a default that stopped being `.live` would leave
+        // every shipping transfer holding nothing while the counts stayed green.
+        let factory = try slice(of: model,
+                                from: "private static func backgroundTime()",
+                                upTo: "\n    ///")
+        XCTAssertTrue(factory.contains("return .live"),
+                      """
+                      the shipping model no longer leases background time from the system, so \
+                      the counts a scenario asserts are about a budget nothing in life uses.
+                      """)
+    }
+
+    /// The text between two markers, so a claim about ONE function is not a claim about the
+    /// whole file. A lexical slice, not a parse — see this file's stated limit.
+    private func slice(of body: String, from start: String, upTo end: String) throws -> String {
+        guard let begins = body.range(of: start) else {
+            throw XCTSkip("`\(start)` is gone from the model")
+        }
+        let rest = String(body[begins.lowerBound...])
+        guard let ends = rest.range(of: end) else { return rest }
+        return String(rest[..<ends.lowerBound])
+    }
+
     /// AC5. The defect in one line: the recorder page's attachment factory defaulted its log
     /// to `nil` while its sibling 450 lines down the SAME FILE defaulted to `.shared`, so the
     /// slowest and most failure-prone path in the app was the one whose telemetry was thrown
