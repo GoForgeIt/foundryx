@@ -212,4 +212,5 @@ on-disk-name	Sources/FoundryXKit/ConversationOrganizer.swift	categories.json
 on-disk-name	Sources/FoundryXKit/ConversationOrganizer.swift	list-index.json
 on-disk-name	Sources/FoundryXKit/ConversationRecap.swift	recap-cache.json
 on-disk-name	Sources/FoundryXKit/OwnerVoiceStore.swift	state.json
+on-disk-name	Sources/FoundryXKit/PocketMeasuredFigures.swift	PKT01_BLUE_26079bc5-fw1.6-20260816-verb-probe.json
 on-disk-name	Sources/FoundryXKit/RecordingDeviceStore.swift	recording-devices.json

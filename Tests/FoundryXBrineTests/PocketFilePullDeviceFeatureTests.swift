@@ -39,7 +39,7 @@ private enum PocketFilePullSteps {
             "offline storage is present without exposing the uncalibrated storage pair",
             "its hero reports the link as connected with battery and firmware",
             "no recording pill, recording state, or Live Activity surface is present",
-            "each recording shows its custody and duration at 32 kilobits per second",
+            "each recording shows its custody and the size the recorder stated",
             "no active source FrameRouter WAL Live Activity or live state mutation occurs"
         ]
         var steps = givens.map { phrase in defineStep(phrase) { context, _, _ in await world.given(phrase); return context } }
@@ -125,8 +125,8 @@ private actor PocketFilePullWorld {
             XCTAssertEqual(detail?.linkLabel, "Connected"); XCTAssertEqual(detail?.battery, "72%"); XCTAssertEqual(detail?.firmware, "1.6")
         case "no recording pill, recording state, or Live Activity surface is present":
             XCTAssertEqual(detail?.showsRecordingState, false); XCTAssertEqual(detail?.showsLiveActivity, false)
-        case "each recording shows its custody and duration at 32 kilobits per second":
-            XCTAssertEqual(manifest?.rows.map(\.duration), ["22 sec", "12 sec"])
+        case "each recording shows its custody and the size the recorder stated":
+            XCTAssertEqual(manifest?.rows.map(\.size), ["85 KB", "46 KB"])
             XCTAssertEqual(manifest?.rows.map(\.presenceLabel), ["In Solleva", "Only on the recorder"])
         case "no active source FrameRouter WAL Live Activity or live state mutation occurs":
             XCTAssertEqual(effects, .zero)

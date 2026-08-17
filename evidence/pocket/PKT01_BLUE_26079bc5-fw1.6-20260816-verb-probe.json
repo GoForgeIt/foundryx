@@ -1,0 +1,102 @@
+{
+  "probed_at": "2026-08-16T16:46:41",
+  "address": "08322547-B7D1-0875-DA0C-0CE9BC1AE529",
+  "verbs": {
+    "BAT": {
+      "note": "battery percent",
+      "class": "read",
+      "reply": [
+        "MCU&BAT&58"
+      ]
+    },
+    "FW": {
+      "note": "device firmware version",
+      "class": "read",
+      "reply": [
+        "MCU&FW&1.6"
+      ]
+    },
+    "SPACE": {
+      "note": "free/total storage \u2014 the number the design refused to promise unmeasured",
+      "class": "read",
+      "reply": [
+        "MCU&SPA&058767&058992"
+      ]
+    },
+    "STE": {
+      "note": "device state (idle/recording)",
+      "class": "read",
+      "reply": [
+        "MCU&STE&0"
+      ]
+    },
+    "WF": {
+      "note": "WiFi FIRMWARE version \u2014 NOT credentials (this is the one I conflated)",
+      "class": "read",
+      "reply": [
+        "MCU&WF&V8"
+      ]
+    },
+    "LIST_DIRS": {
+      "note": "dates that have recordings",
+      "class": "read",
+      "reply": [
+        "MCU&DIRS&2026-08-07",
+        "MCU&DIRS&2026-08-11",
+        "MCU&DIRS&2026-08-12",
+        "MCU&DIRS&2026-08-13",
+        "MCU&DIRS&2026-08-14",
+        "MCU&DIRS_SUM&005"
+      ]
+    },
+    "WIFI": {
+      "note": "WiFi credentials the AP will use",
+      "class": "read",
+      "reply": [
+        "MCU&WIFI&PKT01_BLUE_26079bc5&PD9QQDJ6"
+      ]
+    },
+    "WIFIS": {
+      "note": "status after cleanup \u2014 proves the teardown took",
+      "class": "read",
+      "reply": [
+        "MCU&WIFIS&0"
+      ]
+    },
+    "LIST&2026-08-07": {
+      "note": "files on 2026-08-07",
+      "class": "read",
+      "reply": [
+        "MCU&F&2026-08-07&20260807142852&4",
+        "MCU&F&2026-08-07&20260807153240&2648",
+        "MCU&F&2026-08-07&20260807161651&1712",
+        "MCU&F&2026-08-07&20260807174644&1499",
+        "MCU&F&2026-08-07&20260807220738&1245",
+        "MCU&F&2026-08-07&20260807222826&1453",
+        "MCU&LIST&006"
+      ]
+    },
+    "WIFIO": {
+      "note": "OPEN the access point",
+      "class": "state-change (reversed by WIFIC)",
+      "reply": [
+        "MCU&WIFIO"
+      ]
+    },
+    "WIFIC": {
+      "note": "CLEAN UP / close the access point",
+      "class": "state-change (the reversal)",
+      "reply": [
+        "MCU&WIFIC"
+      ]
+    }
+  },
+  "refused": {
+    "SK": "writes a NEW session key. Would re-key the recorder and can break the phone's pairing \u2014 U1 (does a keyed recorder refuse a second APP&SK&?) is still open.",
+    "REC": "starts/stops recording on the owner's device. Not mine to trigger.",
+    "U": "begins a file transfer, which ties up the radio for minutes to hours.",
+    "D": "delete. Already validated NON-DESTRUCTIVELY with a sentinel that cannot exist: APP&D&1970-01-01&19700101000000 -> MCU&D&ERR, 19 recordings before and after.",
+    "T": "sets the device clock. Exists (pocket-libre set_time sends T&<YYYYMMDDHHmmss> and checks for MCU&T&OK) but it is a WRITE, and status already reports 'Time: Synced to host', so there is nothing to correct."
+  },
+  "recordings_after": 19
+}
