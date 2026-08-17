@@ -165,13 +165,19 @@ private final class FastSyncPageWorld {
     func when(_ phrase: String) async throws {
         switch phrase {
         case "Solleva asks that recorder what it is holding":
-            check.run(hardwareToken: identifier.uuidString, advertisedName: Self.recorderName)
+            // THE SAME FOUR ARGUMENTS THE SHIPPING PAGE PASSES. This call was written against
+            // a base that predates the safety predicate, and after the merge it drove a
+            // signature that no longer exists.
+            check.run(hardwareToken: identifier.uuidString, advertisedName: Self.recorderName,
+                      library: manager.captureLibraryRoot, stages: manager.captureStages(),
+                      brain: .myComputer)
             try await AppScenarioHost.settle(untilTrue: { !self.check.isChecking },
                                              describing: "the check to finish")
         case "I bring the offered recording over with fast sync":
             check.fastSync(hardwareToken: identifier.uuidString,
                            advertisedName: Self.recorderName,
-                           into: manager)
+                           into: manager,
+                           brain: .myComputer)
             try await AppScenarioHost.settle(
                 untilTrue: { !self.check.isBringingOver && !self.check.isChecking },
                 describing: "the fast sync and the shelf re-read that follows it")
@@ -210,9 +216,13 @@ private final class FastSyncPageWorld {
                 throw BrineStepError("the shelf has no rows after the transfer — the app never "
                                         + "re-read it")
             }
-            guard row.custodyLabel == "In Solleva" else {
+            // THE FACT FIRST, then that it is said in words. Step 5 replaced the two-valued
+            // custody label with a three-place reading, so an equality against one sentence
+            // both over- and under-matches: the row now says WHERE it is and how old each
+            // answer is.
+            guard row.presence.onThisPhone.answer == .yes else {
                 throw BrineStepError(
-                    "the row still reads \"\(row.custodyLabel)\" after the file landed over "
+                    "the row still reads \"\(row.presenceLabel)\" after the file landed over "
                         + "WiFi. A fast-synced recording must land in the SAME custody a "
                         + "Bluetooth one does, or the page is telling the truth about one "
                         + "transport and not the other")
@@ -237,7 +247,7 @@ private final class FastSyncPageWorld {
                         + "rather than saying nothing was kept")
             }
             let rows = check.detail?.manifest.rows ?? []
-            if rows.first?.custodyLabel == "In Solleva" {
+            if rows.first?.presence.onThisPhone.answer == .yes {
                 throw BrineStepError("the shelf claims Solleva is holding a recording that "
                                         + "never arrived")
             }
