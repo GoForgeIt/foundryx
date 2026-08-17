@@ -539,50 +539,27 @@ struct RecordingDevicePageView: View {
         RecordingDevicePage.resolve(live, canConnect: canReachDevice, check: checkState)
     }
 
+    /// THE PAGE, WALKED IN THE ORDER THE KIT DECIDED — never in the order these statements
+    /// happen to be written in.
+    ///
+    /// THE DEFECT THIS CLOSES, in Nick's words about his own recorder page: *"there is lots of
+    /// scrolling to get to any of the important controls or information."* His unit was holding
+    /// nineteen recordings, and the bring-over, the fast sync, the reset and the auto-clear
+    /// were all drawn UNDERNEATH all nineteen rows, because they were written inside the shelf
+    /// that lists them. The shelf is the only band here with no ceiling. Every other band is a
+    /// fixed number of lines; that one is a row per recording, and a control after it sits at a
+    /// distance decided by how full somebody's recorder is.
+    ///
+    /// AND WHY THE ORDER IS A VALUE. `swift test` cannot compile `App/`, so an order expressed
+    /// as eleven statements in a `VStack` is invisible to every test in this repository — which
+    /// is exactly how the controls got under the list and stayed there through a shipped build.
+    /// `RecorderPageLayout.order` is an array Brine reads; this walks it.
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                header
-                if let sentence = page.recordingIndicatorSentence {
-                    // THE SINGLE MOST IMPORTANT SENTENCE IN THE DESIGN. It occupies the band
-                    // where a live device carries record / pause / stop; the empty space is
-                    // not blanked, it is occupied by the true fact.
-                    Text(sentence)
-                        .grainTextStyle(.caption)
-                        .foregroundStyle(GrainColor.textMuted)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("recorder-light-sentence")
-                        .padding(.vertical, GrainSpacing.x3)
-                        .overlay(alignment: .bottom) { hairline }
+                ForEach(RecorderPageLayout.order, id: \.self) { band in
+                    self.band(band)
                 }
-                readingsStrip
-                capabilityStrip
-                captureToggle
-                actions
-                recorderShelf
-                // THE COST OF STARTING OVER IS A PAGE-LEVEL FACT, NOT A CONSEQUENCE OF A
-                // SUCCESSFUL LISTING.
-                //
-                // THE DEFECT THIS MOVE CLOSES, found by trying to photograph the thing. This
-                // section used to live inside `if let detail = check.detail`, so it appeared
-                // only after a check had REACHED the recorder — which made two of its own
-                // states unreachable. `resetGate` answers `shelfObservedAt == nil` with "Check
-                // the recorder first", and `costLine(nil)` says Solleva has not checked what
-                // the recorder is holding; neither could ever be drawn, because both describe
-                // the state before the first successful check. A gate whose whole design is
-                // that a stale or absent reading moves the primary action and never the enabled
-                // state cannot be gated on the reading being present.
-                //
-                // It also puts the reset's cost on the same screen as Forget without either
-                // needing a radio, which is what makes both photographable.
-                resetGate
-                // A SETTING, NOT PART OF THE SHELF. It sits outside `recorderShelf` on
-                // purpose: the shelf draws only after the owner has asked a recorder what it
-                // is holding, and whether THIS recorder clears itself is a standing choice a
-                // person must be able to see and change without opening a Bluetooth session
-                // first. Nested inside the shelf, the one control the ruling calls
-                // "owner-armed" would have been invisible until the radio answered.
-                autoClearControl
             }
             .padding(.horizontal, GrainSpacing.x4)
             .padding(.bottom, GrainSpacing.x8)
@@ -681,6 +658,54 @@ struct RecordingDevicePageView: View {
         }
     }
 
+    /// ONE BAND. The dispatch is exhaustive over `RecorderPageBand`, so a band added to the
+    /// layout does not compile until this page draws something for it — which is the half a
+    /// source scan cannot give you.
+    @ViewBuilder
+    private func band(_ band: RecorderPageBand) -> some View {
+        switch band {
+        case .header:            header
+        case .recordingIndicator: recordingIndicator
+        case .readings:          readingsStrip
+        case .capabilities:      capabilityStrip
+        case .captureToggle:     captureToggle
+        case .actions:           actions
+        case .shelfHeadline:     shelfHeadline
+        case .shelfControls:     shelfControls
+        // THE COST OF STARTING OVER IS A PAGE-LEVEL FACT, NOT A CONSEQUENCE OF A SUCCESSFUL
+        // LISTING. This section used to live inside `if let detail = check.detail`, so it
+        // appeared only after a check had REACHED the recorder — which made two of its own
+        // states unreachable. `resetGate` answers `shelfObservedAt == nil` with "Check the
+        // recorder first", and `costLine(nil)` says Solleva has not checked what the recorder
+        // is holding; neither could ever be drawn, because both describe the state before the
+        // first successful check.
+        case .resetGate:         resetGate
+        // A SETTING, NOT PART OF THE SHELF. The shelf draws only after the owner has asked a
+        // recorder what it is holding, and whether THIS recorder clears itself is a standing
+        // choice a person must be able to see and change without opening a Bluetooth session
+        // first. Nested inside the shelf, the one control the ruling calls "owner-armed" would
+        // have been invisible until the radio answered.
+        case .autoClear:         autoClearControl
+        case .shelfRows:         shelfRows
+        }
+    }
+
+    /// THE SINGLE MOST IMPORTANT SENTENCE IN THE DESIGN. It occupies the band where a live
+    /// device carries record / pause / stop; the empty space is not blanked, it is occupied by
+    /// the true fact.
+    @ViewBuilder
+    private var recordingIndicator: some View {
+        if let sentence = page.recordingIndicatorSentence {
+            Text(sentence)
+                .grainTextStyle(.caption)
+                .foregroundStyle(GrainColor.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("recorder-light-sentence")
+                .padding(.vertical, GrainSpacing.x3)
+                .overlay(alignment: .bottom) { hairline }
+        }
+    }
+
     /// THE RE-READ, OFF THE MAIN ACTOR. `RecordingDeviceStore.current()` resolves the account
     /// binding — a process-wide lock plus an on-disk registry read — and then decodes a JSON
     /// file, which is the per-row main-actor disk read `LazyView` exists to prevent.
@@ -735,41 +760,74 @@ struct RecordingDevicePageView: View {
     /// read beside it. A fact nobody has ever asked shows NO number — not a dash, not `0%`,
     /// not the shipped word `Unavailable` — and offers the action that would go and ask. The
     /// second state is a button, because a stated absence with no way to end it is a shrug.
+    ///
+    /// SAID ONCE, NOT ONCE PER FACT — and this is a layout change, not a change of what is
+    /// said. Three facts stacked as three full-width rows each carrying its own copy of "read
+    /// just now", or its own copy of the SAME "Connect and check now" button, is the page Nick
+    /// was shown. `RecordingDeviceReadingPresentation.strip(_:)` decides what the whole strip
+    /// shares; the numbers sit side by side as tiles, the one moment they were read is stated
+    /// under them once, and the one errand that would go and ask is offered once.
     @ViewBuilder
     private var readingsStrip: some View {
         if !page.readings.isEmpty {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(page.readings.enumerated()), id: \.offset) { _, line in
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(line.label)
-                            .grainTextStyle(.caption)
-                            .foregroundStyle(GrainColor.textMuted)
-                        Spacer(minLength: GrainSpacing.x2)
-                        if let value = line.value {
-                            VStack(alignment: .trailing, spacing: GrainSpacing.x1) {
-                                Text(value)
+            let strip = RecordingDeviceReadingPresentation.strip(page.readings)
+            VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+                // THE NUMBERS, SIDE BY SIDE. Value above label, which is the order a person
+                // reads a figure in — the label is what it is, and the figure is what they
+                // opened the page for.
+                if !strip.read.isEmpty {
+                    HStack(alignment: .top, spacing: GrainSpacing.x4) {
+                        ForEach(Array(strip.read.enumerated()), id: \.offset) { _, line in
+                            VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                                if let value = line.value {
+                                    Text(value)
+                                        .grainTextStyle(.body)
+                                        .fontWeight(.semibold)
+                                        .foregroundStyle(GrainColor.ink)
+                                }
+                                Text(line.label)
                                     .grainTextStyle(.caption)
-                                    .fontWeight(.semibold)
-                                    .foregroundStyle(GrainColor.ink)
+                                    .foregroundStyle(GrainColor.textMuted)
                                 // THE AGE IS NOT OPTIONAL DECORATION. A number with no
                                 // statement of when it was read is the `Unavailable` defect
-                                // with a number painted over it.
-                                if let ago = line.observedAgo {
+                                // with a number painted over it. It is drawn per tile ONLY
+                                // when the strip has no single moment to state for them all.
+                                if strip.sharedAge == nil, let ago = line.observedAgo {
                                     Text(ago)
                                         .grainTextStyle(.caption)
                                         .foregroundStyle(GrainColor.textFaint)
                                 }
                             }
-                        } else if let action = line.action {
-                            Button(action) { perform(action) }
-                                .buttonStyle(.grain(.outlined))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityElement(children: .combine)
                         }
                     }
-                    .padding(.vertical, GrainSpacing.x2)
-                    .accessibilityElement(children: .combine)
+                }
+
+                // ONE MOMENT, STATED ONCE, when one check read all of them.
+                if let shared = strip.sharedAge {
+                    Text(shared)
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.textFaint)
+                }
+
+                // WHAT NOBODY HAS ASKED FOR YET, NAMED — never dropped — and ONE way to ask.
+                if !strip.unread.isEmpty {
+                    HStack(alignment: .top, spacing: GrainSpacing.x4) {
+                        ForEach(Array(strip.unread.enumerated()), id: \.offset) { _, line in
+                            Text(line.label)
+                                .grainTextStyle(.caption)
+                                .foregroundStyle(GrainColor.textFaint)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    if let ask = strip.askAction {
+                        Button(ask) { perform(ask) }
+                            .buttonStyle(.grain(.outlined))
+                    }
                 }
             }
-            .padding(.top, GrainSpacing.x2)
+            .padding(.vertical, GrainSpacing.x3)
             .overlay(alignment: .bottom) { hairline }
         }
     }
@@ -867,8 +925,14 @@ struct RecordingDevicePageView: View {
     ///
     /// IT DRAWS NOTHING UNTIL THE OWNER ASKS. A panel that appeared on its own would be this
     /// screen deciding to open a Bluetooth session every time somebody looked at it.
+    /// THE SHELF'S HEADLINE: what a check is doing, or the reason it could not, or that the
+    /// recorder answered and is holding nothing.
+    ///
+    /// IT IS ITS OWN BAND, ABOVE THE CONTROLS AND ABOVE THE LIST. Until this split, the title,
+    /// the controls and the list were one `VStack` — which is why "bring one over" was drawn
+    /// below however many recordings the recorder happened to be holding.
     @ViewBuilder
-    private var recorderShelf: some View {
+    private var shelfHeadline: some View {
         if check.isChecking || check.detail != nil || check.message != nil {
             VStack(alignment: .leading, spacing: 0) {
                 Text(PocketRecorderCheckPresentation.sectionTitle)
@@ -898,112 +962,164 @@ struct RecordingDevicePageView: View {
                         .padding(.vertical, GrainSpacing.x2)
                 }
 
-                if let detail = check.detail {
-                    if detail.manifest.rows.isEmpty {
-                        Text(PocketRecorderCheckPresentation.emptyLine)
-                            .grainTextStyle(.caption)
-                            .foregroundStyle(GrainColor.textMuted)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.vertical, GrainSpacing.x2)
-                    } else {
-                        ForEach(Array(detail.manifest.rows.enumerated()), id: \.offset) { _, row in
-                            HStack(alignment: .firstTextBaseline, spacing: GrainSpacing.x3) {
-                                VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-                                    Text(row.title)
-                                        .grainTextStyle(.body)
-                                        .foregroundStyle(GrainColor.ink)
-                                    // WHERE THIS RECORDING IS, ON EVERY ROW, IN THREE PLACES.
-                                    // It read "Only on the recorder" for every row in every
-                                    // build until the bring-over shipped, and then it could
-                                    // only ever say one of two things - never "on this phone
-                                    // but not yet safe anywhere else", and never "nobody
-                                    // asked". Each place carries its own answer and its own
-                                    // age, and every string comes from the kit.
-                                    Text(row.presenceLabel)
-                                        .grainTextStyle(.caption)
-                                        .foregroundStyle(GrainColor.textFaint)
-                                    ForEach(Array(row.places.enumerated()), id: \.offset) { _, place in
-                                        Text(placeLine(place))
-                                            .grainTextStyle(.caption)
-                                            .foregroundStyle(GrainColor.textFaint)
-                                    }
-                                }
-                                Spacer(minLength: GrainSpacing.x2)
-                                VStack(alignment: .trailing, spacing: GrainSpacing.x1) {
-                                    // THE RECORDER'S OWN KILOBYTES. This used to be
-                                    // `row.duration`, which divided them by an unmeasured
-                                    // 4,000 bytes/second and printed "44 min" on all nineteen
-                                    // of Nick's rows. Step 3 renamed the field precisely so
-                                    // this merge could not put the invented minutes back.
-                                    Text(row.size)
-                                        .grainTextStyle(.caption)
-                                        .fontWeight(.semibold)
-                                        .foregroundStyle(GrainColor.textMuted)
-                                    // THE AFFORDANCE DOES NOT EXIST FOR A RECORDING SOLLEVA
-                                    // HAS NOT PROVED IT HOLDS. Nick's ruling in his own
-                                    // words, and this is the predicate itself rather than a
-                                    // disabled button - a greyed-out control for a state a
-                                    // person cannot reach from here is a puzzle, not an
-                                    // affordance. `isOffered` reads the SAME reading the row
-                                    // above is drawn from.
-                                    if PocketRemoveFromRecorderPresentation
-                                        .isOffered(for: row.presence) {
-                                        // IT ASKS FIRST. Until this shipped, the row fired the
-                                        // removal on the tap while FORGET — which destroys a
-                                        // key and no audio — sat behind an `.alert`. The less
-                                        // recoverable gesture was the less guarded one, and
-                                        // `confirmation(for:)`, written precisely to guard it,
-                                        // had no call site anywhere in the app.
-                                        Button {
-                                            confirmingRemovalOf = row.id
-                                        } label: {
-                                            Text(PocketRemoveFromRecorderPresentation.action)
-                                                .grainTextStyle(.caption)
-                                        }
-                                        .buttonStyle(.grain(.text))
-                                        .disabled(check.isRemoving || check.isChecking
-                                                  || check.isBringingOver)
-                                    }
-                                }
-                            }
-                            .padding(.vertical, GrainSpacing.x2)
-                            .accessibilityElement(children: .combine)
-                            .overlay(alignment: .bottom) { hairline }
-                        }
-                    }
-
-                    bringOver
-                    removalReport
-
-                    fastSync
-
-                    Text(PocketRecorderCheckPresentation.sectionNote)
+                // THE ANSWERED-AND-EMPTY CASE BELONGS TO THE HEADLINE, because when it is true
+                // there are no rows at all and a list band drawn for it would be a heading over
+                // nothing.
+                if let detail = check.detail, detail.manifest.rows.isEmpty {
+                    Text(PocketRecorderCheckPresentation.emptyLine)
                         .grainTextStyle(.caption)
-                        .foregroundStyle(GrainColor.textFaint)
+                        .foregroundStyle(GrainColor.textMuted)
                         .fixedSize(horizontal: false, vertical: true)
-                        .padding(.top, GrainSpacing.x3)
-
-                    // WHERE THE COPY GOES, IN THE TERMS OF THE BRAIN THAT IS ON. On the
-                    // phone-only tier this says so, and does not borrow the computer's
-                    // sentence for a durability the code cannot deliver there.
-                    Text(PocketRecorderCheckPresentation.destinationNote(for: brain))
-                        .grainTextStyle(.caption)
-                        .foregroundStyle(GrainColor.textFaint)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.top, GrainSpacing.x2)
+                        .padding(.vertical, GrainSpacing.x2)
                 }
             }
             .padding(.top, GrainSpacing.x6)
         }
     }
 
-    /// ONE PLACE, AS A LINE. Composed from the kit's own three fields so no sentence about
-    /// where a recording is exists only inside a SwiftUI body.
-    /// THE KIT'S SPELLING, not this screen's. A conversation that came off a recorder renders
-    /// the same three places on the detail screen, and two interpolations of the same three
-    /// fields is how the two screens start disagreeing about a recording nobody moved.
-    private func placeLine(_ place: PocketPlaceLine) -> String {
-        PocketPresencePresentation.oneLine(place)
+    /// EVERYTHING A PERSON CAN DO WITH WHAT THE RECORDER IS HOLDING, ABOVE THE LIST OF IT.
+    ///
+    /// These three were written inside the shelf's `VStack`, after the `ForEach` that draws a
+    /// row per recording. On Nick's unit that put them under nineteen rows — far enough down
+    /// that he reported the page as having no controls at all.
+    @ViewBuilder
+    private var shelfControls: some View {
+        if check.detail != nil {
+            VStack(alignment: .leading, spacing: 0) {
+                bringOver
+                fastSync
+                removalReport
+            }
+        }
+    }
+
+    /// WHAT THE RECORDER SAID IT IS HOLDING, rendered 1:1 from the kit's
+    /// `StoredFileDeviceDetailPresentation` — the presentation that shipped with zero callers
+    /// in `App/` while `features/pocket-file-pull-device.feature` asserted over it. Not one
+    /// string here is invented in this body.
+    ///
+    /// IT IS THE LAST BAND ON THE PAGE, and that is the whole point of `RecorderPageLayout`:
+    /// it is the only band whose length is a property of somebody's hardware rather than of
+    /// this design.
+    @ViewBuilder
+    private var shelfRows: some View {
+        if let detail = check.detail {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(detail.manifest.rows.enumerated()), id: \.offset) { _, row in
+                    // TWO LINES, EACH WITH THE WHOLE WIDTH. What the recording IS on the
+                    // first; where it is on the second.
+                    //
+                    // THE DEFECT THE PHOTOGRAPH CAUGHT, and it would have shipped unseen: the
+                    // three places first went in a column beside the size, which left them
+                    // half a screen to fit in, and SwiftUI wrapped them INSIDE THE WORDS —
+                    // "Unknow / n", "Elsewhe / re", "Recor / der". Legible copy, illegible
+                    // layout. They get the full width now, and each place is pinned to one
+                    // line that scales down rather than breaking.
+                    VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                        HStack(alignment: .firstTextBaseline, spacing: GrainSpacing.x3) {
+                            Text(row.title)
+                                .grainTextStyle(.body)
+                                .foregroundStyle(GrainColor.ink)
+                            Spacer(minLength: GrainSpacing.x2)
+                            // THE RECORDER'S OWN KILOBYTES. This used to be `row.duration`,
+                            // which divided them by an unmeasured 4,000 bytes/second and
+                            // printed "44 min" on all nineteen of Nick's rows. Step 3 renamed
+                            // the field precisely so this merge could not put the invented
+                            // minutes back.
+                            Text(row.size)
+                                .grainTextStyle(.caption)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(GrainColor.textMuted)
+                                .fixedSize()
+                        }
+
+                        // WHERE THIS RECORDING IS, ON EVERY ROW, IN THREE PLACES — AND ONCE
+                        // EACH.
+                        //
+                        // THIS USED TO BE FOUR LINES FOR THREE FACTS. `row.presenceLabel`
+                        // ("Only on the recorder") sat above the three `row.places` lines it
+                        // is DERIVED FROM ("On the recorder: Yes - just now" and the rest),
+                        // and every one of those lines was full width. Nineteen of those is
+                        // the page Nick was shown. Not one of the three places is dropped —
+                        // they are the evidence that deleting a recording is safe — so the
+                        // derived summary is what left, and the places are on one line with
+                        // the age they share stated once beneath.
+                        HStack(alignment: .firstTextBaseline, spacing: GrainSpacing.x3) {
+                            ForEach(Array(row.presenceBlock.chips.enumerated()),
+                                    id: \.offset) { _, chip in
+                                HStack(spacing: GrainSpacing.x1) {
+                                    Text(chip.place)
+                                        .foregroundStyle(GrainColor.textFaint)
+                                    Text(chip.answer)
+                                        .fontWeight(.semibold)
+                                        .foregroundStyle(chip.isHeld
+                                                         ? GrainColor.ink
+                                                         : GrainColor.textFaint)
+                                }
+                                .grainTextStyle(.caption)
+                                // ONE LINE, ALWAYS. A place that wraps is a place that reads
+                                // as two facts; scaling is the honest way to lose nothing.
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                            }
+                            Spacer(minLength: 0)
+                        }
+
+                        HStack(alignment: .firstTextBaseline, spacing: GrainSpacing.x3) {
+                            if let age = row.presenceBlock.ageLine {
+                                Text(age)
+                                    .grainTextStyle(.caption)
+                                    .foregroundStyle(GrainColor.textFaint)
+                            }
+                            Spacer(minLength: GrainSpacing.x2)
+                            // THE AFFORDANCE DOES NOT EXIST FOR A RECORDING SOLLEVA HAS NOT
+                            // PROVED IT HOLDS. Nick's ruling in his own words, and this is the
+                            // predicate itself rather than a disabled button - a greyed-out
+                            // control for a state a person cannot reach from here is a puzzle,
+                            // not an affordance. `isOffered` reads the SAME reading the row
+                            // above is drawn from.
+                            if PocketRemoveFromRecorderPresentation
+                                .isOffered(for: row.presence) {
+                                // IT ASKS FIRST. Until this shipped, the row fired the removal
+                                // on the tap while FORGET — which destroys a key and no audio
+                                // — sat behind an `.alert`. The less recoverable gesture was
+                                // the less guarded one, and `confirmation(for:)`, written
+                                // precisely to guard it, had no call site anywhere in the app.
+                                Button {
+                                    confirmingRemovalOf = row.id
+                                } label: {
+                                    Text(PocketRemoveFromRecorderPresentation.action)
+                                        .grainTextStyle(.caption)
+                                        .fixedSize()
+                                }
+                                .buttonStyle(.grain(.text))
+                                .disabled(check.isRemoving || check.isChecking
+                                          || check.isBringingOver)
+                            }
+                        }
+                    }
+                    .padding(.vertical, GrainSpacing.x2)
+                    .accessibilityElement(children: .combine)
+                    .overlay(alignment: .bottom) { hairline }
+                }
+
+                Text(PocketRecorderCheckPresentation.sectionNote)
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, GrainSpacing.x3)
+
+                // WHERE THE COPY GOES, IN THE TERMS OF THE BRAIN THAT IS ON. On the phone-only
+                // tier this says so, and does not borrow the computer's sentence for a
+                // durability the code cannot deliver there.
+                Text(PocketRecorderCheckPresentation.destinationNote(for: brain))
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, GrainSpacing.x2)
+            }
+            .padding(.top, GrainSpacing.x4)
+        }
     }
 
     /// WHAT THE RECORDER ANSWERED WHEN IT WAS ASKED TO REMOVE SOMETHING.

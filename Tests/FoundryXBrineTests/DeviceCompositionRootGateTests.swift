@@ -458,13 +458,37 @@ final class DeviceCompositionRootGateTests: XCTestCase {
         // green over a page that draws nothing. What is checked now is a LINE whose whole
         // content is the reference — which is what a SwiftUI body composition looks like and
         // what a declaration never does.
+        //
+        // THE COMPOSITION IS NOW A BAND ARM. The page walks `RecorderPageLayout.order` and
+        // dispatches on `RecorderPageBand`, so the reference is `case .readings: readingsStrip`
+        // rather than a bare statement. The mutation this must still catch is the same one:
+        // an arm rewired to draw nothing. Whitespace is collapsed so the check holds the
+        // composition and not somebody's column alignment.
         let composes = screen.split(separator: "\n", omittingEmptySubsequences: false)
-            .contains { $0.trimmingCharacters(in: .whitespaces) == "readingsStrip" }
+            .contains {
+                $0.split(whereSeparator: { $0 == " " || $0 == "\t" }).joined(separator: " ")
+                    == "case .readings: readingsStrip"
+            }
         XCTAssertTrue(composes,
                       "`readingsStrip` is declared but never composed into the page body, so "
                           + "the recorder's readings are built and drawn nowhere")
-        for branch in ["if let value = line.value", "if let ago = line.observedAgo",
-                       "} else if let action = line.action {"] {
+
+        // THE SHAPE, AND IT IS THE SAME CLAIM AS BEFORE THE STRIP WAS COMPRESSED: a fact that
+        // was read renders its value AND the moment it was read; a fact nobody asked renders
+        // neither and offers the action instead.
+        //
+        // WHAT CHANGED IS WHERE THE MOMENT AND THE OFFER LIVE, not whether they are drawn.
+        // `RecordingDeviceReadingPresentation.strip(_:)` decides what the whole strip shares,
+        // because three facts read by one check used to print three copies of "read just now"
+        // and three copies of the SAME "Connect and check now" button — one errand offered
+        // three times. So BOTH age branches are named (the shared one and the per-line
+        // fallback for a strip whose readings disagree), and so is the single offer.
+        for branch in ["if let value = line.value",
+                       "RecordingDeviceReadingPresentation.strip(",
+                       "if let shared = strip.sharedAge",
+                       "strip.sharedAge == nil, let ago = line.observedAgo",
+                       "if !strip.unread.isEmpty",
+                       "if let ask = strip.askAction"] {
             XCTAssertTrue(screen.contains(branch),
                           "App/DeviceScreen.swift does not carry `\(branch)`. A fact that was "
                               + "read must render its value AND its age; a fact nobody asked "
@@ -472,9 +496,15 @@ final class DeviceCompositionRootGateTests: XCTestCase {
         }
         // AND THE OFFER IS THE REAL ONE. `perform` is the same switch the page's own actions
         // go through, so this button opens a session rather than being decorative.
-        XCTAssertTrue(screen.contains("Button(action) { perform(action) }"),
+        XCTAssertTrue(screen.contains("Button(ask) { perform(ask) }"),
                       "the \"nobody has asked\" row's action is not wired to `perform`, so the "
                           + "page states an absence and offers a control that does nothing")
+        // AND EVERY UNASKED FACT IS STILL NAMED. The compression removed the repeated BUTTON,
+        // never the labels — a strip that silently drops what it has not got is the
+        // `Unavailable` defect with the row deleted instead of the word.
+        XCTAssertTrue(screen.contains("ForEach(Array(strip.unread.enumerated()), id: \\.offset)"),
+                      "the page does not draw the facts nobody has asked for — compressing the "
+                          + "strip must remove the repetition, never a fact")
 
         // THE NAMED RESIDUE, MEASURED RATHER THAN CLAIMED.
         //

@@ -177,7 +177,19 @@ public struct StoredFileManifestRowPresentation: Equatable, Sendable {
     public let presenceLabel: String
     /// The three places, each with its own answer and its own age. `unknown` renders as
     /// `Unknown`, and a place nobody asked about carries the age `never checked`.
+    ///
+    /// THE RECORDER PAGE NO LONGER DRAWS THESE AS FOUR STACKED LINES — see `presenceBlock`,
+    /// which is the same three readings compressed onto one. They stay on the model because
+    /// they are the long form, and the conversation detail screen still renders one place per
+    /// line where there is exactly one recording to talk about and no list to get past.
     public let places: [PocketPlaceLine]
+    /// THE SAME THREE PLACES, SAID ONCE, ON ONE LINE — and the age they share stated once.
+    ///
+    /// It is built HERE, at the same instant as `places`, rather than in the view. Composed in
+    /// a SwiftUI body against `Date()` it would age against the moment the row was drawn while
+    /// the line beside it aged against the moment the recorder answered, which is two answers
+    /// to one question on one row.
+    public let presenceBlock: PocketPresencePresentation.PocketPresenceBlock
     /// THE READING ITSELF, carried alongside the rendered lines so the reset's cost and the
     /// forget confirmation are computed from the SAME reading the rows are drawn from. A
     /// second count of "how many are only on the recorder", derived from the strings, is how
@@ -217,6 +229,7 @@ public enum StoredFileDevicePresentation {
                   size: extent(sizeBytes: $0.sizeBytes),
                   presenceLabel: PocketPresencePresentation.label($0.presence),
                   places: PocketPresencePresentation.lines($0.presence, now: now),
+                  presenceBlock: PocketPresencePresentation.block($0.presence, now: now),
                   presence: $0.presence)
         })
     }

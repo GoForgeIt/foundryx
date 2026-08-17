@@ -264,6 +264,70 @@ enum RecorderPageSurface {
             .map { ns.substring(with: $0.range) }
     }
 
+    // MARK: - What the page renders about ONE ROW, and in what order it renders its bands
+
+    /// THE FIELDS OF ONE SHELF ROW THAT STATE WHERE THE RECORDING IS.
+    ///
+    /// `presenceLabel` is `PocketPresencePresentation.label(_:)` — a prose summary DERIVED from
+    /// the three places. `places` is the three places, one line each. `presenceBlock` is the
+    /// three places compressed onto one line. Any two of these on one row is the same fact
+    /// said twice, and until this gate existed the page rendered the first two together: four
+    /// lines for three facts, nineteen times down Nick's screen.
+    static let presenceBearingRowFields = ["presenceLabel", "places", "presenceBlock"]
+
+    /// Which of those a body actually renders, deduplicated, in the order they first appear.
+    static func presenceFieldsRendered(in body: String) -> [String] {
+        let code = AppSourceTree.code(of: body)
+        var found: [String] = []
+        for hit in matchesIn(code,
+                             pattern: "\\brow\\s*\\.\\s*(?:"
+                                 + presenceBearingRowFields.joined(separator: "|") + ")\\b") {
+            let field = hit.split(separator: ".").last.map {
+                $0.trimmingCharacters(in: .whitespaces)
+            } ?? hit
+            if !found.contains(field) { found.append(field) }
+        }
+        return found
+    }
+
+    /// EVERY BAND THE PAGE'S OWN BODY NAMES, read out of the `case .<band>:` arms it dispatches
+    /// on. The ORDER is the kit's (`RecorderPageLayout.order`) and Brine holds it there; this
+    /// is the other half — that the view actually walks that order instead of writing eleven
+    /// statements into a `VStack` where nothing can read them.
+    static func bandsTheViewDraws() throws -> [String] {
+        let body = declarationBody(of: "RecordingDevicePageView",
+                                   in: try text(of: pageFile)) ?? ""
+        return matchesIn(AppSourceTree.code(of: body),
+                         pattern: "case\\s+\\.([a-zA-Z0-9_]+)\\s*:")
+            .map { $0.replacingOccurrences(of: "case", with: "")
+                     .replacingOccurrences(of: ":", with: "")
+                     .replacingOccurrences(of: ".", with: "")
+                     .trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// Whether the page's body drives its layout off a named value rather than off its own
+    /// statement order. Without this the kit's array is a decision nothing obeys.
+    static func viewWalksTheDecidedOrder() throws -> Bool {
+        let body = declarationBody(of: "RecordingDevicePageView",
+                                   in: try text(of: pageFile)) ?? ""
+        return AppSourceTree.code(of: body).contains("RecorderPageLayout.order")
+    }
+
+    /// Whether the page renders the COMPRESSED readings strip rather than a line per reading.
+    static func viewRendersTheCompressedStrip() throws -> Bool {
+        let body = declarationBody(of: "RecordingDevicePageView",
+                                   in: try text(of: pageFile)) ?? ""
+        return AppSourceTree.code(of: body)
+            .contains("RecordingDeviceReadingPresentation.strip(")
+    }
+
+    static func matchesIn(_ code: String, pattern: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let ns = code as NSString
+        return regex.matches(in: code, range: NSRange(location: 0, length: ns.length))
+            .map { ns.substring(with: $0.range) }
+    }
+
     /// A shell function's balanced-brace body. `ci-gates.sh` is not Swift, so the Swift
     /// declaration reader above does not find `phase_uiproof() {` — and ruling over the whole
     /// file would let a mention in a comment, or in a different phase entirely, satisfy the

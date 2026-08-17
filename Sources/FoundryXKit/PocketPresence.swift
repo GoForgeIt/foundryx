@@ -299,11 +299,110 @@ public enum PocketPresencePresentation {
         "\(line.place): \(line.answer) - \(line.age)"
     }
 
+    // MARK: - THE SAME THREE PLACES, SAID ONCE, ON ONE LINE
+
+    // WHAT WAS ON NICK'S SCREEN, VERBATIM, FOR ONE RECORDING:
+    //
+    //     Only on the recorder
+    //     On the recorder: Yes - just now
+    //     On this iPhone: No - just now
+    //     Safe elsewhere: No - just now
+    //
+    // Four lines. THREE facts and one summary, and the summary is `label(_:)` — which is the
+    // other three said again in prose, derived from them by this very file. Nineteen of those
+    // stacked is the page he was shown, and it is the reason the controls that act on those
+    // recordings were off the bottom of it.
+    //
+    // NOTHING IS DROPPED TO FIX IT. The three places and their ages are load-bearing: they are
+    // the whole evidence that deleting a recording is safe, and `isOnlyOnTheRecorder` and
+    // `isDurableElsewhere` are read straight off them. So the SUMMARY is what leaves the row —
+    // it is the only line that states nothing the other three do not — and the three places are
+    // compressed onto one line with the age they share stated once.
+    //
+    // `label(_:)` IS NOT DELETED. It is the shelf read model's one-line answer and eight
+    // scenarios assert over it; it simply stops being drawn beside the lines it summarises.
+
+    /// The SHORT name of a place, for the row that says all three at once. It is a second
+    /// spelling of the same place, and it lives here, next to the long one, for the reason
+    /// every string on this surface does: a word invented in a `Text(…)` is in no population
+    /// the promise gate or the language lexer can see.
+    public static let onRecorderShortPlace = "Recorder"
+    public static let onThisPhoneShortPlace = "iPhone"
+    public static let safeElsewhereShortPlace = "Elsewhere"
+
+    /// What the row says before an age it is stating for the whole row rather than per place.
+    public static let readPrefix = "Read "
+
+    /// ONE PLACE, AS SHORT AS IT GETS: the place and its answer, and a flag the view turns into
+    /// emphasis. The flag is here rather than in the view because "which of these three is the
+    /// one to look at" is a decision, and a decision in a SwiftUI body is a decision no test in
+    /// this repository can compile.
+    public struct PocketPresenceChip: Equatable, Sendable {
+        public let place: String
+        public let answer: String
+        /// The place is holding it. The view draws these in the ink colour and the rest faint.
+        public let isHeld: Bool
+
+        public init(place: String, answer: String, isHeld: Bool) {
+            self.place = place; self.answer = answer; self.isHeld = isHeld
+        }
+    }
+
+    /// ONE ROW'S ANSWER TO "WHERE IS THIS RECORDING", COMPLETE AND SAID ONCE.
+    public struct PocketPresenceBlock: Equatable, Sendable {
+        /// The three places, in the order they have always been listed, each named once.
+        public let chips: [PocketPresenceChip]
+        /// How old those answers are. ONE clause when every answered place shares an instant —
+        /// which is the ordinary case, because one check reads all three — and one clause per
+        /// place when they do not. `nil` when no place has an instant at all, because every
+        /// chip already reads `Unknown` and saying it a fourth time is the defect this closes.
+        public let ageLine: String?
+
+        public init(chips: [PocketPresenceChip], ageLine: String?) {
+            self.chips = chips; self.ageLine = ageLine
+        }
+    }
+
+    /// - Parameter now: the instant the ages are rendered against, injected for the same reason
+    ///   `lines(_:now:)` injects it — a scenario states an age as a fact instead of racing it.
+    public static func block(_ presence: PocketRecordingPresence,
+                             now: Date) -> PocketPresenceBlock {
+        let places: [(short: String, reading: PocketPlaceReading)] = [
+            (onRecorderShortPlace, presence.onRecorder),
+            (onThisPhoneShortPlace, presence.onThisPhone),
+            (safeElsewhereShortPlace, presence.safeElsewhere),
+        ]
+        let chips = places.map {
+            PocketPresenceChip(place: $0.short,
+                               answer: answer($0.reading.answer),
+                               isHeld: $0.reading.isYes)
+        }
+        // A place with no instant contributes NO age, and it is never silently dropped: its
+        // chip already reads `Unknown`, which is the whole of what "nobody asked" means here.
+        let dated = places.filter { $0.reading.observedAt != nil }
+        guard !dated.isEmpty else { return PocketPresenceBlock(chips: chips, ageLine: nil) }
+        let ages = dated.map { age($0.reading.observedAt, now: now) }
+        if Set(ages).count == 1 {
+            return PocketPresenceBlock(chips: chips, ageLine: readPrefix + ages[0])
+        }
+        let each = zip(dated, ages).map { "\($0.0.short) \($0.1)" }.joined(separator: ", ")
+        return PocketPresenceBlock(chips: chips, ageLine: readPrefix + each)
+    }
+
+    /// EVERY LINE ONE ROW STATES ABOUT WHERE A RECORDING IS, in render order. The population
+    /// the "nothing is said twice" rule is held over — a rule over a set somebody assembled by
+    /// hand would move with the mutation it exists to catch.
+    public static func rowLines(_ presence: PocketRecordingPresence, now: Date) -> [String] {
+        let b = block(presence, now: now)
+        return b.chips.map { "\($0.place) \($0.answer)" } + [b.ageLine].compactMap { $0 }
+    }
+
     public static var everyLine: [String] {
         [onRecorderPlace, onThisPhonePlace, safeElsewherePlace,
          yesAnswer, noAnswer, unknownAnswer, neverCheckedAge,
          inSollevaLabel, onlyOnRecorderLabel, phoneNotCheckedLabel,
-         onThisPhoneOnlyLabel, safeElsewhereLabel]
+         onThisPhoneOnlyLabel, safeElsewhereLabel,
+         onRecorderShortPlace, onThisPhoneShortPlace, safeElsewhereShortPlace]
     }
 }
 

@@ -563,7 +563,6 @@ public enum RecordingDevicePage {
         // them could say `Unavailable` — battery, firmware and gap recovery — which is the
         // `N/A · N/A · N/A` strip in the shipped word. Two of those three were never
         // capabilities; they were readings with nowhere durable to live, and they are below.
-        let capabilities = RecordingDeviceConnectPresentation.reportedCapabilityLines(declared)
         // THE READINGS ARE A CLASS FACT, and this is the one place that decides it. A
         // record-then-sync recorder can be asked for its charge, its room and its firmware,
         // so an unasked fact there is a question with an answer somebody can go and get. A
@@ -572,6 +571,21 @@ public enum RecordingDevicePage {
         let readings = deviceClass == .recordThenSync
             ? RecordingDeviceReadingPresentation.lines(input.readings, now: now)
             : []
+        // AND THE STRIP DOES NOT SAY AGAIN WHAT THE READINGS ALREADY SAID.
+        //
+        // The paragraph above claimed battery and firmware had left this strip. THEY HAD NOT —
+        // this line handed every declared key straight through, and the composition declares
+        // battery and firmware for any CONNECTED recorder. The recorder page's own simulator
+        // proof photographed the result on 2026-08-17: `58%` and `1.6` as readings, and
+        // `Battery 58%` and `Firmware 1.6` again one band lower, on one screen. The comment
+        // was an intention nothing carried out; this is the subtraction itself.
+        //
+        // IT IS SUBTRACTED ONLY WHERE THE OTHER BAND EXISTS. A device with no readings strip
+        // (an Omi, a phone microphone) loses nothing: `readings` is empty for it, so nothing
+        // is excluded and its battery stays exactly where it always was.
+        let capabilities = RecordingDeviceConnectPresentation.reportedCapabilityLines(
+            declared,
+            excluding: readings.isEmpty ? [] : RecordingDeviceReadingPresentation.order)
         // THE HEADER OF A RECORDER IS ABOUT A CHECK, NEVER ABOUT A LINK.
         //
         // `input.link.label` was the status for every class, and for a record-then-sync

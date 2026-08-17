@@ -285,10 +285,33 @@ public enum RecordingDeviceConnectPresentation {
     /// §6a draws exactly that, with a note saying the LINK is why. For a built-in microphone
     /// it is the `N/A · N/A · N/A` strip in a different word — four rows of "Unavailable" for
     /// four things a phone microphone does not have and never will.
+    /// - Parameter owned: keys a DIFFERENT band of the same page already states, which this
+    ///   strip must therefore not state again.
+    ///
+    /// THE DEFECT THIS PARAMETER CLOSES, photographed by the recorder page's own simulator
+    /// proof on 2026-08-17. `RecordingDevicePage.resolve` carries a comment saying battery and
+    /// firmware *"were never capabilities; they were readings with nowhere durable to live, and
+    /// they are below"* — and then handed this function every declared key. For a CONNECTED
+    /// recorder the composition declares battery and firmware, so the page drew `58%` and `1.6`
+    /// as readings and then `Battery 58%` and `Firmware 1.6` again, one band lower. The comment
+    /// described an intention; nothing carried it out. Nick's word for the result was
+    /// "duplicated text", and he is reading the same number twice within one screen height.
+    ///
+    /// It is a parameter rather than a hard-coded subtraction because the exclusion is only
+    /// true where the other band EXISTS: an Omi renders no readings strip, so its battery is a
+    /// capability and belongs here. The caller passes what its own readings band is holding.
     public static func reportedCapabilityLines(
-        _ capabilities: RecordingDeviceCapabilities
+        _ capabilities: RecordingDeviceCapabilities,
+        excluding owned: [RecordingDeviceCapabilityKey] = []
     ) -> [RecordingDeviceCapabilityLine] {
-        capabilityLines(capabilities).filter(\.isAvailable)
+        // BY KEY, NOT BY LABEL. `capabilityLines` walks `capabilityOrder` and returns one line
+        // per key in that order, so zipping rejoins each line with the key it came from. A
+        // label join would silently stop excluding anything the day two bands spell one fact
+        // two ways, which is the exact failure this exclusion exists to prevent.
+        let excluded = Set(owned.map(\.rawValue))
+        return zip(capabilityOrder, capabilityLines(capabilities))
+            .filter { !excluded.contains($0.0.rawValue) && $0.1.isAvailable }
+            .map(\.1)
     }
 
     public static func row(_ entry: RecordingDeviceEntry) -> RecordingDeviceRowPresentation {

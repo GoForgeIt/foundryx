@@ -700,7 +700,7 @@
       "reached_from": [
         {
           "via": "device-screen",
-          "anchor": "                                        .isOffered(for: row.presence) {"
+          "anchor": "                                .isOffered(for: row.presence) {"
         }
       ],
       "verdict": "reachable",

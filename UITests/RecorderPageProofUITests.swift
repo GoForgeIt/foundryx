@@ -139,4 +139,57 @@ final class RecorderPageProofUITests: XCTestCase {
                            + "proof cannot fail")
         answered.terminate()
     }
+
+    /// THE CONTROLS COME BEFORE THE LIST, MEASURED ON A REAL RENDER.
+    func testEveryControlIsDrawnAboveTheListOfRecordings() throws {
+        let answered = open("shelfAnswered")
+        let removeAction = "Remove it from the recorder"
+        // Wait for the shelf itself, so the frames below are measured on a laid-out page.
+        XCTAssertTrue(answered.buttons[removeAction].firstMatch.waitForExistence(timeout: 20),
+                      "the answered shelf drew no row, so there is no list to be above")
+
+        // MEASURED ON A REAL RENDER RATHER THAN READ OUT OF THE SOURCE.
+        //
+        // `RecorderPageLayout` decides the order and Brine holds it, but a decision the page
+        // walks is still only a decision until something LOOKS. This is the look: every control
+        // that acts on what the recorder is holding must be drawn above the first row of the
+        // list of it.
+        //
+        // WHY A FRAME COMPARISON AND NOT `isHittable`. A control can be on screen because the
+        // simulator is tall and the fixture has three rows — Nick's recorder had nineteen. A
+        // viewport test would pass on the old layout on this hardware and fail on his, which is
+        // the opposite of a gate. Y-ORDER IS SIZE-INDEPENDENT: the removal button lives INSIDE
+        // a shelf row, so "the bring-over sits above it" is exactly the claim, at any length.
+        // Measured against the old layout, where `bringOver` was written after the row
+        // `ForEach`: this assertion is the one that fails.
+        let bringOverButton = answered.buttons["Bring over"].firstMatch
+        let rowButton = answered.buttons[removeAction].firstMatch
+        if bringOverButton.exists && rowButton.exists {
+            XCTAssertLessThan(bringOverButton.frame.maxY, rowButton.frame.minY,
+                              "the bring-over control is drawn at y=\(bringOverButton.frame.minY)"
+                                + " and a row of the list at y=\(rowButton.frame.minY) — the "
+                                + "control is INSIDE or BELOW the list, so how far a person "
+                                + "scrolls to reach it is decided by how full their recorder is")
+        } else {
+            XCTFail("the answered page renders no bring-over button and no row button, so the "
+                        + "order of the two cannot be measured and this proof cannot fail")
+        }
+        shoot(answered, "recorder-page-05-controls-above-the-list")
+
+        // AND A PICTURE OF THE LIST ITSELF, which is now below the fold precisely BECAUSE the
+        // controls are above it. Without this the one band this change reshaped hardest — the
+        // row, which went from four stacked lines about where a recording is to one — would
+        // ship in no photograph at all, which is the exact hole this whole proof exists to
+        // close.
+        var swipes = 0
+        while !answered.buttons[removeAction].firstMatch.isHittable, swipes < 6 {
+            answered.swipeUp()
+            swipes += 1
+        }
+        XCTAssertTrue(answered.buttons[removeAction].firstMatch.isHittable,
+                      "the list of recordings could not be reached by scrolling at all, so no "
+                          + "picture of a row can be taken and this proof cannot fail")
+        shoot(answered, "recorder-page-06-the-list-of-recordings")
+        answered.terminate()
+    }
 }

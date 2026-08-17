@@ -133,6 +133,74 @@ public enum RecordingDeviceReadingPresentation {
         }
     }
 
+    // MARK: - THE STRIP, SAID ONCE INSTEAD OF ONCE PER FACT
+
+    // WHAT WAS ON NICK'S SCREEN. A recorder nobody had checked drew three lines, and each one
+    // carried its own copy of the same button:
+    //
+    //     Battery      [ Connect and check now ]
+    //     Free space   [ Connect and check now ]
+    //     Firmware     [ Connect and check now ]
+    //
+    // One errand, offered three times, and it is the SAME errand — `askAction` is one constant
+    // and every unread line carries it by construction. A recorder that HAD answered drew the
+    // mirror image: three numbers each followed by its own "read just now", for three facts one
+    // check read at one instant.
+    //
+    // NOTHING IS DROPPED. Every fact is still named, asked or not, and the way out of an
+    // unasked fact is still offered — once, for the strip, instead of once per row of it.
+
+    /// The strip as one thing rather than as N things, so a view renders what was decided here
+    /// instead of deciding it in a body no test can compile.
+    public struct ReadingStrip: Equatable, Sendable {
+        /// The facts that carry a number, in `order`.
+        public let read: [RecordingDeviceReadingLine]
+        /// The facts nobody has asked for, in `order`. NAMED, never omitted — a strip that
+        /// silently drops what it has not got is the `Unavailable` defect with the row deleted
+        /// instead of the word.
+        public let unread: [RecordingDeviceReadingLine]
+        /// The ONE age, when every fact that has one was read at the same moment — which is the
+        /// ordinary case, because one check reads all of them. `nil` when they differ, and then
+        /// each read line states its own.
+        public let sharedAge: String?
+        /// The ONE action that would go and ask, when every unasked fact offers the same one.
+        /// `nil` when nothing is unasked.
+        public let askAction: String?
+
+        public init(read: [RecordingDeviceReadingLine],
+                    unread: [RecordingDeviceReadingLine],
+                    sharedAge: String?,
+                    askAction: String?) {
+            self.read = read; self.unread = unread
+            self.sharedAge = sharedAge; self.askAction = askAction
+        }
+
+        /// The paired-existence half: a compression that compressed a strip with nothing in it
+        /// satisfies every rule below and proves nothing.
+        public var isEmpty: Bool { read.isEmpty && unread.isEmpty }
+    }
+
+    public static func strip(_ lines: [RecordingDeviceReadingLine]) -> ReadingStrip {
+        let read = lines.filter(\.wasRead)
+        let unread = lines.filter { !$0.wasRead }
+        // A read line whose age is missing cannot be covered by a shared one, so the strip
+        // falls back to per-line ages rather than stating an age for a fact that has none.
+        // EVERY read line must have an age AND they must all be the same one — `Set` alone
+        // would collapse three lines to one entry and then call a strip with a missing age
+        // "shared".
+        let ages = read.map(\.observedAgo)
+        let shared: String? = (!read.isEmpty
+                               && !ages.contains(where: { $0 == nil })
+                               && Set(ages.compactMap { $0 }).count == 1)
+            ? ages.first ?? nil
+            : nil
+        let asks = Set(unread.compactMap(\.action))
+        return ReadingStrip(read: read,
+                            unread: unread,
+                            sharedAge: shared,
+                            askAction: asks.count == 1 ? asks.first : nil)
+    }
+
     /// How old a reading is, in words.
     ///
     /// COARSE ON PURPOSE, AND NEVER A CLOCK TIME. "read 20 minutes ago" is a claim this page
