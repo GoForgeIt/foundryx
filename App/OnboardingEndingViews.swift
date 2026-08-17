@@ -321,7 +321,17 @@ struct OnboardingDestinationStep: View {
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("tier-comparison")
 
-                VStack(spacing: GrainSpacing.x2) {
+                // ONE alignment. This stack used to declare none, and a VStack with no
+                // alignment centres its children — so three GrainButtons of three
+                // different widths (GrainButtonStyle sets a height and horizontal padding
+                // but never maxWidth, so each hugs its title) ended up centred relative to
+                // each other inside a box that shrink-wrapped to the longest label and was
+                // itself pinned to the leading edge. Nick: "centered in a left aligned
+                // box". The screen is `.leading` throughout — title, blurb, comparison —
+                // so the buttons are too, and the stack spans the column so a button's
+                // leading edge lands on the same left edge as the title rather than on the
+                // edge of the shrink-wrapped box.
+                VStack(alignment: .leading, spacing: GrainSpacing.x2) {
                     GrainButton(BrainChoice.foundryCloud.destinationLabel,
                                 variant: .filled, size: .regular) {
                         brains.select(.foundryCloud)
@@ -338,6 +348,7 @@ struct OnboardingDestinationStep: View {
                         onFinish(.myComputer)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.bottom, GrainSpacing.x4)
             }
         }
