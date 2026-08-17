@@ -457,7 +457,9 @@ final class AuthPresenter: NSObject, ASWebAuthenticationPresentationContextProvi
 
 /// Keychain-backed store for the signed-in identity (id_token + refresh).
 enum AuthStore {
-    private static let service = "com.goforgeit.foundryx.auth"
+    /// The one, real, shipped identity item. Never write it from a test — see
+    /// `setKeychainServiceForTests`.
+    static let productionKeychainService = "com.goforgeit.foundryx.auth"
     private static let account = "identity"
     /// UserDefaults MIRROR of "someone is signed in" — no secret, just a boolean.
     /// Needed because the keychain item is unreadable while the device is LOCKED,
@@ -467,6 +469,25 @@ enum AuthStore {
     /// stamps it.
     static let signedInMirrorKey = "foundryx.auth.signed-in"
     #if DEBUG || PERF_HARNESS
+    /// THE KEYCHAIN IS MACHINE-GLOBAL AND OUTLIVES THE TEST PROCESS.
+    ///
+    /// `service` is a fixed string, so a test that drove the real `save(_:)` wrote
+    /// the developer's (and the self-hosted CI runner's) actual login keychain, and
+    /// nothing ever removed it. Every LATER test process then read
+    /// `identityPresence() == .present` with no matching activation record in its own
+    /// defaults, which `CaptureAccountScope` resolves — correctly, for production — to
+    /// `.blocked`. `.blocked` ⇒ no binding ⇒ `CaptureWAL.performDurableMutation` writes
+    /// nothing, so nine unrelated suites failed with "a file that should exist does not".
+    /// One leaked keychain item, 42 assertion failures, no error message naming it.
+    ///
+    /// The seam mirrors `CaptureAccountScope.setPairingKeychainServicesForTests`: tests
+    /// exercise the REAL persistence code against a service that cannot collide with the
+    /// shipped one. Installed bundle-wide by `FoundryXTestBundleHygiene` so no suite has
+    /// to remember, and so a machine already polluted by an older build is unaffected.
+    nonisolated(unsafe) private static var keychainServiceOverrideForTests: String?
+    static func setKeychainServiceForTests(_ service: String?) {
+        keychainServiceOverrideForTests = service
+    }
     nonisolated(unsafe) private static var identityEraseForTests:
         (() -> AccountSurfaceOutcome)?
     static func setIdentityEraseForTests(
@@ -474,7 +495,16 @@ enum AuthStore {
     ) {
         identityEraseForTests = erase
     }
+    private static var service: String {
+        keychainServiceOverrideForTests ?? productionKeychainService
+    }
+    #else
+    private static var service: String { productionKeychainService }
     #endif
+
+    /// Which service this build is actually reading and writing. Lets the test bundle
+    /// PROVE it is not bound to the shipped one instead of assuming it.
+    static var effectiveKeychainService: String { service }
 
     static func save(
         _ id: AuthIdentity,
