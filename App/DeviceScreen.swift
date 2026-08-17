@@ -431,6 +431,19 @@ struct RecordingDevicePageView: View {
 
     @State private var showingEducation = false
     @State private var confirmingForget = false
+    /// WHAT THE ACCOUNT HOLDS FOR THIS RECORDER NOW, as opposed to when the row was opened.
+    ///
+    /// THE DEFECT THIS CLOSES. `input` is captured when the row's `NavigationLink` is pushed
+    /// (`DeviceScreen.devicePage(for:)`), and a check writes the recorder's charge, its
+    /// firmware and how full it is straight to the account's store. Nothing re-read it:
+    /// `RecordingDeviceListModel.refresh` fires only on the Omi's connection state, its
+    /// battery, `saved` or `sources`, and a check on a record-then-sync recorder touches none
+    /// of those. So the shelf filled with recordings while Battery, Free space and Firmware
+    /// each went on offering "Connect and check now" over numbers already on this phone's disk.
+    ///
+    /// `nil` until a check ends, so a page nothing has happened on renders exactly the value
+    /// it was pushed with.
+    @State private var refreshedInput: RecordingDeviceListInput?
     /// WHICH RECORDING THE OWNER IS BEING ASKED ABOUT, by the recorder's own `<date>/<timestamp>`.
     ///
     /// It holds the ID rather than a Bool because the confirmation is per-recording and the
@@ -504,8 +517,26 @@ struct RecordingDevicePageView: View {
     /// `canForget: shape != .builtInMic` — two shape branches on a screen whose whole rule is
     /// that no surface switches on shape. Education now follows the negotiated protocol and
     /// forget follows the store record, both inside `resolve`, where Brine can hold them.
+    /// THE DEVICE AS IT IS NOW, not as it was when the row was opened. Everything the page
+    /// renders resolves from this; `input` stays the pushed value so `refreshedInput` is always
+    /// derived from the same identity rather than from itself.
+    private var live: RecordingDeviceListInput { refreshedInput ?? input }
+
+    /// THE ONLY LIVE STATE A RECORD-THEN-SYNC RECORDER HAS, and the decision is the kit's.
+    ///
+    /// A check opens its own session and closes it again, so this page has no link to report
+    /// and never had one — `input.link` is `.disconnected` for every `.filePull` identity by
+    /// construction. What it does have is a check: one running, or one that answered at an
+    /// instant this phone's clock recorded. `swift test` cannot compile `App/`, so the choice
+    /// between the three lives in `RecordingDeviceCheckState` where Brine can hold it.
+    private var checkState: RecordingDeviceCheckState {
+        RecordingDeviceCheckState.resolve(isChecking: check.isChecking,
+                                          answeredAt: check.shelfObservedAt,
+                                          readings: live.readings)
+    }
+
     private var page: RecordingDevicePagePresentation {
-        RecordingDevicePage.resolve(input, canConnect: canReachDevice)
+        RecordingDevicePage.resolve(live, canConnect: canReachDevice, check: checkState)
     }
 
     var body: some View {
@@ -636,6 +667,41 @@ struct RecordingDevicePageView: View {
         // execute a SwiftUI body — which is precisely how that comparison shipped untested.
         .onChange(of: scenePhase) { phase in
             check.sceneChanged(to: PocketErrandScenePhase(phase))
+        }
+        // A CHECK THAT ENDED CHANGED WHAT THIS ACCOUNT HOLDS FOR THIS RECORDER, so the page
+        // the check was run from goes and re-reads it.
+        //
+        // ON THE FALLING EDGE, and that is the whole event. `PocketRecorderCheck` keeps the
+        // readings BEFORE it attempts the listing, so they are on disk by the time this fires
+        // even for a recorder that answered its charge and then refused to say what it was
+        // holding — which is precisely the run whose numbers a person most wants.
+        .onChange(of: check.isChecking) { checking in
+            guard !checking else { return }
+            reReadWhatTheCheckWrote()
+        }
+    }
+
+    /// THE RE-READ, OFF THE MAIN ACTOR. `RecordingDeviceStore.current()` resolves the account
+    /// binding — a process-wide lock plus an on-disk registry read — and then decodes a JSON
+    /// file, which is the per-row main-actor disk read `LazyView` exists to prevent.
+    ///
+    /// THE TASK INHERITS THE MAIN ACTOR, for the reason `forget()` names 100 lines down: only
+    /// the disk read is detached, because `onChange` is a main-actor callback owned by the
+    /// screen above and handing it to a detached task makes it a `sending` closure crossing an
+    /// isolation boundary, which does not compile — and `swift test` cannot compile `App/` to
+    /// say so.
+    private func reReadWhatTheCheckWrote() {
+        let pushed = input
+        Task {
+            let refreshed = await Task.detached(priority: .utility) {
+                RecordingDevicePageFacts.refreshed(pushed)
+            }.value
+            refreshedInput = refreshed
+            // AND THE LIST BEHIND THIS PAGE. Its rows carry the battery this same check just
+            // measured, and it composes them from the same store — so a check that changed
+            // this page and left the list it was opened from stale would put two answers to
+            // one question on two screens a back-swipe apart.
+            onChange()
         }
     }
 
@@ -1435,10 +1501,15 @@ final class PocketRecorderCheckModel: ObservableObject {
     ///
     /// It sets no behaviour. `run` and `bringOver` are untouched, and a proof that taps
     /// anything gets the real code path or nothing.
+    /// - Parameter proofShelfAnsweredAt: when the recorder answered the listing being
+    ///   photographed. WITHOUT IT THE PICTURE CONTRADICTS ITSELF: the header states what a
+    ///   check is doing, so a mount that hands over an answered shelf and no instant
+    ///   photographs "Not checked yet" above a list of files the recorder just named.
     init(proofIsChecking: Bool = false,
          proofDetail: StoredFileDeviceDetailPresentation? = nil,
          proofMessage: String? = nil,
-         proofOfferedRecording: PocketRecording? = nil) {
+         proofOfferedRecording: PocketRecording? = nil,
+         proofShelfAnsweredAt: Date? = nil) {
         // A PHOTOGRAPH RUNS NO ERRAND, so it never takes any time — but the lease must exist
         // or the model has a stored property this initialiser leaves unset.
         lease = PocketBackgroundLease(time: Self.backgroundTime())
@@ -1446,6 +1517,7 @@ final class PocketRecorderCheckModel: ObservableObject {
         detail = proofDetail
         message = proofMessage
         offeredRecording = proofOfferedRecording
+        shelfObservedAt = proofShelfAnsweredAt
     }
     #endif
 

@@ -779,7 +779,24 @@ private final class UnifiedDeviceListWorld {
                               ?? false,
                           "the sentence no longer names the only recording indicator there is")
             XCTAssertEqual(page.classCaption, RecordingDeviceClass.recordThenSync.caption)
-            XCTAssertEqual(page.status, RecordingDeviceLinkState.disconnected.label)
+            // THIS USED TO READ `page.status == RecordingDeviceLinkState.disconnected.label`,
+            // AND THAT EXPECTATION WAS THE DEFECT WRITTEN DOWN.
+            //
+            // A record-then-sync recorder has no live link for anything to report: a check
+            // opens its own authenticated session and closes it again, and the composition
+            // never puts this class in the link map at all — so `.disconnected` here was not a
+            // measurement, it was the default of a field this device does not fill. The header
+            // therefore read "Not connected" while Solleva was on the line listing that
+            // recorder's files. What the header says now is what a CHECK is doing, and this
+            // fixture is a recorder nobody has checked.
+            // (`features/a-check-changes-the-page-it-was-run-from.feature` holds the other two
+            // states and the prohibition below over all of them.)
+            XCTAssertEqual(page.status, RecordingDevicePage.neverCheckedStatus)
+            for link in [RecordingDeviceLinkState.connected, .reconnecting, .disconnected] {
+                XCTAssertNotEqual(page.status, link.label,
+                                  "the recorder's header states a link this device class never "
+                                      + "has")
+            }
 
         case "the page offers no record or stop control":
             let page = try requirePage()

@@ -118,6 +118,28 @@ enum RecorderPageProofFixture {
             declared[RecordingDeviceCapabilityKey.batteryLevel.rawValue] = batteryPercent
             declared[RecordingDeviceCapabilityKey.firmwareVersion.rawValue] = firmwareVersion
         }
+        // WHAT THE RECORDER HAS SAID, on the one state where it has said anything.
+        //
+        // Until this existed the proof photographed the readings strip's "nobody has asked"
+        // branch in all three states and its "here is the number, and when it was read" branch
+        // in none — so the half of that strip a person sees after every successful check was
+        // the half no picture had ever shown. It is seeded only for `shelfAnswered` because
+        // that is the only state in which a check has come back: a recorder mid-check has not
+        // answered yet, and `neverAsked` is the state whose whole content is that nobody has.
+        var readings: [String: RecordingDeviceReading] = [:]
+        if state == .shelfAnswered {
+            readings = [
+                RecordingDeviceCapabilityKey.batteryLevel.rawValue:
+                    RecordingDeviceReading(value: batteryPercent, observedAt: listedAt),
+                RecordingDeviceCapabilityKey.firmwareVersion.rawValue:
+                    RecordingDeviceReading(value: firmwareVersion, observedAt: listedAt),
+                RecordingDeviceCapabilityKey.freeSpace.rawValue:
+                    RecordingDeviceReading(
+                        value: RecordingDeviceReadingPresentation.freeSpace(
+                            usedKilobytes: 2_000_000, capacityKilobytes: 8_000_000),
+                        observedAt: listedAt),
+            ]
+        }
         return RecordingDeviceListInput(
             identity: identity,
             displayName: deviceName,
@@ -125,7 +147,8 @@ enum RecorderPageProofFixture {
             link: connected ? .connected : .disconnected,
             lastConnected: nil,
             isRemembered: true,
-            negotiatedProtocol: PocketRecordingDeviceBridge.protocolIdentifier)
+            negotiatedProtocol: PocketRecordingDeviceBridge.protocolIdentifier,
+            readings: readings)
     }
 
     /// THREE RECORDINGS, IN BOTH TIMESTAMP FORMATS THE DEVICE ACTUALLY USES. Sizes are bytes;
@@ -211,8 +234,14 @@ enum RecorderPageProofFixture {
         case .errandRunning:
             return PocketRecorderCheckModel(proofIsChecking: true)
         case .shelfAnswered:
+            // WHEN THE RECORDER ANSWERED, because the header states what a check is doing. A
+            // shelf handed over with no instant photographs "Not checked yet" above a list of
+            // files the recorder has just named — a page contradicting itself in two lines,
+            // which is the failure this file's own header says teaches a reviewer to distrust
+            // the pictures.
             return PocketRecorderCheckModel(proofDetail: detail,
-                                            proofOfferedRecording: offered)
+                                            proofOfferedRecording: offered,
+                                            proofShelfAnsweredAt: listedAt)
         }
     }
 }

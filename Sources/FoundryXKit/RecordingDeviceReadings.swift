@@ -141,11 +141,22 @@ public enum RecordingDeviceReadingPresentation {
     /// A reading from the future — a phone whose clock moved backwards — reads as just now
     /// rather than as a negative age.
     public static func ago(from observedAt: Date, to now: Date) -> String {
+        "read \(elapsed(from: observedAt, to: now))"
+    }
+
+    /// THE AGE WITHOUT THE VERB, so a second surface can put its own verb in front of it
+    /// rather than spell the arithmetic again.
+    ///
+    /// The recorder page's header says when the RECORDER ANSWERED, and a strip line says when
+    /// a FACT WAS READ. Those are two sentences about one instant, and computing the instant
+    /// twice is how "read 20 minutes ago" and "Answered 19 minutes ago" end up one above the
+    /// other on the same screen. Same rounding, same words, one implementation.
+    public static func elapsed(from observedAt: Date, to now: Date) -> String {
         let seconds = now.timeIntervalSince(observedAt)
-        guard seconds >= 60 else { return "read just now" }
-        if seconds < 3_600 { return "read \(plural(Int(seconds / 60), "minute")) ago" }
-        if seconds < 86_400 { return "read \(plural(Int(seconds / 3_600), "hour")) ago" }
-        return "read \(plural(Int(seconds / 86_400), "day")) ago"
+        guard seconds >= 60 else { return "just now" }
+        if seconds < 3_600 { return "\(plural(Int(seconds / 60), "minute")) ago" }
+        if seconds < 86_400 { return "\(plural(Int(seconds / 3_600), "hour")) ago" }
+        return "\(plural(Int(seconds / 86_400), "day")) ago"
     }
 
     private static func plural(_ count: Int, _ noun: String) -> String {

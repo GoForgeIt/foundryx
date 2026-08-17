@@ -391,7 +391,14 @@ public struct RecordingDevicePagePresentation: Equatable, Sendable {
     public let displayName: String
     /// `Live` / `Records on its own` — the eyebrow above the status.
     public let classCaption: String
-    /// LINK REACHABILITY ONLY: `Connected` / `Connecting` / `Not connected`.
+    /// WHAT THIS DEVICE CLASS ACTUALLY HAS A LIVE ANSWER FOR.
+    ///
+    /// For a LIVE device it is link reachability and nothing else: `Connected` / `Connecting` /
+    /// `Not connected`, never "In range" (see rule 5 in the file header).
+    ///
+    /// For a RECORD-THEN-SYNC recorder there is no link to report — a check opens its own
+    /// session and closes it — so it is what a CHECK is doing: `Not checked yet` /
+    /// `Checking now…` / `Answered 20 minutes ago`. See `RecordingDeviceCheckState`.
     public let status: String
     /// The band where a live device carries record / pause / stop. Non-nil for a
     /// record-then-sync device, and it is the design's single most important sentence.
@@ -546,6 +553,7 @@ public enum RecordingDevicePage {
     ///   a scenario can state the moment it is claimed from.
     public static func resolve(_ input: RecordingDeviceListInput,
                                canConnect: Bool = true,
+                               check: RecordingDeviceCheckState? = nil,
                                now: Date = Date()) -> RecordingDevicePagePresentation {
         let deviceClass = input.deviceClass
         let declared = RecordingDeviceCapabilities(declared: input.declaredCapabilities)
@@ -564,6 +572,21 @@ public enum RecordingDevicePage {
         let readings = deviceClass == .recordThenSync
             ? RecordingDeviceReadingPresentation.lines(input.readings, now: now)
             : []
+        // THE HEADER OF A RECORDER IS ABOUT A CHECK, NEVER ABOUT A LINK.
+        //
+        // `input.link.label` was the status for every class, and for a record-then-sync
+        // recorder it is a claim about something that does not exist: a check opens its own
+        // authenticated session and closes it again, and the composition has no live link to
+        // put in that map at all. The header therefore read "Not connected" while Solleva was
+        // on the line listing that recorder's files — the absence of a fact about a link that
+        // this device class never has, printed in the size a person reads first.
+        //
+        // `nil` IN MEANS "ASK THE FACTS", not "assume nobody has checked". A page opened fresh
+        // has no screen-lifetime check state, and answering `Not checked yet` over a battery
+        // read twenty minutes ago would be the same lie in the opposite direction.
+        let checkState = check ?? RecordingDeviceCheckState.resolve(isChecking: false,
+                                                                    answeredAt: nil,
+                                                                    readings: input.readings)
 
         var actions: [String] = []
         if canConnect {
@@ -596,7 +619,9 @@ public enum RecordingDevicePage {
         return RecordingDevicePagePresentation(
             displayName: input.displayName,
             classCaption: deviceClass.caption,
-            status: input.link.label,
+            status: deviceClass == .recordThenSync
+                ? status(for: checkState, now: now)
+                : input.link.label,
             recordingIndicatorSentence: deviceClass.carriesRecordControl
                 ? nil
                 : recorderIndicatorSentence,

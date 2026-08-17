@@ -496,6 +496,70 @@ final class DeviceCompositionRootGateTests: XCTestCase {
         }
     }
 
+    /// A COMPLETED CHECK CHANGES THE PAGE THE CHECK WAS RUN FROM.
+    ///
+    /// WHY THIS CANNOT BE A BRINE SCENARIO EITHER, AND IT IS THE SAME REASON AS THE GATE ABOVE.
+    /// `features/a-check-changes-the-page-it-was-run-from.feature` holds the KIT half: given a
+    /// recorder nobody has checked, the shipped check writes its charge, its firmware and its
+    /// free space to the account's store, and `RecordingDevicePageFacts.refreshed` folds them
+    /// back into the value the page renders. Every one of those assertions goes on passing
+    /// while `App/` never calls the refresh — which is the state `main` was in: the page is
+    /// built from the `RecordingDeviceListInput` captured when the row's `NavigationLink` was
+    /// pushed (`devicePage(for:)`), and `RecordingDeviceListModel.refresh` fires only on the
+    /// Omi's connection state, its battery, `saved` or `sources`, none of which a check on a
+    /// record-then-sync recorder touches. So the shelf filled with recordings while Battery,
+    /// Free space and Firmware each went on offering "Connect and check now" over numbers
+    /// already on the phone's disk.
+    ///
+    /// AND THE HEADER, WHICH IS THE SAME DEFECT FROM THE OTHER END. `page.status` was
+    /// `input.link.label` for every class. A record-then-sync recorder has no live link — the
+    /// check opens its own session and closes it — so the header read "Not connected" while
+    /// Solleva was actively listing that recorder's files. The only live state this class has
+    /// is what a CHECK is doing, and this holds that the view feeds the check's own state in.
+    func testACompletedCheckIsReReadIntoThePageItWasRunFrom() throws {
+        let screen = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent("App/DeviceScreen.swift"),
+            encoding: .utf8)
+
+        // NON-VACUITY FIRST: this gate must be reading the file that holds the page.
+        XCTAssertTrue(screen.contains("RecordingDevicePage.resolve("),
+                      "the device page is no longer built in App/DeviceScreen.swift — this "
+                          + "gate is checking a file that no longer holds the boundary")
+        XCTAssertTrue(screen.contains("check.run(hardwareToken:"),
+                      "App/DeviceScreen.swift no longer runs a check, so there is no completed "
+                          + "check for this gate to be about")
+
+        // THE RE-READ EXISTS, AND IT IS THE KIT'S.
+        XCTAssertTrue(screen.contains("RecordingDevicePageFacts.refreshed("),
+                      "nothing in App/ re-reads what a check wrote. The battery, free space "
+                          + "and firmware a session went and measured are written to the "
+                          + "account's store by `PocketRecorderCheck`, and the page renders "
+                          + "the input value captured when the NavigationLink was pushed — so "
+                          + "every one of those rows goes on offering the button that would "
+                          + "measure a number already sitting on this phone's disk")
+        // AND IT IS FIRED BY A CHECK ENDING. A re-read that only ran on appear would leave the
+        // page stale for exactly the one event that changes it.
+        XCTAssertTrue(screen.contains("onChange(of: check.isChecking)"),
+                      "the re-read is not wired to a check finishing, so the one event that "
+                          + "changes what the account holds for this recorder is the one event "
+                          + "that does not redraw its page")
+        // AND THE PAGE IS RESOLVED FROM WHAT WAS RE-READ, not from the pushed value. A refresh
+        // whose result nothing renders is a disk read for nobody.
+        XCTAssertFalse(
+            screen.contains("RecordingDevicePage.resolve(input, canConnect: canReachDevice)"),
+            "the page is still resolved from `input` — the value the NavigationLink was pushed "
+                + "with. Whatever the re-read produced reaches no surface")
+
+        // THE HEADER'S LIVE STATE COMES FROM THE CHECK.
+        XCTAssertTrue(screen.contains("RecordingDeviceCheckState.resolve(isChecking:"),
+                      "the recorder page's header is not driven by the check. `input.link` is "
+                          + "a claim about a live link that a record-then-sync recorder never "
+                          + "has, so the header reads \"Not connected\" while a check is on "
+                          + "the line with it")
+        XCTAssertTrue(screen.contains("check.isChecking"),
+                      "nothing feeds the in-flight check into the page's state")
+    }
+
     /// THE BRING-OVER'S CONVERSATION IS HANDED TO THE RUNNING APP.
     ///
     /// WHY THIS GATE IS THE WHOLE POINT. `PocketCaptureImport` can write a complete, correct,
