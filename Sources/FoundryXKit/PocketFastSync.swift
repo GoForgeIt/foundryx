@@ -86,6 +86,17 @@ public struct PocketFastSyncPresentation: Sendable, Equatable {
     public static let endpointUnmeasuredLine =
         "Solleva doesn't know where this recorder serves its files yet, so it used Bluetooth. "
         + "Nothing was left switched on."
+
+    /// THE SAME FACT, IN THE TENSE THE SCREEN IS ACTUALLY IN.
+    ///
+    /// `endpointUnmeasuredLine` above is an OUTCOME — it says what happened after an attempt.
+    /// The recorder page renders it under a button that is permanently disabled, where nothing
+    /// has been attempted at all, so it tells the owner that Solleva tried and fell back when
+    /// Solleva did nothing. That is a small lie about the app's own behaviour on the one screen
+    /// whose job is to say what it did.
+    public static let endpointUnmeasuredBeforeAnyAttemptLine =
+        "Solleva doesn't know where this recorder serves its files yet, so this stays on "
+        + "Bluetooth."
     public static let cannotJoinLine =
         "This phone can't join the recorder's network, so nothing was moved."
     public static let notThisRecorderLine =
@@ -116,6 +127,7 @@ public struct PocketFastSyncPresentation: Sendable, Equatable {
     public static var everyLine: [String] {
         [setup, settings].flatMap { [$0.title, $0.body, $0.primaryAction, $0.passwordLabel] }
             + [sheetWarning, succeededLine, keptBluetoothLine, endpointUnmeasuredLine,
+               endpointUnmeasuredBeforeAnyAttemptLine,
                cannotJoinLine, notThisRecorderLine, neverReadyLine, transferFailedLine]
     }
 

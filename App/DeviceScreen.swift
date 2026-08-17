@@ -1106,7 +1106,10 @@ struct RecordingDevicePageView: View {
 
             Text(PocketRecorderCheckModel.fastSyncCanRun
                  ? PocketFastSyncPresentation.sheetWarning
-                 : PocketFastSyncPresentation.endpointUnmeasuredLine)
+                 // BEFORE ANY ATTEMPT, NOT AFTER ONE. This used to render the OUTCOME line,
+                 // which says Solleva "used Bluetooth" and that "nothing was left switched on"
+                 // — under a button that has never run, on a page where nothing was tried.
+                 : PocketFastSyncPresentation.endpointUnmeasuredBeforeAnyAttemptLine)
                 .grainTextStyle(.caption)
                 .foregroundStyle(GrainColor.textFaint)
                 .fixedSize(horizontal: false, vertical: true)
