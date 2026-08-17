@@ -119,13 +119,18 @@ enum AmbientNotifier {
         return binding
     }
 
-    /// Ask once for notification permission (banner + sound), install the foreground
-    /// presenter, and register the confirm-card category (Run/Dismiss). Best-effort —
-    /// a denied user simply never sees ambient nudges; nothing else changes.
-    static func requestAuthorizationIfNeeded() {
+    /// Install the foreground presenter and register the confirm-card category
+    /// (Run/Dismiss). Idempotent, and it PROMPTS FOR NOTHING — the permission prompt
+    /// belongs to whichever surface promises the user a notification, so it can report
+    /// what the user answered instead of firing anonymously at launch.
+    ///
+    /// The presenter matters as much as the permission: without it iOS silently swallows
+    /// a local notification while the app is foregrounded, which is exactly the situation
+    /// during onboarding, with the phone in the user's hand.
+    static func installNotificationSurface() {
         #if DEBUG
-        // Screen-proof harness: never raise the OS permission prompt (it would cover a
-        // screenshot). No effect on a normal launch.
+        // Screen-proof harness: never touch the notification centre (a prompt would cover
+        // a screenshot). No effect on a normal launch.
         if ProcessInfo.processInfo.arguments.contains(where: { $0.hasSuffix("Preview") }) { return }
         #endif
         let center = UNUserNotificationCenter.current()
@@ -141,6 +146,18 @@ enum AmbientNotifier {
                 ],
                 intentIdentifiers: [], options: [.customDismissAction]),
         ])
+    }
+
+    /// Ask once for notification permission (banner + sound) and install the surface.
+    /// Best-effort — a denied user simply never sees ambient nudges; nothing else changes.
+    static func requestAuthorizationIfNeeded() {
+        #if DEBUG
+        // Screen-proof harness: never raise the OS permission prompt (it would cover a
+        // screenshot). No effect on a normal launch.
+        if ProcessInfo.processInfo.arguments.contains(where: { $0.hasSuffix("Preview") }) { return }
+        #endif
+        installNotificationSurface()
+        let center = UNUserNotificationCenter.current()
         center.getNotificationSettings { settings in
             guard settings.authorizationStatus == .notDetermined else { return }
             center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
@@ -254,75 +271,132 @@ enum AmbientNotifier {
     }
 
     /// Fire a sample notification so the user can experience the surface before any
-    /// real trigger (Settings → "Preview a notification"). Clearly marked PREVIEW.
-    static func postPreview() {
+    /// real trigger (onboarding's ambient step, and Settings → "Preview a notification").
+    /// Clearly marked PREVIEW.
+    ///
+    /// It REPORTS. This used to open with
+    /// `guard let binding = CaptureAccountScope.currentAccountBinding() else { return }`,
+    /// which during onboarding — when no account is bound — posted nothing and returned
+    /// silently, while the caller announced "We just sent a sample nudge" on the very next
+    /// line. That is the `CaptureWAL.performDurableMutation` shape: a guard that swallows
+    /// the work and lets the caller claim it happened. Now every path ends in exactly one
+    /// `report`, and the caller renders `OnboardingAmbientStepCopy.confirmation(for:)`.
+    ///
+    /// It also ASKS, here, at the step that promises the notification. Authorization was
+    /// only ever requested from `RootView`, so at this step the status is very likely
+    /// `.notDetermined` and iOS would drop the nudge; `installNotificationSurface` puts the
+    /// foreground presenter in place (without it iOS swallows the banner while the app is
+    /// open, which is exactly the situation during onboarding) and `deliver` raises the
+    /// single permission prompt and reports the user's answer.
+    static func postPreview(
+        report: @escaping @Sendable (AmbientNudgeAttempt) -> Void = { _ in }
+    ) {
+        installNotificationSurface()
         // A persona-relatable sample (family for individual, a client for the
         // expert, a team pattern for the firm) so the nudge lands for whoever
         // is here — not a generic placeholder.
-        guard let binding = CaptureAccountScope.currentAccountBinding() else { return }
         let ex = PersonaCopy.notificationExample(for: PersonaPrefs.persona())
-        deliver(title: ex.title, body: ex.body, preview: true, binding: binding)
+        // The binding is OPTIONAL for the sample: it carries no user content, no seed and
+        // no tap payload, so there is nothing for an account scope to protect — and the
+        // step that fires it runs before any account exists.
+        deliver(title: ex.title, body: ex.body, preview: true,
+                binding: CaptureAccountScope.currentAccountBinding(),
+                report: report)
     }
 
+    /// `binding` is optional for ONE case only: the sample preview, which carries no user
+    /// content, no seed and no tap payload. Every other caller passes a real binding and
+    /// the account-scoped behaviour below is unchanged. `report`, when supplied, is called
+    /// EXACTLY ONCE on every path — including the paths that used to `return` in silence.
     private static func deliver(title: String, body: String, preview: Bool,
                                 seed: String? = nil, answerText: String? = nil,
                                 captureId: String? = nil,
-                                binding: CaptureAccountScope.AccountBinding) {
+                                binding: CaptureAccountScope.AccountBinding?,
+                                report: (@Sendable (AmbientNudgeAttempt) -> Void)? = nil) {
         #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains(where: { $0.hasSuffix("Preview") }) { return }   // screen-proof: no OS prompts
+        if ProcessInfo.processInfo.arguments.contains(where: { $0.hasSuffix("Preview") }) {
+            // Screen-proof harness: no OS prompts. Nothing was scheduled, so say so
+            // rather than letting the caller claim a nudge it never got.
+            report?(.unavailable)
+            return
+        }
         #endif
+        // A real (non-preview) notification carries the user's own words and a tap payload
+        // that acts on their account — it may not go out unbound.
+        guard preview || binding != nil else {
+            report?(.unavailable)
+            return
+        }
         let center = UNUserNotificationCenter.current()
-        let fire: () -> Void = {
-            CaptureAccountScope.perform(as: binding) { captured in
-                let content = UNMutableNotificationContent()
-                content.title = title
-                content.body = body
-                content.sound = .default
-                content.userInfo = [
-                    "ambient": true,
-                    "preview": preview,
-                    ownerScopeKey: captured.scope,
-                    ownerGenerationKey: NSNumber(value: captured.generation),
-                ]
-                if let captureId, !captureId.isEmpty {
-                    content.userInfo["captureId"] = captureId
+        let schedule: (String?, UInt64?) -> Void = { ownerScope, ownerGeneration in
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.sound = .default
+            content.userInfo = ["ambient": true, "preview": preview]
+            if let ownerScope, let ownerGeneration {
+                content.userInfo[ownerScopeKey] = ownerScope
+                content.userInfo[ownerGenerationKey] = NSNumber(value: ownerGeneration)
+            }
+            if let captureId, !captureId.isEmpty {
+                content.userInfo["captureId"] = captureId
+            }
+            if let seed {
+                content.categoryIdentifier = cardCategory
+                content.userInfo["seed"] = seed
+            }
+            if let answerText {
+                content.userInfo["answerText"] = answerText
+                content.userInfo["answerTitle"] = title
+            }
+            let req = UNNotificationRequest(
+                identifier: "ambient-\(UUID().uuidString)",
+                content: content,
+                trigger: UNTimeIntervalNotificationTrigger(
+                    timeInterval: 0.5, repeats: false))
+            center.add(req) { error in
+                if error != nil {
+                    // Handed to iOS and REFUSED. Never report this as a send.
+                    report?(.unavailable)
+                    return
                 }
-                if let seed {
-                    content.categoryIdentifier = cardCategory
-                    content.userInfo["seed"] = seed
-                }
-                if let answerText {
-                    content.userInfo["answerText"] = answerText
-                    content.userInfo["answerTitle"] = title
-                }
-                let req = UNNotificationRequest(
-                    identifier: "ambient-\(UUID().uuidString)",
-                    content: content,
-                    trigger: UNTimeIntervalNotificationTrigger(
-                        timeInterval: 0.5, repeats: false))
-                center.add(req) { _ in
-                    // `add` is asynchronous. If a transition raced the request after
-                    // the transition's bulk clear, withdraw this exact stale request.
-                    guard !binding.isCurrent else { return }
-                    center.removePendingNotificationRequests(
-                        withIdentifiers: [req.identifier])
-                    center.removeDeliveredNotifications(
-                        withIdentifiers: [req.identifier])
-                }
+                report?(.scheduled)
+                // `add` is asynchronous. If a transition raced the request after
+                // the transition's bulk clear, withdraw this exact stale request.
+                guard let binding, !binding.isCurrent else { return }
+                center.removePendingNotificationRequests(
+                    withIdentifiers: [req.identifier])
+                center.removeDeliveredNotifications(
+                    withIdentifiers: [req.identifier])
             }
         }
+        let fire: () -> Void = {
+            guard let binding else {
+                schedule(nil, nil)          // unbound sample
+                return
+            }
+            let ran = CaptureAccountScope.perform(as: binding) { captured in
+                schedule(captured.scope, captured.generation)
+            }
+            // The identity moved out from under the request between the settings read and
+            // here. Nothing was scheduled.
+            if ran == nil { report?(.unavailable) }
+        }
         center.getNotificationSettings { settings in
-            guard CaptureAccountScope.perform(
-                as: binding, { _ in true }) == true else { return }
+            if let binding,
+               CaptureAccountScope.perform(as: binding, { _ in true }) != true {
+                report?(.unavailable)
+                return
+            }
             switch settings.authorizationStatus {
             case .authorized, .provisional, .ephemeral:
                 fire()
             case .notDetermined:
                 center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
-                    if granted { fire() }
+                    if granted { fire() } else { report?(.refused) }
                 }
             default:
-                break   // denied — respect it
+                report?(.refused)   // denied — respect it, and SAY it
             }
         }
     }
