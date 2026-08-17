@@ -5,10 +5,12 @@ import UIKit
 #endif
 
 // Session-based chat: a list of resumable conversations (each its own kiln-session
-// chat_id), a "new chat" affordance, and a read-only route line (privacy + the
-// resolved model — Auto by default; setting either is Settings' job, T-PHONE-CHATLAW
-// / ia-brief.md §5.3). The active conversation renders through ChatViewModel; its
-// history is snapshotted back into the durable ChatConversationStore at end-of-turn.
+// chat_id), a "new chat" affordance, and a route control that OPENS — the Kiln router
+// by name as the default, the routes this cell has proved it can reach, and the
+// per-chat privacy choice. Its LABEL is a receipt: once a turn has been answered it
+// names the target that served it, not the one the chat asked for. The active
+// conversation renders through ChatViewModel; its history is snapshotted back into the
+// durable ChatConversationStore at end-of-turn.
 struct ChatScreen: View {
     /// The resolved remote door target (relay tunnel + id_token bearer).
     let target: DoorTarget
@@ -54,11 +56,14 @@ struct ChatScreen: View {
     }
     /// A run artifact the user tapped to view (sheet with the in-app viewers).
     @State private var viewingArtifact: ChatViewModel.RunArtifact?
-    // Seeded synchronously from the warm cache so the route line's resolved model name
-    // paints instantly (track 20260715T1501 origin). `loadModels()` still runs on appear
-    // and refreshes this in the background — a changed live list replaces the cache. The
-    // picker that once wrote INTO this array is gone (T-PHONE-CHATLAW); `models` now only
-    // resolves an id to a display name for the read-only route line.
+    // Seeded synchronously from the warm cache so the route line's model name paints
+    // instantly (track 20260715T1501 origin). `loadModels()` still runs on appear and
+    // refreshes this in the background — a changed live list replaces the cache.
+    //
+    // `models` resolves an id to a friendly NAME. It is deliberately not the picker's
+    // menu: the door's catalog lists every chat target in the Kiln registry, credentialed
+    // or not, so what the picker OFFERS comes from `store.provenTargets` instead (see
+    // `RouteMenu`).
     @State private var models: [ModelOption] = ModelCache.load()
     /// The conversation currently hydrated into `model` — guards against reloading the
     /// live view mid-stream when nothing actually switched.
@@ -216,19 +221,28 @@ struct ChatScreen: View {
         hydrateActive()
     }
 
-    // MARK: header — which chats · route line (read-only) · new chat
+    // MARK: header — which chats · route control · new chat
     //
-    // T-PHONE-CHATLAW (tracks.md): "the header's model picker replaced by a
-    // non-interactive route line carrying the privacy truth (five controls become
-    // three)" — this header used to carry an interactive Privacy `Menu` AND an
-    // interactive `ModelPickerMenu` alongside the chat-list button and "New" (four
-    // controls once "Chats"/"All" had already merged into one, five against the
-    // original ia-brief.md §5.3 inventory). Both fold into ONE non-interactive route
-    // line here — setting privacy or a model is Settings' job now (ia-brief.md §5.3:
-    // "the picker moves to Settings"); this line is a receipt, matching the same
-    // "choice is a receipt on the run, not a setting you maintain" law already shipped
-    // for the desktop (`ia-brief.md:910-913`). Three controls: chat list, route line,
-    // New.
+    // Still three controls. The middle one OPENS again (FX-5A).
+    //
+    // T-PHONE-CHATLAW collapsed the header's interactive Privacy `Menu` and
+    // `ModelPickerMenu` into one non-interactive line, on the stated ground that
+    // "setting privacy or a model moves to Settings (ia-brief.md §5.3)". That Settings
+    // picker was never built — not in this checkout and not in the shipped one — so
+    // what actually shipped was a control with no way to set anything, under a word
+    // ("Auto") derived from `Conversation.modelTargetId`, a field no production code
+    // wrote. Nick tapped it and nothing happened, because there was nothing there.
+    //
+    // The same commit's own reasoning is the argument against what it shipped: it
+    // declined to build the chat-list space grouping because "building UI with nothing
+    // behind it would violate this corpus's own 'no dead controls' law." A route line
+    // whose only word comes from a dead writer is that same violation, one paragraph
+    // later.
+    //
+    // What stays from that track is the good half — the header states the route ONCE
+    // instead of repeating it under every turn. What changes is that the line is now a
+    // `Menu`, and its words are a RECEIPT: it names the target that answered
+    // (`ChatRouteLine`), not the one this chat asked for.
     private var header: some View {
         HStack(spacing: GrainSpacing.x2) {
             // ONE way in, because there is one list.
@@ -264,35 +278,51 @@ struct ChatScreen: View {
         .padding(.vertical, GrainSpacing.x2)
     }
 
-    /// The privacy truth, as a plain (non-interactive — no button/menu wrapper, no tap
-    /// target) line: a lock/cloud SF Symbol + "Private · stays on your Mac" or
-    /// "Open · <resolved model>". Replaces the old per-message route caption at the same job
-    /// (`ChatView.swift`'s former `routeCaption`, dropped here as superseded — the
-    /// header now states the route once instead of repeating it under every turn).
+    /// The route control: a `Menu` whose LABEL is the route line and whose CONTENT is
+    /// the two choices that decide a route — which target answers, and whether this
+    /// chat's data may leave the machine.
+    ///
+    /// Extracted into an `Equatable` subview (`RouteMenu`) for the reason the deleted
+    /// `ModelPickerMenu` was: this screen re-renders on every streamed token and on the
+    /// per-second "Thinking…" timer, and re-evaluating an OPEN system menu snaps its
+    /// scroll back to the top.
     private var routeLine: some View {
-        HStack(spacing: GrainSpacing.x1) {
-            Image(systemName: isPrivate ? "lock.fill" : "cloud")
-            Text(routeLineText).grainTextStyle(.caption)
-        }
-        .foregroundStyle(isPrivate ? GrainColor.sage : GrainColor.textMuted)
-        .padding(.vertical, GrainSpacing.x1)
-        .accessibilityIdentifier("route-line")
-        .accessibilityLabel("Route")
-        .accessibilityValue(routeLineText)
+        RouteMenu(reading: routeReading,
+                  isPrivate: isPrivate,
+                  selectedId: store.active?.modelTargetId,
+                  provenTargets: store.provenTargets,
+                  models: models,
+                  onSelectRoute: setModel,
+                  onSelectPrivacy: setPrivacy)
+            .equatable()
     }
 
-    private var routeLineText: String {
-        isPrivate ? "Private · stays on your Mac" : "Open · \(resolvedModelLabel)"
-    }
-
-    /// "Auto" unless this conversation carries a pinned `modelTargetId` the door
-    /// already reported a friendly label for.
-    private var resolvedModelLabel: String {
-        guard let id = store.active?.modelTargetId else { return "Auto" }
-        return models.first(where: { $0.id == id }).map(ModelCatalog.displayName(for:)) ?? id
+    /// What the header says — decided in `FoundryXKit` (where `swift test` can hold it),
+    /// rendered here. A resolved route beats a requested one: the LIVE turn's answer
+    /// while a chat is open, falling back to the durable conversation's after a switch.
+    private var routeReading: ChatRouteReading {
+        ChatRouteLine.reading(isPrivate: isPrivate,
+                              requestedTargetId: store.active?.modelTargetId,
+                              resolvedTargetId: model.resolvedTargetId
+                                  ?? store.active?.resolvedTargetId,
+                              models: models)
     }
 
     // MARK: actions
+
+    /// Pin this chat to a route (nil ⇒ the Kiln router decides each turn).
+    private func setModel(_ id: String?) {
+        guard let active = store.active else { return }
+        store.setModel(id, for: active.id)
+    }
+
+    private func setPrivacy(_ on: Bool) {
+        guard let active = store.active else { return }
+        // The store clears any pinned route when going Private (a pin IS a route, and a
+        // cloud pin under a "Private" badge would be a lie) — enforced in
+        // `setSensitivity` rather than here, so a second caller cannot forget half of it.
+        store.setSensitivity(on ? ChatConversationStore.Sensitivity.private : nil, for: active.id)
+    }
 
     /// Load the active conversation's persisted history into the live view (on first
     /// appearance + every switch). No-op if it's already loaded (avoids clobbering a
@@ -375,10 +405,88 @@ struct ChatScreen: View {
     }
 }
 
-// The interactive `ModelPickerMenu` that used to live here (an Equatable Menu subview
-// wrapping `ModelCatalog.menu(from:)`) was deleted under T-PHONE-CHATLAW: the header's
-// model picker is retired in favor of the read-only `routeLine` above. `ModelCatalog`
-// itself is not dead — it still backs `model-picker.feature` and
-// `Tests/FoundryXBrineTests/ModelPickerTests.swift`, and `routeLine`'s
-// `resolvedModelLabel` still calls `ModelCatalog.displayName(for:)` to resolve a pinned
-// `modelTargetId` to a friendly name.
+/// The header's route control, isolated as an `Equatable` subview.
+///
+/// The chat screen re-renders on every streamed token and on the per-second "Thinking…"
+/// elapsed timer. When a picker `Menu` lived inline, each of those re-evaluated the open
+/// menu's content and the system menu snapped its scroll back to the top. Keyed only on
+/// the values that actually change the menu, SwiftUI skips re-rendering it while a turn
+/// streams. (This is the one thing worth keeping from the `ModelPickerMenu` this
+/// replaces.)
+///
+/// WHAT IT OFFERS, and why it is not the door's whole catalog. The routes listed are the
+/// ones this phone has WATCHED answer a turn (`ChatConversationStore.provenTargets`).
+/// `GET /foundryx/models` is not a credential list — on a hosted cell it lists
+/// `claude-opus-4-8` whether or not the tenant has ever run the `claude-max-cli` login
+/// that target needs, because the door's catalog treats a named `connection_id` as
+/// proof. Offering a route the cell cannot authenticate to is offering a 401. A
+/// `routed:` boundary is proof of the opposite kind, and the door accepts a target id as
+/// a selection (`resolve_selected_target` falls back to `target_id`), so a route learned
+/// this way is a usable pin.
+private struct RouteMenu: View, Equatable {
+    let reading: ChatRouteReading
+    let isPrivate: Bool
+    let selectedId: String?
+    let provenTargets: [String]
+    let models: [ModelOption]
+    let onSelectRoute: (String?) -> Void
+    let onSelectPrivacy: (Bool) -> Void
+
+    nonisolated static func == (lhs: RouteMenu, rhs: RouteMenu) -> Bool {
+        lhs.reading == rhs.reading && lhs.isPrivate == rhs.isPrivate
+            && lhs.selectedId == rhs.selectedId && lhs.provenTargets == rhs.provenTargets
+            && lhs.models == rhs.models
+    }
+
+    /// A route id as a person would read it — the door's own label when it has one.
+    private func name(_ id: String) -> String {
+        models.first(where: { $0.id == id }).map(ModelCatalog.displayName(for:))
+            ?? ModelCatalog.displayName(for: ModelOption(id: id, label: ""))
+    }
+
+    var body: some View {
+        Menu {
+            Section("Route") {
+                // The default, NAMED. Kiln's router picks a target per turn; calling
+                // that "Auto" named nobody.
+                Button { onSelectRoute(nil) } label: {
+                    Label(ChatRouteLine.routerName,
+                          systemImage: selectedId == nil ? "checkmark" : "shuffle")
+                }
+                ForEach(provenTargets, id: \.self) { target in
+                    Button { onSelectRoute(target) } label: {
+                        Label(name(target),
+                              systemImage: selectedId == target ? "checkmark" : "cpu")
+                    }
+                }
+                if provenTargets.isEmpty {
+                    // Honest about WHY the list is short, instead of an empty section.
+                    Text("A model joins this list once it has answered a turn here")
+                }
+            }
+            Section("Privacy") {
+                Button { onSelectPrivacy(true) } label: {
+                    Label("Private · stays on your Mac",
+                          systemImage: isPrivate ? "checkmark" : "lock.fill")
+                }
+                Button { onSelectPrivacy(false) } label: {
+                    Label("Open · may use cloud for speed",
+                          systemImage: isPrivate ? "cloud" : "checkmark")
+                }
+            }
+        } label: {
+            HStack(spacing: GrainSpacing.x1) {
+                Image(systemName: isPrivate ? "lock.fill" : "cloud")
+                Text(reading.text).grainTextStyle(.caption)
+                Image(systemName: "chevron.down").font(.system(size: 9))
+            }
+            .foregroundStyle(isPrivate ? GrainColor.sage : GrainColor.textMuted)
+            .padding(.vertical, GrainSpacing.x1)
+            .contentShape(Rectangle())
+        }
+        .accessibilityIdentifier("route-line")
+        .accessibilityLabel("Route")
+        .accessibilityValue(reading.text)
+        .accessibilityHint("Choose which model answers, and whether this chat stays on your Mac")
+    }
+}

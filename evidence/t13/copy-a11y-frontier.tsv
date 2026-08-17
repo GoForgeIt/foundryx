@@ -219,8 +219,11 @@ customer-facing-string	App/ChatListView.swift	Done
 customer-facing-string	App/ChatListView.swift	New
 customer-facing-string	App/ChatListView.swift	Show every source
 customer-facing-string	App/ChatListView.swift	\(nodes.count)
+customer-facing-string	App/ChatScreen.swift	A model joins this list once it has answered a turn here
 customer-facing-string	App/ChatScreen.swift	Done
 customer-facing-string	App/ChatScreen.swift	New
+customer-facing-string	App/ChatScreen.swift	Open · may use cloud for speed
+customer-facing-string	App/ChatScreen.swift	Private · stays on your Mac
 customer-facing-string	App/ChatScreen.swift	Route
 customer-facing-string	App/ConnectionConfigView.swift	Connect
 customer-facing-string	App/ConnectionConfigView.swift	Local Solleva door
