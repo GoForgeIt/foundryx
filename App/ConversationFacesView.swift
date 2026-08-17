@@ -43,6 +43,18 @@ struct ConversationFacesView: View {
     let conversationDate: Date?
     /// Phone-only tier → on-device stepper labels ("Saved on phone", etc.).
     var local: Bool = false
+    /// WHICH BRAIN IS ON, for the safety predicate this page draws its "safe elsewhere" row
+    /// from. REQUIRED, with no default, for the same reason `PocketCaptureDurability` makes it
+    /// required: a default here is a decision about whether a recording is safe, made by
+    /// whoever forgot to pass it.
+    ///
+    /// IT IS NOT `local`. `local` decides which WORDS the stepper uses; this decides whether a
+    /// segment upload-ack is evidence of a copy anywhere other than this handset. On the
+    /// phone-only tier that ack is self-issued (`CaptureBackend` passes a closure that succeeds
+    /// by doing nothing), so reading `local` as though it were the brain would answer
+    /// "safe elsewhere: Yes" for a recording whose only copy is on this phone — the same
+    /// predicate that arms the delete button.
+    let brain: BrainChoice
     /// The semantic-search seam. No embedding index exists on the phone today,
     /// so the default is nil and the meaning toggle is ABSENT (never a dead
     /// control). Inject a real, available index and the toggle appears.
@@ -139,6 +151,17 @@ struct ConversationFacesView: View {
     @State private var playbackDuration: Double = 0
     @State private var scrubbing = false
     @State private var clockTask: Task<Void, Never>?
+
+    // MARK: listen — a recording that came off a recorder (Step 9)
+    /// THE RECORDER'S OWN FILE, ON THIS PHONE, or nil for every recording this phone made
+    /// itself. `PocketRecorderFileStore` keeps the MP3 a pocket recorder handed over and never
+    /// removes it, so asking a computer for those bytes would put a person's own recording
+    /// behind a Mac that might be asleep — which is the one thing carrying a recorder is for.
+    /// Resolved OFF the main actor in `resolveHeldRecording()`.
+    @State private var heldHere: URL?
+    /// The three places this recording is, in the vocabulary `PocketPresence` defines. Nil
+    /// until resolved, and never rendered for a conversation this phone recorded itself.
+    @State private var placesHere: PocketRecordingPresence?
 
     private enum AudioState: Equatable { case idle, loading, playing, failure(AudioPlaybackPresentation.Outcome) }
 
@@ -411,6 +434,7 @@ struct ConversationFacesView: View {
             // "Listen" button keeps its intrinsic size, and the PLAYING transport's
             // scrubber fills the row instead of fighting a Spacer for the width.
             listenRow
+            whereThisRecordingIsRow
             VStack(alignment: .leading, spacing: GrainSpacing.x3) {
                 summaryNarrative
                 if !summaryBullets.isEmpty {
@@ -1028,6 +1052,35 @@ struct ConversationFacesView: View {
 
     // MARK: - listen / receipt (unchanged behavior)
 
+    /// WHERE THIS RECORDING IS — ALL THREE PLACES AT ONCE, each with its own age, and a place
+    /// nobody asked about reading `Unknown` rather than a confident `No`. Present ONLY for a
+    /// recording that came off a recorder: every other conversation has exactly one home and a
+    /// three-line answer about it would be noise.
+    ///
+    /// The strings are `PocketPresencePresentation`'s — Step 5's vocabulary, not a second one —
+    /// and the last line names the thing Solleva deliberately does not do: Listen and reclaiming
+    /// this local copy delete each other, Listen shipped, and a capability that is missing on
+    /// purpose is said out loud instead of discovered as an absence.
+    @ViewBuilder private var whereThisRecordingIsRow: some View {
+        if let places = placesHere {
+            VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                Text(PocketLocalCopyPresentation.playsHereLine)
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textMuted)
+                ForEach(Array(PocketPresencePresentation.lines(places, now: Date()).enumerated()),
+                        id: \.offset) { _, line in
+                    Text(PocketPresencePresentation.oneLine(line))
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.textFaint)
+                }
+                Text(PocketLocalCopyPresentation.keptHereLine)
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textFaint)
+            }
+            .accessibilityIdentifier("where-this-recording-is")
+        }
+    }
+
     @ViewBuilder private var listenRow: some View {
         // Recording wins the audio session: while it's live, Listen is DISABLED with an
         // honest reason (never start new playback that would fight the mic). An already
@@ -1085,6 +1138,9 @@ struct ConversationFacesView: View {
             case .unavailable: return GrainColor.textFaint
             case .unreachable: return GrainColor.textMuted
             case .failed:      return GrainColor.amber
+            // The bytes are HERE and could not be decoded — a real fault in this app's own
+            // container, so it smolders like `.failed` rather than reading as a soft absence.
+            case .heldButUnreadable: return GrainColor.amber
             }
         }()
         VStack(alignment: .leading, spacing: GrainSpacing.x1) {
@@ -1172,6 +1228,10 @@ struct ConversationFacesView: View {
 
     private func initialLoad() async {
         loadError = nil
+        // BEFORE ANYTHING REACHES FOR THE DOOR. If this recording came off a recorder its
+        // bytes are already on this phone, and the Listen row must know that before a person
+        // can tap it.
+        await resolveHeldRecording()
         let base = CaptureWAL.documentsCaptures()
         cached = TranscriptCacheStore.load(captureId: captureId, baseDir: base)
         provisional = ConversationCardStore.load(captureId: captureId, baseDir: base)
@@ -1429,11 +1489,62 @@ struct ConversationFacesView: View {
 
     // MARK: - audio replay (same semantics as the previous detail)
 
+    /// WHERE THIS CONVERSATION'S AUDIO IS, AND WHAT ITS ROW SHOULD SAY — resolved OFF the main
+    /// actor, because it is a directory walk plus a stat per confirmation marker and this is a
+    /// screen appearing. `PocketLocalPlayback.heldFile` counts any main-thread read at the
+    /// operation itself, so a future caller that drags this onto main trips a hard counter
+    /// rather than quietly costing a person their first frame.
+    private func resolveHeldRecording() async {
+        let id = captureId
+        let library = manager.captureLibraryRoot
+        let stages = manager.captureStages()
+        // HOISTED OUT OF THE DETACHED TASK, exactly like `library` and `stages` above: a
+        // `Task.detached` that read `self.brain` would capture the view.
+        let brain = self.brain
+        let resolved = await Task.detached(priority: .userInitiated) {
+            () -> (URL?, PocketRecordingPresence) in
+            let root = CaptureAccountScope.privateURL(for: .pocketRecordings)
+            let held = PocketLocalPlayback.heldFile(forCapture: id, in: root)
+            guard held != nil else { return (nil, .nothingAsked) }
+            // Step 5's predicate, READ and not recomputed: one answer to "is this safe".
+            let durability = PocketCaptureDurability(baseDir: library, stages: stages,
+                                                     brain: brain)
+            return (held, PocketLocalPlayback.presence(forCapture: id,
+                                                       heldFile: held,
+                                                       // Nobody asked a recorder from here, and
+                                                       // `unknown` says exactly that.
+                                                       recorderListedAt: nil,
+                                                       durability: durability,
+                                                       askedAt: Date()))
+        }.value
+        heldHere = resolved.0
+        placesHere = resolved.0 == nil ? nil : resolved.1
+    }
+
     private func playAudio() async {
         // Never start playback while a recording owns the session — the row already shows
         // the disabled reason; this is the tap-time guard so nothing races the gate.
         guard !isRecordingActive else { return }
         audioState = .loading
+        // THE RECORDER'S OWN FILE, PLAYED FROM HERE. No door, no cache, no network: the bytes
+        // are in this app's container. The failure for a file we are holding is
+        // `.heldButUnreadable` and never the computer's sentence — telling somebody to go wake
+        // a Mac that was never asked is a lie they cannot act on.
+        if let held = heldHere {
+            guard let p = PocketLocalPlayback.player(forHeldFile: held) else {
+                audioState = .failure(.heldButUnreadable)
+                return
+            }
+            playbackOwnsSession = PlaybackSession.begin()
+            player = p
+            p.play()
+            playbackDuration = p.duration
+            playbackElapsed = 0
+            scrubbing = false
+            audioState = .playing
+            startPlaybackClock(p)
+            return
+        }
         do {
             let cacheKey = await AudioReplayCache.shared.key(
                 captureId: captureId, startMs: nil, endMs: nil)

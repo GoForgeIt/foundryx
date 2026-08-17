@@ -1,0 +1,27 @@
+# M3-the-held-file-borrows-the-computers-sentence
+#
+# TWO VARIANTS WERE RUN, because the first fired a different assertion than the one this
+# mutation is aimed at.
+#
+# VARIANT A — the whole copy replaced by `.unreachable`'s:
+#   RED: [failed] A recording held on this phone is never blamed on the computer:
+#        the held-file copy does not say where the file is
+#   (fires the SUBTITLE assertion, not the population one.)
+#
+# VARIANT B — the copy still says where the file is, and ALSO blames the computer. This is the
+# realistic version: a well-meaning edit that adds the old sentence back "for context".
+#   RED: [failed] A recording held on this phone is never blamed on the computer:
+#        a file on this iPhone was reported with the computer's line: 'Can't reach your computer'
+#   The assertion is over the POPULATION — every line of `.unreachable` and `.unavailable` — so
+#   it cannot be satisfied by remembering one string, and the same check asserts
+#   `Set(everyLine).count == everyLine.count` so two outcomes cannot collapse into one sentence.
+#
+--- a/Sources/FoundryXKit/AudioPlaybackPresentation.swift
++++ b/Sources/FoundryXKit/AudioPlaybackPresentation.swift
+@@ -124,8 +124,8 @@
+         case .heldButUnreadable:
+-            return Copy(title: "Couldn't play this recording",
+-                        subtitle: "Its file is on this iPhone, so your computer isn't needed.")
++            return Copy(title: "Couldn't play this recording",
++                        subtitle: "Its file is on this iPhone. Can't reach your computer.")
+         }

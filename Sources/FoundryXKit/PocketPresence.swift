@@ -292,6 +292,13 @@ public enum PocketPresencePresentation {
                                    age: age($0.1.observedAt, now: now)) }
     }
 
+    /// ONE PLACE AS ONE LINE OF TEXT. In the kit because two screens render these now — the
+    /// recorder's shelf and a conversation that came off a recorder — and the same three facts
+    /// spelled two ways on two screens is how one of them quietly stops matching the other.
+    public static func oneLine(_ line: PocketPlaceLine) -> String {
+        "\(line.place): \(line.answer) - \(line.age)"
+    }
+
     public static var everyLine: [String] {
         [onRecorderPlace, onThisPhonePlace, safeElsewherePlace,
          yesAnswer, noAnswer, unknownAnswer, neverCheckedAge,

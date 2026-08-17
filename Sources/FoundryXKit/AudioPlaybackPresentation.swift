@@ -9,8 +9,19 @@ import Foundation
 ///     text): a pruned recording ("Audio no longer available") reads distinctly from an
 ///     offline computer ("Can't reach your computer").
 ///
-/// Audio is only ever kept on the operator's computer (and in the phone's in-memory
-/// replay cache) — never persisted on the phone — so the copy says so plainly.
+/// WHERE THE AUDIO IS — CORRECTED. This type used to open with "audio is only ever kept on
+/// the operator's computer (and in the phone's in-memory replay cache) — never persisted on
+/// the phone". That was true of every recording this app made itself, and a recording brought
+/// off a pocket recorder falsifies it: `PocketRecorderFileStore` writes the recorder's own MP3
+/// into the account-scoped `pocket-recordings` directory and never removes it, because that
+/// held file is what makes a failed import free to retry.
+///
+/// So there are now two homes, and `PocketLocalPlayback.source(forCapture:)` is the one place
+/// that decides between them. A recording this phone made still lives on the computer and reads
+/// exactly as it always did. A recording HELD HERE plays from here, with no computer involved —
+/// and when it will not play, the reason must never be borrowed from the computer's vocabulary,
+/// because blaming an unreachable Mac for a file in this app's own container is a lie a person
+/// cannot act on.
 public enum AudioPlaybackPresentation {
 
     /// Why playback isn't happening, in the user's terms.
@@ -19,10 +30,15 @@ public enum AudioPlaybackPresentation {
     ///  • `unreachable` — the door couldn't be reached at all (offline / computer asleep):
     ///    the audio lives on the computer, which we can't reach right now.
     ///  • `failed` — anything else (undecodable bytes, an unexpected server error).
+    ///  • `heldButUnreadable` — the bytes are HERE, in this app's own container, and this phone
+    ///    could not decode them. It exists so a recording on the phone can never be reported as
+    ///    a computer that could not be reached: the computer was never asked, and telling
+    ///    somebody to go wake their Mac would send them to fix a machine that is not involved.
     public enum Outcome: Equatable, Sendable {
         case unavailable
         case unreachable
         case failed
+        case heldButUnreadable
     }
 
     /// The two-line copy for an outcome. `subtitle` is nil when a single line says it all.
@@ -105,6 +121,23 @@ public enum AudioPlaybackPresentation {
                         subtitle: "Your voice note audio lives there.")
         case .failed:
             return Copy(title: "Couldn't play this audio")
+        case .heldButUnreadable:
+            // NOT "your computer". This recording came off a recorder and its original file is
+            // on this iPhone; the subtitle says where it is so the sentence is actionable
+            // instead of pointing at a machine that was never asked.
+            return Copy(title: "Couldn't play this recording",
+                        subtitle: "Its file is on this iPhone, so your computer isn't needed.")
+        }
+    }
+
+    /// Every human line this type can render, so a claim about it is held over the POPULATION
+    /// rather than over whichever string a test author remembered — and so "the held-on-phone
+    /// failure does not reuse the computer's sentence" is an assertion that cannot pass
+    /// vacuously.
+    public static var everyLine: [String] {
+        [Outcome.unavailable, .unreachable, .failed, .heldButUnreadable].flatMap { outcome -> [String] in
+            let c = copy(for: outcome)
+            return [c.title, c.subtitle].compactMap { $0 }
         }
     }
 }

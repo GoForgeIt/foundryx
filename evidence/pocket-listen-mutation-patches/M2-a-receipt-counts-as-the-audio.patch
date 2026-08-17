@@ -1,0 +1,20 @@
+# M2-a-receipt-counts-as-the-audio
+#
+# RED: PocketLocalPlaybackGateTests, 2 named assertions, quoted from the run:
+#   :104 XCTAssertNil failed: ".../20260814090000.mp3" — "a receipt with no audio beside it was
+#        claimed as a held recording"
+#   :106 XCTAssertEqual failed: ("heldOnThisPhone(...)") is not equal to ("onTheComputer") —
+#        "with nothing held here, playback must fall back to the computer"
+#
+# WHY IT MATTERS. Custody's two facts are separate on purpose ("the bytes are here" and "they
+# are a conversation"). A receipt that outlives its audio would route Listen at a path that is
+# not there — and, because the source is no longer `.onTheComputer`, the door fallback that
+# would have played it is skipped too. The recording becomes unplayable in BOTH places.
+#
+--- a/Sources/FoundryXKit/PocketLocalPlayback.swift
++++ b/Sources/FoundryXKit/PocketLocalPlayback.swift
+@@ -85,6 +85,6 @@
+             let audio = receipt.deletingPathExtension().appendingPathExtension("mp3")
+-            return fm.fileExists(atPath: audio.path) ? audio : nil
++            return audio
+         }

@@ -736,6 +736,8 @@ phase_uiproof() {
        -only-testing:FoundryXUITests/PlaceRestoreProofUITests \
        -only-testing:FoundryXUITests/RecordingDevicesPageProofUITests \
        -only-testing:FoundryXUITests/RecordingDevicePageProofUITests \
+       -only-testing:FoundryXUITests/PocketListenProofUITests \
+       -only-testing:FoundryXUITests/RecorderClearingProofUITests \
        >"$out" 2>&1; then
     echo "  uiproof: recording surface (phone-mic + Omi ambient + foreground restore + place restore + recorder attribution) PASSED"
   else

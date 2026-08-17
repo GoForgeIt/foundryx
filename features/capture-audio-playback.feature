@@ -2,9 +2,15 @@ Feature: Hearing a conversation's audio, honestly
 
   Some conversations you don't remember — an ambient capture that triggered on a clap of
   thunder, a meeting you half-caught. The only way to know what a capture is, is to HEAR
-  it. The detail view offers "Listen": it plays the capture's own audio, fetched from
-  your computer where the recording lives (the phone never keeps a copy). While it fetches
-  it says so; while it plays you can stop it.
+  it. The detail view offers "Listen": it plays the capture's own audio. For a conversation
+  this phone recorded, that audio is fetched from your computer, where it lives. While it
+  fetches it says so; while it plays you can stop it.
+
+  This feature used to say "the phone never keeps a copy". A recording brought off a pocket
+  recorder makes that false: Solleva keeps the recorder's own file on this phone and plays it
+  from here, with no computer involved. That half is described in
+  a-recording-from-a-recorder-plays-here.feature. Everything below is about a recording this
+  phone made itself.
 
   Playback is honest about what can go wrong. Recordings live on your computer and aren't
   kept there forever, so an old capture whose audio was pruned reads "Audio no longer

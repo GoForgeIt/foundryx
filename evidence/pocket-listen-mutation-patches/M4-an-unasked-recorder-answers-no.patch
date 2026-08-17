@@ -1,0 +1,22 @@
+# M4-an-unasked-recorder-answers-no
+#
+# RED: [failed] The row says all three places at once:
+#      'On the recorder' reads 'No', expected 'Unknown'
+#
+# WHY IT MATTERS, and why it is the mutation worth running here. This is the ORIGINAL DEFECT of
+# `StoredFileCustody`, reintroduced on the conversation side: a place nobody asked about drawn
+# with exactly the confidence of a place that answered. A conversation row is not attached to a
+# live recorder, so `No` here would tell a person their recording is off the recorder — which
+# nothing has checked, and which is the fact a factory reset is decided on.
+#
+# The UI proof reds on the same mutation: "On the recorder: Unknown - never checked" is not on
+# the screen.
+#
+--- a/Sources/FoundryXKit/PocketLocalPlayback.swift
++++ b/Sources/FoundryXKit/PocketLocalPlayback.swift
+@@ -133,5 +133,4 @@
+-        let onRecorder: PocketPlaceReading = recorderListedAt.map {
+-            PocketPlaceReading(answer: .yes, observedAt: $0)
+-        } ?? .neverAsked
++        let onRecorder = PocketPlaceReading(answer: recorderListedAt == nil ? .no : .yes,
++                                            observedAt: recorderListedAt ?? askedAt)

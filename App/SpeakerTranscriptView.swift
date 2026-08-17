@@ -757,6 +757,11 @@ struct SpeakerTagSheet: View {
             case .unavailable: return GrainColor.textFaint
             case .unreachable: return GrainColor.textMuted
             case .failed:      return GrainColor.amber
+            // A voice sample is always a door fetch — it is a SLICE of a capture, and no
+            // recorder ever handed this phone a slice — so this arm is unreachable here. It is
+            // spelled out anyway rather than defaulted, so adding a fourth outcome makes
+            // somebody decide what this row does with it.
+            case .heldButUnreadable: return GrainColor.amber
             }
         }()
         VStack(alignment: .leading, spacing: GrainSpacing.x1) {

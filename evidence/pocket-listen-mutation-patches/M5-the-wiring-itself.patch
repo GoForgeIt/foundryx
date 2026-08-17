@@ -1,0 +1,23 @@
+# M5-the-wiring-itself — the mutation that grades WIRE IT rather than the logic.
+#
+# THE WHOLE POINT. Under this mutation the kit is untouched and `swift test --filter
+# "PocketListenHereFeatureTests|PocketLocalPlaybackGateTests"` reports
+#   Executed 4 tests, with 0 failures
+# — a perfectly green logic suite over a decision the app never asks. That is the defect class
+# this repository's reachability register exists for, reproduced deliberately.
+#
+# RED, on the simulator, where the app is actually running:
+#   PocketListenProofUITests.swift:57: XCTAssertEqual failed: ("0") is not equal to ("5") —
+#   "the plays-here line, the three places and the kept-here line render for a recording that
+#    came off a recorder"
+#
+# The register catches the same thing statically: `pocket-local-playback`'s only declared caller
+# is this line, so deleting it computes `unreachable` against a row declaring `reachable`.
+#
+--- a/App/ConversationFacesView.swift
++++ b/App/ConversationFacesView.swift
+@@ -1189,7 +1189,6 @@
+     private func initialLoad() async {
+         loadError = nil
+-        await resolveHeldRecording()
+         let base = CaptureWAL.documentsCaptures()

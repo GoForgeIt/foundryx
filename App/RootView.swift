@@ -1075,7 +1075,7 @@ private struct MainTabs: View {
                         brainSetupBanner(text)
                     }
                     CaptureScreen(device: device, manager: manager, sources: sources,
-                                  target: target, local: local,
+                                  target: target, local: local, brain: brains.choice,
                                   reopenCaptureId: $restoreCaptureId,
                                   openCaptureId: $openCaptureId)
                 }

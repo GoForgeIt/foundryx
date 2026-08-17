@@ -155,6 +155,9 @@ struct CaptureScreen: View {
     let target: DoorTarget
     /// Phone-only tier: labels stay on-device ("Saved on phone", not "…to computer").
     var local: Bool = false
+    /// WHICH BRAIN IS ON. Carried, not derived from `local`: see `ConversationFacesView.brain`.
+    /// It reaches the safety predicate a recording's "safe elsewhere" row is drawn from.
+    let brain: BrainChoice
     /// The transcript to REOPEN, from the durable place the shell restored
     /// (features/app-place-restore.feature). Drives one programmatic push; cleared when
     /// that detail is dismissed, or by the shell if the person moves off this tab first.
@@ -219,7 +222,7 @@ struct CaptureScreen: View {
     private let tagger = makeSystemCategoryTagger()
 
     init(device: DeviceManager, manager: CaptureManager, sources: CaptureSourceRegistry,
-         target: DoorTarget, local: Bool = false,
+         target: DoorTarget, local: Bool = false, brain: BrainChoice,
          reopenCaptureId: Binding<String?> = .constant(nil),
          openCaptureId: Binding<String?> = .constant(nil)) {
         self.device = device
@@ -227,6 +230,7 @@ struct CaptureScreen: View {
         self.sources = sources
         self.target = target
         self.local = local
+        self.brain = brain
         _reopenCaptureId = reopenCaptureId
         _openCaptureId = openCaptureId
         _categories = StateObject(wrappedValue: manager.makeCategoryStore())
@@ -381,7 +385,8 @@ struct CaptureScreen: View {
                 ConversationFacesView(
                     target: target, manager: manager, captureId: cid,
                     timeRange: "Tue, Jul 14 · 4:16 PM–4:28 PM · 12 min",
-                    place: "Office", conversationDate: Date(), local: true)
+                    place: "Office", conversationDate: Date(), local: true,
+                    brain: .justMyPhone)
             }
         }
         #endif
@@ -854,7 +859,8 @@ struct CaptureScreen: View {
                 timeRange: hit.dateLabel,
                 place: nil,
                 conversationDate: nil,
-                local: false)
+                local: false,
+                brain: brain)
         } label: {
             VStack(alignment: .leading, spacing: GrainSpacing.x1) {
                 Text(hit.title.isEmpty ? "Untitled voice note" : hit.title)
@@ -1033,7 +1039,8 @@ struct CaptureScreen: View {
                                                                      baseDir: manager.baseDir),
             conversationDate: manager.conversationMeta(for: wal.captureId)
                 .map { Date(timeIntervalSince1970: TimeInterval($0.startedAt)) }
-                ?? wal.status.startedAt
+                ?? wal.status.startedAt,
+            brain: brain
         )
         // THE ONE PLACE A TRANSCRIPT REPORTS ITSELF. Every route into a conversation's
         // detail — a tapped row's `NavigationLink`, a merge, a restored place — calls this
