@@ -154,13 +154,69 @@ public struct PocketConversationTime: Sendable, Equatable {
     public let warning: String?
 }
 
+/// Every line the recorder's clock can make a person read, in the kit, for the same reason every
+/// other device string is: `swift test` cannot compile `App/`.
+public enum PocketRecorderClockPresentation {
+    /// THE ONLY CLOCK SENTENCE THIS BUILD CAN HONESTLY SAY. It names the proof (the recorder is
+    /// ahead of this phone) and what was done about it (filed under the arrival day) rather than
+    /// the old "may have drifted", which was a guess dressed as a finding.
+    public static let recorderAheadLine =
+        "The recorder's clock is ahead of this phone, so this recording is filed under the day "
+        + "it arrived."
+
+    public static let everyLine: [String] = [recorderAheadLine]
+}
+
+/// WHAT A BROUGHT-OVER RECORDING'S TIME IS, AND WHEN THIS APP IS ALLOWED TO DOUBT IT.
+///
+/// ## The defect this replaces
+///
+/// This rule used to take a `lastClockSet: Date?` trust point and read `nil` — "we have never
+/// set this recorder's clock" — as EVIDENCE THAT THE CLOCK WAS WRONG:
+///
+/// ```swift
+/// let beforeTrust = lastClockSet.map { reported < $0 } ?? true   // nil -> true
+/// ```
+///
+/// Nothing in this repository ever passed that argument. `PocketCaptureImport.makeConversation`
+/// defaulted it to `nil` and its one production caller took the default, so `beforeTrust` was
+/// `true` for every recording that has ever come off a recorder and every one of them was
+/// labelled suspect. A warning that fires on everything says nothing. The parameter is gone
+/// rather than defaulted, because a trust point nothing can produce is not a trust point.
+///
+/// ## Why this reads and does not write
+///
+/// The obvious repair is `APP&T` — set the recorder's clock and the trust point becomes real.
+/// It was not taken, for two MEASURED reasons (hardware probe of firmware 1.6, 2026-08-16,
+/// `foundry-hearth/reference/pocket-ble-protocol.md`):
+///
+///   * **There is no clock-READ verb.** No command in the firmware's verb set answers with the
+///     device's own time. `APP&T` is write-only.
+///   * **"Time: Synced to host" is not a readback.** `pocket-libre`'s `status` prints that as an
+///     unconditional literal right after issuing a blind `set_time()`. It reports what the CLI
+///     just did, not what the recorder said.
+///
+/// So the recorder has exactly one way to state that its clock is adrift: stamp a recording
+/// LATER than the moment this phone received it, which is a time no recording can honestly
+/// have. That is the whole of the evidence, so it is the whole of the rule.
+///
+/// ## The limit, stated rather than hidden
+///
+/// A recorder whose clock is stuck in the PAST is not detectable this way and this build does
+/// not claim to detect it. Doing so needs either a clock-read verb the firmware does not have,
+/// or the `APP&T` write — which has never been issued to any real device, and which would be a
+/// WRITE on a path that otherwise only reads.
 public enum PocketConversationClock {
-    public static func resolve(reported: Date, broughtOver: Date, lastClockSet: Date?, calendar: Calendar) -> PocketConversationTime {
-        let future = reported > broughtOver
-        let beforeTrust = lastClockSet.map { reported < $0 } ?? true
-        let timeline = future ? calendar.startOfDay(for: broughtOver) : reported
+    public static func resolve(reported: Date, broughtOver: Date, calendar: Calendar) -> PocketConversationTime {
+        // THE ONLY DEVICE-SOURCED PROOF THERE IS. Everything else is a guess, and the previous
+        // version of this line shipped a guess to nineteen recordings at once.
+        let recorderIsAhead = reported > broughtOver
+        // CLAMPED FOR GROUPING, NEVER OVERWRITTEN. A conversation dated to next week sorts above
+        // everything forever; `recorderReported` keeps what the device actually said so the row
+        // can still show the recorder's own digits.
+        let timeline = recorderIsAhead ? calendar.startOfDay(for: broughtOver) : reported
         return .init(timeline: timeline, recorderReported: reported, broughtOver: broughtOver,
-                     warning: (future || beforeTrust) ? "Time reported by recorder — device clock may have drifted" : nil)
+                     warning: recorderIsAhead ? PocketRecorderClockPresentation.recorderAheadLine : nil)
     }
 }
 

@@ -259,7 +259,11 @@ public enum PocketBringOverOutcome: Sendable, Equatable {
     /// outcome that only said "it worked" would leave the conversation invisible until the
     /// next launch, which is the difference between a file on a phone and a recording a
     /// person can read.
-    case broughtOver(bytes: Int, captureID: String)
+    ///
+    /// `clockWarning` IS CARRIED FOR THE SAME REASON `captureID` IS: it is a fact about this
+    /// recording that only the import could establish, and dropping it here is precisely how
+    /// `PocketImportedCapture.clockWarning` came to be a field nothing on earth read.
+    case broughtOver(bytes: Int, captureID: String, clockWarning: String?)
     /// The bytes AND the conversation were already here; the recorder was not asked again.
     case alreadyHeld(captureID: String)
     case transferIncomplete     // fewer bytes than announced / stall / disconnect
@@ -269,7 +273,7 @@ public enum PocketBringOverOutcome: Sendable, Equatable {
     /// The conversation this bring-over produced, if it produced one.
     public var captureID: String? {
         switch self {
-        case .broughtOver(_, let id), .alreadyHeld(let id): return id
+        case .broughtOver(_, let id, _), .alreadyHeld(let id): return id
         default: return nil
         }
     }
@@ -328,16 +332,28 @@ public enum PocketBringOverPresentation {
     /// tempted to break already has a renderer on the panel this action lives on —
     /// `PocketRecorderCheckPresentation.sectionNote` — and a second copy of it beside the
     /// button would be the same sentence twice on one screen.
+    ///
+    /// `PocketRecorderClockPresentation` IS IN HERE because `message(for:)` can now append it,
+    /// and a population claim that missed a line this affordance renders would be a population
+    /// claim about the wrong population.
     public static let everyLine: [String] = [
         actionTitle, inProgressLine, broughtOverLine, alreadyHeldLine,
         transferIncompleteLine, unreadableRecordingLine, leftTheRecorderLine,
-    ]
+    ] + PocketRecorderClockPresentation.everyLine
 
     /// The line an outcome earns. `.recorderUnavailable` carries its own, because the reason a
     /// session never opened is the attach seam's to state, not this file's to guess at.
+    ///
+    /// THE CLOCK WARNING IS READ HERE, AND THIS IS THE ONLY PLACE IT COULD BE. It was computed
+    /// on every import and then dropped on the floor — `PocketImportedCapture.clockWarning`
+    /// went into a struct that this file's own `conversation(_:)` discarded, so a field that
+    /// could only ever be produced by an import was consumed by nothing at all. It goes AFTER
+    /// the landing sentence: the first thing a person needs is whether their recording is here.
     public static func message(for outcome: PocketBringOverOutcome) -> String {
         switch outcome {
-        case .broughtOver:              return broughtOverLine
+        case .broughtOver(_, _, let clockWarning):
+            guard let clockWarning else { return broughtOverLine }
+            return broughtOverLine + " " + clockWarning
         case .alreadyHeld:              return alreadyHeldLine
         case .transferIncomplete:       return transferIncompleteLine
         case .unreadableRecording:      return unreadableRecordingLine
@@ -604,7 +620,8 @@ public enum PocketBringOver {
         // has cost this app measured main-thread hangs, and reading the file back to count its
         // bytes would undo the entire reason nothing on this path is held in memory.
         let onDisk = (try? held.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-        return .broughtOver(bytes: bytes ?? onDisk, captureID: imported.captureID)
+        return .broughtOver(bytes: bytes ?? onDisk, captureID: imported.captureID,
+                            clockWarning: imported.clockWarning)
     }
 }
 

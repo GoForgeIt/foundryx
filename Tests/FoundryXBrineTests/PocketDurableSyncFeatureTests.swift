@@ -14,7 +14,7 @@ private enum PocketDurableSteps {
     static func make(_ world: PocketDurableWorld) -> [StepDefinition] {
         let givens = ["an attached Pocket is away", "eligible Pocket candidates on multiple recorder days",
           "complete, truncated, and malformed Pocket payloads", "a Pocket pull that first returns a partial prefix",
-          "trusted, pre-set-point, and future Pocket timestamps", "finalized Pocket and Omi audio at the durable boundary",
+          "ordinary and impossible Pocket timestamps", "finalized Pocket and Omi audio at the durable boundary",
           "a verified durable Pocket import", "spies around all live capture boundaries"]
         let whens = ["five presence misses occur, then one inventory succeeds, then another miss occurs",
           "Pocket sync receives the backlog", "Pocket sync imports each payload",
@@ -25,7 +25,7 @@ private enum PocketDurableSteps {
           "newer days arrive first, shorter files break same-day ties, and each landed file starts processing immediately",
           "only re-readable checksum-matched MP3 creates a mapping and downstream job",
           "one capture, conversation, transcript, Lore lineage, and Activity lineage exist",
-          "device time is used, uncertain time is labeled, and future grouping is clamped without losing the reported value",
+          "device time is used, only a time the recorder could not have is labeled, and future grouping is clamped without losing the reported value",
           "both use the same conversation and Activity flow and neither posts a content notification",
           "no recorder delete is issued and the shipped deletion promise remains visible",
           "no FrameRouter, Live Activity, recording pill, or currently-recording state is reached"]
@@ -70,11 +70,11 @@ private actor PocketDurableWorld {
                         await sync.importFile(c, payload: mp3(count: 8), evidence: goodEvidence)]
         case "Pocket sync assembles their conversations":
             var cal = Calendar(identifier: .gregorian); cal.timeZone = TimeZone(secondsFromGMT: 0)!
-            let now = Date(timeIntervalSince1970: 2_000_000), set = Date(timeIntervalSince1970: 1_500_000)
+            let now = Date(timeIntervalSince1970: 2_000_000)
             times = [.init(timeline: Date(), recorderReported: Date(), broughtOver: Date(), warning: nil)]
-            times = [PocketConversationClock.resolve(reported: Date(timeIntervalSince1970: 1_700_000), broughtOver: now, lastClockSet: set, calendar: cal),
-                     PocketConversationClock.resolve(reported: Date(timeIntervalSince1970: 1_000_000), broughtOver: now, lastClockSet: set, calendar: cal),
-                     PocketConversationClock.resolve(reported: Date(timeIntervalSince1970: 3_000_000), broughtOver: now, lastClockSet: set, calendar: cal)]
+            times = [PocketConversationClock.resolve(reported: Date(timeIntervalSince1970: 1_700_000), broughtOver: now, calendar: cal),
+                     PocketConversationClock.resolve(reported: Date(timeIntervalSince1970: 1_000_000), broughtOver: now, calendar: cal),
+                     PocketConversationClock.resolve(reported: Date(timeIntervalSince1970: 3_000_000), broughtOver: now, calendar: cal)]
         case "ambient processing notices an action in each":
             ambient = [PocketPostCaptureParity.ambientResult(conversationID: "p", enabled: true), PocketPostCaptureParity.ambientResult(conversationID: "o", enabled: true)]
         // THIS USED TO READ `deleteCommands = PocketRecorderCustodyPromise.automaticDeleteCommands`
@@ -122,8 +122,10 @@ private actor PocketDurableWorld {
             let jobs=await sink.jobs(); XCTAssertEqual(outcomes, [.imported(captureID:"capture-1"), .retryable(.truncatedPayload), .retryable(.malformedMP3)]); XCTAssertEqual(jobs.count, 1)
         case "one capture, conversation, transcript, Lore lineage, and Activity lineage exist":
             let jobs=await sink.jobs(); XCTAssertEqual(outcomes, [.retryable(.truncatedPayload), .imported(captureID:"capture-1"), .alreadyImported(captureID:"capture-1")]); XCTAssertEqual(jobs.count, 1)
-        case "device time is used, uncertain time is labeled, and future grouping is clamped without losing the reported value":
-            XCTAssertNil(times[0].warning); XCTAssertNotNil(times[1].warning); XCTAssertNotNil(times[2].warning); XCTAssertNotEqual(times[2].timeline, times[2].recorderReported)
+        case "device time is used, only a time the recorder could not have is labeled, and future grouping is clamped without losing the reported value":
+            XCTAssertNil(times[0].warning); XCTAssertNil(times[1].warning); XCTAssertNotNil(times[2].warning)
+            XCTAssertEqual(times[0].timeline, times[0].recorderReported); XCTAssertEqual(times[1].timeline, times[1].recorderReported)
+            XCTAssertNotEqual(times[2].timeline, times[2].recorderReported); XCTAssertEqual(times[2].recorderReported, Date(timeIntervalSince1970: 3_000_000))
         case "both use the same conversation and Activity flow and neither posts a content notification": XCTAssertEqual(ambient.map{$0.activityLineageCount}, [1,1]); XCTAssertEqual(ambient.map{$0.notificationCount}, [0,0])
         case "no recorder delete is issued and the shipped deletion promise remains visible":
             XCTAssertTrue(composedInWindow.contains("APP&LIST_DIRS"),
