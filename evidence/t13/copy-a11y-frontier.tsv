@@ -3,14 +3,32 @@
 # One row per customer-facing literal: kind<TAB>path<TAB>literal.
 #
 # Emitted by scripts/derive-copy-a11y-frontier.py — an INDEPENDENT implementation in
-# another language — and NOT by the Swift check it pins. The two agree row for row: 432
-# rows over 220 files, 152 `a11y-identifier` and 280 `customer-facing-string`.
+# another language — and NOT by the Swift check it pins. The two agree row for row: 431
+# rows over 224 files, 153 `a11y-identifier` and 278 `customer-facing-string`.
 #
 # ON THIS FRONTIER: the literal argument of `.accessibilityIdentifier("…")`, and the
 # literal FIRST argument of `Text(`, `Button(`, `Label(` and `.navigationTitle(`.
 # NOT ON IT, stated rather than implied away: interpolated and computed copy
 # (`Text(viewModel.title)` carries no literal), LocalizedStringKey tables, alert and
 # confirmation-dialog titles, and every string under Tests/ and UITests/.
+#
+# MOVED 2026-08-16 (pocket delivery plan, Step 10). Two rows LEFT this frontier and one
+# joined it, and the departures are the point rather than an erosion:
+#
+#   -  customer-facing-string  App/DeviceScreen.swift  Cancel
+#   -  customer-facing-string  App/DeviceScreen.swift  Use this device for capture
+#
+# Both were sentences a person reads, typed straight into `RecordingDevicePageView`'s
+# SwiftUI body on a screen whose stated rule is that every sentence comes from a kit
+# presentation type. `swift test` cannot compile `App/`, so nothing in the suite could see
+# either one. They are now `RecordingDevicePage.cancelAction` and
+# `RecordingDevicePage.captureToggleTitle` in `Sources/FoundryXKit`, where Brine reaches
+# them — so they leave THIS frontier (which pins literals at `Text(`/`Button(` heads) by
+# moving somewhere better held, not by disappearing.
+#
+#   +  a11y-identifier  App/RecorderPageProof.swift  recorder-page-proof
+#
+# The mount that lets `phase_uiproof` photograph the recorder page's three states.
 a11y-identifier	App/ActionOptionsSheet.swift	act-in-chat
 a11y-identifier	App/ActionOptionsSheet.swift	confirm-feedback
 a11y-identifier	App/ActionOptionsSheet.swift	continue-in-chat
@@ -110,6 +128,7 @@ a11y-identifier	App/PocketOnboardingView.swift	pocket-session-key-field
 a11y-identifier	App/PocketOnboardingView.swift	pocket-session-key-message
 a11y-identifier	App/PocketOnboardingView.swift	pocket-session-key-progress
 a11y-identifier	App/PocketOnboardingView.swift	pocket-session-key-submit
+a11y-identifier	App/RecorderPageProof.swift	recorder-page-proof
 a11y-identifier	App/RecordingScreen.swift	live-transcript
 a11y-identifier	App/RecordingScreen.swift	minimize-recording
 a11y-identifier	App/RecordingScreen.swift	recording-elapsed
@@ -265,10 +284,8 @@ customer-facing-string	App/ConversationFacesView.swift	Your note: \(note)
 customer-facing-string	App/ConversationFacesView.swift	\(ConversationActionsPresentation.othersGroupLabel) (\(actions.othersRows.count))
 customer-facing-string	App/ConversationFacesView.swift	\(outcome.speakerName) also matches \(n) past \(n == 1 ? 
 customer-facing-string	App/ConversationFacesView.swift	\u{2022}
-customer-facing-string	App/DeviceScreen.swift	Cancel
 customer-facing-string	App/DeviceScreen.swift	Close
 customer-facing-string	App/DeviceScreen.swift	Computer memory
-customer-facing-string	App/DeviceScreen.swift	Use this device for capture
 customer-facing-string	App/KilnConversationView.swift	Done
 customer-facing-string	App/OnboardingEndingViews.swift	Make your first voice note
 customer-facing-string	App/OnboardingEndingViews.swift	Next

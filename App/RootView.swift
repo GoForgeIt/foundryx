@@ -240,6 +240,23 @@ struct RootView: View {
            ProcessInfo.processInfo.arguments.contains("deletionChoice") {
             return AnyView(DeletionOutcomeChoiceView(onPick: { _ in }, onCancel: {}))
         }
+        // DEV-only: `-Screen recorder <state>` mounts ONE state of the recorder page — the
+        // page a person opens to see what their recorder is holding — for screenshot
+        // verification. Reached in the real app only from Settings → Devices & connections →
+        // a REMEMBERED record-then-sync recorder, which needs a Bluetooth radio and the
+        // recorder on the desk; a simulator has neither, so no build had ever rendered this
+        // screen at all. The states come from `RecorderPageProofState`, and a name that is
+        // not one of them falls through to the ordinary destination rather than quietly
+        // rendering the resting page — a misspelling that photographed the wrong screen and
+        // passed is the failure this step exists to remove.
+        if ProcessInfo.processInfo.arguments.contains("-Screen"),
+           ProcessInfo.processInfo.arguments.contains("recorder"),
+           let index = ProcessInfo.processInfo.arguments.firstIndex(of: "recorder"),
+           let state = RecorderPageProofState.named(
+               index + 1 < ProcessInfo.processInfo.arguments.count
+                   ? ProcessInfo.processInfo.arguments[index + 1] : nil) {
+            return AnyView(RecorderPageProof(state: state))
+        }
         #endif
         // The welcome front door leads until the user enters (enterApp); an
         // opted-out user short-circuits inside RootGate — no gate of any kind.
