@@ -142,7 +142,30 @@ pocket-libre waits 90 s, and the status-`1` check ordered before any client has 
 on `"MCU&D"` matches all four, and one of those four means *your recording is gone*. **Match the
 full frame.** Treat `MCU&D&ERR` as an explicit refusal, never as a delete that happened.
 
-## 8. Reproducing this
+## 8. The product audit this evidence forced
+
+Evidence that governs nothing is a document. Every surface that renders a duration, a transfer
+time, a speed or a free-space number was swept on 2026-08-16 and each one now either descends
+from a frame above or is gone.
+
+| surface | figure | before | after |
+|---|---|---|---|
+| shelf row (`StoredFileDevicePresentation.manifest` → `App/DeviceScreen.swift`) | how big a recording is | `"2 min"`, derived by dividing stated kilobytes by an unmeasured 4,000 B/s | `"469 KB"` — the recorder's own integer off `MCU&F&…&<KB>`, rendered losslessly |
+| fast-sync offer (`PocketFastSyncPresentation.setup`) | how much quicker it is | `"Much faster for long backlogs."` | `"Uses the recorder's own WiFi instead of Bluetooth."` — the mechanism, no rate |
+| fast-sync progress (`PocketFastSyncProgress`) | a rate | already withheld behind `measuredRate` | unchanged — this one was right, and was the only one |
+| readings strip (`RecordingDeviceReadingPresentation`) | battery / firmware / free space | measured | unchanged — `MCU&BAT&58`, `MCU&FW&1.6`, `MCU&SPA&058767&058992` |
+| reset + forget cost (`PocketRecorderCostPresentation`) | what a reset costs | counts of recordings | unchanged — counts, never megabytes |
+| bring-over (`PocketBringOverPresentation`) | how long it will take | states nothing | unchanged, and it must stay that way until a leg is timed |
+
+`PocketMeasuredFigures` is where that table lives as code. Production asks it before printing, so
+re-admitting any of these is a one-line change beside the reason it was withheld — never a quiet
+edit in a view. `features/pocket-numbers-were-measured.feature` holds it, and the mutations that
+prove it can fail are recorded in the commit.
+
+**NOT registered there, stated rather than implied away:** `"read 20 minutes ago"`. That is this
+phone's clock measuring itself, not a claim about a recorder.
+
+## 9. Reproducing this
 
 ```
 python3 -m venv <venv> && <venv>/bin/pip install -e ~/Development/pocket-libre
