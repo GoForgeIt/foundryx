@@ -264,7 +264,10 @@ private actor PocketFastWorld {
             let live = liveBoundaries.counts
             XCTAssertEqual(cleaned, 5)
             XCTAssertEqual(completedPayloads.count, 4)
-            XCTAssertEqual(PocketRecorderCustodyPromise.automaticDeleteCommands, 0)
+            // THE `automaticDeleteCommands == 0` LINE THAT USED TO SIT HERE IS GONE. It was a
+            // constant compared to a literal — no code path could falsify it — and Step 6's
+            // owner-armed clear made it false as well as useless. The assertion above it is the
+            // real one: it reads the frames this leg actually composed.
             XCTAssertEqual(live.storedFileLifecycleEvents, 5)
             XCTAssertEqual(live.activeSourceSelections + live.frameRouterStarts + live.walWrites + live.liveActivities + live.liveStateMutations, 0)
 

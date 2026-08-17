@@ -663,6 +663,14 @@ private actor PocketDeleteConsentWorld {
                 + PocketDestinationPresentation.everyLine
                 + PocketPresencePresentation.everyLine
                 + RecordingDeviceReadingPresentation.everyLine
+                // THE THREE FAMILIES THIS WAVE ADDED, and they are exactly the ones with the
+                // most reason to re-promise it: the removal's own copy, the fast-sync outcome
+                // lines, and the clock warnings. A family absent from this union is a family
+                // this gate CANNOT SEE — which is how the mint consent's "Solleva never deletes
+                // anything from the recorder" survived on six of the eleven branches.
+                + PocketRemoveFromRecorderPresentation.everyLine
+                + PocketFastSyncPresentation.everyLine
+                + PocketRecorderClockPresentation.everyLine
                 + [PocketRecorderCustodyPromise.text]
             XCTAssertFalse(everyLine.isEmpty)
             // AND THE SCAN CAN SEE A VIOLATION WHEN THERE IS ONE. Without this the loop below
@@ -683,12 +691,21 @@ private actor PocketDeleteConsentWorld {
         case "nothing Solleva does on its own is counted as something a person asked for":
             // THE INVARIANT THAT WAS ALREADY CORRECTLY NAMED AND MUST NOT BE WEAKENED. It is
             // no *automatic* delete — never was it no delete.
-            // NOTE FOR STEP 6. `automaticDeleteCommands` is a CONSTANT compared to a literal —
-            // no change to any code path this app runs can falsify it, and it becomes literally
-            // false the day the owner-armed auto-clear ships. It is kept only until there is an
-            // armed path to restate it about ("no delete on an UNARMED recorder"); the real
-            // instrument is the census assertion below, which reads the population.
-            XCTAssertEqual(PocketRecorderCustodyPromise.automaticDeleteCommands, 0)
+            // STEP 1 LEFT INSTRUCTIONS FOR TODAY, AND THIS IS THEM CARRIED OUT. The
+            // `automaticDeleteCommands == 0` assertion that stood here is gone: Step 6 shipped
+            // the armed path its own note was waiting for, so the constant is now false as well
+            // as unfalsifiable. The restatement it asked for — "no delete on an UNARMED
+            // recorder" — is a SCENARIO, not a constant: "Clearing a recorder automatically is
+            // off until I turn it on, and only for that recorder", which drives a real recorder
+            // over a real radio and reads the census.
+            let unarmed = PocketAutoClear.off.decision(
+                syncedAt: Date(),
+                presence: PocketRecordingPresence(
+                    onRecorder: PocketPlaceReading(answer: .yes, observedAt: Date()),
+                    onThisPhone: PocketPlaceReading(answer: .yes, observedAt: Date()),
+                    safeElsewhere: PocketPlaceReading(answer: .yes, observedAt: Date())))
+            XCTAssertEqual(unarmed, .thisRecorderIsNotArmed,
+                           "a recorder nobody armed cleared a recording that was safe elsewhere")
             let unchosen = await PocketRecorderCommandGate.admit(
                 frame: "APP&D&2026-03-28&20260328001919", ownerConsent: nil)
             XCTAssertEqual(unchosen, .refused(.nobodyChoseThisRecording))

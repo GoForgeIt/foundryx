@@ -279,11 +279,23 @@ public enum PocketPostCaptureParity {
 public enum PocketRecorderCustodyPromise {
     public static let text = "Solleva never deletes anything you didn't ask it to."
 
-    /// THE INVARIANT THAT WAS ALWAYS CORRECTLY NAMED — no *automatic* delete, which is a
-    /// different and weaker claim than no delete. Kept as the declared policy; the PROOF is
-    /// `PocketRecorderCommandLedger`, because a constant equal to zero is a claim no mutation
-    /// can falsify and this one was asserted in four suites for months.
-    public static let automaticDeleteCommands = 0
+    /// THE CONSTANT THAT USED TO LIVE HERE IS GONE, ON THE DAY ITS OWN NOTE SAID IT WOULD BE.
+    ///
+    /// `automaticDeleteCommands = 0` was asserted in four suites for months. It was a claim no
+    /// mutation could falsify — nothing in the app could change it — and Step 1's gate said so
+    /// in writing, adding: *"it is kept only until there is an armed path to restate it about
+    /// ('no delete on an UNARMED recorder')."*
+    ///
+    /// Step 6 shipped that armed path, and on this tree the constant is not merely unfalsifiable
+    /// but FALSE: an owner-armed recorder does compose deletions, on purpose, which is the whole
+    /// feature. Leaving a `0` beside a behaviour that is no longer zero is worse than leaving
+    /// nothing, because four suites go on citing it.
+    ///
+    /// The restated invariant is behavioural and lives where it can fail: the recorder that
+    /// nobody armed composes nothing (`features/pocket-remove-from-the-recorder.feature`,
+    /// "Clearing a recorder automatically is off until I turn it on"), and every frame this app
+    /// composes — sent or refused — is written to `PocketRecorderCommandLedger`, which is what
+    /// the census assertions read.
 }
 
 private extension Data {

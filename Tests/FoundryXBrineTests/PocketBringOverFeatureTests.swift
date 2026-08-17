@@ -691,7 +691,10 @@ private actor PocketBringOverWorld {
                 XCTAssertFalse(PocketRecorderWire.namesADeletion("APP&" + command),
                                "the bring-over issued \"\(command)\" — no automatic delete, ever")
             }
-            XCTAssertEqual(PocketRecorderCustodyPromise.automaticDeleteCommands, 0)
+            // THE `automaticDeleteCommands == 0` LINE THAT USED TO SIT HERE IS GONE. It was a
+            // constant compared to a literal — no code path could falsify it — and Step 6's
+            // owner-armed clear made it false as well as useless. The assertion above it is the
+            // real one: it reads the frames this leg actually composed.
             XCTAssertTrue(
                 PocketRecorderCheckPresentation.sectionNote
                     .contains(PocketRecorderCustodyPromise.text),
