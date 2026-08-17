@@ -22,7 +22,7 @@ final class PocketRemoveFromRecorderFeatureTests: XCTestCase {
         let result = try await BrineFeatureRunner.run(
             "pocket-remove-from-the-recorder",
             registry: StepRegistry(PocketRemoveSteps.make(world)))
-        XCTAssertEqual(result.passed, 11)
+        XCTAssertEqual(result.passed, 15)
     }
 
     /// THE PREFIX COLLISION, MEASURED RATHER THAN ASSERTED. A matcher on `"MCU&D"` answers
@@ -55,12 +55,17 @@ private enum PocketRemoveSteps {
             "a recorder whose recordings synced before I turned automatic clearing on",
             "a recorder with automatic clearing turned on",
             "the sentences a person reads about taking recordings off a recorder",
+            "a shelf with one recording confirmed safe elsewhere and one that is not",
+            "a recording Solleva has confirmed safe somewhere else",
+            "a recorder whose shelf Solleva could not re-read",
         ]
         let whens = [
             "I ask Solleva to take it off the recorder",
             "I ask Solleva to take one of each off the recorder",
             "I turn on automatic clearing for the first recorder",
             "I turn on automatic clearing for that recorder",
+            "I choose to take it off the recorder",
+            "I ask Solleva to take a recording off it",
         ]
         let thens = [
             "Solleva refuses and says it has not confirmed a copy anywhere else",
@@ -87,6 +92,14 @@ private enum PocketRemoveSteps {
             "on a phone with nowhere else to put a copy, automatic clearing is not offered at all",
             "none of them promises an amount of space nobody has measured",
             "the promise is still that Solleva never deletes anything you did not ask it to",
+            "only the confirmed recording offers to be taken off the recorder",
+            "a recording Solleva has never checked on offers nothing",
+            "I am asked to confirm first",
+            "what I am asked names the recorder and says where the copy already is",
+            "nothing is asked of the recorder until I confirm",
+            "Solleva says it cannot act on that recording right now",
+            "Solleva asked that recorder how full it is on the same trip",
+            "a recorder that refused to remove anything is not asked how full it is",
         ]
         var steps = givens.map { phrase in
             defineStep(phrase) { context, _, _ in try await world.given(phrase); return context }
@@ -143,6 +156,10 @@ private actor PocketRemoveWorld {
     private var syncedBeforeArming: Date?
     private var armedAt: Date?
 
+    // The four scenarios added after review.
+    private var shelfReadings: [PocketRecordingPresence] = []
+    private var confirmationAsked: String?
+
     // MARK: - Given
 
     func given(_ phrase: String) async throws {
@@ -163,6 +180,25 @@ private actor PocketRemoveWorld {
         case "a recorder holding a recording Solleva has confirmed safe somewhere else":
             try await stageRecorder(removal: .removesWhatItHolds)
             presence = Self.provenSafe
+
+        case "a shelf with one recording confirmed safe elsewhere and one that is not":
+            // ONE OF EACH, ON PURPOSE. A fixture where every row agrees cannot tell a working
+            // gate from a deleted `if`: the assertion would pass whether the affordance were
+            // offered to all of them or none.
+            shelfReadings = [Self.provenSafe, Self.onlyHere, Self.neverChecked]
+
+        case "a recording Solleva has confirmed safe somewhere else":
+            try await stageRecorder(removal: .removesWhatItHolds)
+            presence = Self.provenSafe
+            confirmationAsked = nil
+
+        case "a recorder whose shelf Solleva could not re-read":
+            // THE REACHABLE STALE STATE. A check that reached the recorder followed by one that
+            // did not leaves the page drawing the old rows with NO readings behind them — the
+            // page publishes `shelfRecordings` on every check and `presences` only on a check
+            // that answered. Modelled here as the reading being absent for the row tapped.
+            try await stageRecorder(removal: .removesWhatItHolds)
+            shelfReadings = []
 
         case "a recorder that will not remove the recording it is asked about":
             try await stageRecorder(removal: .refusesEverything)
@@ -278,6 +314,29 @@ private actor PocketRemoveWorld {
             }
             commandsSeenByTheRecorder = Array(stack.commandsWritten.dropFirst(before))
 
+        case "I choose to take it off the recorder":
+            // WHAT THE ROW'S BUTTON DOES NOW: it opens the confirmation. It does NOT compose a
+            // removal, and the next two checks are what hold that apart.
+            guard let stack else { throw BrineStepError("no recorder was staged") }
+            let before = stack.commandsWritten.count
+            confirmationAsked = PocketRemoveFromRecorderPresentation.confirmation(for: .myComputer)
+            commandsSeenByTheRecorder = Array(stack.commandsWritten.dropFirst(before))
+            composed = await PocketRecorderCommandLedger.shared.composed(since: try requireMark())
+
+        case "I ask Solleva to take a recording off it":
+            // THE PAGE'S OWN GUARD, run as the page runs it: no reading for the row means the
+            // errand is never reached. The assertion below is that this produces a SENTENCE.
+            guard let stack else { throw BrineStepError("no recorder was staged") }
+            let before = stack.commandsWritten.count
+            if shelfReadings.isEmpty {
+                outcomes = []
+            } else {
+                outcomes.append(await remove(shelfWhenStaged[0], presence: shelfReadings[0],
+                                             provenance: .ownerChose))
+            }
+            commandsSeenByTheRecorder = Array(stack.commandsWritten.dropFirst(before))
+            composed = await PocketRecorderCommandLedger.shared.composed(since: try requireMark())
+
         case "I turn on automatic clearing for the first recorder",
              "I turn on automatic clearing for that recorder":
             guard let store, let first else { throw BrineStepError("no recorder was remembered") }
@@ -318,6 +377,90 @@ private actor PocketRemoveWorld {
             guard PocketRemoveFromRecorderPresentation.message(for: .notProvenSafe)
                 == PocketRemoveFromRecorderPresentation.notProvenSafeLine else {
                 throw BrineStepError("the refusal does not say why")
+            }
+
+        case "only the confirmed recording offers to be taken off the recorder":
+            let offered = shelfReadings.map(PocketRemoveFromRecorderPresentation.isOffered(for:))
+            guard offered == [true, false, false] else {
+                throw BrineStepError("the affordance was offered as \(offered) over readings "
+                                        + "[safe elsewhere, only here, never checked] — it must "
+                                        + "be offered on the first and no other")
+            }
+
+        case "a recording Solleva has never checked on offers nothing":
+            // `unknown` IS NOT A YES, stated separately from the row above because it is the
+            // arm a two-valued predicate gets wrong.
+            for answer in PocketPresenceAnswer.allCases where answer != .yes {
+                let reading = PocketRecordingPresence(
+                    onRecorder: PocketPlaceReading(answer: .yes, observedAt: Self.armingInstant),
+                    onThisPhone: PocketPlaceReading(answer: .yes, observedAt: Self.armingInstant),
+                    safeElsewhere: PocketPlaceReading(answer: answer, observedAt: nil))
+                guard !PocketRemoveFromRecorderPresentation.isOffered(for: reading) else {
+                    throw BrineStepError("the affordance is offered for a recording whose "
+                                            + "safety answer is \(answer.rawValue)")
+                }
+            }
+
+        case "I am asked to confirm first":
+            guard confirmationAsked != nil else {
+                throw BrineStepError("choosing to remove a recording asked nothing — the "
+                                        + "confirmation this behaviour wrote has no call site")
+            }
+
+        case "what I am asked names the recorder and says where the copy already is":
+            let asked = confirmationAsked ?? ""
+            guard asked.contains("off the recorder"),
+                  asked.contains(PocketRemoveFromRecorderPresentation.keptLine(for: .myComputer))
+            else {
+                throw BrineStepError("the confirmation reads \"\(asked)\" — it must name the "
+                                        + "recorder as what the recording is leaving AND say "
+                                        + "where the copy that makes this safe already is")
+            }
+
+        case "nothing is asked of the recorder until I confirm":
+            let asked = commandsSeenByTheRecorder.filter {
+                PocketRecorderWire.namesADeletion("APP&" + $0)
+            }
+            guard asked.isEmpty, composed.filter(\.namesADeletion).isEmpty else {
+                throw BrineStepError("opening the confirmation already composed a deletion")
+            }
+
+        case "Solleva says it cannot act on that recording right now":
+            // THE SENTENCE ITSELF. The page's guard used to `return` in silence here.
+            guard !PocketRemoveFromRecorderPresentation.cannotActOnThisNowLine.isEmpty,
+                  PocketRemoveFromRecorderPresentation.everyLine
+                    .contains(PocketRemoveFromRecorderPresentation.cannotActOnThisNowLine) else {
+                throw BrineStepError("there is no sentence for a tap that could not be carried "
+                                        + "out, so the page has nothing to say and says it")
+            }
+            guard outcomes.isEmpty else {
+                throw BrineStepError("an errand ran for a row with no safety reading")
+            }
+
+        case "Solleva asked that recorder how full it is on the same trip":
+            let asked = commandsSeenByTheRecorder.filter { $0 == "SPACE" }
+            guard !asked.isEmpty else {
+                throw BrineStepError("the removal session never asked how full the recorder is: "
+                                        + "the commands were \(commandsSeenByTheRecorder). The "
+                                        + "owner is watching that number while trying to "
+                                        + "reclaim space, and it stays frozen at whatever the "
+                                        + "last check said")
+            }
+
+        case "a recorder that refused to remove anything is not asked how full it is":
+            // THE PAIRED CONTROL. "The session asked how full it is" is also satisfied by a
+            // session that asks unconditionally — which would spend a command, on a link whose
+            // information timeout retires the whole session, for a reading nothing changed.
+            // Same recorder, same call, ONE fact different: this one says no.
+            try await stageRecorder(removal: .refusesEverything)
+            guard let stack else { throw BrineStepError("no recorder was staged") }
+            let before = stack.commandsWritten.count
+            _ = await remove(shelfWhenStaged[0], presence: Self.provenSafe,
+                             provenance: .ownerChose)
+            let after = Array(stack.commandsWritten.dropFirst(before))
+            guard !after.contains("SPACE") else {
+                throw BrineStepError("a recorder that refused was still asked how full it is: "
+                                        + "\(after)")
             }
 
         case "the recorder is never asked to remove anything":

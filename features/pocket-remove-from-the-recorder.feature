@@ -80,3 +80,27 @@ Feature: Taking a recording off the recorder, on purpose
     And on a phone with nowhere else to put a copy, automatic clearing is not offered at all
     And none of them promises an amount of space nobody has measured
     And the promise is still that Solleva never deletes anything you did not ask it to
+
+  Scenario: The affordance exists only for a recording Solleva can prove it holds elsewhere
+    Given a shelf with one recording confirmed safe elsewhere and one that is not
+    Then only the confirmed recording offers to be taken off the recorder
+    And a recording Solleva has never checked on offers nothing
+
+  Scenario: I am told what this does, and where the copy already is, before it happens
+    Given a recording Solleva has confirmed safe somewhere else
+    When I choose to take it off the recorder
+    Then I am asked to confirm first
+    And what I am asked names the recorder and says where the copy already is
+    And nothing is asked of the recorder until I confirm
+
+  Scenario: A tap that cannot be carried out says so rather than doing nothing
+    Given a recorder whose shelf Solleva could not re-read
+    When I ask Solleva to take a recording off it
+    Then Solleva says it cannot act on that recording right now
+    And the recorder is never asked to remove anything
+
+  Scenario: How full the recorder is, is re-read after something is taken off it
+    Given a recorder holding a recording Solleva has confirmed safe somewhere else
+    When I ask Solleva to take it off the recorder
+    Then Solleva asked that recorder how full it is on the same trip
+    And a recorder that refused to remove anything is not asked how full it is

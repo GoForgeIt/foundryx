@@ -431,6 +431,12 @@ struct RecordingDevicePageView: View {
 
     @State private var showingEducation = false
     @State private var confirmingForget = false
+    /// WHICH RECORDING THE OWNER IS BEING ASKED ABOUT, by the recorder's own `<date>/<timestamp>`.
+    ///
+    /// It holds the ID rather than a Bool because the confirmation is per-recording and the
+    /// sentence it shows names where THAT recording's copy is. A Bool plus a separate "current
+    /// row" is two pieces of state that can disagree, on the one gesture that cannot be undone.
+    @State private var confirmingRemovalOf: String?
     /// §10 custody. The key is fetched from the Keychain only when the owner asks for it, and
     /// it does not outlive the sheet that showed it.
     @State private var showingKeyCustody = false
@@ -593,6 +599,25 @@ struct RecordingDevicePageView: View {
             // this line shipped the confirmation stated the mechanism and never the number.
             Text(PocketRecorderCostPresentation.forgetMessage(warning: page.forgetWarning,
                                                               presences: check.presences))
+        }
+        // THE DESTRUCTIVE TAP'S OWN CONFIRMATION. `isPresented` is derived from the ID rather
+        // than held separately, so dismissing the dialog and forgetting which recording it was
+        // about are the same event.
+        .alert(PocketRemoveFromRecorderPresentation.action,
+               isPresented: Binding(get: { confirmingRemovalOf != nil },
+                                    set: { if !$0 { confirmingRemovalOf = nil } })) {
+            Button(PocketRemoveFromRecorderPresentation.cancelConfirmAction, role: .cancel) {
+                confirmingRemovalOf = nil
+            }
+            Button(PocketRemoveFromRecorderPresentation.confirmAction, role: .destructive) {
+                guard let id = confirmingRemovalOf else { return }
+                confirmingRemovalOf = nil
+                check.removeFromRecorder(id: id,
+                                         hardwareToken: input.identity.hardwareToken,
+                                         advertisedName: input.displayName)
+            }
+        } message: {
+            Text(PocketRemoveFromRecorderPresentation.confirmation(for: brain))
         }
         // LEAVING THE PAGE STOPS THE ERRAND. Without this the check or the transfer carried on
         // with nobody watching it — a `CBCentralManager` still connected to the recorder, a
@@ -850,11 +875,14 @@ struct RecordingDevicePageView: View {
                                     // above is drawn from.
                                     if PocketRemoveFromRecorderPresentation
                                         .isOffered(for: row.presence) {
+                                        // IT ASKS FIRST. Until this shipped, the row fired the
+                                        // removal on the tap while FORGET — which destroys a
+                                        // key and no audio — sat behind an `.alert`. The less
+                                        // recoverable gesture was the less guarded one, and
+                                        // `confirmation(for:)`, written precisely to guard it,
+                                        // had no call site anywhere in the app.
                                         Button {
-                                            check.removeFromRecorder(
-                                                id: row.id,
-                                                hardwareToken: input.identity.hardwareToken,
-                                                advertisedName: input.displayName)
+                                            confirmingRemovalOf = row.id
                                         } label: {
                                             Text(PocketRemoveFromRecorderPresentation.action)
                                                 .grainTextStyle(.caption)
@@ -1289,6 +1317,15 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// the brain and the library would be a second opinion on "is this safe", and the delete
     /// ruling is explicit that two answers to that question is how a recording gets lost.
     private var durability: PocketCaptureDurability?
+    /// WHAT THE SAFETY EVIDENCE IS BUILT FROM, kept so it can be built AGAIN.
+    ///
+    /// `PocketCaptureDurability` holds a SNAPSHOT of capture stages taken at check time. That
+    /// is right for resolving one shelf cheaply and wrong for every question asked afterwards:
+    /// a recording brought over AFTER the check cannot be in the snapshot, so its stage is nil
+    /// forever and it can never become safe elsewhere on this page — no matter how long the
+    /// drain runs. The shelf column said so, and the owner-armed clear, which reads the same
+    /// reading, could therefore never clear the recording it was armed for.
+    private var evidenceBasis: (library: URL, brain: BrainChoice)?
 
     /// THE RADIO THE IN-FLIGHT ERRAND IS HOLDING, and the Task driving it.
     ///
@@ -1419,6 +1456,7 @@ final class PocketRecorderCheckModel: ObservableObject {
         // phone" and nothing more.
         let durability = PocketCaptureDurability(baseDir: library, stages: stages, brain: brain)
         self.durability = durability
+        self.evidenceBasis = (library: library, brain: brain)
         errand = Task { [weak self] in
             // THE SHELF IS ASKED FOR HERE AND NOWHERE ELSE. Choosing which file to bring over
             // needs the recorder's own fields, not the row titles; reading it on a second
@@ -1453,6 +1491,20 @@ final class PocketRecorderCheckModel: ObservableObject {
             // there yet. It also makes every observer of this flag race the offer.
             self.isChecking = false
             self.finishErrand(outcome: Self.token(for: outcome))
+            // THE ARMED PATH RUNS ON A CHECK TOO, AND THAT IS WHAT MAKES IT WORK AT ALL.
+            //
+            // "Synced" means CONFIRMED, which is a state a recording reaches minutes after its
+            // transfer finishes — the drain has to run and the upload has to be acknowledged.
+            // So at the end of a bring-over the answer is always "not proven safe yet", and a
+            // sweep that only ran there would clear nothing on the transfer it was armed for
+            // and, on a shelf the owner never re-checks, nothing ever.
+            //
+            // A check re-takes the stage snapshot by construction, so this is the moment the
+            // evidence can finally exist. The candidate set is unchanged and still tight: only
+            // recordings THIS owner pulled over since the page opened, each put to the same
+            // predicate an explicit tap meets.
+            await self.clearWhatTheArmedControlAllows(hardwareToken: hardwareToken,
+                                                      advertisedName: advertisedName)
         }
     }
 
@@ -1470,6 +1522,19 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// It is the SAME `PocketShelfReadModel.presences` the session itself used, so the shelf
     /// after a transfer and the shelf during a check cannot disagree about whether a recording
     /// is safe. Two answers to that question is how a recording gets lost.
+    /// RE-TAKE THE STAGE SNAPSHOT THE SAFETY PREDICATE STANDS ON.
+    ///
+    /// Called before every re-read that follows a transfer. `captureStages()` is an in-memory
+    /// read on the main actor — the same call the check itself makes at its call site — so this
+    /// costs no disk; what it buys is that a capture which landed since the check exists at all
+    /// in the evidence the shelf is resolved against.
+    private func refreshEvidence(from manager: CaptureManager) {
+        guard let basis = evidenceBasis else { return }
+        durability = PocketCaptureDurability(baseDir: basis.library,
+                                             stages: manager.captureStages(),
+                                             brain: basis.brain)
+    }
+
     private func rebuildShelf(_ panel: StoredFileDeviceDetailPresentation,
                               identity: RecordingDeviceIdentity) async {
         let resolved = await PocketShelfReadModel.presences(shelfRecordings,
@@ -1712,6 +1777,10 @@ final class PocketRecorderCheckModel: ObservableObject {
                 // candidate set is exactly this map, and its whole job is to answer "did this
                 // land after the owner armed this recorder".
                 self.syncedThisSession[fileToken] = Date()
+                // THE EVIDENCE IS RE-TAKEN BEFORE THE SHELF IS RE-READ. Without this the row
+                // for the recording that just landed is resolved against a snapshot taken
+                // before it existed.
+                self.refreshEvidence(from: manager)
                 if let panel { await self.rebuildShelf(panel, identity: identity) }
             }
             // BUSY UNTIL THE SHELF HAS CAUGHT UP — see the same note in `run`. Dropped before
@@ -1768,9 +1837,17 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// it to `PocketDeleteConsent`'s failable factory. Nothing here recomputes it.
     func removeFromRecorder(id: String, hardwareToken: String, advertisedName: String) {
         guard !isChecking, !isBringingOver, !isRemoving else { return }
+        // EVERY EXIT SAYS SOMETHING. This guard used to `return` in silence, and the state it
+        // catches is REACHABLE: `shelfRecordings` is restated on EVERY check while `presences`
+        // and `detail` are only restated on a check that reached the recorder, so one good
+        // check followed by one failed one leaves the page drawing the old rows over no
+        // readings. Every tap on the destructive button then did nothing and explained nothing.
         guard let index = shelfRecordings.firstIndex(where: {
             $0.date + "/" + $0.timestamp == id
-        }), let presence = presences?[safe: index] else { return }
+        }), let presence = presences?[safe: index] else {
+            removalMessage = PocketRemoveFromRecorderPresentation.cannotActOnThisNowLine
+            return
+        }
         guard let identifier = UUID(uuidString: hardwareToken) else {
             removalMessage = PocketRecorderCheckPresentation.notThisRecorderLine
             return
@@ -1978,6 +2055,7 @@ extension PocketRecorderCheckModel {
                 // sweep's candidate set is exactly this map, so a recorder armed by its owner
                 // would never clear anything the fast path brought over.
                 self.syncedThisSession[fileToken] = Date()
+                self.refreshEvidence(from: manager)
                 if let panel { await self.rebuildShelf(panel, identity: identity) }
             }
             self.isBringingOver = false

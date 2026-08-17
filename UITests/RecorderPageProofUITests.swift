@@ -97,7 +97,40 @@ final class RecorderPageProofUITests: XCTestCase {
         XCTAssertTrue(answered.buttons["Bring over"].firstMatch.exists
                         || answered.staticTexts["Bring over"].firstMatch.exists,
                       "the answered shelf offers nothing to bring over")
+        // THE DESTRUCTIVE AFFORDANCE, PHOTOGRAPHED, AND ITS GATE PROVEN IN BOTH DIRECTIONS.
+        //
+        // The fixture seeds THREE recordings and marks exactly ONE of them safe elsewhere. So
+        // the count is the assertion: "Remove it from the recorder" must appear once — not
+        // three times (the gate is not reading the predicate) and not zero (the gate is
+        // refusing everything, which a deleted button also achieves). Until this shipped,
+        // `PocketRemoveFromRecorderPresentation.isOffered` — the function enforcing the
+        // ruling's "the affordance does not exist for a recording we have not brought over" —
+        // had no test anywhere and its only call site was a bare `if` in a SwiftUI body.
+        let removeAction = "Remove it from the recorder"
+        XCTAssertTrue(answered.buttons[removeAction].firstMatch.waitForExistence(timeout: 10)
+                        || answered.staticTexts[removeAction].firstMatch.exists,
+                      "no row offers to be taken off the recorder, on a shelf whose fixture "
+                        + "marks one recording safe elsewhere — the affordance is unreachable")
+        let offered = answered.buttons.matching(identifier: removeAction).count
+                    + answered.staticTexts.matching(identifier: removeAction).count
+        XCTAssertEqual(offered, 1,
+                       "\(offered) of the three seeded rows offer the removal. Exactly one is "
+                        + "marked safe elsewhere, so any other number means the affordance is "
+                        + "not reading the safety predicate it is supposed to be gated on")
         shoot(answered, "recorder-page-03-shelf-answered")
+
+        // AND THE CONFIRMATION IT NOW OPENS. Tapping used to compose the removal immediately,
+        // while FORGET — which destroys a key and no audio — sat behind an alert.
+        let removeButton = answered.buttons[removeAction].firstMatch
+        if removeButton.exists {
+            removeButton.tap()
+            XCTAssertTrue(answered.buttons["Take it off the recorder"].firstMatch
+                            .waitForExistence(timeout: 10),
+                          "the destructive tap did not ask first — the confirmation written to "
+                            + "guard it has no call site")
+            shoot(answered, "recorder-page-04-removal-confirmation")
+            answered.buttons["Keep it on the recorder"].firstMatch.tap()
+        }
 
         // THE CONTROL. The same query family must NOT match text no screen renders, or every
         // assertion above would pass on a blank page.

@@ -207,7 +207,31 @@ public enum PocketRemoveFromRecorder {
         let result = await attachment.withAuthenticatedSession(
             peripheralIdentifier: id, advertisedName: advertisedName
         ) { client, _ in
-            await remove(client: client, recording: recording, consent: consent)
+            let outcome = await remove(client: client, recording: recording, consent: consent)
+            // HOW FULL THE RECORDER IS, RE-READ ON THE SAME TRIP, AND ONLY WHEN SOMETHING
+            // ACTUALLY LEFT.
+            //
+            // TWO THINGS THIS CLOSES AT ONCE. The page's free-space strip is the number the
+            // owner is staring at WHILE trying to reclaim space, and it used to keep saying
+            // whatever the last check said — so a successful removal changed the shelf and left
+            // the one figure the person is watching frozen and wrong. And the delta across a
+            // removal is the measurement the copy discipline in this file is explicitly waiting
+            // on: until it is observed, nothing here may say "free up space". Reading it here
+            // is the only place it can ever be taken, because it needs a session that has just
+            // removed something.
+            //
+            // IT IS READ AFTER THE OUTCOME IS DECIDED, never before, and only on `.removed`.
+            // `APP&SPACE` runs inside `protected(.information)`, which retires the whole
+            // session on a timeout — asking first would trade a confirmed removal against a
+            // number, which is the ordering mistake `PocketRecorderCheck` already records
+            // making once. A reading that does not arrive changes nothing.
+            if case .removed = outcome,
+               let space = await PocketRecordingDeviceBridge.storageReading(client: client) {
+                RecordingDeviceStore.recordObservedFacts(
+                    identity: identity.recordingDeviceIdentity,
+                    readings: [RecordingDeviceCapabilityKey.freeSpace.rawValue: space])
+            }
+            return outcome
         }
         switch result {
         case .ran(let outcome): return outcome
@@ -265,6 +289,12 @@ public enum PocketRemoveFromRecorderPresentation {
     /// `isOffered(for:)`, which is the same predicate the consent factories read.
     public static let action = "Remove it from the recorder"
 
+    /// THE TWO ANSWERS TO THE CONFIRMATION. They did not exist, which is part of why the
+    /// confirmation itself had no call site: a sentence with no buttons is not a dialog.
+    /// Named for the act rather than "OK", the same rule the mint consent follows.
+    public static let confirmAction = "Take it off the recorder"
+    public static let cancelConfirmAction = "Keep it on the recorder"
+
     /// The confirmation. It names the recorder as the place the recording is leaving, and it
     /// says where the copy that makes this safe already is.
     public static func confirmation(for brain: BrainChoice) -> String {
@@ -282,6 +312,17 @@ public enum PocketRemoveFromRecorderPresentation {
         case .foundryCloud: return "Solleva has confirmed a copy in your Vault."
         }
     }
+
+    /// THE TAP THAT COULD NOT BE CARRIED OUT, AND IT SAYS SO.
+    ///
+    /// The row and the safety reading it was drawn from are published separately, and a check
+    /// that reaches the recorder and then a check that FAILS leaves the page drawing rows from
+    /// the old panel with no readings behind them. Every tap on the destructive button then
+    /// returned early and set no message at all — a control that looks live, does nothing, and
+    /// explains nothing. This file's neighbour states the standard: *"a bring-over that
+    /// silently did nothing is indistinguishable from one that worked."*
+    public static let cannotActOnThisNowLine =
+        "Solleva can't act on that recording right now. Check the recorder again first."
 
     /// The refusal, and it names WHY rather than greying something out.
     public static let notProvenSafeLine =
@@ -356,7 +397,8 @@ public enum PocketRemoveFromRecorderPresentation {
     /// THE POPULATION. Every line this behaviour can render, so a claim about its copy is held
     /// over the whole set rather than over whichever string a test author remembered.
     public static var everyLine: [String] {
-        var lines = [action, notProvenSafeLine, recorderRefusedLine, stillListedLine,
+        var lines = [action, confirmAction, cancelConfirmAction, notProvenSafeLine,
+                     recorderRefusedLine, stillListedLine, cannotActOnThisNowLine,
                      removedLine, nowhereElseLine, autoClearTitle,
                      autoClearUnavailableLine, autoClearNotRetroactiveLine]
         for brain in BrainChoice.allCases {
