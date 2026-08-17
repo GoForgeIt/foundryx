@@ -690,15 +690,45 @@
       ],
       "verdict": "reachable",
       "why": "THE ARMED PATH'S GATE, AND IT READS THE STEP 5 PREDICATE RATHER THAN A SECOND OPINION OF IT. Three refusals and one yes, because a person asking why a recording is still on their recorder is owed the actual reason: this recorder was never armed, it synced before you armed it, or Solleva cannot prove it holds it elsewhere. Its ONE production caller offers it only recordings the owner pulled over since the screen opened — nothing in this app enumerates a shelf and clears what looks safe, which is what makes non-retroactivity a property of the data flow rather than of a check somebody has to remember."
+    },
+    {
+      "id": "pocket-remove-affordance-gate",
+      "name": "whether a row offers to be taken off the recorder at all",
+      "declared_in": "Sources/FoundryXKit/PocketRecorderClearing.swift",
+      "declaration_anchor": "    public static func isOffered(for presence: PocketRecordingPresence) -> Bool {",
+      "call_pattern": ".isOffered(for:",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "                                        .isOffered(for: row.presence) {"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "the ruling's clause 'the affordance does not exist for a recording we have not brought over', as CODE. It reads the same predicate the consent factories read, so the button and the consent cannot disagree. It is enumerated because a destructive capability that is present, unreached and unenumerated is the worst row this register can hold — and for a while this one was present, reached by a bare `if` in a SwiftUI body, and enumerated nowhere."
+    },
+    {
+      "id": "pocket-remove-confirmation",
+      "name": "the sentence a person reads before a recording leaves the recorder",
+      "declared_in": "Sources/FoundryXKit/PocketRecorderClearing.swift",
+      "declaration_anchor": "    public static func confirmation(for brain: BrainChoice) -> String {",
+      "call_pattern": "PocketRemoveFromRecorderPresentation.confirmation(",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "            Text(PocketRemoveFromRecorderPresentation.confirmation(for: brain))"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "it was written to guard the one gesture that cannot be undone and had NO call site anywhere in the app, while Forget — which destroys a key and no audio — sat behind an alert. A written-but-unreachable confirmation is worse than none, because the copy gates count it as shipped."
     }
   ],
   "_verdict_counts_are_equality": "Declared as exact counts, never bounds. A bound would let the unreachable roster grow by one without anybody moving this file, which is precisely how four capabilities reached `main` unreached.",
   "verdict_counts": {
-    "reachable": 35,
+    "reachable": 37,
     "undetermined": 1,
     "unreachable": 9
   },
   "_floor": "A register that lost its rows would be a silent full pass, so the population is asserted before its contents are.",
-  "minimum_capabilities": 45,
+  "minimum_capabilities": 47,
   "minimum_entry_points": 1
 }
