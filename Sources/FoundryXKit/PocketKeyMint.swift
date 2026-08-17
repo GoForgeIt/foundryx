@@ -15,10 +15,27 @@
 //   THE PROOF. `MCU&SK&OK` on its own is an ACK, and an ACK is not evidence that the recorder
 //   kept what we sent — a firmware that already holds a vendor key could answer `OK` and go on
 //   using the key it had. So a mint is verified by READING BACK the recorder's access-point
-//   credentials (`APP&WIFI`) and checking that the password it reports is the first eight
-//   characters of OUR key. A recorder still holding somebody else's key cannot produce that
-//   string. `PocketAccessPointReadback.provesPossession(ofSessionKey:)` is that check, and
-//   nothing in this app reports a successful mint without it.
+//   credentials (`APP&WIFI`) and checking that the password it reports could only come from OUR
+//   key. A recorder still holding somebody else's key cannot produce that string.
+//   `PocketAccessPointReadback.provesPossession(ofSessionKey:)` is that check, and nothing in
+//   this app reports a successful mint without it.
+//
+//   WHAT REAL HARDWARE CORRECTED, 2026-08-16. This file used to say the reported password IS
+//   the first eight characters of the key, and checked EQUALITY against all eight. The first
+//   session anyone has ever run against a real recorder refutes the eighth character:
+//
+//       device PKT01_BLUE_26079bc5, firmware 1.6, WiFi firmware V8
+//       session key           PD9QQDJ6KM3PJDFC
+//       APP&WIFI reported     MCU&WIFI&PKT01_BLUE_26079bc5&PD9QQDJ8
+//       this app derived      PD9QQDJ6            <- differs in the EIGHTH character
+//
+//   (`foundry-hearth/reference/pocket-ble-protocol.md`.) So the app's own derivation returned
+//   FALSE against the owner's own recorder, and fast sync failed its possession gate before it
+//   ever tried to join. Seven characters agree; the eighth is something one sample cannot
+//   explain — a checksum, a different truncation, an off-by-one in the vendor's own derivation.
+//   What this file does about it is stated where the constant lives, and the rule everywhere
+//   else is: THE RECORDER'S READBACK IS THE AUTHORITY on what its password is. Nothing joins a
+//   network with a password this app computed.
 //
 // THE HALF-CREDENTIAL PROBLEM, STATED. The access-point password is literally half the session
 // key. So this file's readback type is deliberately NOT `Equatable`, NOT
@@ -89,8 +106,26 @@ public enum PocketSessionKeyMint {
 
     public static let length = 16
 
-    /// The number of leading characters that become the recorder's WiFi password.
+    /// The length of the recorder's WiFi password. Eight — the WPA-PSK minimum, and what real
+    /// hardware reported (`PD9QQDJ8`).
     public static let accessPointPasswordLength = 8
+
+    /// HOW MANY OF THOSE EIGHT CHARACTERS THE SESSION KEY IS EVIDENCED TO PREDICT: seven.
+    ///
+    /// Measured 2026-08-16 on `PKT01_BLUE_26079bc5` / fw 1.6: key `PD9QQDJ6KM3PJDFC`, reported
+    /// password `PD9QQDJ8`. Characters 1-7 agree. The eighth does not, and ONE SAMPLE CANNOT
+    /// SAY WHY — so this app does not invent a rule for it. It asserts only what it has seen.
+    ///
+    /// This is a weaker predicate than the eight-character equality it replaces, and the
+    /// weakening is bounded and stated: 57^7 ≈ 2^40.8 of the mint's entropy still has to be
+    /// reproduced by a recorder claiming to hold our key, over a BLE read that answers one
+    /// attempt at a time. A recorder holding a VENDOR key — the exact thing this proof exists
+    /// to catch — disagrees in the FIRST characters, not the last one.
+    ///
+    /// Raising it back to 8 is a one-line change the day a second sample explains the eighth
+    /// character. `PocketFastSyncHardwareEvidenceTests` holds the measured pair so that change
+    /// cannot be made by accident.
+    public static let accessPointPasswordEvidencedPrefixLength = 7
 
     /// SecRandomCopyBytes, and a rejection filter so the alphabet is uniform.
     ///
@@ -115,14 +150,21 @@ public enum PocketSessionKeyMint {
         return result
     }
 
-    /// The eight characters the recorder will use as its access-point password.
+    /// THE CHARACTERS OF THE RECORDER'S PASSWORD THIS KEY IS EVIDENCED TO PREDICT — seven of
+    /// the eight, and it is named `…Prefix` rather than `…Password` because that is all it is.
     ///
-    /// `nil` for anything that is not a well-formed key, so no caller can derive a WPA
-    /// passphrase shorter than the 8-byte minimum from a malformed candidate.
-    public static func accessPointPassword(for sessionKey: String) -> String? {
+    /// IT IS NOT A CREDENTIAL AND NOTHING MAY JOIN A NETWORK WITH IT. Real hardware reports a
+    /// password whose eighth character this app cannot compute, so a WPA join built from this
+    /// string fails — silently, after the AP is already up. The password to join with comes
+    /// from `PocketAccessPointReadback.credentials(provenBy:)`, which is the recorder's own
+    /// answer to `APP&WIFI`.
+    ///
+    /// `nil` for anything that is not a well-formed key, so no caller can build a comparison
+    /// out of a malformed candidate.
+    public static func accessPointPasswordEvidencedPrefix(for sessionKey: String) -> String? {
         guard PocketSecretRecord.isValid(sessionKey) else { return nil }
-        let derived = String(sessionKey.prefix(accessPointPasswordLength))
-        guard derived.count == accessPointPasswordLength else { return nil }
+        let derived = String(sessionKey.prefix(accessPointPasswordEvidencedPrefixLength))
+        guard derived.count == accessPointPasswordEvidencedPrefixLength else { return nil }
         return derived
     }
 
@@ -194,9 +236,35 @@ public struct PocketAccessPointReadback: Sendable {
 
     /// THE ONE QUESTION. Does the recorder report an access-point password that only a device
     /// holding THIS key could report?
+    ///
+    /// "Only a device holding this key" is now measured rather than assumed: it is agreement on
+    /// the seven characters real hardware agreed on, over a field of the password's full length.
+    /// See `accessPointPasswordEvidencedPrefixLength` for the sample and for what is given up.
     public func provesPossession(ofSessionKey key: String) -> Bool {
-        guard let derived = PocketSessionKeyMint.accessPointPassword(for: key) else { return false }
-        return fields.contains(derived)
+        matchingField(for: key) != nil
+    }
+
+    /// THE CREDENTIAL TO ACTUALLY JOIN WITH — the recorder's own answer, never a derived one,
+    /// and only handed out once the same value has PROVED the recorder is holding our key.
+    ///
+    /// This is the only way a password leaves this type, and it leaves as a `PocketAccessPoint`
+    /// bound for `PocketSoftAPJoining` — not as a `String` a log line could take. `nil` is the
+    /// same "not proven" that `provesPossession` returns false for, so no caller can join a
+    /// network on a recorder it did not recognise.
+    public func credentials(provenBy key: String) -> PocketAccessPoint? {
+        guard let password = matchingField(for: key) else { return nil }
+        return PocketAccessPoint(ssid: ssid, password: password)
+    }
+
+    /// Position-agnostic, exactly as `parse` promised: no hardware session recorded WHICH field
+    /// of `MCU&WIFI&…` is the password, so the answer may not depend on the order.
+    private func matchingField(for key: String) -> String? {
+        guard let prefix = PocketSessionKeyMint.accessPointPasswordEvidencedPrefix(for: key) else {
+            return nil
+        }
+        return fields.first {
+            $0.count == PocketSessionKeyMint.accessPointPasswordLength && $0.hasPrefix(prefix)
+        }
     }
 }
 

@@ -695,6 +695,8 @@ private struct RecordingDevicePageView: View {
 
                     bringOver
 
+                    fastSync
+
                     Text(PocketRecorderCheckPresentation.sectionNote)
                         .grainTextStyle(.caption)
                         .foregroundStyle(GrainColor.textFaint)
@@ -746,6 +748,44 @@ private struct RecordingDevicePageView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, GrainSpacing.x2)
             }
+        }
+    }
+
+    /// THE ENTRY POINT `PocketFastSyncCoordinator` NEVER HAD.
+    ///
+    /// The coordinator, its six evidence gates, the recorder-side choreography and both
+    /// entry points' copy all shipped months ago and were driven by eight green scenarios —
+    /// while `grep FastSync App/*.swift` returned NOTHING and the reachability register said
+    /// `unreachable`, "constructed only in its own feature test". This is the button.
+    ///
+    /// WHY IT CAN BE DISABLED AND STILL BE HERE. Nobody has ever confirmed the address a
+    /// Pocket serves its files from (`PROTOCOL.md:149`, "HTTP endpoint: TBD"), and this phone
+    /// can only join an access point where the hotspot entitlement is live. When either is
+    /// missing the button says so IN WORDS underneath itself rather than disappearing: a
+    /// capability that vanishes is indistinguishable from one that was never built, which is
+    /// the exact confusion that let this stay unwired.
+    @ViewBuilder
+    private var fastSync: some View {
+        if check.offeredRecording != nil {
+            Button {
+                check.fastSync(hardwareToken: input.identity.hardwareToken,
+                               advertisedName: input.displayName,
+                               into: manager)
+            } label: {
+                Text(PocketFastSyncPresentation.settings.primaryAction)
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.grain(.outlined))
+            .disabled(check.isBringingOver || check.isChecking || !PocketRecorderCheckModel.fastSyncCanRun)
+            .padding(.top, GrainSpacing.x2)
+
+            Text(PocketRecorderCheckModel.fastSyncCanRun
+                 ? PocketFastSyncPresentation.sheetWarning
+                 : PocketFastSyncPresentation.endpointUnmeasuredLine)
+                .grainTextStyle(.caption)
+                .foregroundStyle(GrainColor.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, GrainSpacing.x2)
         }
     }
 
@@ -1022,6 +1062,88 @@ final class PocketRecorderCheckModel: ObservableObject {
             if let captureID = outcome.captureID {
                 manager.adoptCompletedCapture(captureId: captureID)
             }
+            self.run(hardwareToken: hardwareToken, advertisedName: advertisedName)
+        }
+    }
+
+    // MARK: - Fast sync: the same errand over the recorder's own network
+
+    #if DEBUG
+    /// THE TWO THINGS A HERMETIC RUN CANNOT OWN ON THIS PATH — a WiFi association and a server
+    /// on an address nobody has confirmed — plus the custody store the fake radio's key lives
+    /// in. Same shape, same reason and same `#if DEBUG` as `attachmentFactoryForScenarios`:
+    /// the Release binary has no such door.
+    struct FastSyncScenarioSeam: Sendable {
+        let endpoint: URL?
+        let joiner: any PocketSoftAPJoining
+        let http: any PocketHTTPPulling
+        let secrets: any PocketSecretStore
+        init(endpoint: URL?, joiner: any PocketSoftAPJoining, http: any PocketHTTPPulling,
+             secrets: any PocketSecretStore) {
+            self.endpoint = endpoint; self.joiner = joiner; self.http = http; self.secrets = secrets
+        }
+    }
+    nonisolated(unsafe) static var fastSyncSeamForScenarios: FastSyncScenarioSeam?
+    #endif
+
+    /// WHETHER A TAP COULD DO ANYTHING TODAY, asked of the evidence rather than of a hope.
+    ///
+    /// Two facts, both measured: is there a confirmed address to fetch from
+    /// (`PocketFastSyncEndpoint.measured`, still nil — `PROTOCOL.md:149` says "TBD"), and can
+    /// this build join an access point at all (`PocketHotspotJoiner.isSupported`, which needs
+    /// the hotspot entitlement and an iOS runtime).
+    static var fastSyncCanRun: Bool {
+        #if DEBUG
+        if let seam = fastSyncSeamForScenarios { return seam.endpoint != nil }
+        #endif
+        return PocketFastSyncEndpoint.measured != nil && PocketHotspotJoiner.isSupported
+    }
+
+    /// ONE RECORDING, OVER THE RECORDER'S OWN WIFI, INTO THE SAME CUSTODY.
+    ///
+    /// It shares `isBringingOver` with the Bluetooth leg on purpose: they are the same recorder
+    /// and the same radio, and two ideas of "busy" is how a second session gets opened on top
+    /// of a live one. The hand-off to `CaptureManager` and the shelf re-read are the Bluetooth
+    /// path's, verbatim — a fast-synced recording is not a second kind of recording.
+    func fastSync(hardwareToken: String, advertisedName: String, into manager: CaptureManager) {
+        guard !isChecking, !isBringingOver else { return }
+        guard let recording = offeredRecording else { return }
+        guard let identifier = UUID(uuidString: hardwareToken) else {
+            bringOverMessage = PocketRecorderCheckPresentation.notThisRecorderLine
+            return
+        }
+        isBringingOver = true
+        bringOverMessage = nil
+        Task {
+            var endpoint = PocketFastSyncEndpoint.measured
+            var joiner: any PocketSoftAPJoining = PocketHotspotJoiner()
+            var http: any PocketHTTPPulling = PocketFastSyncHTTPPuller()
+            var secrets: any PocketSecretStore = KeychainPocketSecretStore()
+            #if DEBUG
+            if let seam = Self.fastSyncSeamForScenarios {
+                endpoint = seam.endpoint; joiner = seam.joiner
+                http = seam.http; secrets = seam.secrets
+            }
+            #endif
+            let result = await PocketFastSyncErrand.run(
+                peripheralIdentifier: identifier,
+                advertisedName: advertisedName,
+                recording: recording,
+                endpoint: endpoint,
+                custody: self.custody,
+                secrets: secrets,
+                attachment: Self.makeAttachment(log: DoorLog.shared),
+                destination: .init(baseDir: manager.captureLibraryRoot),
+                joiner: joiner,
+                http: http)
+            self.isBringingOver = false
+            self.bringOverMessage = result.message
+            if let captureID = result.captureID {
+                manager.adoptCompletedCapture(captureId: captureID)
+            }
+            // THE SHELF IS RE-READ FOR THE SAME REASON THE BLUETOOTH LEG RE-READS IT: custody is
+            // the only thing that knows whether the file landed, and the row's "In Solleva" has
+            // to come from asking the disk rather than from this method having been optimistic.
             self.run(hardwareToken: hardwareToken, advertisedName: advertisedName)
         }
     }

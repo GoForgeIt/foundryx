@@ -68,12 +68,14 @@ final class PocketFactoryFreshMintFeatureTests: ProcessGlobalStateTestCase {
             XCTAssertEqual(key.trimmingCharacters(in: .whitespacesAndNewlines), key,
                            "a key with edge whitespace can never be re-entered as itself — "
                                + "`PocketSessionKey.normalised` would trim it away")
-            let password = PocketSessionKeyMint.accessPointPassword(for: key)
-            XCTAssertEqual(password?.count, 8,
-                           "the derived WiFi password is not the WPA minimum length")
-            XCTAssertTrue(password?.unicodeScalars.allSatisfy {
-                $0.isASCII && $0.value >= 32 && $0.value <= 126
-            } ?? false, "the derived WiFi password is not a legal WPA passphrase")
+            let evidenced = PocketSessionKeyMint.accessPointPasswordEvidencedPrefix(for: key)
+            XCTAssertEqual(evidenced?.count, 7,
+                           "the key predicts none of the recorder's password, so no mint can "
+                               + "ever be verified against a readback")
+            XCTAssertTrue(String(key.prefix(PocketSessionKeyMint.accessPointPasswordLength))
+                .unicodeScalars.allSatisfy { $0.isASCII && $0.value >= 32 && $0.value <= 126 },
+                          "the characters the recorder publishes as its WPA passphrase are not "
+                              + "all legal in one")
         }
     }
 
@@ -120,7 +122,11 @@ final class PocketFactoryFreshMintFeatureTests: ProcessGlobalStateTestCase {
     func testTheAccessPointReadbackProvesPossessionAndOnlyPossession() {
         let ours = "Zq7vK3wRpL2xAbCd"
         let theirs = "Aa1Bb2Cc3Dd4Ee5F"
-        let derived = PocketSessionKeyMint.accessPointPassword(for: ours)!
+        // WHAT A RECORDER HOLDING `ours` ACTUALLY REPORTS: seven characters this app can
+        // predict and an eighth it cannot — the shape measured on fw 1.6, where the key ended
+        // `…J6` and the reported password ended `…J8`. The fixture carries the disagreement so
+        // this proof is held against hardware rather than against the app's own arithmetic.
+        let derived = String(ours.prefix(7)) + "9"
 
         for response in ["MCU&WIFI&PKT01_BLUE_26079bc5&\(derived)",
                          "MCU&WIFI&\(derived)&PKT01_BLUE_26079bc5"] {
@@ -135,7 +141,7 @@ final class PocketFactoryFreshMintFeatureTests: ProcessGlobalStateTestCase {
         }
 
         // A recorder still holding another app's key reports THAT key's password.
-        let otherPassword = PocketSessionKeyMint.accessPointPassword(for: theirs)!
+        let otherPassword = String(theirs.prefix(7)) + "9"
         let stale = PocketAccessPointReadback.parse("MCU&WIFI&PKT01&\(otherPassword)")!
         XCTAssertFalse(stale.provesPossession(ofSessionKey: ours),
                        "a blindly-acknowledging recorder passed the proof, which is the exact "
@@ -148,12 +154,15 @@ final class PocketFactoryFreshMintFeatureTests: ProcessGlobalStateTestCase {
         XCTAssertNil(PocketAccessPointReadback.parse(""))
     }
 
-    /// A malformed key has no eight-character password, and deriving one anyway would hand a
-    /// WPA join a passphrase shorter than the standard's minimum.
-    func testNoPasswordIsDerivedFromAMalformedKey() {
+    /// A malformed key predicts nothing, and comparing a readback against a fragment of one
+    /// would be a proof that gets easier the worse the key is.
+    func testNothingIsDerivedFromAMalformedKey() {
         for candidate in ["", "short", "0123456789abcdefg", "0123456789abcde\u{00E9}"] {
-            XCTAssertNil(PocketSessionKeyMint.accessPointPassword(for: candidate),
-                         "\"\(candidate)\" produced a WiFi password")
+            XCTAssertNil(PocketSessionKeyMint.accessPointPasswordEvidencedPrefix(for: candidate),
+                         "\"\(candidate)\" produced something to compare a readback against")
+            XCTAssertNil(PocketAccessPointReadback.parse("MCU&WIFI&PKT01&Aa1Bb2Cc")!
+                            .credentials(provenBy: candidate),
+                         "\"\(candidate)\" was handed a password to join a network with")
         }
     }
 
@@ -251,7 +260,7 @@ private enum FactoryFreshMintSteps {
             "the recorder is still holding no key",
             "Solleva asks me to confirm, and says what it cannot predict",
             "it is sixteen characters the recorder's protocol can carry",
-            "its first eight characters are a password a WiFi network will accept",
+            "the characters a WiFi network will see are ones it will accept",
             "two keys made one after another are never the same",
             "it contains no character that would split the recorder's own commands",
             "I can see this recorder's key on a screen of its own",
@@ -736,16 +745,23 @@ private actor FactoryFreshMintWorld {
             XCTAssertEqual(key.utf8.count, 16)
             XCTAssertTrue(PocketSecretRecord.isValid(key))
 
-        case "its first eight characters are a password a WiFi network will accept":
+        case "the characters a WiFi network will see are ones it will accept":
+            // WHAT THIS NO LONGER CLAIMS. It used to assert the recorder's password IS the
+            // first eight characters of the key. Real hardware refutes the eighth
+            // (`PocketFastSyncHardwareEvidenceTests`), so what is held is the part that is
+            // still true and still load-bearing: the characters this app puts on the wire —
+            // eight of which the recorder turns into a WPA passphrase — are all legal in one.
             let key = try PocketSessionKeyMint.generate()
-            guard let password = PocketSessionKeyMint.accessPointPassword(for: key) else {
-                return XCTFail("no WiFi password is derived from a freshly generated key")
+            guard let evidenced = PocketSessionKeyMint
+                    .accessPointPasswordEvidencedPrefix(for: key) else {
+                return XCTFail("a freshly generated key predicts nothing about the recorder's "
+                                   + "own password, so no mint could ever be verified")
             }
-            XCTAssertEqual(password, String(key.prefix(8)))
-            XCTAssertEqual(password.count, 8, "shorter than WPA's own minimum")
-            XCTAssertTrue(password.unicodeScalars.allSatisfy {
+            XCTAssertEqual(evidenced, String(key.prefix(7)))
+            XCTAssertTrue(String(key.prefix(8)).unicodeScalars.allSatisfy {
                 $0.isASCII && $0.value >= 32 && $0.value <= 126
-            })
+            }, "the characters the recorder will publish as its WPA passphrase are not all "
+                 + "legal in one")
 
         case "two keys made one after another are never the same":
             XCTAssertNotEqual(try PocketSessionKeyMint.generate(),
@@ -914,7 +930,7 @@ private actor FactoryFreshMintWorld {
             }
             XCTAssertFalse(captured.contains(key),
                            "the recorder's session key was printed or logged")
-            let password = PocketSessionKeyMint.accessPointPassword(for: key) ?? ""
+            let password = PocketSessionKeyMint.accessPointPasswordEvidencedPrefix(for: key) ?? ""
             XCTAssertFalse(password.isEmpty)
             XCTAssertFalse(captured.contains(password),
                            "the derived WiFi password — which is literally half the session "
