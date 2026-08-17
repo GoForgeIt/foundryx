@@ -31,6 +31,7 @@ a11y-identifier	App/ArtifactViewers.swift	artifact-unavailable
 a11y-identifier	App/CaptureScreen.swift	live-hero-pause
 a11y-identifier	App/CaptureScreen.swift	record-block-reason
 a11y-identifier	App/CaptureScreen.swift	record-cta
+a11y-identifier	App/CaptureScreen.swift	recorder-status
 a11y-identifier	App/ChatListView.swift	chat-list
 a11y-identifier	App/ChatListView.swift	chat-list-coverage
 a11y-identifier	App/ChatListView.swift	chat-list-done
@@ -195,7 +196,6 @@ customer-facing-string	App/CaptureScreen.swift	Cancel
 customer-facing-string	App/CaptureScreen.swift	Capture
 customer-facing-string	App/CaptureScreen.swift	Categories are yours: rename or delete them any time. Deleting one never deletes its voice notes.
 customer-facing-string	App/CaptureScreen.swift	Chapter \(index + 1)
-customer-facing-string	App/CaptureScreen.swift	Connect your Omi
 customer-facing-string	App/CaptureScreen.swift	Create
 customer-facing-string	App/CaptureScreen.swift	Delete
 customer-facing-string	App/CaptureScreen.swift	Delete \"\(cat.name)\"
@@ -211,16 +211,17 @@ customer-facing-string	App/CaptureScreen.swift	Removes it from your phone, your 
 customer-facing-string	App/CaptureScreen.swift	Rename
 customer-facing-string	App/CaptureScreen.swift	Rename or delete category
 customer-facing-string	App/CaptureScreen.swift	Search all voice notes
-customer-facing-string	App/CaptureScreen.swift	\(dev.rssi) dBm
-customer-facing-string	App/CaptureScreen.swift	\(name) · \(p.statusLine)
 customer-facing-string	App/CaptureScreen.swift	\(selectedIds.count) selected
 customer-facing-string	App/ChatListView.swift	Delete
 customer-facing-string	App/ChatListView.swift	Done
 customer-facing-string	App/ChatListView.swift	New
 customer-facing-string	App/ChatListView.swift	Show every source
 customer-facing-string	App/ChatListView.swift	\(nodes.count)
+customer-facing-string	App/ChatScreen.swift	A model joins this list once it has answered a turn here
 customer-facing-string	App/ChatScreen.swift	Done
 customer-facing-string	App/ChatScreen.swift	New
+customer-facing-string	App/ChatScreen.swift	Open · may use cloud for speed
+customer-facing-string	App/ChatScreen.swift	Private · stays on your Mac
 customer-facing-string	App/ChatScreen.swift	Route
 customer-facing-string	App/ConnectionConfigView.swift	Connect
 customer-facing-string	App/ConnectionConfigView.swift	Local Solleva door

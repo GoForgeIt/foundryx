@@ -50,7 +50,7 @@ private final class WaitingExperienceWorld: @unchecked Sendable {
     var presenter = SyncBarPresenter()
     var presentation: SyncBarPresentation = .settled
     var everSyncing = false
-    var local = true
+    var destination: CaptureDestination = .phone
 
     func reset(_ model: WaitingExperienceModel) {
         self.model = model
@@ -63,7 +63,7 @@ private final class WaitingExperienceWorld: @unchecked Sendable {
         presenter = SyncBarPresenter()
         presentation = .settled
         everSyncing = false
-        local = true
+        destination = .phone
     }
 
     /// Step the presenter at `base + offset` seconds, remembering if the syncing bar was
@@ -241,8 +241,10 @@ private enum WaitingExperienceSteps {
             defineCheck("it says all my conversations are saved") { _, _, _ in
                 try expect(world.presentation == .settled,
                            "expected the settled strip, got \(world.presentation)")
-                try expect(SyncStripCopy.allSaved(local: world.local) == "All voice notes saved",
-                           "settled copy was \(SyncStripCopy.allSaved(local: world.local))")
+                try expect(SyncStripCopy.allSaved(destination: world.destination)
+                               == "All voice notes saved",
+                           "settled copy was "
+                           + "\(SyncStripCopy.allSaved(destination: world.destination))")
             },
         ]
     }

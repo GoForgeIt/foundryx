@@ -146,7 +146,7 @@ struct WaitingExperienceProof: View {
                         syncingText: WaitingExperienceModel(
                             kind: .sync, onDevice: false,
                             progress: .determinate(done: 214, total: 1210)).statusLine(elapsed: 0),
-                        settledText: SyncStripCopy.allSaved(local: false),
+                        settledText: SyncStripCopy.allSaved(destination: .computer),
                         settledIsPending: false),
                     config: .immediate)
                     .padding(.vertical, GrainSpacing.x2)

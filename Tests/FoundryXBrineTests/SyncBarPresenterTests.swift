@@ -119,8 +119,37 @@ final class SyncBarPresenterTests: XCTestCase {
         XCTAssertEqual(SyncStripLayout.height(for: .syncing), SyncStripLayout.totalHeight)
     }
 
-    func testSettledCopyIsTierAware() {
-        XCTAssertEqual(SyncStripCopy.allSaved(local: true), "All voice notes saved")
-        XCTAssertEqual(SyncStripCopy.allSaved(local: false), "All voice notes saved to computer")
+    /// THIS ASSERTION USED TO PIN THE DEFECT.
+    ///
+    /// It read `allSaved(local: false) == "All voice notes saved to computer"` — a
+    /// BOOLEAN over a THREE-valued fact. `RootGate` resolves to `.computerBrain`,
+    /// `.cellBrain` and `.phoneBrain`; the first two both answer `local` with `false`, so
+    /// a Vault owner with no computer read "All voice notes saved to computer" and this
+    /// test agreed with him. Changing it was the fix, not a convenience: the old
+    /// assertion could only have stayed green by keeping the sentence wrong for one brain
+    /// in three.
+    func testSettledCopyNamesTheResolvedDestination() {
+        XCTAssertEqual(SyncStripCopy.allSaved(destination: .phone), "All voice notes saved")
+        XCTAssertEqual(SyncStripCopy.allSaved(destination: .computer),
+                       "All voice notes saved to computer")
+        XCTAssertEqual(SyncStripCopy.allSaved(destination: .vault),
+                       "All voice notes saved to your Vault")
+    }
+
+    /// EVERY destination, not the two that happen to agree. A fourth brain added to
+    /// `CaptureDestination` without its own sentence reds this the day it is added.
+    func testNoTwoDestinationsShareASentence() {
+        let lines = CaptureDestination.allCases.map { SyncStripCopy.allSaved(destination: $0) }
+        XCTAssertEqual(Set(lines).count, lines.count,
+                       "two destinations render the same sentence: \(lines)")
+    }
+
+    /// Only a brain the app can actually run on gets a destination — the sign-in gate has
+    /// nowhere to save anything and must not be handed a default that reads like a place.
+    func testEveryResolvedBrainMapsToItsOwnDestination() {
+        XCTAssertEqual(RootDestination.computerBrain.captureDestination, .computer)
+        XCTAssertEqual(RootDestination.cellBrain.captureDestination, .vault)
+        XCTAssertEqual(RootDestination.phoneBrain.captureDestination, .phone)
+        XCTAssertNil(RootDestination.signInGate.captureDestination)
     }
 }

@@ -404,6 +404,16 @@ public final class ChatViewModel: ObservableObject {
         messages.last(where: { $0.role == "assistant" })?.text ?? ""
     }
 
+    /// The target that ACTUALLY SERVED the latest routed turn in this thread — the door's
+    /// `routed:` boundary, not the pin this chat asked for. nil until something answers.
+    ///
+    /// This has been on the wire and in `Message.routedVia` the whole time; between
+    /// 5b02aec and now, nothing rendered it. It fed `UsageHook.chat` telemetry and
+    /// otherwise fell on the floor.
+    public var resolvedTargetId: String? {
+        messages.last(where: { $0.routedVia?.isEmpty == false })?.routedVia
+    }
+
     private func appendAssistant(_ t: String) {
         if case .streaming = turnState {} else { turnState = .streaming }
         if let idx = messages.lastIndex(where: { $0.role == "assistant" }) {
@@ -431,5 +441,104 @@ public final class ChatViewModel: ObservableObject {
         if let idx = messages.lastIndex(where: { $0.role == "assistant" }) {
             messages[idx].routedVia = targetId
         }
+    }
+}
+
+// MARK: - The chat header's route line
+
+/// What the chat header states about a conversation's route, as DATA rather than as a
+/// string built inside a SwiftUI `body`. `swift test` cannot compile `App/`, so a
+/// decision made in a view is a decision no gate can hold; this type is where the
+/// decision lives and `ChatScreen` is a dumb renderer over it.
+public struct ChatRouteReading: Equatable, Sendable {
+    /// "Private" or "Open" — where this chat's data may go.
+    public let privacy: String
+    /// The route, in words: the router's name, the pin this chat asked for, or the
+    /// target that answered.
+    public let route: String
+    /// True when `route` names the target that ACTUALLY SERVED the latest completed turn
+    /// — a receipt. False when it names what the chat is merely asking for.
+    public let isResolved: Bool
+
+    public init(privacy: String, route: String, isResolved: Bool) {
+        self.privacy = privacy
+        self.route = route
+        self.isResolved = isResolved
+    }
+
+    /// The single line the header renders. "answered by" is load-bearing: it is the word
+    /// that tells the reader this is a fact about the turn that just finished and not a
+    /// setting they chose.
+    public var text: String {
+        isResolved ? "\(privacy) · answered by \(route)" : "\(privacy) · \(route)"
+    }
+}
+
+/// The chat header's route line, and the rule that decides what it says.
+///
+/// Two defects are fixed here and they are separate.
+///
+/// FIRST — the header said "Auto", which is the name of nobody. The default is Kiln's
+/// router; `routerName` says so out loud. A reader who cannot name the thing choosing
+/// their model cannot tell a working router from a broken one.
+///
+/// SECOND, and the one that matters — the header reported the REQUEST and never the
+/// RESOLUTION. `Conversation.modelTargetId` is what a chat ASKS for. The target that
+/// actually served a turn is a different fact, it is on the wire
+/// (`Event::Boundary { label: "routed: <committed_target_id>" }`, kiln-runtime), the
+/// door forwards it, and `ChatViewModel` has been stamping it onto `Message.routedVia`
+/// the whole time. Nothing rendered it, so when a Fireworks `gpt-oss-120b` turn
+/// introduced itself as Claude, there was nothing on screen that could contradict it.
+///
+/// [reading] therefore prefers a resolved route over a requested one, always. A receipt
+/// beats a request.
+public enum ChatRouteLine {
+
+    /// The default route, NAMED. Not "Auto".
+    public static let routerName = "Kiln router"
+
+    /// What the header says for a conversation.
+    ///
+    /// - Parameters:
+    ///   - isPrivate: the chat's sensitivity is `confidential`.
+    ///   - requestedTargetId: the chat's pin (`Conversation.modelTargetId`), if any.
+    ///   - resolvedTargetId: the target the door reported for the latest completed turn,
+    ///     if any. WINS over `requestedTargetId` whenever both are present.
+    ///   - models: the door's catalog, used only to prefer its own friendly label for an
+    ///     id over a prettified one.
+    public static func reading(isPrivate: Bool,
+                               requestedTargetId: String?,
+                               resolvedTargetId: String?,
+                               models: [ModelOption]) -> ChatRouteReading {
+        let privacy = isPrivate ? "Private" : "Open"
+        if let resolved = trimmed(resolvedTargetId) {
+            return ChatRouteReading(privacy: privacy,
+                                    route: displayName(for: resolved, in: models),
+                                    isResolved: true)
+        }
+        if let requested = trimmed(requestedTargetId) {
+            return ChatRouteReading(privacy: privacy,
+                                    route: displayName(for: requested, in: models),
+                                    isResolved: false)
+        }
+        return ChatRouteReading(privacy: privacy, route: routerName, isResolved: false)
+    }
+
+    /// A friendly name for a target or model id: the door's own label when it has a
+    /// meaningful one, else `ModelCatalog`'s prettified id. A routed target id
+    /// (`cloud-fireworks-chat`) is usually NOT in the catalog — the catalog is keyed by
+    /// served MODEL id — so the prettified fallback is the common path, and it is still
+    /// unambiguous about who answered.
+    private static func displayName(for id: String, in models: [ModelOption]) -> String {
+        if let match = models.first(where: { $0.id == id }) {
+            return ModelCatalog.displayName(for: match)
+        }
+        return ModelCatalog.displayName(for: ModelOption(id: id, label: ""))
+    }
+
+    private static func trimmed(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let t = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
     }
 }

@@ -195,7 +195,8 @@ struct RootView: View {
             return AnyView(MainTabs(
                 target: DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "local"),
                 remote: remote, brains: brains,
-                local: !ProcessInfo.processInfo.arguments.contains("-RemoteChat"),
+                destination: ProcessInfo.processInfo.arguments.contains("-RemoteChat")
+                    ? .computer : .phone,
                 vaultFunnel: vaultFunnel, accountDeletion: accountDeletion, showingAccount: .constant(false)))
         }
         #endif
@@ -297,7 +298,8 @@ struct RootView: View {
                         : nil)
             case .computerBrain:
                 if let target = remote.makeDoorTarget() {
-                    MainTabs(target: target, remote: remote, brains: brains, local: false,
+                    MainTabs(target: target, remote: remote, brains: brains,
+                             destination: .computer,
                              vaultFunnel: vaultFunnel, accountDeletion: accountDeletion, showingAccount: $showingAccount,
                              showingOnboarding: $showingOnboarding,
                              onboardingSkipsWelcome: onboardingSkipsWelcome)
@@ -334,7 +336,8 @@ struct RootView: View {
                    let target = try? CellBackend.resolveTarget(
                     config: cfg,
                     idToken: identityCoordinator.currentToken?.value) {
-                    MainTabs(target: target, remote: remote, brains: brains, local: false,
+                    MainTabs(target: target, remote: remote, brains: brains,
+                             destination: .vault,
                              vaultFunnel: vaultFunnel, accountDeletion: accountDeletion,
                              showingAccount: $showingAccount,
                              showingOnboarding: $showingOnboarding,
@@ -351,7 +354,7 @@ struct RootView: View {
                 // The phone-only tier: whole without a brain (zero content egress).
                 MainTabs(target: DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!,
                                             bearer: "local"),
-                         remote: remote, brains: brains, local: true,
+                         remote: remote, brains: brains, destination: .phone,
                          vaultFunnel: vaultFunnel, accountDeletion: accountDeletion, showingAccount: $showingAccount,
                              showingOnboarding: $showingOnboarding,
                              onboardingSkipsWelcome: onboardingSkipsWelcome)
@@ -536,6 +539,21 @@ final class TabRouter: ObservableObject {
         }
     }
     @Published var showActionChooser = false
+
+    /// A REQUEST TO OPEN THE DEVICES PAGE INSIDE SETTINGS.
+    ///
+    /// The capture page's recorder status icon is the only thing that sets it (Nick,
+    /// 2026-08-17: "if you click on it it will take you to the devices page in settings").
+    /// Selecting the Settings TAB alone would leave the person one more tap away on a
+    /// screen with a dozen rows, which is not what was asked for — `SettingsScreen` binds
+    /// this to the SAME destination its "Devices & connections" row pushes, so there is
+    /// one device page and one place it is built.
+    @Published var openDeviceSettings = false
+
+    func openDevices() {
+        selected = RecorderLinkBadge.destinationTab
+        openDeviceSettings = true
+    }
 }
 
 /// Owns the ONE DeviceManager + CaptureManager so Capture + Device tabs share a
@@ -546,10 +564,15 @@ private struct MainTabs: View {
     let target: DoorTarget
     let remote: RemoteSession
     let brains: BrainStore
+    /// WHICH BRAIN THIS SHELL ACTUALLY RESOLVED TO — three-valued, from `RootGate`.
+    /// The `local: Bool` it replaces could not tell the computer brain from the cell
+    /// brain, which is how the capture page came to tell a Vault owner with no computer
+    /// that his voice notes were saved to a computer.
+    let destination: CaptureDestination
     /// Phone-only tier: capture finalizes through LocalBackend (WhisperKit +
     /// Foundation Models), chat is the local whole-library surface, and nothing
-    /// ever dials a door.
-    let local: Bool
+    /// ever dials a door. DERIVED, so it can never disagree with `destination`.
+    private var local: Bool { destination == .phone }
     /// The Vault activation funnel, threaded down to Settings' "Your Vault" entry row
     /// (track T-IOS-VAULT-ENTRY). Owned by RootView; MainTabs only passes it through.
     let vaultFunnel: VaultFunnelModel
@@ -633,7 +656,8 @@ private struct MainTabs: View {
     /// whether it still exists (free) instead of re-reading the chat file at init.
     private let savedChatId: String?
 
-    init(target: DoorTarget, remote: RemoteSession, brains: BrainStore, local: Bool,
+    init(target: DoorTarget, remote: RemoteSession, brains: BrainStore,
+         destination: CaptureDestination,
          vaultFunnel: VaultFunnelModel, accountDeletion: AccountDeletionModel,
          showingAccount: Binding<Bool>,
          showingOnboarding: Binding<Bool> = .constant(false),
@@ -641,7 +665,8 @@ private struct MainTabs: View {
         self.target = target
         self.remote = remote
         self.brains = brains
-        self.local = local
+        self.destination = destination
+        let local = destination == .phone
         self.vaultFunnel = vaultFunnel
         self.accountDeletion = accountDeletion
         _showingAccount = showingAccount
@@ -1102,7 +1127,9 @@ private struct MainTabs: View {
                         brainSetupBanner(text)
                     }
                     CaptureScreen(device: device, manager: manager, sources: sources,
-                                  target: target, local: local, brain: brains.choice,
+                                  target: target, destination: destination,
+                                  brain: brains.choice,
+                                  onOpenDevices: { router.openDevices() },
                                   reopenCaptureId: $restoreCaptureId,
                                   openCaptureId: $openCaptureId)
                 }
@@ -1192,7 +1219,8 @@ private struct MainTabs: View {
                 if deferredTabsReady || router.selected == .settings {
                     SettingsScreen(brains: brains, remote: remote,
                                    device: device, manager: manager, sources: sources,
-                                   vaultFunnel: vaultFunnel, accountDeletion: accountDeletion)
+                                   vaultFunnel: vaultFunnel, accountDeletion: accountDeletion,
+                                   openDevices: $router.openDeviceSettings)
                         .navigationTitle(SettingsSheetPresentation.title)
                         .navigationBarTitleDisplayMode(.inline)
                 } else {
