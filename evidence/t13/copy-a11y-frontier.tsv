@@ -279,7 +279,6 @@ customer-facing-string	App/OnboardingFlowView.swift	From here on, your agent ans
 customer-facing-string	App/OnboardingFlowView.swift	Keep reading… \(max(0, (Self.targetFrames - n) / 50)) s left
 customer-facing-string	App/OnboardingFlowView.swift	Not now
 customer-facing-string	App/OnboardingFlowView.swift	Off by default. You can change this any time in Settings.
-customer-facing-string	App/OnboardingFlowView.swift	On — check your lock screen
 customer-facing-string	App/OnboardingFlowView.swift	Read this aloud (~20 seconds). Your voice becomes the key that lets only YOU command your agent. It never leaves your devices.
 customer-facing-string	App/OnboardingFlowView.swift	Retry cleanup
 customer-facing-string	App/OnboardingFlowView.swift	Start reading
@@ -288,7 +287,6 @@ customer-facing-string	App/OnboardingFlowView.swift	Teach it your voice
 customer-facing-string	App/OnboardingFlowView.swift	That was only ~\(n / 50) seconds — a stable voice key needs about 15. Give it another read?
 customer-facing-string	App/OnboardingFlowView.swift	Try again
 customer-facing-string	App/OnboardingFlowView.swift	Turn it on
-customer-facing-string	App/OnboardingFlowView.swift	We just sent a sample nudge so the first real one is never a surprise. Your agent answers to “Foundry” — rename it in Settings.
 customer-facing-string	App/OnboardingFlowView.swift	While you're taking a note, your phone can privately notice moments like “I'll have to look that up” and offer to help — everything stays on your phone until you accept a suggestion.
 customer-facing-string	App/OnboardingFlowView.swift	Your voice
 customer-facing-string	App/OnboardingFlowView.swift	Your voice is now your key
