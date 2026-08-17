@@ -474,11 +474,20 @@ public enum RecordingDevicePage {
     public static let forgetAction = "Forget this recorder"
     public static let disconnectAction = "Disconnect"
     public static let connectAction = "Connect"
-    /// The capture toggle's own label. IT LIVES HERE RATHER THAN IN THE VIEW because it was the
-    /// last user-facing string in `App/DeviceScreen.swift` written as a literal in a SwiftUI
-    /// body, and `RecorderPageCopyAndTokenGateTests` now forbids that outright — a line invented
-    /// in a body is a line no copy review, no language lexer and no population gate can see.
-    public static let captureToggleLabel = "Use this device for capture"
+    /// THE PER-DEVICE AVAILABILITY TOGGLE, AND THE WAY OUT OF A DESTRUCTIVE ALERT.
+    ///
+    /// Both were typed straight into `RecordingDevicePageView`'s body —
+    /// `Text("Use this device for capture")` and `Button("Cancel", role: .cancel)` — on a
+    /// screen whose stated rule is that every sentence comes from here. `swift test` cannot
+    /// compile `App/`, so no test in this repository could see either one, and the file's own
+    /// header says "THIS VIEW DERIVES NOTHING" three hundred lines above the first of them.
+    /// They are here now, and `the-recorder-page-is-rendered-and-held-to-its-words.feature`
+    /// is what stops the next one.
+    public static let captureToggleTitle = "Use this device for capture"
+
+    /// The word on the button that does nothing. It is still a word a person reads, and a
+    /// prohibition with an exception for short strings is not a prohibition.
+    public static let cancelAction = "Cancel"
 
     /// Forgetting a record-then-sync recorder is a real lockout, so it says so (design §6a).
     ///

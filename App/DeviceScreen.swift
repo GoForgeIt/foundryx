@@ -402,7 +402,14 @@ final class RecordingDeviceListModel: ObservableObject {
 
 /// The slots a live device fills with recording state, filled with what is true instead
 /// (design §2's honest-substitute table, and §6a's resting state).
-private struct RecordingDevicePageView: View {
+///
+/// IT USED TO BE `private`, WHICH MADE IT UNPHOTOGRAPHABLE. Reaching this page in a simulator
+/// means a remembered recorder, a Bluetooth radio and a device in the room — so nothing in any
+/// build had ever rendered it, and "never ship UI without simulator proof" was a habit somebody
+/// had to remember on the one screen in this app that cannot be reached without hardware.
+/// `RecorderPageProof` mounts THIS type — not a copy of it — with a scripted check model, and
+/// `phase_uiproof` photographs each of its states.
+struct RecordingDevicePageView: View {
     let input: RecordingDeviceListInput
     @ObservedObject var device: DeviceManager
     /// THE ONE THAT OWNS THE CAPTURE LIBRARY. A bring-over writes a finished conversation into
@@ -437,10 +444,36 @@ private struct RecordingDevicePageView: View {
     /// The maker's reset ceremony, reached from the shelf's own cost line.
     @State private var showingFactoryReset = false
     /// What the recorder said it is holding, the last time this screen asked it.
-    @StateObject private var check = PocketRecorderCheckModel()
     /// Whether this app is still the thing in front of the owner. A backgrounded transfer is
     /// an errand nobody is watching, and it stops — see the `onChange` at the end of `body`.
     @Environment(\.scenePhase) private var scenePhase
+    ///
+    /// INJECTABLE, WITH THE LIVE MODEL AS THE DEFAULT. Every production call site gets the
+    /// same freshly-built model it always did; the proof mount hands in one whose published
+    /// state is already the state being photographed, because a simulator has no radio and
+    /// therefore no other way to reach an answered shelf.
+    @StateObject private var check: PocketRecorderCheckModel
+
+    init(input: RecordingDeviceListInput,
+         device: DeviceManager,
+         manager: CaptureManager,
+         sources: CaptureSourceRegistry,
+         isSavedOmi: Bool,
+         brain: BrainChoice,
+         onChange: @escaping () -> Void,
+         check: PocketRecorderCheckModel = PocketRecorderCheckModel()) {
+        self.input = input
+        _device = ObservedObject(wrappedValue: device)
+        _manager = ObservedObject(wrappedValue: manager)
+        _sources = ObservedObject(wrappedValue: sources)
+        self.isSavedOmi = isSavedOmi
+        // NO DEFAULT, and Step 10's hand-written init silently dropped it. The memberwise init
+        // it replaced carried `brain`; once this one existed, every call site had to pass it
+        // explicitly and the proof mount is one of them.
+        self.brain = brain
+        self.onChange = onChange
+        _check = StateObject(wrappedValue: check)
+    }
 
     /// DOES THIS BUILD HAVE A TRANSPORT THAT CAN ACTUALLY ATTACH THIS DEVICE?
     ///
@@ -552,7 +585,7 @@ private struct RecordingDevicePageView: View {
         // FoundryX only has for a recorder it provisioned; showing it for a Bluetooth route
         // was a destructive-sounding promise about a key that does not exist.
         .alert(RecordingDevicePage.forgetAction, isPresented: $confirmingForget) {
-            Button("Cancel", role: .cancel) {}
+            Button(RecordingDevicePage.cancelAction, role: .cancel) {}
             Button(RecordingDevicePage.forgetAction, role: .destructive) { forget() }
         } message: {
             // THE COST, IN THE SAME TERMS AS THE RESET. Forgetting deletes this app's key, so
@@ -696,7 +729,7 @@ private struct RecordingDevicePageView: View {
                 get: { source.enabled },
                 set: { sources.setEnabled(source.id, $0); onChange() }
             )) {
-                Text(RecordingDevicePage.captureToggleLabel)
+                Text(RecordingDevicePage.captureToggleTitle)
                     .grainTextStyle(.body)
                     .foregroundStyle(GrainColor.ink)
             }
@@ -1296,6 +1329,32 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// .setAccountForTests`), and `#if DEBUG` means the Release binary has no such door.
     nonisolated(unsafe) static var attachmentFactoryForScenarios:
         (@Sendable () -> RecordingDeviceAttachment)?
+    #endif
+
+    /// The production constructor. Every call site that is not the proof mount uses it, and it
+    /// is the default argument of `RecordingDevicePageView.init`.
+    init() {}
+
+    #if DEBUG || PERF_HARNESS
+    /// THE PROOF MOUNT'S CONSTRUCTOR — a model already in the state being photographed.
+    ///
+    /// The three states this page can be in are reached, in life, by a Bluetooth session with
+    /// a recorder on the desk. A simulator has no radio, so a proof that had to CAUSE those
+    /// states could photograph exactly one of them: the resting one. This sets the same
+    /// published properties the live path sets, so the pictures are of the shipped body
+    /// rendering the shipped presentation values, and only the cause is scripted.
+    ///
+    /// It sets no behaviour. `run` and `bringOver` are untouched, and a proof that taps
+    /// anything gets the real code path or nothing.
+    init(proofIsChecking: Bool = false,
+         proofDetail: StoredFileDeviceDetailPresentation? = nil,
+         proofMessage: String? = nil,
+         proofOfferedRecording: PocketRecording? = nil) {
+        isChecking = proofIsChecking
+        detail = proofDetail
+        message = proofMessage
+        offeredRecording = proofOfferedRecording
+    }
     #endif
 
     /// The attachment this model opens sessions with: the production one unless a scenario

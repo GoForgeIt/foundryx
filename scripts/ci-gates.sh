@@ -693,8 +693,15 @@ phase_appscenarios() {
 # through the whole pipeline; -SyntheticTranscript substitutes only LiveTranscriber with a
 # PCM-driven deterministic word source, leaving the real view/binding/restore path intact.
 # A missing simulator is a LOUD failure, never a silent skip.
+#
+# RecorderPageProofUITests is the RECORDER PAGE — the screen a person opens to see what their
+# recorder is holding, in each of the three states it can be in. No build had ever rendered it:
+# reaching it in life needs a remembered record-then-sync recorder, a Bluetooth radio and the
+# recorder on the desk, so the one screen that cannot be reached without hardware was also the
+# one screen nobody could look at. It is mounted through the registered `-Screen recorder
+# <state>` seam. `RecorderPageRenderedFeatureTests` fails if this line is removed.
 phase_uiproof() {
-  echo "==> [uiproof] recording-surface UI E2E on a simulator (phone-mic + Omi ambient + foreground restore + recorder attribution)"
+  echo "==> [uiproof] recording-surface UI E2E on a simulator (phone-mic + Omi ambient + foreground restore + recorder page + recorder attribution)"
   local udid
   udid=$(xcrun simctl list devices available 2>/dev/null | grep -E "iPhone" | grep -Eo "[0-9A-F-]{36}" | head -1)
   if [ -z "$udid" ]; then
@@ -733,6 +740,7 @@ phase_uiproof() {
        -only-testing:FoundryXUITests/ForegroundRestoreProofUITests/testLiveTranscriptRendersAndSurvivesBackgrounding \
        -only-testing:FoundryXUITests/VaultFunnelReachableProofUITests/testOwnerCanReachVaultSetupFromSettings \
        -only-testing:FoundryXUITests/RecordingDeviceProofUITests/testTheRecorderIsNamedOnTheConversationRowAndInItsDetail \
+       -only-testing:FoundryXUITests/RecorderPageProofUITests \
        -only-testing:FoundryXUITests/PlaceRestoreProofUITests \
        -only-testing:FoundryXUITests/RecordingDevicesPageProofUITests \
        -only-testing:FoundryXUITests/RecordingDevicePageProofUITests \

@@ -1,31 +1,3 @@
-# T13 / A11 leg (a) — THE COPY / ACCESSIBILITY PARTITION, PINNED.
-#
-# One row per customer-facing literal: kind<TAB>path<TAB>literal.
-#
-# 2026-08-16 — ONE ROW REMOVED, AND THE REASON MATTERS MORE THAN THE ROW.
-# `customer-facing-string  App/DeviceScreen.swift  Use this device for capture` is gone
-# because the string MOVED to `RecordingDevicePage.captureToggleLabel`, where
-# `RecorderPageCopyAndTokenGateTests` now requires every sentence on the recorder page to
-# live. It was the last literal written directly into that page's SwiftUI body.
-#
-# THE TENSION THIS EXPOSES, STATED RATHER THAN QUIETLY RESOLVED. This oracle only sees a
-# literal that is the FIRST ARGUMENT of `Text(` / `Button(` / `Label(` (see
-# `scripts/derive-copy-a11y-frontier.py:22`). Copy that lives on a kit presentation type as
-# `public static let` is invisible to it: 383 of its rows are App-side and 34 are kit-side,
-# and almost all of this app's customer-facing copy is kit-side. So a gate that pushes copy
-# OUT of view bodies — which is the right place for it, and what Step 10 of the pocket
-# delivery plan asks for — also pushes it off this frontier. The frontier is not wrong; its
-# COVERAGE is narrower than its name suggests, and nobody has widened it.
-#
-# Emitted by scripts/derive-copy-a11y-frontier.py — an INDEPENDENT implementation in
-# another language — and NOT by the Swift check it pins. The two agree row for row: 433
-# rows over 225 files, 153 `a11y-identifier` and 280 `customer-facing-string`.
-#
-# ON THIS FRONTIER: the literal argument of `.accessibilityIdentifier("…")`, and the
-# literal FIRST argument of `Text(`, `Button(`, `Label(` and `.navigationTitle(`.
-# NOT ON IT, stated rather than implied away: interpolated and computed copy
-# (`Text(viewModel.title)` carries no literal), LocalizedStringKey tables, alert and
-# confirmation-dialog titles, and every string under Tests/ and UITests/.
 a11y-identifier	App/ActionOptionsSheet.swift	act-in-chat
 a11y-identifier	App/ActionOptionsSheet.swift	confirm-feedback
 a11y-identifier	App/ActionOptionsSheet.swift	continue-in-chat
@@ -126,6 +98,7 @@ a11y-identifier	App/PocketOnboardingView.swift	pocket-session-key-field
 a11y-identifier	App/PocketOnboardingView.swift	pocket-session-key-message
 a11y-identifier	App/PocketOnboardingView.swift	pocket-session-key-progress
 a11y-identifier	App/PocketOnboardingView.swift	pocket-session-key-submit
+a11y-identifier	App/RecorderPageProof.swift	recorder-page-proof
 a11y-identifier	App/RecordingScreen.swift	live-transcript
 a11y-identifier	App/RecordingScreen.swift	minimize-recording
 a11y-identifier	App/RecordingScreen.swift	recording-elapsed
@@ -281,7 +254,6 @@ customer-facing-string	App/ConversationFacesView.swift	Your note: \(note)
 customer-facing-string	App/ConversationFacesView.swift	\(ConversationActionsPresentation.othersGroupLabel) (\(actions.othersRows.count))
 customer-facing-string	App/ConversationFacesView.swift	\(outcome.speakerName) also matches \(n) past \(n == 1 ? 
 customer-facing-string	App/ConversationFacesView.swift	\u{2022}
-customer-facing-string	App/DeviceScreen.swift	Cancel
 customer-facing-string	App/DeviceScreen.swift	Close
 customer-facing-string	App/DeviceScreen.swift	Computer memory
 customer-facing-string	App/KilnConversationView.swift	Done
