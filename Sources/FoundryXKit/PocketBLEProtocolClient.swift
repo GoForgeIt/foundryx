@@ -627,16 +627,59 @@ public actor PocketBLEClient {
     }
 }
 
+/// THE SEVEN-STEP CHOREOGRAPHY, SPLIT WHERE THE PHONE HAS TO DO SOMETHING.
+///
+/// The steps themselves are the reference trace's and they are VALIDATED: on 2026-08-16, on
+/// `PKT01_BLUE_26079bc5` / fw 1.6, `WIFIO -> WIFIS(3) -> WIFIC -> WIFIS(0)` brought the access
+/// point up and tore it down cleanly, with the status codes moving exactly as legended
+/// (`foundry-hearth/reference/pocket-ble-protocol.md`). What was wrong was never the commands:
+/// it was that they were all inside one function, so the phone's join had nowhere to happen
+/// except after a wait that could not end until the phone had joined.
 extension PocketBLEClient: PocketFastSyncControlling {
-    public func prepare(_ request: PocketRecordingRequest) async throws {
-        guard try await performReferenceWiFiCommand(.initialize) == "MCU&WIFIS&0" else { throw PocketProtocolError.malformedResponse }
-        guard try await performReferenceWiFiCommand(.credentials).hasPrefix("MCU&WIFI&") else { throw PocketProtocolError.malformedResponse }
-        guard try await performReferenceWiFiCommand(.enable) == "MCU&WIFIO" else { throw PocketProtocolError.malformedResponse }
-        var ready = false
-        for _ in 0..<3 where !ready { ready = try await performReferenceWiFiCommand(.status) == "MCU&WIFIS&1" }
-        guard ready else { throw PocketProtocolError.malformedResponse }
-        guard try await performReferenceWiFiCommand(.select(request)).hasPrefix("MCU&U&") else { throw PocketProtocolError.malformedResponse }
-        guard try await performReferenceWiFiCommand(.beginTransfer) == "MCU&U&WIFI" else { throw PocketProtocolError.malformedResponse }
+
+    /// HOW OFTEN THE RECORDER IS ASKED. Every two seconds — ~45 reads across the default
+    /// budget, which is a cost this link can carry and still leaves the answer prompt.
+    private static var readinessPollInterval: TimeInterval { 2 }
+
+    public func reportedAccessPoint() async throws -> PocketAccessPointReadback {
+        // The plain information read, not a WiFi-control command: nothing is enabled here.
+        try await accessPointCredentials()
+    }
+
+    public func openAccessPoint() async throws {
+        guard try await performReferenceWiFiCommand(.initialize) == "MCU&WIFIS&0" else {
+            throw PocketProtocolError.malformedResponse
+        }
+        guard try await performReferenceWiFiCommand(.enable) == "MCU&WIFIO" else {
+            throw PocketProtocolError.malformedResponse
+        }
+    }
+
+    /// WAIT FOR A STATUS THAT IS A STATEMENT ABOUT THE PHONE, WITH THE PHONE ALREADY THERE.
+    ///
+    /// `3` means the access point is up and waiting; `2` means a client is associating; `1`
+    /// means it is ready to serve. This returns on `1`, keeps waiting through `3` and `2`, and
+    /// gives up on the budget rather than after three round trips — which took 0.2 seconds and
+    /// was the entire reason a bench attempt would have reported "the WiFi family does not work
+    /// on 1.6".
+    public func awaitClientJoined(withinSeconds seconds: TimeInterval) async throws {
+        let deadline = Date().addingTimeInterval(seconds)
+        while true {
+            let status = try await performReferenceWiFiCommand(.status)
+            if status == "MCU&WIFIS&1" { return }
+            guard Date() < deadline else { throw PocketProtocolError.timeout(.wifiControl) }
+            try await Task.sleep(nanoseconds:
+                UInt64(Self.readinessPollInterval * 1_000_000_000))
+        }
+    }
+
+    public func beginTransfer(_ request: PocketRecordingRequest) async throws {
+        guard try await performReferenceWiFiCommand(.select(request)).hasPrefix("MCU&U&") else {
+            throw PocketProtocolError.malformedResponse
+        }
+        guard try await performReferenceWiFiCommand(.beginTransfer) == "MCU&U&WIFI" else {
+            throw PocketProtocolError.malformedResponse
+        }
     }
 
     public func cleanup() async { _ = try? await performReferenceWiFiCommand(.close) }

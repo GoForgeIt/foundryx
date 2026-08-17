@@ -369,11 +369,12 @@
       "reached_from": [
         {
           "via": "device-screen",
-          "anchor": "manager.adoptCompletedCapture(captureId: captureID)"
+          "anchor": "manager.adoptCompletedCapture(captureId: captureID)",
+          "sites": 2
         }
       ],
       "verdict": "reachable",
-      "why": "THE ROW THAT WOULD HAVE CAUGHT THIS DEFECT CLASS AGAIN. `CaptureManager` hydrates its library ONCE, in `loadExisting()`, at construction — so a conversation created while the app is already open is invisible and un-uploaded until the next launch unless something hands it over. Every scenario about the import can be green without this call, which is precisely the shape `PocketBLEClient.download` shipped in. It takes a capture id and NOTHING else: it cannot tell which producer wrote the capture, so the background-restoration spool and `BrainSeeder` are served by the same verb."
+      "why": "THE ROW THAT WOULD HAVE CAUGHT THIS DEFECT CLASS AGAIN. `CaptureManager` hydrates its library ONCE, in `loadExisting()`, at construction — so a conversation created while the app is already open is invisible and un-uploaded until the next launch unless something hands it over. Every scenario about the import can be green without this call, which is precisely the shape `PocketBLEClient.download` shipped in. It takes a capture id and NOTHING else: it cannot tell which producer wrote the capture, so the background-restoration spool and `BrainSeeder` are served by the same verb. TWO SITES SINCE 2026-08-16, DECLARED RATHER THAN WIDENED BY ACCIDENT. The recorder page now has a second way to bring a recording over — the same errand over the recorder's own WiFi (`PocketFastSyncErrand`) — and it hands the capture over by exactly this call, because a fast-synced recording is not a second kind of recording. This gate caught the new site on the run that added it (declared 1, carries 2), which is the register working: the number moves in a diff somebody has to write, not silently."
     },
     {
       "id": "opus-frame-packer",
@@ -408,17 +409,37 @@
       "why": "INSTANCE 2, OPENLY RED, AND NOW SUPERSEDED RATHER THAN MERELY UNCALLED. The actor is constructed in ONE file and that file is a test. It stays unreachable ON PURPOSE: its decoder seam is `PocketMP3Decoding.decode(_ mp3: Data) -> PocketPCM`, which takes the whole recording as one `Data` and returns the whole decode as another — at fw-1.6's 32 kbps CBR, two hours is ~29 MB of MP3 that decodes to 691 MB of PCM, so a conformance that actually decoded a real Pocket file would take the phone down. The shipped path is the streaming `PocketAudioTranslator` -> `PocketCaptureImport`, registered below and reachable. Wiring this actor is a REGRESSION until that seam is reshaped, which is why the honest red stands."
     },
     {
+      "id": "pocket-fast-sync-errand",
+      "name": "PocketFastSyncErrand — the production constructor of the Wi-Fi handoff",
+      "declared_in": "Sources/FoundryXKit/PocketFastSyncErrand.swift",
+      "declaration_anchor": "public enum PocketFastSyncErrand {",
+      "call_pattern": "PocketFastSyncErrand.run(",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "let result = await PocketFastSyncErrand.run("
+        }
+      ],
+      "verdict": "reachable",
+      "why": "THE SIX MISSING LINKS, SUPPLIED. This file holds the production conformers of `PocketSoftAPJoining` (NEHotspotConfiguration, behind the entitlement Nick approved on 2026-08-16), `PocketHTTPPulling` (one GET with a deadline, because the address it fetches from is unconfirmed and a hang would be the likeliest outcome) and `PocketFastSyncHandoff` (which is `PocketBringOver.keep(payload:)` — the SAME custody commit and the SAME `PocketCaptureImport` a Bluetooth pull runs, not a second ingest route). `App/DeviceScreen.swift` calls it from the recorder page's Fast sync button, which is the entry point `grep FastSync App/*.swift` returned zero of."
+    },
+    {
       "id": "pocket-fast-sync-coordinator",
       "name": "PocketFastSyncCoordinator — the Wi-Fi handoff that makes a long file finish",
       "declared_in": "Sources/FoundryXKit/PocketFastSync.swift",
       "declaration_anchor": "public actor PocketFastSyncCoordinator {",
       "call_pattern": "PocketFastSyncCoordinator(",
-      "reached_from": [],
+      "reached_from": [
+        {
+          "via": "pocket-fast-sync-errand",
+          "anchor": "let coordinator = PocketFastSyncCoordinator(joiner: joiner, http: http,"
+        }
+      ],
       "tested_from": [
         "Tests/FoundryXBrineTests/PocketFastSyncFeatureTests.swift"
       ],
-      "verdict": "unreachable",
-      "why": "INSTANCE 2, OPENLY RED. Constructed only in its own feature test. Every outcome it can produce — completed, keptBluetooth, paused, cancelled, unavailable, failed — is unobservable in a shipping build."
+      "verdict": "reachable",
+      "why": "MOVED 2026-08-16, AND THIS IS WHAT MOVED IT. The row used to read \"INSTANCE 2, OPENLY RED. Constructed only in its own feature test\" — and it was right: zero production constructors across nine Pocket worktrees, while eight Brine scenarios drove it green. `PocketFastSyncErrand` is now that constructor and `App/DeviceScreen.swift` is now that caller. Three defects had to be fixed first or the wiring would have shipped a button that could not work: the access-point password was derived as `sessionKey.prefix(8)` and real hardware reports a different EIGHTH character (`PD9QQDJ6KM3PJDFC` -> `PD9QQDJ8`), so the possession gate refused the owner's own recorder; readiness was polled three times with no delay where the reference client allows 90 seconds; and the wait for status `1` — which only happens AFTER a client joins — was ordered before the join. What is still NOT claimed: nobody has confirmed the URL a Pocket serves files from, so `PocketFastSyncEndpoint.measured` is nil and every real tap today ends in `E-WIFI-ENDPOINT` with a sentence. Reachable means the shipping app CALLS this; it does not mean the transfer has ever completed on hardware."
     },
     {
       "id": "stored-file-lifecycle-stub",
@@ -502,10 +523,14 @@
         {
           "dynamic": "every call goes through the existential `any PocketFastSyncControlling` held by `PocketFastSyncCoordinator`. A text register cannot see which conformer a protocol existential dispatches to, and there is no honest way to fake that with a grep.",
           "depends_on": "pocket-fast-sync-coordinator"
+        },
+        {
+          "via": "pocket-fast-sync-errand",
+          "anchor": "let control: any PocketFastSyncControlling = client"
         }
       ],
-      "verdict": "undetermined",
-      "why": "THE THIRD VERDICT, ON REAL CODE. Calling this `unreachable` would be a guess dressed as a measurement; calling it `reachable` would be the original disease. What IS determined is printed beside it: its only known existential holder, `pocket-fast-sync-coordinator`, is declared `unreachable` — so the likely truth is that this conformance is dead too, and the way to find out is to make the coordinator reachable, not to make this checker cleverer."
+      "verdict": "reachable",
+      "why": "THE THIRD VERDICT, ANSWERED RATHER THAN INHERITED. It stood at `undetermined` because a text register cannot see which conformer an existential dispatches to, and its own remedy sentence read: \"the way to find out is to make the coordinator reachable\". That was done. Two facts now decide it, and both are measured rather than argued: `PocketFastSyncErrand` binds the existential on one line from a concrete `PocketBLEClient`, and `PocketFastSyncControlOrderingTests.testExactlyOneShippingTypeConformsToTheControlProtocol` holds that the shipping tree contains EXACTLY ONE conformer of `PocketFastSyncControlling` — so there is nothing else the dispatch could reach, and the day a second conformer appears that test goes red and this row has to be argued again. The dynamic caveat is kept below it because it is still true of the mechanism."
     },
     {
       "id": "pocket-recorder-command-gate",
@@ -669,11 +694,11 @@
   ],
   "_verdict_counts_are_equality": "Declared as exact counts, never bounds. A bound would let the unreachable roster grow by one without anybody moving this file, which is precisely how four capabilities reached `main` unreached.",
   "verdict_counts": {
-    "reachable": 32,
-    "undetermined": 2,
-    "unreachable": 10
+    "reachable": 35,
+    "undetermined": 1,
+    "unreachable": 9
   },
   "_floor": "A register that lost its rows would be a silent full pass, so the population is asserted before its contents are.",
-  "minimum_capabilities": 44,
+  "minimum_capabilities": 45,
   "minimum_entry_points": 1
 }

@@ -203,6 +203,31 @@ final class FakePocketBLEStack: @unchecked Sendable {
     }
     private var storedReachability = Reachability()
 
+    /// THE ACCESS POINT'S OWN STATE, AS THE LEGEND IN `PROTOCOL.md:139-143` DEFINES IT:
+    /// `0` closed / initialising, `3` AP created and waiting for a client, `2` client
+    /// connecting, `1` ready for file transfer. The ONLY way to get from 3 to 1 is
+    /// `clientJoinedTheAccessPoint()` — because on the real device the only way is a client
+    /// joining, and a fixture that walked to 1 on its own would let a client that never joined
+    /// look exactly like one that did.
+    private var wifiStatus = 0
+    private var wifiSelectedFile: String?
+    private var wifiClosed = 0
+    private var wifiStatusIsReadyForSelection: Bool {
+        lock.lock(); defer { lock.unlock() }; return wifiStatus == 1
+    }
+
+    /// A PHONE JOINED THE RECORDER'S NETWORK. Real hardware moves 3 -> 2 -> 1 on its own once
+    /// this happens; this fixture goes straight to 1 because nothing in the client distinguishes
+    /// 2 from "still waiting", and a scripted intermediate would be invented behaviour.
+    func clientJoinedTheAccessPoint() {
+        lock.lock(); if wifiStatus == 3 { wifiStatus = 1 }; lock.unlock()
+    }
+
+    /// What the recorder's radio is doing, so a scenario can assert the AP was TORN DOWN rather
+    /// than left up on somebody's desk.
+    var accessPointStatus: Int { lock.lock(); defer { lock.unlock() }; return wifiStatus }
+    var accessPointCloseCount: Int { lock.lock(); defer { lock.unlock() }; return wifiClosed }
+
     private let lock = NSLock()
     private weak var sink: BLEEventSink?
     private var queue: DispatchQueue?
@@ -533,6 +558,48 @@ final class FakePocketBLEStack: @unchecked Sendable {
             }
             notifyControl("MCU&LIST&\(files.count)")
             return
+        } else if command == "U&WIFI" {
+            // THE SAME WIRE FORM MEANS TWO THINGS, AND THE REFERENCE TRACE IS WHY.
+            // `PROTOCOL.md:97-131` sends `APP&U&WIFI` TWICE: once at step 1 to put the radio
+            // into WiFi mode (answered with a STATUS frame) and once at step 6, after a file
+            // has been selected, to start the transfer (answered `MCU&U&WIFI`). A fixture that
+            // answered the same thing both times would make the ordering this suite is about
+            // unrepresentable.
+            lock.lock()
+            let selected = wifiSelectedFile != nil
+            if !selected { wifiStatus = 0 }
+            let status = wifiStatus
+            lock.unlock()
+            response = selected ? "MCU&U&WIFI" : "MCU&WIFIS&\(status)"
+        } else if command == "WIFIO" {
+            // THE ACCESS POINT COMES UP AND WAITS FOR SOMEBODY. Measured on real hardware:
+            // `APP&WIFIO` -> `MCU&WIFIO`, and `APP&WIFIS` then answers `3` — "open, with no
+            // client" — and STAYS there until a client actually joins.
+            lock.lock(); wifiStatus = 3; lock.unlock()
+            response = "MCU&WIFIO"
+        } else if command == "WIFIS" {
+            lock.lock(); let status = wifiStatus; lock.unlock()
+            response = "MCU&WIFIS&\(status)"
+        } else if command == "WIFIC" {
+            // VERIFIED ON HARDWARE: status returns to 0 and the AP is gone.
+            lock.lock(); wifiStatus = 0; wifiSelectedFile = nil; wifiClosed += 1; lock.unlock()
+            response = "MCU&WIFIC"
+        } else if command.hasPrefix("U&"), answersInventory,
+                  command.dropFirst("U&".count).contains("&"),
+                  wifiStatusIsReadyForSelection {
+            // STEP 5 OF THE WIFI SEQUENCE: the same select frame as the BLE pull, but the bytes
+            // are then served over HTTP rather than on the audio characteristic.
+            let parts = command.dropFirst("U&".count)
+                .split(separator: "&", omittingEmptySubsequences: false)
+            guard parts.count == 2,
+                  let file = inventory.first(where: {
+                      $0.date == parts[0] && $0.timestamp == parts[1]
+                  }) else {
+                notifyControl("MCU&UNKNOWN")
+                return
+            }
+            lock.lock(); wifiSelectedFile = command; lock.unlock()
+            response = "MCU&U&\(file.announcedSizeBytes ?? file.sizeBytes)"
         } else if command.hasPrefix("U&"), answersInventory {
             // THE PULL, AS THE FIRMWARE SERIALISES IT: one control frame announcing the size,
             // then the file itself on the AUDIO characteristic. The chunking is deliberate —

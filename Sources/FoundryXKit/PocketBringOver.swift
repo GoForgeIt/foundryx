@@ -506,6 +506,53 @@ public enum PocketBringOver {
         }
     }
 
+    /// THE SAME SINK, REACHED WITHOUT THE RADIO — what a transport swap actually means.
+    ///
+    /// Bytes that arrived some other way (today: over the recorder's own WiFi, which is what
+    /// `PocketFastSyncErrand` is) are kept by EXACTLY the steps a Bluetooth pull is kept by:
+    /// the same `PocketRecorderFileCustody`, the same commit-by-re-read, the same
+    /// `PocketCaptureImport`, the same conversation receipt, the same `PocketBringOverOutcome`
+    /// vocabulary. There is no second ingest route and no `if fastSync` downstream of here —
+    /// which is the property AC2 of the fast-sync track is about, and the reason this is a
+    /// second entry point into one function rather than a second copy of it.
+    ///
+    /// It takes the whole payload as one `Data` because an HTTP body is one response; the BLE
+    /// path streams because a radio hands over one notification at a time. That is the only
+    /// difference, and it is the transport's, not custody's.
+    public static func keep(payload: Data,
+                            from identity: RecordingDeviceIdentity,
+                            advertisedName: String,
+                            recording: PocketRecording,
+                            custody: any PocketRecorderFileCustody = PocketRecorderFileStore(),
+                            destination: Destination = Destination()) async -> PocketBringOverOutcome {
+        let key = PocketRecorderFileKey(identity: identity,
+                                        date: recording.date,
+                                        timestamp: recording.timestamp)
+        if let held = await custody.heldFile(key), let existing = await custody.conversation(for: key) {
+            _ = held
+            return .alreadyHeld(captureID: existing)
+        }
+        let writer: any PocketRecorderFileWriting
+        do { writer = try await custody.beginKeeping(key) }
+        catch { return .transferIncomplete }
+        let bytes: Int
+        do {
+            try writer.write(payload)
+            bytes = try writer.commit()
+        } catch {
+            // NOTHING IS KEPT, and custody has already removed the partial. The recorder still
+            // holds the only copy, which it always did.
+            writer.abandon()
+            return .transferIncomplete
+        }
+        guard let held = await custody.heldFile(key) else { return .transferIncomplete }
+        return await conversation(from: held, key: key, bytes: bytes,
+                                  deviceIdentity: identity,
+                                  advertisedName: advertisedName,
+                                  recording: recording, custody: custody,
+                                  destination: destination)
+    }
+
     private static func pull(client: PocketBLEClient,
                              identity: PocketAuthenticatedIdentity,
                              advertisedName: String,

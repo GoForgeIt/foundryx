@@ -75,7 +75,7 @@ Feature: I make a brand-new recorder mine, and Solleva proves it
   Scenario: the key Solleva makes is one the recorder's WiFi can actually use
     Given the key Solleva makes for a new recorder
     Then it is sixteen characters the recorder's protocol can carry
-    And its first eight characters are a password a WiFi network will accept
+    And the characters a WiFi network will see are ones it will accept
     And two keys made one after another are never the same
     And it contains no character that would split the recorder's own commands
 
