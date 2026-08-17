@@ -77,13 +77,18 @@ final class RecorderPageErrandWiringTests: XCTestCase {
         // has its own `Self.makeAttachment(` call sites; counting the file's would be counting
         // the sibling this track is explicitly not allowed to edit.
         let model = try checkModelBody()
+        //
+        // FOUR SINCE STEP 6. The check, the bring-over, and the TWO removal errands the delete
+        // ruling's two paths need — an explicit tap and the owner-armed clear. Each opens its
+        // own session, so each builds its own attachment; `teardown()` retires an attachment's
+        // link and generation, which makes one single-use by construction.
         let calls = model.components(separatedBy: "Self.makeAttachment(").count - 1
-        XCTAssertEqual(calls, 2,
-                       "the check model builds \(calls) attachment(s); the check and the "
-                       + "bring-over are both expected to")
+        XCTAssertEqual(calls, 4,
+                       "the check model builds \(calls) attachment(s); the check, the "
+                       + "bring-over and the two removal paths are all expected to")
         let logged = model.components(separatedBy: "Self.makeAttachment(log: DoorLog.shared)")
             .count - 1
-        XCTAssertEqual(logged, 2,
+        XCTAssertEqual(logged, 4,
                        "\(logged) of \(calls) attachment call sites pass the shared log")
     }
 

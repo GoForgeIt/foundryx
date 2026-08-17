@@ -1,7 +1,7 @@
 import Foundation
 
 public enum PocketOperation: String, Sendable, Equatable {
-    case authentication, information, dateList, fileList, download, wifiControl
+    case authentication, information, dateList, fileList, download, wifiControl, removal
 }
 
 public enum PocketProtocolError: Error, Sendable, Equatable, CustomStringConvertible {
@@ -293,7 +293,17 @@ public actor PocketBLEClient {
 
     public func listRecordings(on requestedDate: String) async throws -> [PocketRecording] {
         guard validToken(requestedDate) else { throw PocketProtocolError.malformedResponse }
-        return try await protected(.fileList) {
+        return try await protected(.fileList) { try await listedRecordings(on: requestedDate) }
+    }
+
+    /// ONE DAY'S SHELF, WITHOUT CLAIMING THE OPERATION LOCK.
+    ///
+    /// Extracted so `removeRecording` can re-read the shelf ON THE SAME ERRAND. `protected(_:)`
+    /// refuses a second operation with `.busy`, so a removal that called `listRecordings(on:)`
+    /// would throw instead of confirming — and the only way past that without this split is a
+    /// SECOND authenticated session, in which the shelf it read would be a different reading of
+    /// a different moment. The confirmation has to be the same trip or it confirms nothing.
+    private func listedRecordings(on requestedDate: String) async throws -> [PocketRecording] {
             try await write("LIST&\(requestedDate)")
             var recordings: [PocketRecording] = []
             while true {
@@ -317,6 +327,50 @@ public actor PocketBLEClient {
                 }
                 if response.hasPrefix("MCU&LIST&"), let count = Int(response.dropFirst("MCU&LIST&".count)), count == recordings.count { return recordings }
                 throw PocketProtocolError.malformedResponse
+            }
+    }
+
+    /// TAKE ONE RECORDING OFF THE RECORDER, AND FIND OUT WHETHER IT ACTUALLY WENT.
+    ///
+    /// THE FRAME. `APP&D&<date>&<timestamp>`, composed exactly the way `download` composes
+    /// `APP&U&<date>&<timestamp>` — through the one `write(_:ownerConsent:)` every command in
+    /// this app goes through, so `PocketRecorderCommandGate` sees it and the census records it.
+    /// The date and timestamp are the recorder's OWN spelling, passed through untouched: this
+    /// firmware lists both bare `20260807142852` and PH-prefixed `PH260811175026` on the same
+    /// device, and `(date, timestamp)` is only a stable identity if nothing normalises it.
+    ///
+    /// SUCCESS IS THE RE-READ, NEVER THE ACKNOWLEDGEMENT, and that is the whole reason this is
+    /// not three lines. `MCU&D` has been issued to exactly one real recorder, once, against a
+    /// sentinel that cannot exist — it answered `MCU&D&ERR`, which is what tells us this
+    /// firmware discriminates. It does NOT tell us that its yes is trustworthy. So the day's
+    /// shelf is read again ON THIS SAME ERRAND and only an absent file is reported as removed.
+    /// A second session would be a different reading of a different moment and would confirm
+    /// nothing; `listedRecordings(on:)` exists so the re-read happens inside this operation's
+    /// own lock rather than tripping `protected(_:)`'s `.busy`.
+    ///
+    /// - Parameter ownerConsent: REQUIRED, with no default. A deletion cannot be authorised by
+    ///   omission, and the gate refuses one that names a different recording.
+    public func removeRecording(_ request: PocketRecordingRequest,
+                                ownerConsent: PocketDeleteConsent) async throws
+        -> PocketRemovalOutcome {
+        guard validToken(request.date), validToken(request.timestamp) else {
+            throw PocketProtocolError.malformedResponse
+        }
+        return try await protected(.removal) {
+            try await write("D&\(request.date)&\(request.timestamp)", ownerConsent: ownerConsent)
+            switch PocketRemovalAck.read(try await nextControl(operation: .removal)) {
+            case .theRecorderRefused:
+                // AN EXPLICIT NO. Reported as the recorder's own answer, and the shelf is NOT
+                // re-read: there is nothing to confirm, and a needless second command on a
+                // session whose timeout retires the whole link is a cost with no reading.
+                return .theRecorderRefused
+            case .notAboutARemoval:
+                throw PocketProtocolError.malformedResponse
+            case .acknowledged:
+                let remaining = try await listedRecordings(on: request.date)
+                guard !remaining.contains(where: { $0.timestamp == request.timestamp })
+                else { return .stillListedAfterwards }
+                return .removed(stillOnTheRecorder: remaining.count)
             }
         }
     }

@@ -53,22 +53,37 @@ public struct RecordingDeviceRecord: Codable, Equatable, Sendable {
     /// `RecordingDeviceReadings.swift` for the two states and why there is no third.
     public var readings: [String: RecordingDeviceReading]
 
+    /// WHEN THE OWNER ARMED THIS RECORDER'S AUTOMATIC CLEARING. `nil` is OFF, and `nil` is what
+    /// every record already on disk decodes to — the ruling's *"default OFF"* is therefore the
+    /// state of the world rather than a branch somebody has to remember to write.
+    ///
+    /// IT IS AN INSTANT AND NOT A `Bool`, and that is the whole of "never retroactive". A flag
+    /// can say a recorder is armed; only the instant can say a recording synced BEFORE it was,
+    /// and without that a control switched on over a full recorder would sweep the backlog on
+    /// the spot. It is PER RECORD because the ruling is explicit that this is recorder-scoped:
+    /// the owner may want it on for a device they carry daily and off for one holding something
+    /// they have not filed yet.
+    public var autoClearArmedAt: Date?
+
     public init(identity: RecordingDeviceIdentity,
                 displayName: String,
                 lastConnected: Date? = nil,
                 userDetached: Bool = false,
                 userPreferred: Bool = false,
-                readings: [String: RecordingDeviceReading] = [:]) {
+                readings: [String: RecordingDeviceReading] = [:],
+                autoClearArmedAt: Date? = nil) {
         self.identity = identity
         self.displayName = displayName
         self.lastConnected = lastConnected
         self.userDetached = userDetached
         self.userPreferred = userPreferred
         self.readings = readings
+        self.autoClearArmedAt = autoClearArmedAt
     }
 
     enum CodingKeys: String, CodingKey {
         case identity, displayName, lastConnected, userDetached, userPreferred, readings
+        case autoClearArmedAt
     }
 
     /// DECODED WITH A DEFAULT, DELIBERATELY. Every record already on a person's disk was
@@ -85,6 +100,11 @@ public struct RecordingDeviceRecord: Codable, Equatable, Sendable {
         userPreferred = try container.decode(Bool.self, forKey: .userPreferred)
         readings = try container.decodeIfPresent([String: RecordingDeviceReading].self,
                                                  forKey: .readings) ?? [:]
+        // ABSENT ⇒ OFF, for the same reason `readings` defaults: every record written before
+        // this field existed would otherwise throw `keyNotFound`, which `readLocked` correctly
+        // reports as `unreadable` — un-pairing every device the person owns on the first launch
+        // after the upgrade. And the value it defaults to is the safe one: not armed.
+        autoClearArmedAt = try container.decodeIfPresent(Date.self, forKey: .autoClearArmedAt)
     }
 }
 

@@ -490,6 +490,13 @@ private struct RecordingDevicePageView: View {
                 captureToggle
                 actions
                 recorderShelf
+                // A SETTING, NOT PART OF THE SHELF. It sits outside `recorderShelf` on
+                // purpose: the shelf draws only after the owner has asked a recorder what it
+                // is holding, and whether THIS recorder clears itself is a standing choice a
+                // person must be able to see and change without opening a Bluetooth session
+                // first. Nested inside the shelf, the one control the ruling calls
+                // "owner-armed" would have been invisible until the radio answered.
+                autoClearControl
             }
             .padding(.horizontal, GrainSpacing.x4)
             .padding(.bottom, GrainSpacing.x8)
@@ -775,10 +782,34 @@ private struct RecordingDevicePageView: View {
                                     }
                                 }
                                 Spacer(minLength: GrainSpacing.x2)
-                                Text(row.duration)
-                                    .grainTextStyle(.caption)
-                                    .fontWeight(.semibold)
-                                    .foregroundStyle(GrainColor.textMuted)
+                                VStack(alignment: .trailing, spacing: GrainSpacing.x1) {
+                                    Text(row.duration)
+                                        .grainTextStyle(.caption)
+                                        .fontWeight(.semibold)
+                                        .foregroundStyle(GrainColor.textMuted)
+                                    // THE AFFORDANCE DOES NOT EXIST FOR A RECORDING SOLLEVA
+                                    // HAS NOT PROVED IT HOLDS. Nick's ruling in his own
+                                    // words, and this is the predicate itself rather than a
+                                    // disabled button - a greyed-out control for a state a
+                                    // person cannot reach from here is a puzzle, not an
+                                    // affordance. `isOffered` reads the SAME reading the row
+                                    // above is drawn from.
+                                    if PocketRemoveFromRecorderPresentation
+                                        .isOffered(for: row.presence) {
+                                        Button {
+                                            check.removeFromRecorder(
+                                                id: row.id,
+                                                hardwareToken: input.identity.hardwareToken,
+                                                advertisedName: input.displayName)
+                                        } label: {
+                                            Text(PocketRemoveFromRecorderPresentation.action)
+                                                .grainTextStyle(.caption)
+                                        }
+                                        .buttonStyle(.grain(.text))
+                                        .disabled(check.isRemoving || check.isChecking
+                                                  || check.isBringingOver)
+                                    }
+                                }
                             }
                             .padding(.vertical, GrainSpacing.x2)
                             .accessibilityElement(children: .combine)
@@ -787,6 +818,7 @@ private struct RecordingDevicePageView: View {
                     }
 
                     bringOver
+                    removalReport
 
                     Text(PocketRecorderCheckPresentation.sectionNote)
                         .grainTextStyle(.caption)
@@ -814,6 +846,71 @@ private struct RecordingDevicePageView: View {
     /// where a recording is exists only inside a SwiftUI body.
     private func placeLine(_ place: PocketPlaceLine) -> String {
         "\(place.place): \(place.answer) - \(place.age)"
+    }
+
+    /// WHAT THE RECORDER ANSWERED WHEN IT WAS ASKED TO REMOVE SOMETHING.
+    ///
+    /// It reports THREE different nos - the recorder refused, the recorder said yes and the
+    /// recording is still on it, or Solleva could not reach it at all - because those are three
+    /// different things to do next. Every sentence comes from the kit.
+    @ViewBuilder
+    private var removalReport: some View {
+        if check.isRemoving {
+            HStack(spacing: GrainSpacing.x2) {
+                ProgressView().tint(GrainColor.forgeBlue)
+                Text(PocketRemoveFromRecorderPresentation.action)
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textMuted)
+            }
+            .padding(.top, GrainSpacing.x2)
+        }
+        if let outcome = check.removalMessage {
+            Text(outcome)
+                .grainTextStyle(.caption)
+                .foregroundStyle(GrainColor.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, GrainSpacing.x2)
+        }
+    }
+
+    /// THE OWNER-ARMED AUTOMATIC CLEAR - OFF BY DEFAULT, AND FOR THIS RECORDER ONLY.
+    ///
+    /// It is not offered at all on a brain with nowhere other than this phone to put a copy:
+    /// on that tier nothing can ever satisfy the predicate, so a toggle would be a control that
+    /// can never fire. The sentence beside it states, in itself, what "synced" is trusted to
+    /// mean and WHICH destination satisfied it - and the line under it says out loud that
+    /// turning it on does not reach back over what is already here.
+    @ViewBuilder
+    private var autoClearControl: some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+            if let explanation = PocketRemoveFromRecorderPresentation
+                .autoClearExplanation(for: brain) {
+                Toggle(isOn: Binding(
+                    get: { check.autoClearArmed },
+                    set: { check.setAutoClear($0, hardwareToken: input.identity.hardwareToken) }
+                )) {
+                    Text(PocketRemoveFromRecorderPresentation.autoClearTitle)
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.ink)
+                }
+                .tint(GrainColor.forgeBlue)
+                Text(explanation)
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(PocketRemoveFromRecorderPresentation.autoClearNotRetroactiveLine)
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(PocketRemoveFromRecorderPresentation.autoClearUnavailableLine)
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.top, GrainSpacing.x4)
+        .onAppear { check.readAutoClear(hardwareToken: input.identity.hardwareToken) }
     }
 
     /// STARTING THE RECORDER OVER, WITH ITS COST, AND IT NEVER DISABLES ITSELF.
@@ -1057,6 +1154,27 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// When the recorder last answered a listing. `nil` means it never has on this screen, and
     /// a stale or absent reading changes the reset's primary action, never its enabled state.
     @Published private(set) var shelfObservedAt: Date?
+
+    /// A REMOVAL IS IN FLIGHT. Same model as the check and the bring-over for the same reason:
+    /// one radio, one idea of whether it is busy.
+    @Published private(set) var isRemoving = false
+    /// What the recorder answered, in words — including "it said yes and it is still there",
+    /// which is the outcome a client that trusted the acknowledgement could not report.
+    @Published private(set) var removalMessage: String?
+    /// Whether THIS recorder's automatic clearing is armed. Read from the account's device
+    /// record, which is where the ruling's "recorder-scoped" lives; `false` until read, which
+    /// is also the correct default for a recorder nobody ever armed.
+    @Published private(set) var autoClearArmed = false
+
+    /// WHICH RECORDINGS THIS PHONE HAS PULLED OVER SINCE THIS SCREEN OPENED, and when.
+    ///
+    /// THIS IS WHAT MAKES THE ARMED CONTROL NON-RETROACTIVE STRUCTURALLY RATHER THAN BY
+    /// PROMISE. Nothing in this app enumerates a recorder's shelf and clears what looks safe —
+    /// the armed path is offered exactly one candidate set, the recordings the OWNER pulled
+    /// over after arming, each with the instant its transfer landed. A backlog recording that
+    /// nobody touched is not in this map, so no armed control can reach it, and that is a
+    /// property of the data flow rather than of a check somebody has to remember to write.
+    private var syncedThisSession: [String: Date] = [:]
 
     /// WHERE A BROUGHT-OVER FILE GOES, and what makes a row able to say "In Solleva". The
     /// check consults it too — a custody label that was not asked is a guess.
@@ -1347,6 +1465,21 @@ final class PocketRecorderCheckModel: ObservableObject {
         }
     }
 
+    /// EVERY OUTCOME OF A REMOVAL GETS ITS OWN TOKEN, and the three that are not a success are
+    /// three DIFFERENT diagnoses: the owner had no proof, the recorder said no, or the recorder
+    /// said yes and kept the file. Folding them into one word is how "it didn't work" becomes
+    /// unanswerable at three in the morning.
+    private static func token(for outcome: PocketRemovalOutcome) -> String {
+        switch outcome {
+        case .removed:               return DoorLog.succeeded
+        case .notProvenSafe:         return "not-proven-safe"
+        case .theRecorderRefused:    return "recorder-refused"
+        case .stillListedAfterwards: return "still-listed"
+        case .unavailable:           return "recorder-unavailable"
+        case .failed:                return "removal-failed"
+        }
+    }
+
     /// THE SCREEN WENT AWAY MID-ERRAND.
     ///
     /// Mirrors `RecordingDeviceAttachModel.cancel()` and closes the same hole one layer over:
@@ -1440,6 +1573,10 @@ final class PocketRecorderCheckModel: ObservableObject {
                 DoorLog.shared.command(PocketErrandCommand.custodyCommit,
                                        subject: fileToken,
                                        outcome: DoorLog.succeeded)
+                // THE SYNC INSTANT, RECORDED BEFORE ANYTHING READS IT. The armed control's
+                // candidate set is exactly this map, and its whole job is to answer "did this
+                // land after the owner armed this recorder".
+                self.syncedThisSession[fileToken] = Date()
                 if let panel { await self.rebuildShelf(panel, identity: identity) }
             }
             // BUSY UNTIL THE SHELF HAS CAUGHT UP — see the same note in `run`. Dropped before
@@ -1447,7 +1584,156 @@ final class PocketRecorderCheckModel: ObservableObject {
             // still names the file it has just finished bringing over.
             self.isBringingOver = false
             self.finishErrand(outcome: Self.token(for: outcome))
+            // THE ARMED PATH, AND IT RUNS ONLY AFTER THE RADIO IS FREE. It clears nothing on
+            // its own beyond the one recording the owner just pulled over, and only if that
+            // recording's own shelf reading now says Solleva holds it somewhere else.
+            await self.clearWhatTheArmedControlAllows(hardwareToken: hardwareToken,
+                                                     advertisedName: advertisedName)
         }
+    }
+
+    // MARK: - Taking a recording off the recorder
+
+    /// READ THIS RECORDER'S ARMED CONTROL. Called when the page appears, so a toggle can draw
+    /// its real state instead of a default that happens to look like one.
+    func readAutoClear(hardwareToken: String) {
+        autoClearArmed = RecordingDeviceStore
+            .autoClear(for: Self.custodyIdentity(for: hardwareToken)).isArmed
+    }
+
+    /// THE OWNER ARMED — OR DISARMED — THIS ONE RECORDER.
+    ///
+    /// The instant is written on arming and DISCARDED on disarming, so switching it off and on
+    /// again cannot inherit an older arming and reach back over everything that synced in
+    /// between. It writes one record: arming the recorder you carry daily does not arm the one
+    /// holding something you have not filed yet.
+    func setAutoClear(_ armed: Bool, hardwareToken: String) {
+        let identity = Self.custodyIdentity(for: hardwareToken)
+        guard let store = RecordingDeviceStore.current() else { return }
+        do {
+            if armed { try store.armAutoClear(identity, at: Date()) }
+            else { try store.disarmAutoClear(identity) }
+            autoClearArmed = (try? store.autoClear(for: identity).isArmed) ?? false
+        } catch {
+            // FAIL CLOSED AND SAY SO. A control that could not be written must not draw as on.
+            autoClearArmed = false
+            removalMessage = PocketRemoveFromRecorderPresentation.notProvenSafeLine
+        }
+    }
+
+    /// TAKE ONE RECORDING OFF THE RECORDER, BECAUSE A PERSON TAPPED IT.
+    ///
+    /// - Parameter id: the recorder's OWN name for the file, `<date>/<timestamp>`, carried on
+    ///   the row rather than re-derived from a title or from a row's position in an array. This
+    ///   firmware spells its timestamps two different ways on one device and the spelling has
+    ///   to reach the wire verbatim.
+    ///
+    /// THE SAFETY READING IS THE ONE THE ROW WAS DRAWN FROM. It is looked up out of
+    /// `presences` — the published read model — and handed straight to the errand, which hands
+    /// it to `PocketDeleteConsent`'s failable factory. Nothing here recomputes it.
+    func removeFromRecorder(id: String, hardwareToken: String, advertisedName: String) {
+        guard !isChecking, !isBringingOver, !isRemoving else { return }
+        guard let index = shelfRecordings.firstIndex(where: {
+            $0.date + "/" + $0.timestamp == id
+        }), let presence = presences?[safe: index] else { return }
+        guard let identifier = UUID(uuidString: hardwareToken) else {
+            removalMessage = PocketRecorderCheckPresentation.notThisRecorderLine
+            return
+        }
+        let recording = shelfRecordings[index]
+        isRemoving = true
+        removalMessage = nil
+        beginErrand(PocketErrandCommand.removalSubject)
+        let attachment = Self.makeAttachment(log: DoorLog.shared)
+        self.attachment = attachment
+        let identity = Self.custodyIdentity(for: hardwareToken)
+        let panel = detail
+        errand = Task { [weak self] in
+            let outcome = await PocketRemoveFromRecorder.run(
+                peripheralIdentifier: identifier,
+                advertisedName: advertisedName,
+                recording: recording,
+                presence: presence,
+                provenance: .ownerChose,
+                attachment: attachment)
+            guard let self, !Task.isCancelled else { return }
+            self.errand = nil
+            self.attachment = nil
+            self.removalMessage = PocketRemoveFromRecorderPresentation.message(for: outcome)
+            await self.absorb(outcome, of: recording, panel: panel, identity: identity)
+            self.isRemoving = false
+            self.finishErrand(outcome: Self.token(for: outcome))
+        }
+    }
+
+    /// THE ARMED CONTROL'S ONE PRODUCTION CALLER.
+    ///
+    /// It considers ONLY recordings this owner pulled over since the screen opened — never the
+    /// shelf — so nothing here can reach a backlog nobody touched. Each candidate is put to the
+    /// SAME predicate an explicit tap meets, with the instant its transfer actually landed, and
+    /// `PocketAutoClear.decision` refuses anything that synced before the control was armed.
+    private func clearWhatTheArmedControlAllows(hardwareToken: String,
+                                                advertisedName: String) async {
+        guard !isRemoving, !isChecking, !isBringingOver else { return }
+        guard let identifier = UUID(uuidString: hardwareToken) else { return }
+        let identity = Self.custodyIdentity(for: hardwareToken)
+        let control = RecordingDeviceStore.autoClear(for: identity)
+        guard control.isArmed else { return }
+        guard let presences else { return }
+        for (index, recording) in shelfRecordings.enumerated() {
+            guard let presence = presences[safe: index] else { continue }
+            let token = recording.date + "/" + recording.timestamp
+            guard let syncedAt = syncedThisSession[token] else { continue }
+            guard control.decision(syncedAt: syncedAt, presence: presence) == .clears else {
+                continue
+            }
+            isRemoving = true
+            beginErrand(PocketErrandCommand.removalSubject)
+            let attachment = Self.makeAttachment(log: DoorLog.shared)
+            self.attachment = attachment
+            let panel = detail
+            let outcome = await PocketRemoveFromRecorder.run(
+                peripheralIdentifier: identifier,
+                advertisedName: advertisedName,
+                recording: recording,
+                presence: presence,
+                provenance: .ownerArmedThisRecorder,
+                attachment: attachment)
+            self.attachment = nil
+            removalMessage = PocketRemoveFromRecorderPresentation.message(for: outcome)
+            await absorb(outcome, of: recording, panel: panel, identity: identity)
+            isRemoving = false
+            finishErrand(outcome: Self.token(for: outcome))
+            // ONE AT A TIME, like every other errand this screen runs. A loop that opened a
+            // session per recording without letting the first one settle is the shape the
+            // transfer contract already refuses.
+            break
+        }
+    }
+
+    /// WHAT A REMOVAL CHANGES ON THIS PAGE. Only a recording that is genuinely gone leaves the
+    /// shelf — a refusal and a "it said yes and it is still there" both leave the row where it
+    /// is, because it is still on the recorder.
+    private func absorb(_ outcome: PocketRemovalOutcome,
+                        of recording: PocketRecording,
+                        panel: StoredFileDeviceDetailPresentation?,
+                        identity: RecordingDeviceIdentity) async {
+        guard case .removed = outcome else { return }
+        let token = recording.date + "/" + recording.timestamp
+        DoorLog.shared.command(PocketErrandCommand.recorderRemoval,
+                               subject: token,
+                               outcome: DoorLog.succeeded)
+        syncedThisSession[token] = nil
+        shelfRecordings.removeAll { $0.date + "/" + $0.timestamp == token }
+        if let panel { await rebuildShelf(panel, identity: identity) }
+    }
+}
+
+private extension Array {
+    /// Index or nil. The shelf and its readings move together in `stateShelf`, and a crash is
+    /// not the right answer if some future edit ever lets them disagree by one.
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
 

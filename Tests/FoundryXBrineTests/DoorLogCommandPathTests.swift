@@ -98,9 +98,19 @@ final class DoorLogCommandPathTests: XCTestCase {
 
     /// THE CLOSED VOCABULARY the recorder surface issues, pinned here so the app and the
     /// scenarios cannot drift to two spellings of the same command.
-    func testTheErrandVocabularyIsExactlyThree() {
+    /// FOUR SINCE STEP 6. `recorder.removal` joined it when the recorder page gained the one
+    /// command that takes something AWAY — and it is a distinct word from `custody.commit` for
+    /// the same reason that one is distinct from `errand.stop`: "a recording arrived on this
+    /// phone" and "a recording left the recorder" are two facts, and the second is the only one
+    /// that answers "where did my recording go".
+    func testTheErrandVocabularyIsExactlyFour() {
         XCTAssertEqual(PocketErrandCommand.every,
-                       ["errand.start", "errand.stop", "custody.commit"])
+                       ["errand.start", "errand.stop", "custody.commit", "recorder.removal"])
+        // AND THE SUBJECTS ARE THREE DISTINCT ERRANDS. Two spellings of one errand is a log
+        // whose command stream cannot be read back.
+        XCTAssertEqual(Set([PocketErrandCommand.shelfSubject,
+                            PocketErrandCommand.bringOverSubject,
+                            PocketErrandCommand.removalSubject]).count, 3)
     }
 
     /// AN EXISTENCE ASSERTION OVER THE SAME POPULATION as the prohibitions above: a log that

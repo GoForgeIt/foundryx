@@ -140,13 +140,23 @@ public enum PocketErrandCommand {
     /// A recording is now in this phone's keeping. `subject` is the recorder's own name for
     /// the file — `<date>/<timestamp>` — never a title.
     public static let custodyCommit = "custody.commit"
+    /// A recording is no longer on the recorder, and Solleva PROVED it by re-reading the
+    /// recorder's own shelf on the same errand. `subject` is the recorder's own name for the
+    /// file — `<date>/<timestamp>` — never a title.
+    ///
+    /// IT IS LOGGED ONLY FOR A REMOVAL THAT ACTUALLY HAPPENED. A refusal and an
+    /// acknowledged-but-still-there both stop at `errand.stop` with their own outcome token, so
+    /// the presence of this line is the answer to "did my recording really leave the recorder"
+    /// rather than "did Solleva ask".
+    public static let recorderRemoval = "recorder.removal"
 
     /// The whole vocabulary, in the order an errand that keeps something issues them.
-    public static let every: [String] = [start, stop, custodyCommit]
+    public static let every: [String] = [start, stop, custodyCommit, recorderRemoval]
 
-    /// The two errands this surface runs, as `subject` tokens.
+    /// The three errands this surface runs, as `subject` tokens.
     public static let shelfSubject = "shelf"
     public static let bringOverSubject = "bring-over"
+    public static let removalSubject = "remove-from-recorder"
 }
 
 #if canImport(CoreBluetooth)

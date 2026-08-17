@@ -165,7 +165,9 @@ private final class OneErrandWorld {
             stack.reachability.refusesToConnect = true
 
         case "Solleva has asked that recorder what it is holding":
-            check.run(hardwareToken: identifier.uuidString, advertisedName: Self.recorderName)
+            check.run(hardwareToken: identifier.uuidString, advertisedName: Self.recorderName,
+                      library: manager.captureLibraryRoot,
+                      stages: manager.captureStages(), brain: .myComputer)
             try await AppScenarioHost.settle(untilTrue: { !self.check.isChecking },
                                              describing: "the check to finish")
             guard check.offeredRecording != nil else {
@@ -224,7 +226,9 @@ private final class OneErrandWorld {
         // genuinely mid-flight when the page goes away, rather than incidentally so.
         case "I ask what the recorder is holding and leave the page before it answers":
             stack.holdNotifyConfirmation = true
-            check.run(hardwareToken: identifier.uuidString, advertisedName: Self.recorderName)
+            check.run(hardwareToken: identifier.uuidString, advertisedName: Self.recorderName,
+                      library: manager.captureLibraryRoot,
+                      stages: manager.captureStages(), brain: .myComputer)
             // WAIT UNTIL THE RADIO IS ACTUALLY IN USE. Cancelling before the app has reached
             // the device would prove nothing — the positive control for the whole scenario.
             try await AppScenarioHost.settle(
@@ -237,7 +241,9 @@ private final class OneErrandWorld {
 
         case "I ask what that recorder is holding":
             wireAtWhen = stack.commandsWritten
-            check.run(hardwareToken: identifier.uuidString, advertisedName: Self.recorderName)
+            check.run(hardwareToken: identifier.uuidString, advertisedName: Self.recorderName,
+                      library: manager.captureLibraryRoot,
+                      stages: manager.captureStages(), brain: .myComputer)
             try await AppScenarioHost.settle(untilTrue: { !self.check.isChecking },
                                              describing: "the check to finish")
 
@@ -276,7 +282,7 @@ private final class OneErrandWorld {
                 throw BrineStepError("the shelf has \(rows.count) row(s), not the two files "
                                         + "on the recorder — it was not rebuilt")
             }
-            guard rows.contains(where: { $0.custodyLabel == "In Solleva" }) else {
+            guard rows.contains(where: { $0.presenceLabel.hasPrefix("In Solleva") }) else {
                 throw BrineStepError(
                     "every row still reads \"Only on the recorder\" after the file landed. "
                         + "The shelf was restated without asking custody")
