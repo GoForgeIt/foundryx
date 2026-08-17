@@ -82,6 +82,17 @@ public final class ChatConversationStore: ObservableObject {
         /// (or an accepted ambient card) rather than started by hand.
         public var isFromConversation: Bool { origin?.kind == "action" }
 
+        /// The target that ACTUALLY SERVED the latest routed turn in this chat, as
+        /// recorded from the door's `routed:` boundary. nil until something answers.
+        ///
+        /// This is a different fact from `modelTargetId`: that one is what the chat
+        /// ASKED for, this one is what answered. The header prefers this one, because a
+        /// header that can only report the request cannot contradict a model that
+        /// introduces itself as something else.
+        public var resolvedTargetId: String? {
+            messages.last(where: { $0.routedVia?.isEmpty == false })?.routedVia
+        }
+
         public init(id: String = UUID().uuidString,
                     title: String = "New chat",
                     messages: [StoredMessage] = [],
@@ -163,6 +174,38 @@ public final class ChatConversationStore: ObservableObject {
 
     public func conversation(_ id: String) -> Conversation? {
         conversations.first(where: { $0.id == id })
+    }
+
+    /// Every routing target this phone has WATCHED serve a completed turn, most-recently
+    /// answered first, deduplicated. These — and only these — are the routes the header's
+    /// picker offers to pin.
+    ///
+    /// Evidence, not configuration, and the distinction is not academic. The door's
+    /// `GET /foundryx/models` catalog is NOT a credential list: `project_chat_models`
+    /// projects every `modality == chat` target in the Kiln registry, and its only
+    /// credential test (`target_is_credential_backed`) treats a target as backed the
+    /// moment it names a non-empty `connection_id`. On a hosted cell that is true of
+    /// `cloud-anthropic` — whose `claude-max-cli` connection has no token at all until
+    /// the tenant runs the Claude login — so the catalog lists `claude-opus-4-8` on a
+    /// cell that cannot authenticate to Anthropic. Offering it would be offering a
+    /// route that 401s. (The door's own dispatch pin, `credentialed_chat_target`, gets
+    /// this right: it requires `cli_credential_present`. The catalog does not consult
+    /// it. Fixing that is a door change, not a phone one.)
+    ///
+    /// A `routed:` boundary is the opposite kind of fact: the cell authenticated,
+    /// dispatched, and answered. And a target learned this way is a USABLE pin — the
+    /// door's `resolve_selected_target` matches a selection against a served model id
+    /// first and then falls back to a `target_id`, so `cloud-fireworks-chat` resolves.
+    public var provenTargets: [String] {
+        var seen = Set<String>()
+        var ordered: [String] = []
+        for convo in conversations {
+            for message in convo.messages.reversed() {
+                guard let target = message.routedVia, !target.isEmpty else { continue }
+                if seen.insert(target).inserted { ordered.append(target) }
+            }
+        }
+        return ordered
     }
 
     // MARK: - Lifecycle
