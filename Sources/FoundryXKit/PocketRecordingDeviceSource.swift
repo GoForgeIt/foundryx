@@ -155,6 +155,16 @@ public struct StoredFileManifestItem: Equatable, Sendable {
 }
 
 public struct StoredFileManifestRowPresentation: Equatable, Sendable {
+    /// THE RECORDER'S OWN NAME FOR THIS FILE — `<date>/<timestamp>`, never the title.
+    ///
+    /// IT IS CARRIED, NOT DERIVED, and the reason is the removal. A row that offers to take a
+    /// recording off the recorder has to name that recording on the wire, and the recorder
+    /// spells its files two different ways on ONE device (bare `20260807142852` and PH-prefixed
+    /// `PH260811175026`, both measured on fw 1.6). A view that re-derived an identity from the
+    /// rendered title, or that paired rows to recordings by their position in two arrays, would
+    /// be one reorder away from asking a recorder to delete a different recording than the one
+    /// under the finger.
+    public let id: String
     public let title: String
     /// HOW BIG THE RECORDING IS, in the recorder's own unit.
     ///
@@ -197,7 +207,13 @@ public enum StoredFileDevicePresentation {
     public static func manifest(_ items: [StoredFileManifestItem],
                                 now: Date = Date()) -> StoredFileManifestPresentation {
         StoredFileManifestPresentation(rows: items.map {
-            .init(title: $0.title,
+            // BOTH SIDES OF THIS ROW ARE LOAD-BEARING, and they came from different steps.
+            // `id` is the recorder's own `<date>/<timestamp>`, which a removal has to carry to
+            // the wire verbatim. `size` is the recorder's own kilobytes — it replaced a
+            // `duration` that divided them by an unmeasured 4,000 bytes/second, which is the
+            // fabricated figure `PocketMeasuredFigures` exists to keep off every row.
+            .init(id: $0.id,
+                  title: $0.title,
                   size: extent(sizeBytes: $0.sizeBytes),
                   presenceLabel: PocketPresencePresentation.label($0.presence),
                   places: PocketPresencePresentation.lines($0.presence, now: now),

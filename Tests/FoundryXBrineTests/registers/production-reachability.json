@@ -207,7 +207,7 @@
         }
       ],
       "verdict": "reachable",
-      "why": "INSTANCE 1, HALF TWO."
+      "why": "INSTANCE 1, HALF TWO. ITS BODY MOVED, ITS SIGNATURE DID NOT (2026-08-16, Step 6). `listRecordings(on:)` now claims `protected(.fileList)` and delegates to a private `listedRecordings(on:)`, so `removeRecording` can re-read the day's shelf ON THE SAME ERRAND. That split is load-bearing rather than cosmetic: `protected(_:)` refuses a second operation with `.busy`, so a removal that called this public method to confirm itself would throw instead of confirming, and the only alternative is a SECOND authenticated session — a different reading of a different moment, which confirms nothing. The declared call site in `PocketRecorderCheck` is untouched and still calls this signature; the new caller reaches the shared body, not this method, which is why this row's `sites` count is unchanged."
     },
     {
       "id": "pocket-bring-over-offered",
@@ -528,15 +528,91 @@
       ],
       "verdict": "unreachable",
       "why": "AN AGGREGATE THE SHIPPED PATH DELIBERATELY DOES NOT USE. `deviceInfo()` asks BAT, FW, SPACE and STE and returns all four as `PocketField`s. Three of those are now read individually by `PocketRecordingDeviceBridge.observe`; the fourth is `deviceState`, declared unreachable above because nobody has decoded what its integer means. So calling this would issue one extra command per session to obtain a value no surface may render — and it would do it on a client whose `protected(_:)` retires the whole session on a timeout, which is exactly the risk the bridge orders its reads to contain. Kept rather than deleted because it is the honest shape of a full information sweep the day STE is decoded; enumerated rather than silent because 'present, unreached and unenumerated' is the state this register exists to make impossible."
+    },
+    {
+      "id": "pocket-remove-from-recorder",
+      "name": "take one recording off the recorder, on purpose",
+      "declared_in": "Sources/FoundryXKit/PocketRecorderClearing.swift",
+      "declaration_anchor": "    public static func run(",
+      "call_pattern": "PocketRemoveFromRecorder.run(",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "            let outcome = await PocketRemoveFromRecorder.run(",
+          "sites": 2
+        }
+      ],
+      "verdict": "reachable",
+      "why": "STEP 6, AND THE FIRST THING IN THIS REPOSITORY THAT EVER COMPOSES `APP&D&…`. Step 1 shipped the gate and the consent and said in its own words that nothing composed the verb; this is the verb, and it is registered because a destructive capability that is present, unreached and unenumerated is the worst row this register can hold. TWO CALL SITES, BOTH IN THE RECORDER PAGE, AND THEY ARE THE RULING'S TWO PATHS AND NO THIRD: `removeFromRecorder(id:…)` is the explicit tap, and `clearWhatTheArmedControlAllows` is the owner-armed clear. Both hand in the presence reading the row was drawn from and neither recomputes it. A third caller appearing here is a diff somebody has to make, which is the point of `sites: 2`."
+    },
+    {
+      "id": "pocket-ble-remove-recording",
+      "name": "PocketBLEClient.removeRecording — APP&D, then the re-read that confirms it",
+      "declared_in": "Sources/FoundryXKit/PocketBLEProtocolClient.swift",
+      "declaration_anchor": "    public func removeRecording(_ request: PocketRecordingRequest,",
+      "call_pattern": ".removeRecording(",
+      "reached_from": [
+        {
+          "via": "pocket-remove-from-recorder",
+          "anchor": "            return try await client.removeRecording(recording.request, ownerConsent: consent)"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "THE ONE PLACE THE DELETE OPCODE REACHES THE RADIO. It composes through the SAME `write(_:ownerConsent:)` every other command goes through, so `PocketRecorderCommandGate` sees it and `PocketRecorderCommandLedger` counts it — a delete path that bypassed either would make Step 1's promise unassertable. `ownerConsent` is required with no default. Success is the `LIST&<date>` re-read on the same errand and NEVER the acknowledgement: `MCU&D` has been put to real hardware exactly once, against a sentinel that cannot exist, and it answered `MCU&D&ERR` — which proves the firmware discriminates and proves nothing about whether its yes is true."
+    },
+    {
+      "id": "pocket-removal-ack",
+      "name": "PocketRemovalAck.read — the full-frame matcher for a four-way prefix collision",
+      "declared_in": "Sources/FoundryXKit/PocketRecorderClearing.swift",
+      "declaration_anchor": "    public static func read(_ frame: String) -> PocketRemovalAnswer {",
+      "call_pattern": "PocketRemovalAck.read(",
+      "reached_from": [
+        {
+          "via": "pocket-ble-remove-recording",
+          "anchor": "            switch PocketRemovalAck.read(try await nextControl(operation: .removal)) {"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "`MCU&D` IS A STRICT PREFIX OF THREE OTHER FRAMES THIS SAME FIRMWARE EMITS: `MCU&D&ERR` (the refusal), `MCU&DIRS&<date>` and `MCU&DIRS_SUM&005` (a recorder merely listing the days it holds). A matcher written `hasPrefix(\"MCU&D\")` reads all four as a successful removal, so a listing would read as five deletions and a refusal would read as a success. This splits at the protocol's own delimiter and compares the opcode FIELD whole. Registered because an unreached matcher is indistinguishable from no matcher."
+    },
+    {
+      "id": "pocket-auto-clear-arming",
+      "name": "arming ONE recorder's automatic clearing, off by default",
+      "declared_in": "Sources/FoundryXKit/PocketRecorderClearing.swift",
+      "declaration_anchor": "    public func armAutoClear(_ identity: RecordingDeviceIdentity, at instant: Date) throws {",
+      "call_pattern": ".armAutoClear(",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "            if armed { try store.armAutoClear(identity, at: Date()) }"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "THE RULING'S SECOND PATH, AND IT IS RECORDER-SCOPED RATHER THAN GLOBAL — the owner may want it on for a device they carry daily and off for one holding something they have not filed yet. It writes ONE record, which is the deliberate contrast with `prefer(_:)`, whose whole job is to be exclusive. It stores an INSTANT and not a flag: a flag can say a recorder is armed, and only the instant can say a recording synced before it was, which is the whole of \"never retroactive\". Registered because a setting nothing reads is a switch painted on the wall."
+    },
+    {
+      "id": "pocket-auto-clear-decision",
+      "name": "PocketAutoClear.decision — the armed control meets the same bar a tap does",
+      "declared_in": "Sources/FoundryXKit/PocketRecorderClearing.swift",
+      "declaration_anchor": "    public func decision(syncedAt: Date, presence: PocketRecordingPresence) -> Decision {",
+      "call_pattern": "control.decision(",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "            guard control.decision(syncedAt: syncedAt, presence: presence) == .clears else {"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "THE ARMED PATH'S GATE, AND IT READS THE STEP 5 PREDICATE RATHER THAN A SECOND OPINION OF IT. Three refusals and one yes, because a person asking why a recording is still on their recorder is owed the actual reason: this recorder was never armed, it synced before you armed it, or Solleva cannot prove it holds it elsewhere. Its ONE production caller offers it only recordings the owner pulled over since the screen opened — nothing in this app enumerates a shelf and clears what looks safe, which is what makes non-retroactivity a property of the data flow rather than of a check somebody has to remember."
     }
   ],
   "_verdict_counts_are_equality": "Declared as exact counts, never bounds. A bound would let the unreachable roster grow by one without anybody moving this file, which is precisely how four capabilities reached `main` unreached.",
   "verdict_counts": {
-    "reachable": 23,
+    "reachable": 28,
     "undetermined": 2,
     "unreachable": 10
   },
   "_floor": "A register that lost its rows would be a silent full pass, so the population is asserted before its contents are.",
-  "minimum_capabilities": 35,
+  "minimum_capabilities": 40,
   "minimum_entry_points": 1
 }

@@ -12,6 +12,12 @@ enum DemoSeed {
     /// asserting the seeded device record and not a coincidence.
     static let proofRecorderName = "Proof Recorder Alpha"
 
+    /// The remembered record-then-sync recorder the `-MainPreview` harness stands up, so the
+    /// owner-armed clearing control has a page to render on. A UUID because the page's
+    /// `hardwareToken` is a peripheral identifier and `PocketAuthenticatedIdentity` parses it.
+    static let proofPocketToken = "d0c8f8a2-1f2b-4a3e-9c77-6b1e5f0a2c31"
+    static let proofPocketName = "Proof Pocket Blue"
+
     /// Large-library perf harness: `-StressSeed <N>` drops N synthetic conversation
     /// cards on disk (same stores the real pipeline uses) so a cold launch hydrates a
     /// big timeline. Pairs with the `capture-hydrate` + `capture-list-first-paint`
@@ -362,6 +368,52 @@ enum DemoSeed {
                 displayName: proofRecorderName,
                 accountScope: CaptureAccountScope.currentAccountBinding()?.scope ?? "demo"),
             captureId: "omi-demo-1", baseDir: base)
+
+        // A REMEMBERED RECORD-THEN-SYNC RECORDER, so the one control the delete ruling calls
+        // "owner-armed" can be READ ON A SCREEN.
+        //
+        // WHY IT HAS TO BE SEEDED. `DeviceScreen`'s automatic-clearing control is a per-recorder
+        // setting, and a recorder's page exists only because the ACCOUNT STORE holds a record
+        // for it. A simulator has no Bluetooth radio, so nothing can pair one — and without a
+        // record there is no page, so the control that decides whether recordings leave a
+        // recorder had no simulator proof of any kind. Every prior claim about it was a source
+        // read or a hostless scenario, and this repository has already measured twice what a
+        // source read is worth against a view that stopped rendering.
+        //
+        // ARMED STATE IS NOT SEEDED, on purpose. The record is written with the store's own
+        // default, which is `autoClearArmedAt == nil` — OFF. That is the fact the proof reads,
+        // and seeding it either way would be the harness answering the question.
+        let proofPocket = RecordingDeviceIdentity(shape: .filePull,
+                                                  hardwareToken: proofPocketToken)
+        // SELF-CLEANING FIRST, and here it is load-bearing rather than tidy. The simulator's
+        // container survives between runs and `recordUserPair` UPSERTS — it preserves the
+        // record's existing fields — so a launch in which somebody armed this recorder would
+        // leave it armed for every launch afterwards, and a proof asserting "off by default"
+        // would be reading the last run's toggle. Removing the record makes the default the
+        // STORE's, which is the thing under test.
+        try? RecordingDeviceStore.current()?.remove(proofPocket)
+        RecordingDeviceStore.recordUserPair(identity: proofPocket,
+                                            displayName: proofPocketName)
+
+        // WHICH BRAIN THE HARNESS IS ON, because the recorder page renders a DIFFERENT and
+        // equally load-bearing thing on each: `.justMyPhone` has nowhere other than this phone
+        // to put a copy, so nothing can ever satisfy the safety predicate and the automatic
+        // clearing control is NOT OFFERED — it says why instead. Both branches are true
+        // behaviour and both needed pixels, so the harness can stand up either.
+        //
+        // AN EXPLICIT HARNESS ARGUMENT, in the family this app already uses (`-MainPreview`,
+        // `-FreshActionState`, `-OpenSettings`) and never an environment variable read at some
+        // depth.
+        //
+        // IT IS WRITTEN IN BOTH DIRECTIONS, WHICH IS THE H13-1 LESSON AND NOT TIDINESS. The
+        // brain choice is DURABLE and the simulator's container survives between runs, so a
+        // launch that armed `.myComputer` would leave every later `-MainPreview` launch on it —
+        // and the proof for the phone-only branch would then be reading the previous run's
+        // state rather than this one's. Selecting explicitly either way makes what the screen
+        // renders a property of THIS launch's arguments.
+        BrainStore().select(
+            ProcessInfo.processInfo.arguments.contains("-ProofPairedComputer")
+                ? .myComputer : .justMyPhone)
 
         // T2 AC1 repro (the headline bug): a card that DOES show a summary, whose cached
         // content carries NO summary. Before the card fallback, opening this showed the

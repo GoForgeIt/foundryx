@@ -31,6 +31,14 @@
 # writes a fresh file. That is a data migration, not a rename, and this manifest is what
 # makes the difference visible.
 #
+# 2026-08-16, Step 6 — 180 rows, 162 `coding-key` and 18 `on-disk-name`. The added row is
+# `RecordingDeviceStore.swift`'s `autoClearArmedAt`: WHEN the owner armed one recorder's
+# automatic clearing. It is persisted, per record, and it is decoded with `decodeIfPresent`
+# so that every record already on a person's disk keeps decoding — and the value it defaults
+# to is `nil`, which is OFF, which is the ruling's own default. Renaming it would silently
+# DISARM every recorder its owner had deliberately armed, and they would find out from a
+# recorder that stopped clearing itself rather than from an error.
+#
 # NOT PINNED HERE, stated rather than implied away: Keychain service/account strings,
 # UserDefaults key literals, and every identifier under App/, Widget/ and UITests/.
 # They are persisted too and this file makes no claim about them.
@@ -176,6 +184,7 @@ coding-key	Sources/FoundryXKit/PersonDirectory.swift	aliases
 coding-key	Sources/FoundryXKit/PersonDirectory.swift	displayName = "display_name"
 coding-key	Sources/FoundryXKit/PersonDirectory.swift	entityId = "entity_id"
 coding-key	Sources/FoundryXKit/PersonDirectory.swift	lastSeen = "last_seen"
+coding-key	Sources/FoundryXKit/RecordingDeviceStore.swift	autoClearArmedAt
 coding-key	Sources/FoundryXKit/RecordingDeviceStore.swift	displayName
 coding-key	Sources/FoundryXKit/RecordingDeviceStore.swift	identity
 coding-key	Sources/FoundryXKit/RecordingDeviceStore.swift	lastConnected

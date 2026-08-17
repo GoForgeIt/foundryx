@@ -582,13 +582,23 @@ private actor PocketDeleteConsentWorld {
             let named = Set(PocketDeleteConsent.Provenance.allCases.map(\.rawValue))
             XCTAssertEqual(named, ["ownerChose", "ownerArmedThisRecorder"],
                            "the ledger cannot tell the ruling's two paths apart: \(named)")
-            // AND NEITHER IS CONSTRUCTED YET: the verb is Step 6, and a consent constructed
-            // today would be a consent no person was ever asked for.
+            // AND EACH IS CONSTRUCTED IN EXACTLY ONE PLACE.
+            //
+            // THIS ASSERTION MOVED IN STEP 6, AND THE MOVE IS THE POINT. It used to read
+            // `sites == []` — "neither is constructed yet, because the verb is Step 6, and a
+            // consent constructed today would be a consent no person was ever asked for". Step
+            // 6 shipped the verb, so `[]` is no longer the true statement; it would now be a
+            // gate demanding the feature not exist. The statement that survives is the stronger
+            // one: consent is constructed in ONE file, the errand that reads the safety
+            // predicate, and nowhere else. A second construction site is a second opinion about
+            // whether a recording is safe, which is precisely what the ruling forbids — and
+            // unlike `[]`, this cannot be satisfied by deleting the feature.
             for factory in ["ownerChoseThisRecording(", "ownerArmedThisRecorder("] {
                 let sites = try Self.constructionSites(of: factory)
-                XCTAssertEqual(sites, [],
-                               "owner consent for a deletion is constructed in \(sites) while "
-                                   + "no screen can ask for it")
+                XCTAssertEqual(sites, ["Sources/FoundryXKit/PocketRecorderClearing.swift"],
+                               "owner consent for a deletion is constructed in \(sites) — it "
+                                   + "belongs to exactly one errand, which reads the shelf's own "
+                                   + "safety reading rather than forming a second opinion")
             }
             // THE SINGLE COMPOSER, COUNTED OVER THE WHOLE MODULE.
             //

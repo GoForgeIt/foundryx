@@ -134,7 +134,34 @@ final class FakePocketBLEStack: @unchecked Sendable {
     /// `MCU&UNKNOWN` — an honest "not proven", which is a different answer from a refusal.
     private let answersWiFiReadback: Bool
     /// What this recorder is holding, in the order its firmware lists it.
-    private let inventory: [ScriptedRecording]
+    ///
+    /// MUTABLE, BECAUSE A REMOVAL IS THE ONE COMMAND THAT CHANGES IT. Before `APP&D&…` had a
+    /// caller this could be a `let`: nothing this app composed could alter what the recorder
+    /// held. A removal that did not actually change the fixture's shelf would make the
+    /// re-read confirmation vacuous — it would agree with a recorder that removed nothing.
+    /// Guarded by the same `lock` as `heldKey`.
+    private var inventory: [ScriptedRecording]
+
+    /// WHAT THIS FIRMWARE DOES WHEN IT IS ASKED TO REMOVE A RECORDING.
+    ///
+    /// Three behaviours because real firmware families have all three, and the middle one is
+    /// the reason success is never taken from the acknowledgement.
+    enum RemovalBehaviour: Sendable {
+        /// fw 1.6, as measured on `PKT01_BLUE_26079bc5` 2026-08-16: it DISCRIMINATES. A file it
+        /// holds is removed and acknowledged; a file that cannot exist answers `MCU&D&ERR`.
+        case removesWhatItHolds
+        /// It says yes to everything and removes nothing. The shape that makes a client which
+        /// trusts the acknowledgement tell a person their recording is gone when it is not.
+        case saysYesAndRemovesNothing
+        /// It refuses everything.
+        case refusesEverything
+    }
+    private let removalBehaviour: RemovalBehaviour
+
+    /// What this recorder is holding RIGHT NOW, read under the lock. A scenario asserting that
+    /// a removal actually happened reads this, so the assertion is about the fixture's own
+    /// shelf rather than about what the client believes.
+    var shelf: [ScriptedRecording] { lock.withLock { inventory } }
     /// Whether this firmware answers `LIST_DIRS` / `LIST&` at all. `false` is the honest
     /// "this build's command is not one I know" — `MCU&UNKNOWN` — which is a different answer
     /// from a recorder that lists nothing.
@@ -198,9 +225,11 @@ final class FakePocketBLEStack: @unchecked Sendable {
          answersWiFiReadback: Bool = true,
          inventory: [ScriptedRecording] = [],
          answersInventory: Bool = true,
+         removalBehaviour: RemovalBehaviour = .removesWhatItHolds,
          behaviour: KeyBehaviour? = nil) {
         self.inventory = inventory
         self.answersInventory = answersInventory
+        self.removalBehaviour = removalBehaviour
         self.deviceId = deviceId
         self.deviceName = deviceName
         // `acceptedSecret` stays the shorthand every existing scenario is written in: a value
@@ -456,12 +485,41 @@ final class FakePocketBLEStack: @unchecked Sendable {
             // Inventing a plausible 8 GB here would make every scenario about free space an
             // assertion over a number nobody measured.
             response = "MCU&SPA&\(Self.usedKilobytes)&\(Self.capacityKilobytes)"
+        } else if command.hasPrefix("D&") {
+            // THE REMOVAL, AS THE ONE DEVICE ANYBODY HAS MEASURED ANSWERS IT.
+            //
+            // `APP&D&1970-01-01&19700101000000` — a file that cannot exist — answered
+            // `MCU&D&ERR` on `PKT01_BLUE_26079bc5` (fw 1.6) on 2026-08-16, and the recorder
+            // still held 19 recordings before AND after. So this firmware DISCRIMINATES, and
+            // the fixture discriminates the same way. `MCU&D&ERR` shares a prefix with
+            // `MCU&DIRS&…`, `MCU&DIRS_SUM&…` and the success acknowledgement, which is exactly
+            // why this fake emits all four in one suite.
+            let parts = command.dropFirst("D&".count)
+                .split(separator: "&", omittingEmptySubsequences: false).map(String.init)
+            guard parts.count == 2 else {
+                notifyControl("MCU&UNKNOWN")
+                return
+            }
+            switch removalBehaviour {
+            case .refusesEverything:
+                response = "MCU&D&ERR"
+            case .saysYesAndRemovesNothing:
+                response = "MCU&D"
+            case .removesWhatItHolds:
+                lock.lock()
+                let index = inventory.firstIndex {
+                    $0.date == parts[0] && $0.timestamp == parts[1]
+                }
+                if let index { inventory.remove(at: index) }
+                lock.unlock()
+                response = index == nil ? "MCU&D&ERR" : "MCU&D"
+            }
         } else if command == "LIST_DIRS", answersInventory {
             // THE DAYS, THEN THE COUNT — the reference trace's own two-frame shape. The count
             // frame is what makes an interrupted sequence detectable, so it is emitted here
             // rather than assumed by the reader.
             var days: [String] = []
-            for recording in inventory where !days.contains(recording.date) {
+            for recording in shelf where !days.contains(recording.date) {
                 days.append(recording.date)
             }
             for day in days { notifyControl("MCU&DIRS&\(day)") }
@@ -469,7 +527,7 @@ final class FakePocketBLEStack: @unchecked Sendable {
             return
         } else if command.hasPrefix("LIST&"), answersInventory {
             let day = String(command.dropFirst("LIST&".count))
-            let files = inventory.filter { $0.date == day }
+            let files = shelf.filter { $0.date == day }
             for file in files {
                 notifyControl("MCU&F&\(file.date)&\(file.timestamp)&\(file.sizeKilobytes)")
             }
@@ -483,7 +541,7 @@ final class FakePocketBLEStack: @unchecked Sendable {
             let parts = command.dropFirst("U&".count)
                 .split(separator: "&", omittingEmptySubsequences: false)
             guard parts.count == 2,
-                  let file = inventory.first(where: {
+                  let file = shelf.first(where: {
                       $0.date == parts[0] && $0.timestamp == parts[1]
                   }),
                   let content = file.content else {
