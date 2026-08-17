@@ -270,6 +270,21 @@
       "why": "THE HAND-OFF, and deliberately the least original file in the leg: the same `CaptureWAL`, the same `seg-%012llu.opus` segments, the same `meta.json` / `card.json` birth stamps, the same `.capture-source` marker and the same `.needs-finalize` marker every other capture is made of. Past it there is no second ingest route and no `if pocket` — the origin travels as DATA, which is what `RecordingDeviceShape.filePull` was already for."
     },
     {
+      "id": "pocket-clock-warning-rendered",
+      "name": "the recorder-clock warning reaching a person, rather than being computed and dropped",
+      "declared_in": "Sources/FoundryXKit/PocketBringOver.swift",
+      "declaration_anchor": "    public static func message(for outcome: PocketBringOverOutcome) -> String {",
+      "call_pattern": "PocketBringOverPresentation.message(for:",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "self.bringOverMessage = PocketBringOverPresentation.message(for: outcome)"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "STEP 11, AND THE EXACT DEFECT THIS REGISTER EXISTS FOR. `PocketConversationClock` computed a clock warning on EVERY import and `PocketImportedCapture.clockWarning` carried it into a struct `PocketBringOver.conversation(_:)` threw away - a field with a producer, no consumer, and eight green Pocket feature files over the top of it. The warning now travels in `PocketBringOverOutcome.broughtOver`, is appended by `message(for:)`, and lands in the `Text(outcome)` `App/DeviceScreen.swift` already renders under the Bring over button. THE ROW IS ON `message(for:)` AND NOT ON THE CLOCK RULE ON PURPOSE: the clock rule is reached through `pocket-capture-import` already, and what was never reached was the RENDERING. `PocketRecorderClockFeatureTests` holds the producer/consumer scan; this row holds the fact that the consumer is on a screen."
+    },
+    {
       "id": "capture-adopt-completed",
       "name": "CaptureManager.adoptCompletedCapture — the running app takes a finished capture",
       "declared_in": "Sources/FoundryXKit/CaptureManager.swift",
@@ -430,11 +445,11 @@
   ],
   "_verdict_counts_are_equality": "Declared as exact counts, never bounds. A bound would let the unreachable roster grow by one without anybody moving this file, which is precisely how four capabilities reached `main` unreached.",
   "verdict_counts": {
-    "reachable": 18,
+    "reachable": 19,
     "undetermined": 2,
     "unreachable": 8
   },
   "_floor": "A register that lost its rows would be a silent full pass, so the population is asserted before its contents are.",
-  "minimum_capabilities": 28,
+  "minimum_capabilities": 29,
   "minimum_entry_points": 1
 }

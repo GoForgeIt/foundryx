@@ -464,7 +464,7 @@ private actor PocketBringOverWorld {
 
         case "the file is kept where it can be read back byte for byte":
             XCTAssertEqual(outcomes.count, 1)
-            guard case .broughtOver(let bytes, _) = outcomes[0] else {
+            guard case .broughtOver(let bytes, _, _) = outcomes[0] else {
                 return XCTFail("the bring-over did not land: \(outcomes)")
             }
             XCTAssertEqual(bytes, Self.fixtureMP3().count)

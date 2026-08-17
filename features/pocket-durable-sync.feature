@@ -31,9 +31,9 @@ Feature: Pocket recordings join the durable conversation pipeline
     Then one capture, conversation, transcript, Lore lineage, and Activity lineage exist
 
   Scenario: recorder time is retained with clock-skew honesty
-    Given trusted, pre-set-point, and future Pocket timestamps
+    Given ordinary and impossible Pocket timestamps
     When Pocket sync assembles their conversations
-    Then device time is used, uncertain time is labeled, and future grouping is clamped without losing the reported value
+    Then device time is used, only a time the recorder could not have is labeled, and future grouping is clamped without losing the reported value
 
   Scenario: Pocket and Omi share finalized processing
     Given finalized Pocket and Omi audio at the durable boundary

@@ -79,17 +79,15 @@ public enum PocketCaptureImport {
         displayName: String,
         recorderReported: Date,
         broughtOverAt: Date = Date(),
-        lastClockSet: Date? = nil,
         binding: CaptureAccountScope.AccountBinding?,
         baseDir: URL,
         log: DoorLog? = .shared
     ) throws -> PocketImportedCapture {
         // THE SHIPPED CLOCK RULE, not a second one. `PocketConversationClock` already decides
-        // what to do with a recorder whose clock is ahead of this phone or predates the moment
-        // its clock was last set, and already carries the sentence that says so.
+        // what to do with a recorder whose clock is ahead of this phone, and already carries the
+        // sentence that says so.
         let clock = PocketConversationClock.resolve(reported: recorderReported,
                                                    broughtOver: broughtOverAt,
-                                                   lastClockSet: lastClockSet,
                                                    calendar: Calendar.current)
         let startedAt = UInt64(max(0, clock.timeline.timeIntervalSince1970))
         let captureID = captureId(startedAt: startedAt)
