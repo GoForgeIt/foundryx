@@ -90,6 +90,52 @@
       "why": "SHIPPED ORPHANED ONCE ALREADY — a grep for it outside its own file returned nothing while its scenarios were green, and two separate bespoke tests were written afterwards to hold it (`DevicePagePresentationTests`, `UnifiedRecordingDeviceListFeatureTests`). This row is where that obligation belongs."
     },
     {
+      "id": "capture-screen",
+      "name": "the conversation list and its detail",
+      "declared_in": "App/CaptureScreen.swift",
+      "declaration_anchor": "struct CaptureScreen: View",
+      "call_pattern": "CaptureScreen(",
+      "reached_from": [
+        {
+          "via": "root-view",
+          "anchor": "CaptureScreen(device: device, manager: manager, sources: sources,"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "registered because Step 9 put a Pocket capability on the CONVERSATION side of the app for the first time. Every Pocket row before it chained through `device-screen`; a recording that plays from this phone is reached from the list a person actually taps, so that chain needs its own link rather than being borrowed from the recorder page."
+    },
+    {
+      "id": "conversation-faces-view",
+      "name": "the three-face conversation detail, where Listen lives",
+      "declared_in": "App/ConversationFacesView.swift",
+      "declaration_anchor": "struct ConversationFacesView: View",
+      "call_pattern": "ConversationFacesView(",
+      "reached_from": [
+        {
+          "via": "capture-screen",
+          "anchor": "ConversationFacesView(",
+          "sites": 3
+        }
+      ],
+      "verdict": "reachable",
+      "why": "the screen that owns the Listen row. THREE call sites are declared rather than one because the detail is presented from the local list, from a computer-only search hit and from the DEBUG face proof, and a row that anchored on one of them would go red the first time somebody touched an unrelated presenter."
+    },
+    {
+      "id": "pocket-local-playback",
+      "name": "play a recording that came off a recorder from this phone, with no computer involved",
+      "declared_in": "Sources/FoundryXKit/PocketLocalPlayback.swift",
+      "declaration_anchor": "    public static func heldFile(forCapture captureID: String, in root: URL) -> URL? {",
+      "call_pattern": "PocketLocalPlayback.",
+      "reached_from": [
+        {
+          "via": "conversation-faces-view",
+          "anchor": "            let held = PocketLocalPlayback.heldFile(forCapture: id, in: root)"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "WITHOUT A CALLER THIS IS THE DEFECT ITSELF: the decision would compile, test green, and every brought-over recording would still be fetched from a computer while its bytes sat in this app's own container. It is resolved in `initialLoad()` OFF the main actor and read by `playAudio()` before anything touches `DoorClient`, and by `whereThisRecordingIsRow` for the three places. `heldFile` counts any main-thread read at the operation, so a future caller that drags this directory walk onto main trips a hard counter."
+    },
+    {
       "id": "recording-device-attachment",
       "name": "the tap-to-connect adoption chain",
       "declared_in": "Sources/FoundryXKit/RecordingDeviceAttachment.swift",
@@ -460,11 +506,11 @@
   ],
   "_verdict_counts_are_equality": "Declared as exact counts, never bounds. A bound would let the unreachable roster grow by one without anybody moving this file, which is precisely how four capabilities reached `main` unreached.",
   "verdict_counts": {
-    "reachable": 20,
+    "reachable": 23,
     "undetermined": 2,
     "unreachable": 8
   },
   "_floor": "A register that lost its rows would be a silent full pass, so the population is asserted before its contents are.",
-  "minimum_capabilities": 30,
+  "minimum_capabilities": 33,
   "minimum_entry_points": 1
 }

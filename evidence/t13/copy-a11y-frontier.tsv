@@ -3,8 +3,8 @@
 # One row per customer-facing literal: kind<TAB>path<TAB>literal.
 #
 # Emitted by scripts/derive-copy-a11y-frontier.py — an INDEPENDENT implementation in
-# another language — and NOT by the Swift check it pins. The two agree row for row: 432
-# rows over 220 files, 152 `a11y-identifier` and 280 `customer-facing-string`.
+# another language — and NOT by the Swift check it pins. The two agree row for row: 433
+# rows over 225 files, 153 `a11y-identifier` and 280 `customer-facing-string`.
 #
 # ON THIS FRONTIER: the literal argument of `.accessibilityIdentifier("…")`, and the
 # literal FIRST argument of `Text(`, `Button(`, `Label(` and `.navigationTitle(`.
@@ -83,6 +83,7 @@ a11y-identifier	App/ConversationFacesView.swift	open-relay-answer
 a11y-identifier	App/ConversationFacesView.swift	speaker-late-offer
 a11y-identifier	App/ConversationFacesView.swift	speaker-sync-reverted
 a11y-identifier	App/ConversationFacesView.swift	transcript-search
+a11y-identifier	App/ConversationFacesView.swift	where-this-recording-is
 a11y-identifier	App/DeviceScreen.swift	connect-a-recording-device
 a11y-identifier	App/DeviceScreen.swift	hide-unnamed-devices
 a11y-identifier	App/DeviceScreen.swift	recorder-light-sentence

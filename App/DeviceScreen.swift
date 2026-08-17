@@ -747,8 +747,11 @@ private struct RecordingDevicePageView: View {
 
     /// ONE PLACE, AS A LINE. Composed from the kit's own three fields so no sentence about
     /// where a recording is exists only inside a SwiftUI body.
+    /// THE KIT'S SPELLING, not this screen's. A conversation that came off a recorder renders
+    /// the same three places on the detail screen, and two interpolations of the same three
+    /// fields is how the two screens start disagreeing about a recording nobody moved.
     private func placeLine(_ place: PocketPlaceLine) -> String {
-        "\(place.place): \(place.answer) - \(place.age)"
+        PocketPresencePresentation.oneLine(place)
     }
 
     /// STARTING THE RECORDER OVER, WITH ITS COST, AND IT NEVER DISABLES ITSELF.

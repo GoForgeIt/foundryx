@@ -386,6 +386,8 @@ enum DemoSeed {
                 captureId: id, baseDir: base)
         }
 
+        seedPocketRecording(base: base, now: now)
+
         // Actions-face proof (track 20260715T1500 addendum): candidate decisions
         // for omi-demo-1, written through the SAME log the ambient lane writes
         // (ambient-decisions.jsonl), so the detail's Actions face renders real-
@@ -430,6 +432,81 @@ enum DemoSeed {
                 }
             }
         }
+    }
+
+    // MARK: - a recording that came off a recorder (Step 9 proof state)
+
+    /// The capture id the pocket proof opens. A real `pkt-` id, minted the way
+    /// `PocketCaptureImport` mints one, because `PocketLocalPlayback` refuses any other prefix
+    /// without touching the disk — a proof that seeded `omi-demo-7` would prove nothing.
+    static let pocketProofCaptureID = "pkt-20260814-090000-proof001"
+    /// The recorder the proof's held file is filed under, and the day/instant it reports.
+    static let pocketProofRecorderName = "Proof Pocket PKT01"
+    private static let pocketProofHardwareToken = "demo-proof-pocket"
+    private static let pocketProofDay = "2026-08-14"
+    private static let pocketProofStamp = "20260814090000"
+
+    /// SEED THE STATE STEP 9 IS ABOUT: a conversation that came off a recorder, whose ORIGINAL
+    /// FILE this phone is holding in pocket custody, with the receipt that ties the two
+    /// together — so the simulator can prove the detail plays it with no door in the world and
+    /// says all three places on the row.
+    ///
+    /// SELF-CLEANING, for the reason every other seeder here is: the simulator's container
+    /// survives between runs, so a proof reading LAST run's custody file is a proof whose
+    /// ability to fail is a property of the machine. Only this seeder's own recorder directory
+    /// is removed.
+    private static func seedPocketRecording(base: URL, now: Int) {
+        let root = CaptureAccountScope.privateURL(for: .pocketRecordings)
+        let identity = RecordingDeviceIdentity(shape: .filePull,
+                                               hardwareToken: pocketProofHardwareToken)
+        let recorderDir = root.appendingPathComponent(identity.storageKey, isDirectory: true)
+        try? FileManager.default.removeItem(at: recorderDir)
+        let dayDir = recorderDir.appendingPathComponent(pocketProofDay, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dayDir, withIntermediateDirectories: true)
+
+        // REAL MPEG-2 LAYER III, at the recorder's own 32 kbps / 16 kHz mono — 200 frames of
+        // silence, which a decoder accepts as 7.2 s of audio. Synthesised rather than vendored
+        // because the App target cannot read the test fixture, and a file the decoder REFUSES
+        // would prove the failure path instead of the playing one.
+        var audio = Data()
+        let frameHeader: [UInt8] = [0xFF, 0xF3, 0x48, 0xC4]
+        for _ in 0..<200 {
+            audio.append(contentsOf: frameHeader)
+            audio.append(Data(repeating: 0, count: 144 - frameHeader.count))
+        }
+        try? audio.write(to: dayDir.appendingPathComponent("\(pocketProofStamp).mp3"),
+                         options: [.atomic])
+        // THE RECEIPT custody writes, and the only authority that ties a held file to a
+        // conversation. `PocketLocalPlayback` inverts exactly this.
+        try? Data(pocketProofCaptureID.utf8)
+            .write(to: dayDir.appendingPathComponent("\(pocketProofStamp).capture"),
+                   options: [.atomic])
+
+        let dir = base.appendingPathComponent(pocketProofCaptureID, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let start = UInt64(max(0, now - 5_000))
+        ConversationMetaStore.save(ConversationMeta(startedAt: start, endedAt: start + 7),
+                                   captureId: pocketProofCaptureID, baseDir: base)
+        ConversationCardStore.save(
+            ConversationCardMeta(title: "Walk to the trailhead",
+                                 summary: "Recorded on a pocket recorder and brought over later.",
+                                 stage: "in_lore"),
+            captureId: pocketProofCaptureID, baseDir: base)
+        // `markConfirmed: true` writes the `.lore-confirmed` marker — Step 5's CEILING — so the
+        // row's third place reads `Yes` and the proof can tell it apart from `No`.
+        TranscriptCacheStore.save(
+            CachedTranscript(
+                transcript: "We took the long way around and talked the whole time.",
+                title: "Walk to the trailhead",
+                summary: "Recorded on a pocket recorder and brought over later.",
+                segments: [], speakers: [], fetchedAt: UInt64(max(0, now))),
+            captureId: pocketProofCaptureID, baseDir: base, markConfirmed: true)
+        CaptureDeviceSidecar.write(
+            CaptureDeviceContext(identity: identity,
+                                 displayName: pocketProofRecorderName,
+                                 accountScope: CaptureAccountScope.currentAccountBinding()?.scope
+                                     ?? "demo"),
+            captureId: pocketProofCaptureID, baseDir: base)
     }
 }
 #endif

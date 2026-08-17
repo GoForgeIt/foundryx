@@ -1,0 +1,27 @@
+# M1-point-playback-at-the-door — the mutation the track spec names.
+#
+# RED: PocketListenHereFeatureTests, 3 scenarios of 7, quoted verbatim from the run:
+#   [failed] A recording that came off a recorder plays with the computer unreachable:
+#            nothing played; outcome=Optional(...Outcome.unreachable)
+#            source=Optional(...ConversationAudioSource.onTheComputer)
+#   [failed] A recording held on this phone is never blamed on the computer:
+#            expected .heldButUnreadable, got Optional(...Outcome.unreachable)
+#   [failed] Freeing the space this phone's copy takes is named as something Solleva does not
+#            do yet: this scenario's recording is not held here at all
+# XCTAssertEqual failed: ("4") is not equal to ("7") - all scenarios should pass.
+# The two door scenarios STAY GREEN, which is the paired existence: the mutation is caught by
+# the recordings that are here, not by a blanket "the door was called" assertion.
+#
+# The UI proof reds on the same mutation: `listen-scrubber` never appears and
+# "Can't reach your computer" is on screen for a file in the app's own container.
+#
+--- a/Sources/FoundryXKit/PocketLocalPlayback.swift
++++ b/Sources/FoundryXKit/PocketLocalPlayback.swift
+@@ -97,9 +97,7 @@
+     public static func source(forCapture captureID: String,
+                               pocketRoot: URL? = nil) -> ConversationAudioSource {
+-        let root = pocketRoot ?? CaptureAccountScope.privateURL(for: .pocketRecordings)
+-        guard let held = heldFile(forCapture: captureID, in: root) else { return .onTheComputer }
+-        return .heldOnThisPhone(held)
++        return .onTheComputer
+     }
