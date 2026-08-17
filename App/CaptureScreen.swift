@@ -153,8 +153,18 @@ struct CaptureScreen: View {
     @ObservedObject var sources: CaptureSourceRegistry
     /// The resolved door target — lets a tapped card open its transcript (Phase B).
     let target: DoorTarget
+    /// WHERE FINISHED VOICE NOTES ACTUALLY GO — three-valued, resolved by `RootGate`.
+    ///
+    /// It replaces a `local: Bool` this screen used to carry. That boolean asked "is this
+    /// the phone-only tier?", which the computer brain and the cell brain BOTH answer
+    /// `false`, so the saved-to line below told a Vault owner with no computer that his
+    /// voice notes were saved to a computer.
+    let destination: CaptureDestination
     /// Phone-only tier: labels stay on-device ("Saved on phone", not "…to computer").
-    var local: Bool = false
+    /// DERIVED, so it can never disagree with `destination` again.
+    private var local: Bool { destination == .phone }
+    /// Open the devices page in Settings — where the recorder status icon goes.
+    let onOpenDevices: () -> Void
     /// WHICH BRAIN IS ON. Carried, not derived from `local`: see `ConversationFacesView.brain`.
     /// It reaches the safety predicate a recording's "safe elsewhere" row is drawn from.
     let brain: BrainChoice
@@ -222,14 +232,16 @@ struct CaptureScreen: View {
     private let tagger = makeSystemCategoryTagger()
 
     init(device: DeviceManager, manager: CaptureManager, sources: CaptureSourceRegistry,
-         target: DoorTarget, local: Bool = false, brain: BrainChoice,
+         target: DoorTarget, destination: CaptureDestination, brain: BrainChoice,
+         onOpenDevices: @escaping () -> Void = {},
          reopenCaptureId: Binding<String?> = .constant(nil),
          openCaptureId: Binding<String?> = .constant(nil)) {
         self.device = device
         self.manager = manager
         self.sources = sources
         self.target = target
-        self.local = local
+        self.destination = destination
+        self.onOpenDevices = onOpenDevices
         self.brain = brain
         _reopenCaptureId = reopenCaptureId
         _openCaptureId = openCaptureId
@@ -1275,22 +1287,77 @@ struct CaptureScreen: View {
         return nil
     }
 
-    // MARK: header — ambient control when connected, else the auto-connect status + the
-    // inline "Connect your Omi" affordance (source connection is automatic + self-healing;
-    // the user never hand-drives a BLE scan — that lives in the Device page's source mgmt).
+    // MARK: header — ONE title row for every state, and no vendor block
+    //
+    // WHAT WAS HERE, AND WHY IT IS GONE (Nick, 2026-08-17): "we should probably get rid of
+    // the Omi thing at the top and just show the connection status of any recorder at the
+    // top here and make that connection status just an icon in the top right even with the
+    // 'all voice notes are saved to computer' … But it will show green if connected maybe?"
+    //
+    // The top of the daily surface was one vendor's setup flow: a filled "Connect your
+    // Omi" button, a vendor-worded status line, and a discovered-Omi list — on a page
+    // whose own device model has been brand-free for a while (`RecordingDeviceClass`,
+    // `UnifiedDeviceListPresentation.settingsSubtitle`, which was fixed for exactly this
+    // reason). Connection management already lives on the devices page inside Settings;
+    // this header now carries the title and nothing else, and the recorder signal is the
+    // `RecorderLinkBadge` icon on the saved-to line, which opens that page.
 
     /// The pure capture-page banner state: the live Omi link projected through the
     /// device-page enabled toggle (a disabled Omi short-circuits to `.omiDisabled`).
+    /// Still read by `isShowingCapture` — it decides whether the live meter is on screen.
     private var sourcePresentation: CaptureSourcePresentation {
         .resolve(connection: device.connectionState, omiEnabled: omiEnabled, isPaused: manager.isPaused)
     }
 
-    @ViewBuilder private var header: some View {
-        let p = sourcePresentation
-        if p.isConnected {
-            ambientHeader(name: p.connectedName ?? "Omi", presentation: p)
-        } else {
-            connectHeader(p)
+    /// The recorder-agnostic status badge. The DECISION is `RecorderLinkBadge`'s, in the
+    /// kit, because `swift test` cannot compile `App/` — a tone chosen in a SwiftUI body
+    /// is a decision no test can hold.
+    private var recorderBadge: RecorderLinkBadge {
+        RecorderLinkBadge.resolve(link: device.connectionState,
+                                  enabled: omiEnabled,
+                                  sources: sources.sources)
+    }
+
+    private var header: some View {
+        HStack(spacing: GrainSpacing.x2) {
+            Text("Capture").grainTextStyle(.title).foregroundStyle(GrainColor.ink)
+            Spacer(minLength: GrainSpacing.x2)
+            // Manual conversation split (Feature 2): finalize the current section + start a
+            // fresh conversation now. Only meaningful while actively capturing.
+            if manager.isCapturing {
+                GrainButton("New", variant: .tonal, size: .sm) { manager.splitConversation() }
+            }
+            headerSearchButton
+        }
+        .padding(.horizontal, GrainSpacing.x4)
+        .padding(.vertical, GrainSpacing.x2)
+        .overlay(alignment: .bottom) { Rectangle().fill(GrainColor.borderFaint).frame(height: 1) }
+    }
+
+    /// The one recorder signal on this page: an icon at the trailing edge of the saved-to
+    /// line. Green when something is connected, and a tap opens the devices page in
+    /// Settings — the place connections are actually managed.
+    private var recorderStatusButton: some View {
+        let badge = recorderBadge
+        return Button(action: onOpenDevices) {
+            Image(systemName: "earbuds")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(recorderBadgeColor(badge.tone))
+                .frame(width: GrainSpacing.x6, height: GrainSpacing.x6)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("recorder-status")
+        .accessibilityLabel(badge.label)
+        .accessibilityHint(RecorderLinkBadge.openHint)
+    }
+
+    /// The palette lives here; the MEANING lives in `RecorderLinkBadge.Tone`.
+    private func recorderBadgeColor(_ tone: RecorderLinkBadge.Tone) -> Color {
+        switch tone {
+        case .connected: return GrainColor.sage
+        case .working:   return GrainColor.amber
+        case .idle:      return GrainColor.textFaint
         }
     }
 
@@ -1322,100 +1389,6 @@ struct CaptureScreen: View {
         .accessibilityValue(find.searchOpen ? "Open" : "Closed")
     }
 
-    // MARK: connect header — auto-connect STATUS + the inline "Connect your Omi" affordance
-
-    /// The capture header shown when the Omi isn't connected. ONE clean headline row
-    /// per the prototype top bar ("Capture" + quiet icon actions — the record path
-    /// lives on the CTA card below, not up here). Source connection is automatic +
-    /// self-healing, so the connecting / reconnecting / searching states read as
-    /// ambient STATUS (a spinner + a line) — the user does NOT drive a scan. A clean
-    /// nothing-connected idle (or Bluetooth-off) surfaces the inline "Connect your
-    /// Omi" affordance. Discovered Omis fold in below only for first-time pairing.
-    private func connectHeader(_ p: CaptureSourcePresentation) -> some View {
-        VStack(spacing: 0) {
-            HStack(spacing: GrainSpacing.x2) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Capture").grainTextStyle(.title).foregroundStyle(GrainColor.ink)
-                    HStack(spacing: GrainSpacing.x1) {
-                        if p.isAutoConnecting { ProgressView().controlSize(.mini).tint(GrainColor.forgeBlue) }
-                        Text(p.statusLine)
-                            .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-                            .lineLimit(1)
-                    }
-                }
-                Spacer(minLength: GrainSpacing.x2)
-                headerSearchButton
-            }
-            .padding(.horizontal, GrainSpacing.x4)
-            .padding(.vertical, GrainSpacing.x2)
-            // Keep connection setup available without crowding the title-bar actions.
-            if p.showsConnectAffordance {
-                HStack {
-                    // connectOrPair(): reconnect a remembered device, else a bounded,
-                    // user-initiated pairing scan. start() alone is dormant with no saved
-                    // device (the no-Omi fix), so a first-time user needs the explicit scan.
-                    GrainButton("Connect your Omi", variant: .filled, size: .sm) { device.connectOrPair() }
-                    Spacer()
-                }
-                .padding(.horizontal, GrainSpacing.x4)
-                .padding(.bottom, GrainSpacing.x2)
-            }
-            // First-time pairing only: a scan turned up Omis — tap yours to connect.
-            // (Routine reconnect is automatic; this never asks the user to drive a scan.)
-            if !device.discovered.isEmpty { discoveredList }
-        }
-        .overlay(alignment: .bottom) { Rectangle().fill(GrainColor.borderFaint).frame(height: 1) }
-    }
-
-    /// The compact, inline list of Omis a scan has discovered. Tapping one connects.
-    private var discoveredList: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(device.discovered) { dev in
-                Button { device.connect(dev) } label: {
-                    HStack(spacing: GrainSpacing.x2) {
-                        Image(systemName: "dot.radiowaves.left.and.right").foregroundStyle(GrainColor.forgeBlue)
-                        Text(dev.name).grainTextStyle(.body).foregroundStyle(GrainColor.ink)
-                        Spacer()
-                        Text("\(dev.rssi) dBm").grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
-                    }
-                    .padding(.horizontal, GrainSpacing.x4)
-                    .padding(.vertical, GrainSpacing.x2)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-    }
-
-    /// The connected/ambient header: the active source + live state and the single
-    /// record/pause control. Connection management (Disconnect / Forget / re-pair) lives
-    /// on the Device page now — this surface is purely "start/stop recording".
-    private func ambientHeader(name: String, presentation p: CaptureSourcePresentation) -> some View {
-        HStack(spacing: GrainSpacing.x2) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Capture").grainTextStyle(.title).foregroundStyle(GrainColor.ink)
-                HStack(spacing: GrainSpacing.x1) {
-                    GrainStatusDot(p.isCapturing ? .running : .stopped, size: .sm)
-                    Text("\(name) · \(p.statusLine)")
-                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
-                        .lineLimit(1)
-                }
-            }
-            Spacer(minLength: GrainSpacing.x2)
-            // Manual conversation split (Feature 2): finalize the current section +
-            // start a fresh conversation now, without waiting for the silence gap.
-            // Only meaningful while actively capturing (not paused).
-            if manager.isCapturing {
-                GrainButton("New", variant: .tonal, size: .sm) { manager.splitConversation() }
-            }
-            headerSearchButton
-            // (The record/pause control moved onto the recording instrument strip —
-            // one control, beside the ring it commands.)
-        }
-        .padding(.horizontal, GrainSpacing.x4)
-        .padding(.vertical, GrainSpacing.x2)
-        .overlay(alignment: .bottom) { Rectangle().fill(GrainColor.borderFaint).frame(height: 1) }
-    }
-
     // MARK: global "your data is safe" signal
 
     /// The HONEST determinate drain progress across captures that still have pending
@@ -1439,8 +1412,17 @@ struct CaptureScreen: View {
     // list down every time a sync flapped. Now it's a fixed-height row whose content
     // cross-fades, debounced + minimum-shown by `SyncBarPresenter` so brief drains never
     // flicker it. All copy/height come from the strip's own honest ingredients below.
+    //
+    // The recorder status icon rides at the trailing edge of this row (Nick, 2026-08-17:
+    // "an icon in the top right even with the 'all voice notes are saved to computer'").
+    // It sits BESIDE the strip rather than on top of it so it can never collide with the
+    // determinate progress bar the strip shows while syncing.
     private var syncBar: some View {
-        SyncStatusStripView(content: syncStripContent)
+        HStack(spacing: 0) {
+            SyncStatusStripView(content: syncStripContent)
+            recorderStatusButton
+                .padding(.trailing, GrainSpacing.x4)
+        }
     }
 
     /// The honest ingredients for the strip, computed from live sync state. Every string
@@ -1463,7 +1445,7 @@ struct CaptureScreen: View {
             settledText = message
             settledIsPending = anyWorkPending
         } else {
-            settledText = SyncStripCopy.allSaved(local: local)
+            settledText = SyncStripCopy.allSaved(destination: destination)
             settledIsPending = false
         }
         return SyncStripContent(
@@ -1507,12 +1489,12 @@ struct CaptureScreen: View {
                 .font(.system(size: GrainSpacing.x8 + GrainSpacing.x2, weight: .light))
                 .foregroundStyle(GrainColor.textFaint)
             Text("No voice notes yet").grainTextStyle(.title).foregroundStyle(GrainColor.ink)
-            // Phone-only tier: no computer, no required Omi — record with the mic and
-            // everything is transcribed + stays on-device. Computer tier keeps the
-            // ambient-Omi + sync story.
-            Text(local
-                 ? "Make your first voice note. It’s transcribed and titled here on your phone. Nothing leaves this device."
-                 : "Connect your Omi above, or make a voice note. Capture stays ambient while your Omi is connected. Audio stays on your phone and syncs to your computer. Nothing leaves your devices.")
+            // WHERE A FIRST VOICE NOTE ENDS UP, per resolved brain — the same
+            // three-valued question the saved-to line answers, from the same place.
+            // It used to read "Connect your Omi above, or make a voice note…" on every
+            // non-phone tier: one vendor's name, and a pointer at a header block that no
+            // longer exists.
+            Text(SyncStripCopy.emptyLibraryInvitation(destination: destination))
                 .grainTextStyle(.body).foregroundStyle(GrainColor.textMuted)
                 .multilineTextAlignment(.center).padding(.horizontal, GrainSpacing.x6)
             Spacer()

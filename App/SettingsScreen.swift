@@ -23,6 +23,13 @@ struct SettingsScreen: View {
     /// The in-app account-deletion model (track T-STOREFRONT) — Apple-required deletion,
     /// three scopes. Drives the "Delete account" affordance in the Account section.
     @ObservedObject var accountDeletion: AccountDeletionModel
+    /// A ROUTE INTO THE DEVICES PAGE FROM SOMEWHERE ELSE.
+    ///
+    /// The capture page's recorder status icon opens this page (Nick, 2026-08-17). It
+    /// pushes the SAME destination the "Devices & connections" row below pushes — the
+    /// builder is shared, so there is exactly one device page and one place it is
+    /// constructed, and `DeviceSurfaceSingletonTests` still sees one surface.
+    @Binding var openDevices: Bool
     @State private var actionChoice = ActionButtonChoice.current
     @State private var waitlistJoined =
         WaitlistPrefs.joined()
@@ -83,24 +90,33 @@ struct SettingsScreen: View {
                            recordingIdentity: nil)
     }
 
+    /// THE DEVICE PAGE, BUILT ONCE.
+    ///
+    /// Two things push it now — the row below, and the capture page's recorder status
+    /// icon by way of `openDevices` — so it is one builder rather than two constructions
+    /// that can drift apart.
+    ///
+    /// THE LIST IS "Recording devices" AND THE SHEET IS "Connect a device". The two
+    /// shipped titles were swapped: this screen was hardcoded "Devices" while the connect
+    /// sheet wore `listTitle`.
+    /// THE BRAIN TRAVELS WITH THE PUSH. A recorder's shelf says where a brought-over copy
+    /// will end up, and this screen already owns the one account preference that answers
+    /// it — reading it a second time inside the device page would be a second reader of
+    /// one preference, which is exactly how `foundryx.note-destination` nearly shipped.
+    private var devicePage: some View {
+        LazyView {
+            DeviceScreen(device: device, manager: manager, sources: sources,
+                         remote: remote, brain: brains.choice)
+                .navigationTitle(RecordingDeviceConnectPresentation.listTitle)
+                .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+
     var body: some View {
         List {
             Section {
                 NavigationLink {
-                    LazyView {
-                        // THE LIST IS "Recording devices" AND THE SHEET IS "Connect a device".
-                        // The two shipped titles were swapped: this screen was hardcoded
-                        // "Devices" while the connect sheet wore `listTitle`.
-                        // THE BRAIN TRAVELS WITH THE PUSH. A recorder's shelf says where a
-                        // brought-over copy will end up, and this screen already owns the one
-                        // account preference that answers it — reading it a second time inside
-                        // the device page would be a second reader of one preference, which is
-                        // exactly how `foundryx.note-destination` nearly shipped.
-                        DeviceScreen(device: device, manager: manager, sources: sources,
-                                     remote: remote, brain: brains.choice)
-                            .navigationTitle(RecordingDeviceConnectPresentation.listTitle)
-                            .navigationBarTitleDisplayMode(.inline)
-                    }
+                    devicePage
                 } label: {
                     HStack(spacing: GrainSpacing.x2) {
                         Image(systemName: "earbuds")
@@ -362,6 +378,11 @@ struct SettingsScreen: View {
             }
         }
         .grainBackground()
+        // The capture page's recorder status icon lands HERE, on the device page itself —
+        // not merely on the Settings tab with the row still to find (Nick, 2026-08-17:
+        // "it will take you to the devices page in settings"). Same `devicePage` builder
+        // the row above pushes.
+        .navigationDestination(isPresented: $openDevices) { devicePage }
         // The Devices row's class counts. Loaded here rather than in the subtitle's getter:
         // the count comes from the account-scoped device store on disk, and a body pass is
         // not a place to read it.

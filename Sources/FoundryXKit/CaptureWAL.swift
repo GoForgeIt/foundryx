@@ -495,6 +495,16 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         var firstPoison: (seq: UInt64, reason: String)?
         var sawAuthExpired = false
 
+        // WHERE THIS PASS IS ABOUT TO SEND AUDIO, said once per pass.
+        //
+        // Nine segments ACK'd at 2026-08-17T12:00:53Z could not be traced to any
+        // destination on any instrument: the upload logged no address, the ACK line
+        // named "desktop" whatever the target was, and the watermark then advanced past
+        // them so they will never be re-sent. One line per drain — not per segment, which
+        // on a thousand-segment backlog would evict the ring it is written into.
+        log?.info("capture \(captureId): uploading \(jobs.count) segment(s) → "
+                  + "\(Self.uploadDestination(target))")
+
         await withTaskGroup(of: SegmentUploadResult.self) { group in
             var next = 0
             let initial = min(Self.maxConcurrentSegmentUploads, jobs.count)
@@ -522,7 +532,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
                         advanceWatermark(throughAcked: seq)                        // durable resume point moves forward
                         invalidateStatusCache()   // synced count/watermark changed → rescan next warm
                         uploaded += 1
-                        log?.info("capture \(captureId): segment \(seq) ACK'd by desktop (saved to computer)")
+                        log?.info(Self.ackLine(captureId: captureId, seq: seq, target: target))
                         publish()
                     } catch {
                         firstTransientError = "ack marker write failed for segment \(seq): \((error as NSError).localizedDescription)"
@@ -591,6 +601,36 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         } catch {
             return .transient(seq: seq, message: (error as NSError).localizedDescription)
         }
+    }
+
+    // MARK: - Naming the place the bytes actually went
+
+    /// WHERE AN UPLOAD GOES, IN WORDS.
+    ///
+    /// The WAL is the one component that knows this and it never said it. `upload` POSTs
+    /// to `target.baseURL + "foundryx/capture"` (or down a relay tunnel) and logged no
+    /// address at all, so nine ACK'd segments could not be traced to any destination on
+    /// any instrument after the fact.
+    ///
+    /// It names the ROUTE, never the grant: `target.bearer` is deliberately absent, and
+    /// `DoorLog` ships to the relay, so a token in here would be a credential leaving the
+    /// device in a diagnostic.
+    static func uploadDestination(_ target: DoorTarget) -> String {
+        if let relay = target.relay {
+            return "relay tunnel \(relay.tunnelId)"
+        }
+        return target.baseURL.appendingPathComponent("foundryx/capture").absoluteString
+    }
+
+    /// ONE PINNED FORM for the ACK line, so the log and the test read the same sentence.
+    ///
+    /// It used to be `"… ACK'd by desktop (saved to computer)"` — a hardcoded claim with
+    /// no branch of any kind, on a device whose door may be a hosted Vault the owner
+    /// bought precisely because he has no computer. That string is what led a reader to
+    /// conclude, from the phone's own log, that a cell-brain user was in computer mode,
+    /// and to report it as measured fact.
+    static func ackLine(captureId: String, seq: UInt64, target: DoorTarget) -> String {
+        "capture \(captureId): segment \(seq) ACK'd by \(uploadDestination(target))"
     }
 
     /// POST one segment. Throws on any non-200 so the segment stays pending. In

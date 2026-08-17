@@ -142,6 +142,11 @@ private enum VoiceNotesLanguageSteps {
                     try w.source("App/CaptureScreen.swift"),
                     try w.source(
                         "Sources/FoundryXKit/CaptureCardPresentation.swift"),
+                    // The empty-library invitation MOVED here when the capture header's
+                    // vendor block was removed, so the scan follows the copy. A check
+                    // that keeps reading the file the words used to be in is a check
+                    // that has stopped holding them.
+                    try w.source("Sources/FoundryXKit/SyncBarPresenter.swift"),
                 ]
                 let offenses = sources.flatMap {
                     VoiceNotesLanguage.offendingStringLiterals(in: $0)
@@ -163,11 +168,23 @@ private enum VoiceNotesLanguageSteps {
                 return ctx
             },
             defineCheck("I am invited to make my first voice note") { _, _, _ in
+                // THE INVITATION IS THE KIT'S NOW, and it is asserted as a VALUE rather
+                // than as a substring of a view file: it became three sentences (one per
+                // resolved brain) when the boolean tier flag was replaced, and every one
+                // of them has to invite the first note.
+                for destination in CaptureDestination.allCases {
+                    let copy = SyncStripCopy.emptyLibraryInvitation(destination: destination)
+                    guard copy.localizedCaseInsensitiveContains("first voice note") else {
+                        throw BrineStepError(
+                            "the \(destination.rawValue) brain's empty library has no "
+                            + "first-voice-note invitation: \(copy)")
+                    }
+                }
+                // And the screen actually renders it — `swift test` cannot compile App/.
                 let source = try w.source("App/CaptureScreen.swift")
-                guard source.localizedCaseInsensitiveContains(
-                    "first voice note") else {
+                guard source.contains("SyncStripCopy.emptyLibraryInvitation(") else {
                     throw BrineStepError(
-                        "empty library has no first-voice-note invitation")
+                        "App/CaptureScreen.swift no longer renders the invitation")
                 }
             },
 
