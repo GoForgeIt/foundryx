@@ -141,9 +141,124 @@ public enum SyncStripLayout {
 
 /// The calm settled copy for the strip, shared by the view and the tests so the "all
 /// saved" wording is verified against the real string, never a duplicate.
+///
+/// IT TAKES A DESTINATION, NOT A BOOLEAN, AND THAT IS THE WHOLE FIX. This read
+/// `allSaved(local: Bool)` — one bit for a three-valued fact. `.computerBrain` and
+/// `.cellBrain` both pass `local: false`, so a Vault owner with no computer was told
+/// "All voice notes saved to computer" by the one line on the page whose entire job is
+/// to say where his recordings are. `CaptureDestination` has no value that can name a
+/// place the user is not on, so the sentence cannot drift from the brain again.
 public enum SyncStripCopy {
-    /// The all-saved line. `local` (phone-only tier) has no "computer" to copy to.
-    public static func allSaved(local: Bool) -> String {
-        local ? "All voice notes saved" : "All voice notes saved to computer"
+    /// The all-saved line, naming the place the app actually resolved to.
+    public static func allSaved(destination: CaptureDestination) -> String {
+        switch destination {
+        // The phone-only tier has no second place, so it claims none.
+        case .phone:    return "All voice notes saved"
+        case .computer: return "All voice notes saved to computer"
+        case .vault:    return "All voice notes saved to your Vault"
+        }
+    }
+
+    /// The empty-library invitation under "No voice notes yet".
+    ///
+    /// It used to read "Connect your Omi above, or make a voice note…" on every non-phone
+    /// tier: one vendor's name, and a pointer at a header block that no longer exists.
+    /// Recorder connection lives on the devices page now, so this says what happens to a
+    /// recording instead of directing traffic at a control that is gone.
+    public static func emptyLibraryInvitation(destination: CaptureDestination) -> String {
+        switch destination {
+        case .phone:
+            return "Make your first voice note. It’s transcribed and titled here on your "
+                + "phone. Nothing leaves this device."
+        case .computer:
+            return "Make your first voice note. Capture stays ambient while a recorder is "
+                + "connected. Audio stays on your phone and syncs to your computer. "
+                + "Nothing leaves your devices."
+        case .vault:
+            return "Make your first voice note. Capture stays ambient while a recorder is "
+                + "connected. Audio stays on your phone and syncs to your Vault."
+        }
+    }
+}
+
+// MARK: - The recorder status badge (the header's replacement)
+
+/// THE ONE RECORDER SIGNAL ON THE CAPTURE PAGE, AND WHY IT IS NOT A VENDOR BLOCK.
+///
+/// The capture header led with a "Connect your Omi" pairing block: a filled button, a
+/// vendor-worded status line, and a discovered-device list — the top of the daily surface
+/// given over to one brand's setup flow, on a page whose own device model has been
+/// brand-free (`RecordingDeviceClass`, `UnifiedDeviceListPresentation.settingsSubtitle`)
+/// for a while now. It is replaced by ONE icon at the trailing edge of the saved-to line:
+/// green when something is connected, quiet when nothing is, and a tap goes to the page
+/// where connections are actually managed.
+///
+/// The DECISION lives here, in the kit, because `swift test` cannot compile `App/` — a
+/// tone or a label chosen inside a SwiftUI body is a decision no test can hold.
+public struct RecorderLinkBadge: Equatable, Sendable {
+
+    /// What the icon says at a glance. Named for the STATE, not for a colour, so the view
+    /// owns the palette and the tests own the meaning.
+    public enum Tone: String, Equatable, Sendable, CaseIterable {
+        /// Something is linked right now — the green Nick asked for.
+        case connected
+        /// A link is being established or re-established. Not a claim that it is up.
+        case working
+        /// Nothing is linked.
+        case idle
+    }
+
+    public let tone: Tone
+    /// The accessibility label. Brand-free by construction: no branch here can reach a
+    /// device's reported name, so no vendor word can get in.
+    public let label: String
+
+    public init(tone: Tone, label: String) {
+        self.tone = tone
+        self.label = label
+    }
+
+    /// Green, and nothing else, means connected.
+    public var isConnected: Bool { tone == .connected }
+
+    // MARK: where a tap goes
+
+    /// The tab a tap selects, and the page it opens on it — named once, so the view, the
+    /// router and the test cannot disagree about where "the devices page" is.
+    public static let destinationTab: AppTab = .settings
+    public static var destinationPage: String { SettingsSheetPresentation.deviceEntryLabel }
+    /// The accessibility hint on the button.
+    public static var openHint: String { "Opens \(destinationPage)" }
+
+    // MARK: resolution
+
+    private static let connectedBadge = RecorderLinkBadge(
+        tone: .connected, label: "Recorder connected")
+    private static let workingBadge = RecorderLinkBadge(
+        tone: .working, label: "Connecting to your recorder")
+    private static let idleBadge = RecorderLinkBadge(
+        tone: .idle, label: "No recorder connected")
+
+    /// Project every recorder the capture page knows about onto one badge.
+    ///
+    /// THE PHONE'S OWN MICROPHONE IS NOT A CONNECTED RECORDER. It is always there, so
+    /// counting it would make the icon permanently green and the signal worthless — the
+    /// question the icon answers is "is anything of mine linked?", and a built-in is not
+    /// an answer to it.
+    public static func resolve(link: DeviceConnectionState,
+                               enabled: Bool,
+                               sources: [CaptureSourceDescriptor]) -> RecorderLinkBadge {
+        // Everything that is a recorder in its own right: the phone's built-in mic is
+        // excluded by category, not by name.
+        let external = sources.filter { $0.category != .phoneMic && $0.enabled }
+        if enabled, case .connected = link { return connectedBadge }
+        if external.contains(where: { $0.connection == .connected }) { return connectedBadge }
+        if enabled {
+            switch link {
+            case .connecting, .scanning, .disconnected: return workingBadge
+            case .idle, .poweredOff, .connected:        break
+            }
+        }
+        return idleBadge
     }
 }

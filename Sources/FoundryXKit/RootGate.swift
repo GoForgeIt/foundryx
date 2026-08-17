@@ -52,3 +52,40 @@ public enum RootGate {
         return .phoneBrain
     }
 }
+
+/// WHERE A FINISHED VOICE NOTE ACTUALLY LANDS.
+///
+/// THIS TYPE EXISTS BECAUSE THE ANSWER WAS A BOOLEAN AND THE QUESTION HAS THREE ANSWERS.
+/// `RootGate` has resolved to three brains since rung 3 shipped, but every surface that
+/// wanted to NAME the destination asked `local: Bool` — "is this the phone-only tier?".
+/// `.computerBrain` and `.cellBrain` both answer that question `false`, byte-identically,
+/// so a Vault owner with no computer read "All voice notes saved to computer" on his
+/// capture page and a unit test pinned the sentence in place.
+///
+/// It is deliberately DERIVED from `RootDestination` rather than from `BrainChoice`: a
+/// brain that was CHOSEN but did not resolve (a picked computer with no reachable host, a
+/// picked cloud with no paired cell) degrades to the phone, and the sentence has to
+/// degrade with it. Naming a place from an unresolved choice is the same defect one layer
+/// up.
+public enum CaptureDestination: String, Equatable, Sendable, CaseIterable {
+    /// The phone-only tier. The phone holds the only copy; there is no other place to name.
+    case phone
+    /// The user's own desktop Foundry, over the relayed door.
+    case computer
+    /// A hosted Foundry cell — "your Vault" in every word the product uses for it.
+    case vault
+}
+
+public extension RootDestination {
+    /// The destination this resolved brain actually writes to, or `nil` for a destination
+    /// that is not running the app at all (the sign-in gate has nowhere to save anything,
+    /// and must not be given a default that reads like a place).
+    var captureDestination: CaptureDestination? {
+        switch self {
+        case .computerBrain: return .computer
+        case .cellBrain:     return .vault
+        case .phoneBrain:    return .phone
+        case .signInGate:    return nil
+        }
+    }
+}
