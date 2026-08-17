@@ -42,9 +42,15 @@ final class PocketFastSyncCompositionGateTests: XCTestCase {
         let screen = try Self.source("App/DeviceScreen.swift")
         XCTAssertTrue(screen.contains("PocketFastSyncPresentation.settings.primaryAction"))
         XCTAssertTrue(screen.contains("PocketFastSyncPresentation.sheetWarning"))
-        XCTAssertTrue(screen.contains("PocketFastSyncPresentation.endpointUnmeasuredLine"),
-                      "the page never says why fast sync cannot run, so a disabled button is "
-                          + "indistinguishable from a broken one")
+        // THE PROPERTY, NOT ONE SPELLING OF IT. The page must explain WHY the button cannot
+        // run; which of the two endpoint sentences it uses is a tense decision. It renders the
+        // BEFORE-ANY-ATTEMPT one, because the outcome sentence it used to render says Solleva
+        // "used Bluetooth" on a screen where nothing was ever tried.
+        XCTAssertTrue(
+            screen.contains("PocketFastSyncPresentation.endpointUnmeasuredBeforeAnyAttemptLine")
+                || screen.contains("PocketFastSyncPresentation.endpointUnmeasuredLine"),
+            "the page never says why fast sync cannot run, so a disabled button is "
+                + "indistinguishable from a broken one")
         for typed in ["\"Fast sync\"", "\"Use recorder WiFi\"", "\"FAST SYNC\""] {
             XCTAssertFalse(screen.contains(typed),
                            "\(typed) is typed into the view rather than taken from the kit")
