@@ -631,6 +631,90 @@ phase_lint() {
   else
     echo "  clean — every writer call site is inside a ProcessGlobalStateTestCase subclass"
   fi
+
+  lint_machine_global_identity
+}
+
+# ------------------------------------------- lint: MACHINE-global (cross-PROCESS) polluters
+# The tier above the one the lint before this covers. `CaptureSettings` leaks between SUITES
+# inside one test process; the identity KEYCHAIN leaks between test RUNS, because it lives on
+# the machine. `InterruptedDeletionSignInRecoveryFeatureTests` drove the real
+# `AuthStore.save(_:)` and left a `com.goforgeit.foundryx.auth` item in the developer's login
+# keychain permanently. Every LATER process then read `identityPresence() == .present` with no
+# activation record of its own, which `CaptureAccountScope` resolves to `.blocked` — no scope,
+# no binding, and `CaptureWAL.performDurableMutation` skips every durable write. NINE unrelated
+# suites failed with 42 assertions all saying "a file that should exist does not", and none of
+# them named the cause. The self-hosted CI runner is the same user on the same machine, so the
+# poison also reached release gates.
+#
+# Two rules, both derived rather than hand-listed:
+#   1. A test that persists an identity must be bound to a NON-production keychain service —
+#      it must install `AuthStore.setKeychainServiceForTests` (directly, or by being the
+#      hygiene installer). Derived: the persistence entry points are the `AuthStore` funcs
+#      that name `SecItem*` in Sources/.
+#   2. No test may aim a KEYCHAIN QUERY at the production service literal — an "override"
+#      that quietly points back at production is not one. Narrowed to files that pair the
+#      literal with `kSecAttrService`, because `AccountSurfaceCompletenessTests` legitimately
+#      names it as DATA in its account-surface inventory, and a lint that cannot tell an
+#      inventory from a query is a lint that gets disabled.
+# An EMPTY derived writer set is itself a failure, so a rename cannot silently disarm this.
+lint_machine_global_identity() {
+  echo "==> [lint] machine-global identity-keychain polluters"
+
+  local prod_service
+  prod_service="$(awk -F'"' '/static let productionKeychainService = "/ { print $2; exit }' \
+    Sources/FoundryXKit/FoundryAuth.swift)"
+  if [ -z "$prod_service" ]; then
+    echo "  could not derive the production keychain service from FoundryAuth.swift —"
+    echo "  the lint cannot fail, so it is a gate defect."
+    fail "lint-broken(no-production-service)"
+    return
+  fi
+  echo "  production identity service: $prod_service"
+
+  # 1. Derive AuthStore's keychain PERSISTENCE entry points from the source of truth.
+  local writers
+  writers="$(awk '
+    /^enum AuthStore/ { inStore = 1 }
+    inStore && match($0, /func [A-Za-z_][A-Za-z0-9_]*/) {
+      cur = substr($0, RSTART + 5, RLENGTH - 5)
+    }
+    inStore && /SecItem(Add|Update|Delete)/ { if (cur != "") print cur }
+  ' Sources/FoundryXKit/FoundryAuth.swift | sort -u)"
+  if [ -z "$writers" ]; then
+    echo "  found NO AuthStore keychain writer — the lint has nothing to match on."
+    fail "lint-broken(no-derived-identity-writers)"
+    return
+  fi
+  echo "  AuthStore keychain writers: $(echo "$writers" | tr '\n' ' ')"
+  local wpat; wpat="$(echo "$writers" | tr '\n' '|' | sed 's/|$//')"
+
+  local hygiene="Tests/FoundryXBrineTests/FoundryXTestBundleHygiene.swift"
+  local bad="" leaked="" f
+  for f in Tests/*/*.swift; do
+    [ -f "$f" ] || continue
+    # Strip comments so a WARNING ABOUT the service does not count as using it.
+    if [ "$f" != "$hygiene" ] \
+       && sed 's|//.*||' "$f" | grep -q -- "\"$prod_service\"" \
+       && grep -q 'kSecAttrService' "$f"; then
+      leaked="$leaked $(basename "$f")"
+    fi
+    sed 's|//.*||' "$f" | grep -qE "AuthStore\.($wpat)\(" || continue
+    grep -qE 'AuthStore\.setKeychainServiceForTests|FoundryXTestBundleHygiene\.installOnce' "$f" \
+      || bad="$bad $(basename "$f")"
+  done
+
+  if [ -n "$bad" ]; then
+    echo "  suites persist an identity through AuthStore without installing a non-production"
+    echo "  keychain service (the item they write OUTLIVES the process and blocks every"
+    echo "  durable capture write in the NEXT one):$bad"
+    fail "machine-global-identity-polluter($bad)"
+  elif [ -n "$leaked" ]; then
+    echo "  test files name the SHIPPED identity service directly:$leaked"
+    fail "machine-global-identity-service-named($leaked)"
+  else
+    echo "  clean — every identity persistence call site is bound to a test-only service"
+  fi
 }
 
 # ------------------------------------------------- appscenarios: scenarios INSIDE the application

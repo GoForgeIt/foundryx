@@ -3,6 +3,30 @@ import BrineSwiftCore
 @testable import FoundryXKit
 
 final class InterruptedDeletionSignInRecoveryFeatureTests: XCTestCase {
+
+    /// THIS SUITE IS THE ONE THAT DRIVES THE REAL `AuthStore.save(_:)` — instrumented, it is
+    /// the ONLY production-keychain write in a 1428-test run. The item it writes is
+    /// MACHINE-GLOBAL: it outlives the process, and the next test process reads it as "an
+    /// identity exists that was never activated", which resolves `CaptureAccountScope` to
+    /// `.blocked` and turns every durable capture write in that process into a no-op. That
+    /// cost nine unrelated suites 42 assertion failures on `main`, none of which named it.
+    ///
+    /// The scenario still exercises the real persistence path; only the SERVICE moves, the
+    /// same way pairing already does it via `setPairingKeychainServicesForTests`. Installed
+    /// here, not only in `FoundryXTestBundleHygiene`, because a `--filter` run of this suite
+    /// alone does not get the bundle-wide install and must still not poison the machine.
+    override func setUp() {
+        super.setUp()
+        AuthStore.setKeychainServiceForTests(
+            FoundryXTestBundleHygiene.testKeychainService)
+        _ = AuthStore.eraseIdentityCredential()
+    }
+
+    override func tearDown() {
+        _ = AuthStore.eraseIdentityCredential()
+        super.tearDown()
+    }
+
     func testInterruptedDeletionSignInRecoveryScenarios() async throws {
         let world = InterruptedDeletionSignInRecoveryWorld()
         defer { world.cleanupLiveSignInFixture() }
@@ -10,6 +34,74 @@ final class InterruptedDeletionSignInRecoveryFeatureTests: XCTestCase {
             "interrupted-deletion-signin-recovery",
             registry: StepRegistry(InterruptedDeletionSignInRecoverySteps.make(world)))
     }
+
+    /// The gate that makes the isolation provable instead of hopeful: after this suite has
+    /// driven a real sign-in, the SHIPPED service must still hold nothing.
+    func testASignInDrivenHereLeavesTheProductionKeychainUntouched() async throws {
+        let identity = AuthIdentity(
+            provider: AuthProvider.google.rawValue,
+            idToken: "header.payload.signature",
+            refreshToken: nil,
+            expiresAt: .distantFuture,
+            email: "leak-probe@example.test")
+        CaptureAccountScope.resetTestEnvironment()
+        // resetTestEnvironment clears CaptureAccountScope's overrides, not AuthStore's.
+        defer {
+            _ = AuthStore.eraseIdentityCredential()
+            CaptureAccountScope.resetTestEnvironment()
+        }
+        let container = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "foundryx-keychain-leak-probe-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: container, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: container) }
+        CaptureAccountScope.setContainerForTests(container)
+        // A container override alone is NOT hermetic. `AuthStore.save` also writes the
+        // ACTIVATION RECORD and the signed-in mirror through `CaptureAccountScope
+        // .currentDefaults()`, which falls back to `UserDefaults.standard` — i.e. the test
+        // host's own `com.apple.dt.xctest.tool` domain. Leaving an "active" record there
+        // that no later suite's mirror corroborates resolves them all to `.blocked`, which
+        // is the same silent no-op by the other door. (Measured: without this line, this
+        // test alone re-broke OmiReconnectTests and PocketBringOverFeatureTests.)
+        CaptureAccountScope.setDefaultsForTests(LeakProbeDefaults())
+
+        XCTAssertNotEqual(
+            AuthStore.effectiveKeychainService,
+            AuthStore.productionKeychainService,
+            "this suite must never be bound to the shipped identity service")
+        try? await AuthStore.save(identity)
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: AuthStore.productionKeychainService,
+            kSecAttrAccount as String: "identity",
+            kSecReturnData as String: true,
+        ] as CFDictionary, &item)
+        XCTAssertEqual(
+            status, errSecItemNotFound,
+            """
+            a test wrote the SHIPPED identity keychain item. It outlives this process; every \
+            later test process will resolve CaptureAccountScope to .blocked and silently \
+            write no capture segments at all.
+            """)
+    }
+}
+
+/// Throwaway durability for the leak probe, so a real sign-in never reaches the test host's
+/// own defaults domain.
+private final class LeakProbeDefaults: UserDefaults {
+    private let lock = NSLock()
+    private var values: [String: Any] = [:]
+    init() { super.init(suiteName: nil)! }
+    required init?(coder: NSCoder) { nil }
+    override func object(forKey key: String) -> Any? { lock.withLock { values[key] } }
+    override func set(_ value: Any?, forKey key: String) { lock.withLock { values[key] = value } }
+    override func removeObject(forKey key: String) {
+        _ = lock.withLock { values.removeValue(forKey: key) }
+    }
+    override func synchronize() -> Bool { true }
 }
 
 private final class InterruptedDeletionSignInRecoveryWorld: @unchecked Sendable {
