@@ -23,7 +23,22 @@ final class FoundryXAppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         _ = application
-        guard launchOptions?[.bluetoothCentrals] != nil,
+        // WHAT EVERY LAUNCH OWES, BEFORE ANY GUARD. This used to sit below the restoration
+        // guard, and `launchOptions[.bluetoothCentrals]` is a key iOS supplies ONLY on a
+        // background CoreBluetooth restoration relaunch — so on every ordinary launch this
+        // method returned first and `DoorLog.shared` never got a sink. Every call site that
+        // holds no log of its own reports into that instance, so the whole recorder surface
+        // was writing into a log whose `flush()` returned at its first guard. The decision
+        // itself lives in the Kit (`FoundryXLaunch`) because `App/` is compiled by no test
+        // target, and a launch decision no test can execute is one nothing can falsify.
+        let plan = FoundryXLaunch.begin(
+            bluetoothRestoration: launchOptions?[.bluetoothCentrals] != nil,
+            diagnosticSink: RemoteConfig.fromBundle()?.gatewayHTTPURL
+                .appendingPathComponent("diag/log"))
+
+        // WHAT ONLY A RESTORATION RELAUNCH IS. Everything below adopts the BLE link iOS is
+        // restoring; it stays behind its own guard.
+        guard plan.runsBluetoothRestoration,
               FoundryAuth.hasPersistedSignIn,
               let binding = CaptureAccountScope.currentAccountBinding()
         else {
@@ -41,12 +56,9 @@ final class FoundryXAppDelegate: NSObject, UIApplicationDelegate {
         // THE SHARED LOG, NOT A PRIVATE ONE. Two bootstraps each built their own
         // DoorLog and wired a sink to it, which meant "the log" was whichever
         // instance a given caller happened to hold — and the nineteen call sites
-        // that held none reported into nothing. Configuring the process-wide
-        // instance here is what lets every one of them reach the relay.
+        // that held none reported into nothing. It is already sinked, above, on
+        // every launch rather than only on this one.
         let log = DoorLog.shared
-        log.setRemoteSink(
-            RemoteConfig.fromBundle()?.gatewayHTTPURL
-                .appendingPathComponent("diag/log"))
         let dm = DeviceManager.shared(log: log)
         // N7, on the headless path too: a gap outcome names the account it is about, or it is
         // withheld. This bootstrap already holds the one proved-owner binding.

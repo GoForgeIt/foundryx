@@ -681,10 +681,20 @@ private struct MainTabs: View {
         _restoreCaptureId = State(initialValue: restored.placement.openCaptureId)
         _chatListOpen = State(initialValue: restored.placement.chatListOpen)
         _placementNotice = State(initialValue: restored.notice)
-        let log = DoorLog()
-        // Ship the phone's BLE/audio/capture/chat log to the relay diag sink so
-        // it's observable server-side (no copying logs off the device).
-        log.setRemoteSink(RemoteConfig.fromBundle()?.gatewayHTTPURL.appendingPathComponent("diag/log"))
+        // THE PROCESS-WIDE LOG, ADOPTED — NOT A SECOND ONE BUILT HERE.
+        //
+        // This used to be `DoorLog()` plus its own `setRemoteSink`, and that private instance
+        // is why the diagnostics looked healthy while a whole surface was invisible: the lines
+        // written through THIS log reached the relay, and everything written to `DoorLog.shared`
+        // (the recorder surface — every `cmd pocket…` line) went to an unsinked instance and
+        // died on the device. Measured: 1,569 lines in a day, not one of them a recorder line.
+        //
+        // The re-sink was the second half of it. This `init` runs again on every `.id`-driven
+        // rebuild of the tree — far more often than the 15s backstop cadence — and each
+        // `setRemoteSink` invalidated the heartbeat before it could fire, so the backstop flush
+        // never ran once. The sink is installed by `FoundryXLaunch` on launch instead, exactly
+        // once per process.
+        let log = DoorLog.shared
         // Same sink, own transport: deletion records ship IMMEDIATELY, because a
         // successful "delete everywhere" erases the library and signs the person
         // out — a batched line can die in that gap.

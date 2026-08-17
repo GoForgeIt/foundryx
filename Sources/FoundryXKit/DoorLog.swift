@@ -113,6 +113,15 @@ public final class DoorLog: ObservableObject, @unchecked Sendable {
     // best-effort) to the relay's /diag/log so the phone's BLE/audio/capture/chat
     // behavior is observable SERVER-SIDE — no need to copy logs off the device.
     private var sink: URL?
+
+    /// WHERE THIS LOG SHIPS, or `nil` when nothing it holds leaves the device.
+    ///
+    /// Readable because "is the process-wide log actually sinked?" is the single fact that
+    /// decided whether a whole surface's diagnostics existed. It was unobservable, so the
+    /// answer (no, on every normal launch) went unnoticed while 1,569 lines a day arrived
+    /// from a DIFFERENT instance and made the transport look healthy.
+    public var remoteSinkURL: URL? { sink }
+
     private var shipped = 0
     private var flushScheduled = false
     private var heartbeat: Timer?
@@ -153,7 +162,17 @@ public final class DoorLog: ObservableObject, @unchecked Sendable {
     /// Point the log at the relay diag endpoint (e.g. `…:8788/diag/log`) and start the
     /// periodic backstop flush. Emits a one-line transport marker so the desktop/relay
     /// can confirm the phone→relay diag path is live (grep `diag transport online`).
+    ///
+    /// INSTALLING THE SAME SINK TWICE IS A NO-OP, and that is a fix rather than a nicety.
+    /// This method invalidates the backstop timer and builds a new one, so its 15-second
+    /// cadence restarts from zero on every call. A caller that re-ran faster than that — a
+    /// SwiftUI `init` that fires again on every `.id`-driven rebuild — reset the countdown
+    /// before it could ever elapse, so the periodic flush NEVER RAN, and the only visible
+    /// symptom was `diag transport online` arriving every few seconds. Re-pointing at a
+    /// DIFFERENT URL, or clearing and re-installing, still does the full work: this guards
+    /// repetition, not change.
     public func setRemoteSink(_ url: URL?) {
+        if let url, url == sink, heartbeat != nil { return }
         sink = url
         heartbeat?.invalidate(); heartbeat = nil
         guard url != nil else { return }
