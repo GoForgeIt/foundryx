@@ -421,6 +421,15 @@ public struct RecordingDevicePagePresentation: Equatable, Sendable {
     /// measurable — a phone microphone has no battery of its own and no firmware this app can
     /// read, and offering to go and ask for one would be an action that cannot complete.
     public let readings: [RecordingDeviceReadingLine]
+    /// WHAT THE PAGE KNOWS ABOUT THE READ THAT PRODUCED THOSE READINGS, and normally nothing.
+    ///
+    /// Non-nil only when the phone could not read what this ACCOUNT holds for this recorder —
+    /// no account binding resolved, or the device file is there and undecodable. The numbers
+    /// stay: they are the last thing the recorder actually said, and they are the most useful
+    /// thing on the screen. What this withdraws is the page's implicit claim to have just
+    /// checked them, which `observedAgo` otherwise makes on every line.
+    /// See `RecordingDevicePageReReading`.
+    public let factsNote: String?
     public let showsRecordControl: Bool
     public let showsLiveActivity: Bool
     /// The actions offered, in order.
@@ -436,6 +445,7 @@ public struct RecordingDevicePagePresentation: Equatable, Sendable {
                 capabilities: [RecordingDeviceCapabilityLine],
                 capabilityNote: String?,
                 readings: [RecordingDeviceReadingLine] = [],
+                factsNote: String? = nil,
                 showsRecordControl: Bool,
                 showsLiveActivity: Bool,
                 actions: [String],
@@ -447,6 +457,7 @@ public struct RecordingDevicePagePresentation: Equatable, Sendable {
         self.capabilities = capabilities
         self.capabilityNote = capabilityNote
         self.readings = readings
+        self.factsNote = factsNote
         self.showsRecordControl = showsRecordControl
         self.showsLiveActivity = showsLiveActivity
         self.actions = actions
@@ -551,9 +562,16 @@ public enum RecordingDevicePage {
     /// - Parameter now: the clock the reading ages are measured against. A parameter rather
     ///   than a `Date()` inside, because "read 20 minutes ago" is an assertable claim only if
     ///   a scenario can state the moment it is claimed from.
+    /// - Parameter factsNote: what the page knows about the READ that produced `input`'s
+    ///   readings, when that is not "it worked". `RecordingDevicePageFacts.note(for:)` decides
+    ///   it; passing it through here rather than deriving it is deliberate — this function has
+    ///   no way to know whether the value it was handed came off the disk a moment ago or is
+    ///   the one a `NavigationLink` captured, and inventing an answer to that is the class of
+    ///   claim this whole file exists to stop.
     public static func resolve(_ input: RecordingDeviceListInput,
                                canConnect: Bool = true,
                                check: RecordingDeviceCheckState? = nil,
+                               factsNote: String? = nil,
                                now: Date = Date()) -> RecordingDevicePagePresentation {
         let deviceClass = input.deviceClass
         let declared = RecordingDeviceCapabilities(declared: input.declaredCapabilities)
@@ -644,6 +662,10 @@ public enum RecordingDevicePage {
             // no strip reads `Unavailable` any more. See the deleted constant above.
             capabilityNote: nil,
             readings: readings,
+            // ONLY WHERE THERE ARE READINGS TO QUALIFY. A device with no readings strip has no
+            // number for this sentence to be about, and a note under an empty band is an
+            // apology for nothing.
+            factsNote: readings.isEmpty ? nil : factsNote,
             showsRecordControl: deviceClass.carriesRecordControl,
             showsLiveActivity: deviceClass.mayContributeLiveSurface,
             actions: actions,

@@ -431,19 +431,24 @@ struct RecordingDevicePageView: View {
 
     @State private var showingEducation = false
     @State private var confirmingForget = false
-    /// WHAT THE ACCOUNT HOLDS FOR THIS RECORDER NOW, as opposed to when the row was opened.
-    ///
-    /// THE DEFECT THIS CLOSES. `input` is captured when the row's `NavigationLink` is pushed
-    /// (`DeviceScreen.devicePage(for:)`), and a check writes the recorder's charge, its
-    /// firmware and how full it is straight to the account's store. Nothing re-read it:
-    /// `RecordingDeviceListModel.refresh` fires only on the Omi's connection state, its
-    /// battery, `saved` or `sources`, and a check on a record-then-sync recorder touches none
-    /// of those. So the shelf filled with recordings while Battery, Free space and Firmware
-    /// each went on offering "Connect and check now" over numbers already on this phone's disk.
-    ///
-    /// `nil` until a check ends, so a page nothing has happened on renders exactly the value
-    /// it was pushed with.
-    @State private var refreshedInput: RecordingDeviceListInput?
+
+    // WHAT THE ACCOUNT HOLDS FOR THIS RECORDER NOW, as opposed to when the row was opened, IS
+    // NOT STATE ON THIS VIEW ANY MORE.
+    //
+    // THE DEFECT IT CLOSED. `input` is captured when the row's `NavigationLink` is pushed
+    // (`DeviceScreen.devicePage(for:)`), and a check writes the recorder's charge, its
+    // firmware and how full it is straight to the account's store. Nothing re-read it:
+    // `RecordingDeviceListModel.refresh` fires only on the Omi's connection state, its
+    // battery, `saved` or `sources`, and a check on a record-then-sync recorder touches none
+    // of those. So the shelf filled with recordings while Battery, Free space and Firmware
+    // each went on offering "Connect and check now" over numbers already on this phone's disk.
+    //
+    // AND WHY IT MOVED. It was `@State private var refreshedInput: RecordingDeviceListInput?`,
+    // rendered as `refreshedInput ?? input` — a latch, in a `View`, which is to say in the one
+    // place no test in this repository can execute. Two one-line mutations to it shipped green
+    // through `swift test` AND the app-hosted lane on 2026-08-17. It is `RecorderPageModel`
+    // now; see that file's header.
+
     /// WHICH RECORDING THE OWNER IS BEING ASKED ABOUT, by the recorder's own `<date>/<timestamp>`.
     ///
     /// It holds the ID rather than a Bool because the confirmation is per-recording and the
@@ -471,7 +476,16 @@ struct RecordingDevicePageView: View {
     /// same freshly-built model it always did; the proof mount hands in one whose published
     /// state is already the state being photographed, because a simulator has no radio and
     /// therefore no other way to reach an answered shelf.
-    @StateObject private var check: PocketRecorderCheckModel
+    ///
+    /// ONE `@StateObject`, AND THE CHECK IS REACHED THROUGH IT. Two of them cannot be wired to
+    /// each other — the second's initialiser cannot see the first — and the page's whole fix
+    /// is that wiring: `RecorderPageModel` has to be told when an errand ends.
+    @StateObject private var model: RecorderPageModel
+
+    /// The errand model, unchanged for every reader in this body. It is the SAME object the
+    /// page's model holds, so `check.detail`, `check.isRemoving` and the rest read exactly what
+    /// they always did.
+    private var check: PocketRecorderCheckModel { model.check }
 
     init(input: RecordingDeviceListInput,
          device: DeviceManager,
@@ -491,7 +505,9 @@ struct RecordingDevicePageView: View {
         // explicitly and the proof mount is one of them.
         self.brain = brain
         self.onChange = onChange
-        _check = StateObject(wrappedValue: check)
+        _model = StateObject(wrappedValue: RecorderPageModel(check: check,
+                                                            identity: input.identity,
+                                                            isSavedOmi: isSavedOmi))
     }
 
     /// DOES THIS BUILD HAVE A TRANSPORT THAT CAN ACTUALLY ATTACH THIS DEVICE?
@@ -509,18 +525,19 @@ struct RecordingDevicePageView: View {
     /// "Connect and check now" — the shipped copy for this class — and what it does is exactly
     /// what it says: it connects, reads the shelf, and disconnects. It does NOT bring anything
     /// over, and design §6c's absence of a bring-over button is untouched.
-    private var canReachDevice: Bool {
-        isSavedOmi || (input.deviceClass == .recordThenSync && input.isRemembered)
-    }
+    private var canReachDevice: Bool { model.canReach(input) }
 
     /// EVERY SLOT DECIDED IN THE KIT. This view passed `hasEducation: shape == .filePull` and
     /// `canForget: shape != .builtInMic` — two shape branches on a screen whose whole rule is
     /// that no surface switches on shape. Education now follows the negotiated protocol and
     /// forget follows the store record, both inside `resolve`, where Brine can hold them.
-    /// THE DEVICE AS IT IS NOW, not as it was when the row was opened. Everything the page
-    /// renders resolves from this; `input` stays the pushed value so `refreshedInput` is always
-    /// derived from the same identity rather than from itself.
-    private var live: RecordingDeviceListInput { refreshedInput ?? input }
+    /// THE DEVICE AS IT IS NOW, not as it was when the row was opened.
+    ///
+    /// IT TAKES THE CURRENT `input` EVERY TIME, which is what ended the latch. This read
+    /// `refreshedInput ?? input`: the first errand to finish made `refreshedInput` non-nil and
+    /// from that instant every value the list pushed into this page was discarded for the life
+    /// of the screen. `RecordingDevicePageFacts.readings` now picks the later of the two.
+    private var live: RecordingDeviceListInput { model.live(pushed: input) }
 
     /// THE ONLY LIVE STATE A RECORD-THEN-SYNC RECORDER HAS, and the decision is the kit's.
     ///
@@ -529,15 +546,11 @@ struct RecordingDevicePageView: View {
     /// construction. What it does have is a check: one running, or one that answered at an
     /// instant this phone's clock recorded. `swift test` cannot compile `App/`, so the choice
     /// between the three lives in `RecordingDeviceCheckState` where Brine can hold it.
-    private var checkState: RecordingDeviceCheckState {
-        RecordingDeviceCheckState.resolve(isChecking: check.isChecking,
-                                          answeredAt: check.shelfObservedAt,
-                                          readings: live.readings)
-    }
+    private var checkState: RecordingDeviceCheckState { model.checkState(pushed: input) }
 
-    private var page: RecordingDevicePagePresentation {
-        RecordingDevicePage.resolve(live, canConnect: canReachDevice, check: checkState)
-    }
+    /// THE WHOLE PAGE AS ONE VALUE, decided in `RecorderPageModel` where the app-hosted
+    /// scenarios can execute it. Not one branch of it is taken here.
+    private var page: RecordingDevicePagePresentation { model.page(pushed: input) }
 
     /// THE PAGE, WALKED IN THE ORDER THE KIT DECIDED — never in the order these statements
     /// happen to be written in.
@@ -645,17 +658,25 @@ struct RecordingDevicePageView: View {
         .onChange(of: scenePhase) { phase in
             check.sceneChanged(to: PocketErrandScenePhase(phase))
         }
-        // A CHECK THAT ENDED CHANGED WHAT THIS ACCOUNT HOLDS FOR THIS RECORDER, so the page
-        // the check was run from goes and re-reads it.
+        // AND THE LIST BEHIND THIS PAGE, whenever this page has re-read the account's facts.
         //
-        // ON THE FALLING EDGE, and that is the whole event. `PocketRecorderCheck` keeps the
-        // readings BEFORE it attempts the listing, so they are on disk by the time this fires
-        // even for a recorder that answered its charge and then refused to say what it was
-        // holding — which is precisely the run whose numbers a person most wants.
-        .onChange(of: check.isChecking) { checking in
-            guard !checking else { return }
-            reReadWhatTheCheckWrote()
-        }
+        // THE RE-READ ITSELF IS NOT WIRED HERE ANY MORE. It was:
+        //
+        //     .onChange(of: check.isChecking) { checking in
+        //         guard !checking else { return }
+        //         reReadWhatTheCheckWrote()
+        //     }
+        //
+        // — an edge comparison inside a body nothing in this repository can execute. Inverting
+        // that one `!` moved the re-read to the RISING edge, so a finished check's numbers
+        // reached the page never, and it shipped green through `swift test` (1536/0) AND the
+        // app-hosted lane (7/0) on 2026-08-17. It covered one of the five errands besides.
+        // `PocketRecorderCheckModel.finishErrand` is the one stop all five pass through, and
+        // `RecorderPageModel` listens there. What is left here is telling the LIST: its rows
+        // carry the same battery this errand measured and it composes them from the same
+        // store, so leaving it stale would put two answers to one question on two screens a
+        // back-swipe apart.
+        .onChange(of: model.factsGeneration) { _ in onChange() }
     }
 
     /// ONE BAND. The dispatch is exhaustive over `RecorderPageBand`, so a band added to the
@@ -703,30 +724,6 @@ struct RecordingDevicePageView: View {
                 .accessibilityIdentifier("recorder-light-sentence")
                 .padding(.vertical, GrainSpacing.x3)
                 .overlay(alignment: .bottom) { hairline }
-        }
-    }
-
-    /// THE RE-READ, OFF THE MAIN ACTOR. `RecordingDeviceStore.current()` resolves the account
-    /// binding — a process-wide lock plus an on-disk registry read — and then decodes a JSON
-    /// file, which is the per-row main-actor disk read `LazyView` exists to prevent.
-    ///
-    /// THE TASK INHERITS THE MAIN ACTOR, for the reason `forget()` names 100 lines down: only
-    /// the disk read is detached, because `onChange` is a main-actor callback owned by the
-    /// screen above and handing it to a detached task makes it a `sending` closure crossing an
-    /// isolation boundary, which does not compile — and `swift test` cannot compile `App/` to
-    /// say so.
-    private func reReadWhatTheCheckWrote() {
-        let pushed = input
-        Task {
-            let refreshed = await Task.detached(priority: .utility) {
-                RecordingDevicePageFacts.refreshed(pushed)
-            }.value
-            refreshedInput = refreshed
-            // AND THE LIST BEHIND THIS PAGE. Its rows carry the battery this same check just
-            // measured, and it composes them from the same store — so a check that changed
-            // this page and left the list it was opened from stale would put two answers to
-            // one question on two screens a back-swipe apart.
-            onChange()
         }
     }
 
@@ -809,6 +806,21 @@ struct RecordingDevicePageView: View {
                     Text(shared)
                         .grainTextStyle(.caption)
                         .foregroundStyle(GrainColor.textFaint)
+                }
+
+                // AND WHEN THE PHONE COULD NOT READ THIS ACCOUNT'S OWN RECORD OF THEM, THAT.
+                //
+                // Directly under the age, because it is the age it qualifies: the numbers are
+                // still the last thing the recorder said, and `observedAgo` above would
+                // otherwise be the page claiming it had just gone and confirmed them. The
+                // sentence is the kit's — `RecordingDevicePageFacts.factsUnreadableNote` —
+                // and which of the three re-read outcomes earns it is decided there too.
+                if let note = page.factsNote {
+                    Text(note)
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.textMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("recorder-facts-note")
                 }
 
                 // WHAT NOBODY HAS ASKED FOR YET, NAMED — never dropped — and ONE way to ask.
@@ -1471,6 +1483,15 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// a stale or absent reading changes the reset's primary action, never its enabled state.
     @Published private(set) var shelfObservedAt: Date?
 
+    /// WHAT TO TELL WHEN AN ERRAND HAS FINISHED CHANGING THINGS.
+    ///
+    /// `RecorderPageModel` sets this and re-reads the account's facts for this recorder. It is
+    /// a callback rather than a published flag on purpose: a flag has an EDGE, and an edge is a
+    /// comparison somebody has to get the right way round in a SwiftUI body that nothing in
+    /// this repository can execute. The shipped page did get it right (`guard !checking`) and
+    /// inverting that one character shipped green through every gate this app has.
+    var onErrandFinished: (() -> Void)?
+
     /// A REMOVAL IS IN FLIGHT. Same model as the check and the bring-over for the same reason:
     /// one radio, one idea of whether it is busy.
     @Published private(set) var isRemoving = false
@@ -1877,6 +1898,19 @@ final class PocketRecorderCheckModel: ObservableObject {
         guard let subject = runningErrandSubject else { return }
         runningErrandSubject = nil
         DoorLog.shared.command(PocketErrandCommand.stop, subject: subject, outcome: outcome)
+        // AND THE PAGE GOES AND RE-READS WHAT THAT ERRAND CHANGED.
+        //
+        // THIS IS THE CHOKE POINT AND THAT IS WHY IT IS HERE. The page used to re-read on the
+        // falling edge of `isChecking`, which covered exactly one of the five errands that
+        // reach this function — so a REMOVAL, whose whole purpose is to reclaim room and which
+        // re-reads how full the recorder is on its own session
+        // (`PocketRecorderClearing.swift`, `recordObservedFacts` on `.removed`), wrote a fresh
+        // free-space figure to the account's store while the one number the owner was staring
+        // at sat frozen on the screen they were staring at it on.
+        //
+        // ONCE PER ERRAND, INSIDE THE TOKEN GUARD, so a cancel that raced the finish cannot
+        // fire it twice — and an errand that never started cannot fire it at all.
+        onErrandFinished?()
     }
 
     /// A CLOSED TOKEN, never the diagnostic sentence. The wire form is space-separated

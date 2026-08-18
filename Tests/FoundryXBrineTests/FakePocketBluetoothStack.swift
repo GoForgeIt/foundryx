@@ -177,6 +177,16 @@ final class FakePocketBLEStack: @unchecked Sendable {
     /// not over a plausible-looking 8 GB somebody typed.
     static let capacityKilobytes = 61_032
     static let usedKilobytes = 12_000
+    /// WHAT IT IS HOLDING RIGHT NOW, IN ITS OWN KILOBYTES — `Self.usedKilobytes` at rest, less
+    /// whatever has actually left this recorder since.
+    ///
+    /// A FIXED ANSWER MADE ONE SCENARIO UNWRITABLE. `APP&SPACE` used to answer the static
+    /// figure whatever the shelf held, so "removing a recording changes the free-space figure
+    /// on the page" could only ever assert that an unchanged number was still unchanged —
+    /// vacuously true whether or not anything re-read it. A recorder that deletes a file frees
+    /// room; this one does too, and only on the branch that genuinely removes something.
+    /// Every scenario that removes nothing sees exactly the number it always saw.
+    private var usedKilobytesNow = FakePocketBLEStack.usedKilobytes
     private let map: PocketCharacteristicMap
 
     /// HOW A DEVICE FAILS TO BE REACHED, as the shapes a real radio actually produces. The
@@ -509,7 +519,10 @@ final class FakePocketBLEStack: @unchecked Sendable {
             // client was built from (`PocketBLEProtocolClientTests` pins the same value).
             // Inventing a plausible 8 GB here would make every scenario about free space an
             // assertion over a number nobody measured.
-            response = "MCU&SPA&\(Self.usedKilobytes)&\(Self.capacityKilobytes)"
+            lock.lock()
+            let used = usedKilobytesNow
+            lock.unlock()
+            response = "MCU&SPA&\(used)&\(Self.capacityKilobytes)"
         } else if command.hasPrefix("D&") {
             // THE REMOVAL, AS THE ONE DEVICE ANYBODY HAS MEASURED ANSWERS IT.
             //
@@ -535,7 +548,15 @@ final class FakePocketBLEStack: @unchecked Sendable {
                 let index = inventory.firstIndex {
                     $0.date == parts[0] && $0.timestamp == parts[1]
                 }
-                if let index { inventory.remove(at: index) }
+                if let index {
+                    // THE ROOM COMES BACK, and it comes back by the size of the file that
+                    // left — never a round number. A scenario about free space changing has to
+                    // be about arithmetic over the recorder's own figures, or it is about a
+                    // constant somebody typed.
+                    let freed = max(1, inventory[index].sizeBytes / 1024)
+                    usedKilobytesNow = max(0, usedKilobytesNow - freed)
+                    inventory.remove(at: index)
+                }
                 lock.unlock()
                 response = index == nil ? "MCU&D&ERR" : "MCU&D"
             }

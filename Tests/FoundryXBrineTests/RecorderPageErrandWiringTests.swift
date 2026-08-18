@@ -45,12 +45,34 @@ final class RecorderPageErrandWiringTests: XCTestCase {
         // here is the recreated-every-body-pass defect that loses a running errand), and
         // PRODUCTION must still get a real one without asking — a seam whose default was
         // removed would hand every live call site whatever the last test passed.
-        XCTAssertTrue(code.contains("@StateObject private var check"),
-                      "no view owns the check model, so nothing on this page can reach a recorder")
-        XCTAssertTrue(code.contains("_check = StateObject(wrappedValue: check)")
-                        || code.contains("@StateObject private var check = PocketRecorderCheckModel()"),
-                      "the check model is declared but never initialised into the view's own "
+        // THE OWNERSHIP IS ONE LEVEL DOWN NOW, AND THE PROPERTY IS UNCHANGED.
+        //
+        // The view held `@StateObject private var check` directly. It holds
+        // `@StateObject private var model: RecorderPageModel` and reaches the errand model
+        // through `model.check`, because two `@StateObject`s cannot be wired to each other and
+        // the wiring is the fix: `RecorderPageModel` has to be told when an errand ends, so a
+        // REMOVAL refreshes the free-space figure the owner is watching. What must still hold
+        // is exactly what held before — the page OWNS the object graph with `@StateObject` (an
+        // `@ObservedObject` here is the recreated-every-body-pass defect that loses a running
+        // errand), and the check must survive a body pass inside it.
+        XCTAssertTrue(code.contains("@StateObject private var model"),
+                      "no view owns the recorder page's model, so nothing on this page can "
+                        + "reach a recorder or hold an errand across a body pass")
+        XCTAssertTrue(code.contains("_model = StateObject(wrappedValue: RecorderPageModel("),
+                      "the page's model is declared but never initialised into the view's own "
                         + "storage, so the page holds no errand across a body pass")
+        // THE OTHER HALF OF THE PAGE, NAMED — never a glob over `App/`.
+        let pageModel = AppSourceTree.code(
+            of: try String(contentsOf: AppSourceTree.repoRoot
+                .appendingPathComponent("App/RecorderPageModel.swift")))
+        XCTAssertTrue(pageModel.contains("let check: PocketRecorderCheckModel"),
+                      "`RecorderPageModel` no longer holds the check model, so the object the "
+                        + "view owns across body passes is not the object the errand runs on")
+        XCTAssertTrue(pageModel.contains("check.onErrandFinished = "),
+                      "`RecorderPageModel` is not told when an errand ends, so nothing re-reads "
+                        + "what a check, a transfer or a REMOVAL just wrote to this account's "
+                        + "store — and the free-space figure a person watches while they clear "
+                        + "room is the one number that never moves")
         XCTAssertTrue(code.contains("check: PocketRecorderCheckModel = PocketRecorderCheckModel()")
                         || code.contains("@StateObject private var check = PocketRecorderCheckModel()"),
                       "the model is injectable with NO production default, so a live recorder "

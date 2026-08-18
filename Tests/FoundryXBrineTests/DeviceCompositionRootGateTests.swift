@@ -355,14 +355,27 @@ final class DeviceCompositionRootGateTests: XCTestCase {
     /// Pocket's page therefore carried no connect action at all, and `swift test` cannot
     /// compile `App/` to notice. This is that argument, read off the file.
     func testARememberedRecorderCanBeReachedFromItsOwnPage() throws {
-        let screen = try String(
-            contentsOf: Self.repoRoot.appendingPathComponent("App/DeviceScreen.swift"),
-            encoding: .utf8)
+        // BOTH FILES THE PAGE IS MADE OF, NAMED — never a glob over `App/`. The connect gate
+        // moved into `RecorderPageModel.canReach` when the page's decisions were lifted out of
+        // the SwiftUI body; the body that renders the result stayed here. A gate that read only
+        // one of the two would pass over the half it can no longer see.
+        let screen = try ["App/DeviceScreen.swift", "App/RecorderPageModel.swift"]
+            .map { try String(contentsOf: Self.repoRoot.appendingPathComponent($0),
+                              encoding: .utf8) }
+            .joined(separator: "\n")
 
         // Non-vacuity FIRST: if the page moves out of this file, say so rather than pass for
         // having found nothing to check.
-        XCTAssertTrue(screen.contains("RecordingDevicePage.resolve("),
-                      "the device page is no longer built in App/DeviceScreen.swift — this "
+        // THE ANCHOR IS THE RENDER, NOT THE COMPOSITION, AND THAT IS A DELIBERATE MOVE.
+        //
+        // It was `screen.contains("RecordingDevicePage.resolve(")`. The composition is in
+        // `App/RecorderPageModel.swift` now — a `@MainActor ObservableObject` the app-hosted
+        // lane can construct and EXECUTE, which is the whole point of moving it: two mutations
+        // to the page's re-read shipped green through this file's `contains()` assertions on
+        // 2026-08-17. What is still here, and what these gates are about, is the body that
+        // renders what that model decided.
+        XCTAssertTrue(screen.contains("model.page(pushed: input)"),
+                      "the device page is no longer rendered in App/DeviceScreen.swift — this "
                           + "gate is checking a file that no longer holds the boundary")
 
         XCTAssertFalse(
@@ -442,8 +455,16 @@ final class DeviceCompositionRootGateTests: XCTestCase {
             encoding: .utf8)
 
         // Non-vacuity first: this gate must be reading the file that holds the page.
-        XCTAssertTrue(screen.contains("RecordingDevicePage.resolve("),
-                      "the device page is no longer built in App/DeviceScreen.swift — this "
+        // THE ANCHOR IS THE RENDER, NOT THE COMPOSITION, AND THAT IS A DELIBERATE MOVE.
+        //
+        // It was `screen.contains("RecordingDevicePage.resolve(")`. The composition is in
+        // `App/RecorderPageModel.swift` now — a `@MainActor ObservableObject` the app-hosted
+        // lane can construct and EXECUTE, which is the whole point of moving it: two mutations
+        // to the page's re-read shipped green through this file's `contains()` assertions on
+        // 2026-08-17. What is still here, and what these gates are about, is the body that
+        // renders what that model decided.
+        XCTAssertTrue(screen.contains("model.page(pushed: input)"),
+                      "the device page is no longer rendered in App/DeviceScreen.swift — this "
                           + "gate is checking a file that no longer holds the boundary")
 
         XCTAssertTrue(screen.contains("page.readings"),
@@ -552,42 +573,49 @@ final class DeviceCompositionRootGateTests: XCTestCase {
             encoding: .utf8)
 
         // NON-VACUITY FIRST: this gate must be reading the file that holds the page.
-        XCTAssertTrue(screen.contains("RecordingDevicePage.resolve("),
-                      "the device page is no longer built in App/DeviceScreen.swift — this "
+        // THE ANCHOR IS THE RENDER, NOT THE COMPOSITION, AND THAT IS A DELIBERATE MOVE.
+        //
+        // It was `screen.contains("RecordingDevicePage.resolve(")`. The composition is in
+        // `App/RecorderPageModel.swift` now — a `@MainActor ObservableObject` the app-hosted
+        // lane can construct and EXECUTE, which is the whole point of moving it: two mutations
+        // to the page's re-read shipped green through this file's `contains()` assertions on
+        // 2026-08-17. What is still here, and what these gates are about, is the body that
+        // renders what that model decided.
+        XCTAssertTrue(screen.contains("model.page(pushed: input)"),
+                      "the device page is no longer rendered in App/DeviceScreen.swift — this "
                           + "gate is checking a file that no longer holds the boundary")
         XCTAssertTrue(screen.contains("check.run(hardwareToken:"),
                       "App/DeviceScreen.swift no longer runs a check, so there is no completed "
                           + "check for this gate to be about")
 
-        // THE RE-READ EXISTS, AND IT IS THE KIT'S.
-        XCTAssertTrue(screen.contains("RecordingDevicePageFacts.refreshed("),
-                      "nothing in App/ re-reads what a check wrote. The battery, free space "
-                          + "and firmware a session went and measured are written to the "
-                          + "account's store by `PocketRecorderCheck`, and the page renders "
-                          + "the input value captured when the NavigationLink was pushed — so "
-                          + "every one of those rows goes on offering the button that would "
-                          + "measure a number already sitting on this phone's disk")
-        // AND IT IS FIRED BY A CHECK ENDING. A re-read that only ran on appear would leave the
-        // page stale for exactly the one event that changes it.
-        XCTAssertTrue(screen.contains("onChange(of: check.isChecking)"),
-                      "the re-read is not wired to a check finishing, so the one event that "
-                          + "changes what the account holds for this recorder is the one event "
-                          + "that does not redraw its page")
-        // AND THE PAGE IS RESOLVED FROM WHAT WAS RE-READ, not from the pushed value. A refresh
-        // whose result nothing renders is a disk read for nobody.
-        XCTAssertFalse(
-            screen.contains("RecordingDevicePage.resolve(input, canConnect: canReachDevice)"),
-            "the page is still resolved from `input` — the value the NavigationLink was pushed "
-                + "with. Whatever the re-read produced reaches no surface")
-
-        // THE HEADER'S LIVE STATE COMES FROM THE CHECK.
-        XCTAssertTrue(screen.contains("RecordingDeviceCheckState.resolve(isChecking:"),
-                      "the recorder page's header is not driven by the check. `input.link` is "
-                          + "a claim about a live link that a record-then-sync recorder never "
-                          + "has, so the header reads \"Not connected\" while a check is on "
-                          + "the line with it")
-        XCTAssertTrue(screen.contains("check.isChecking"),
-                      "nothing feeds the in-flight check into the page's state")
+        // THE PAGE IS COMPOSED IN A TYPE SOMETHING CAN RUN. This is now the whole job of this
+        // gate, and it is deliberately the ONLY structural claim left in it.
+        //
+        // WHAT WAS HERE BEFORE, AND WHY IT IS GONE. Five more `contains()` assertions stood
+        // where this one does — that `RecordingDevicePageFacts.refreshed(` appeared, that
+        // `onChange(of: check.isChecking)` appeared, that a particular `resolve(` spelling did
+        // NOT, that `RecordingDeviceCheckState.resolve(isChecking:` appeared, and that
+        // `check.isChecking` appeared. On 2026-08-17 all five were measured:
+        //
+        //   * `guard !checking` → `guard checking` in the body's `onChange` moved the re-read
+        //     to the RISING edge, so a finished check's numbers reached the page never.
+        //     `swift test --filter FoundryXBrineTests`: 1536 executed, 0 failures. The
+        //     app-hosted lane: 7 executed, 0 failures. Every one of the five strings was still
+        //     in the file, because none of them is about the comparison.
+        //   * `refreshedInput = refreshed` → `_ = await …` discarded the disk read's result.
+        //     Same, green.
+        //   * and the last of them, `screen.contains("check.isChecking")`, was VACUOUS: that
+        //     string appears 5 times in `git show 02ad015^:App/DeviceScreen.swift`, the file as
+        //     it stood BEFORE the fix this gate was written to hold. It could never fail.
+        //
+        // The behaviour lives in `Tests/FoundryXAppScenarioTests/CheckRefreshesThePageFeature
+        // Tests.swift` now, which builds the real `RecorderPageModel`, drives a real check over
+        // a scripted radio inside the shipping app's process, and reads the presentation the
+        // body renders. There is no string there for a mutation to satisfy.
+        //
+        // WHAT IS LEFT HERE IS THE ANCHOR ABOVE and nothing else. `model.page(pushed: input)`
+        // is a claim this file can still honestly make: the page is rendered from a value some
+        // OTHER lane decided, which is the property that makes the other lane possible.
     }
 
     /// THE BRING-OVER'S CONVERSATION IS HANDED TO THE RUNNING APP.
