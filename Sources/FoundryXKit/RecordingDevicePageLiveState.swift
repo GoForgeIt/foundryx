@@ -125,26 +125,124 @@ public extension RecordingDeviceListInput {
     }
 }
 
+// MARK: - What the re-read actually found
+
+/// THE THREE ANSWERS A RE-READ CAN GIVE, KEPT APART.
+///
+/// THE DEFECT THIS TYPE EXISTS TO END. `RecordingDevicePageFacts.refreshed` was
+///
+///     guard let store = RecordingDeviceStore.current(),
+///           let records = try? store.records(),
+///           let record = records.first(where: { $0.identity == input.identity })
+///     else { return input }
+///
+/// — three conditions and ONE silent `return input`. Exactly one of the three justifies that
+/// answer. A recorder the store no longer holds keeps what it was pushed with, deliberately:
+/// the alternative is a page blanking its own numbers one frame before it is dismissed, a
+/// flash of "nobody ever asked" over a device the account is in the middle of deleting.
+///
+/// The other two are not that. `RecordingDeviceStore.current()` returning nil means NO ACCOUNT
+/// SCOPE RESOLVED — the process could not say whose recorder this is. `try? store.records()`
+/// swallowing a throw means the account's file is on disk and UNREADABLE, which
+/// `readLocked()` goes out of its way to raise rather than report as "no devices", precisely
+/// because reporting it as absence "would silently un-pair every device the person owns". Both
+/// were then rendered as the same confident page: the last numbers the recorder stated, under
+/// "read 4 minutes ago", with no indication that the phone had just failed to check.
+///
+/// `observedAt` IS THE RECORDER'S CLOCK-TIME ON THIS PHONE, not the freshness of the read. So
+/// a stale figure under a confident age is not a rounding problem — it is the page asserting
+/// something it did not verify.
+public enum RecordingDevicePageReReading: Equatable, Sendable {
+    /// The account's facts for this recorder, as they stand on disk right now.
+    case refreshed([String: RecordingDeviceReading])
+    /// The store answered, and it is not holding this recorder any more. The ONE condition
+    /// under which keeping the pushed value is the honest answer.
+    case deviceNotFound
+    /// No account binding resolved, so nothing could be asked on anyone's behalf.
+    case noAccountScope
+    /// The account's device file exists and could not be decoded.
+    case storeUnreadable(String)
+}
+
 public enum RecordingDevicePageFacts {
 
-    /// WHAT THE ACCOUNT HOLDS FOR THIS RECORDER RIGHT NOW, folded back into the value the page
-    /// renders from.
+    /// THE SENTENCE A PAGE OWES SOMEBODY WHOSE FACTS IT COULD NOT READ.
+    ///
+    /// It does not blank the numbers — they are still the last thing the recorder actually
+    /// said, and they are the most useful thing on the screen. What it withdraws is the
+    /// page's implicit claim to have just checked them.
+    public static let factsUnreadableNote =
+        "Solleva couldn't read what this account has saved for this recorder just now, so "
+        + "these numbers may be older than they say."
+
+    /// WHAT THE ACCOUNT HOLDS FOR THIS RECORDER RIGHT NOW.
     ///
     /// OFF THE MAIN ACTOR AT EVERY CALL SITE, and it is not optional politeness:
     /// `RecordingDeviceStore.current()` resolves the account binding — a process-wide lock plus
     /// an on-disk admission-registry read — and then decodes a JSON file. That is the per-row
     /// main-actor disk read `LazyView` exists to prevent, and it belongs on a utility queue in
-    /// response to a check ending, never inside a body pass.
+    /// response to an errand ending, never inside a body pass.
     ///
-    /// A DEVICE THE STORE NO LONGER HOLDS KEEPS WHAT IT WAS PUSHED WITH. The alternative is a
-    /// page that blanks its own numbers at the moment the owner forgets the recorder, one
-    /// frame before the page is dismissed — a flash of "nobody ever asked" over a device the
-    /// account is in the middle of deleting. Unreadable store, same answer, same reason.
-    public static func refreshed(_ input: RecordingDeviceListInput) -> RecordingDeviceListInput {
-        guard let store = RecordingDeviceStore.current(),
-              let records = try? store.records(),
-              let record = records.first(where: { $0.identity == input.identity })
-        else { return input }
-        return input.withReadings(record.readings)
+    /// IT TAKES AN IDENTITY, NOT THE PAGE'S INPUT, so that nothing about what the page is
+    /// currently rendering can reach the disk read — and so the answer cannot be quietly
+    /// folded back into the caller's stale value the way `refreshed(_:)` did.
+    public static func reRead(_ identity: RecordingDeviceIdentity)
+        -> RecordingDevicePageReReading {
+        guard let store = RecordingDeviceStore.current() else { return .noAccountScope }
+        let records: [RecordingDeviceRecord]
+        do {
+            records = try store.records()
+        } catch {
+            return .storeUnreadable(error.localizedDescription)
+        }
+        guard let record = records.first(where: { $0.identity == identity })
+        else { return .deviceNotFound }
+        return .refreshed(record.readings)
+    }
+
+    /// THE READINGS THE PAGE RENDERS, out of the value the list pushed into it and the value a
+    /// re-read produced.
+    ///
+    /// THE DEFECT THIS ENDS. The page held the re-read in `@State private var refreshedInput`
+    /// and rendered `refreshedInput ?? input`. That latches: the first errand to finish makes
+    /// it non-nil, and from that instant every value the list pushes into the page is
+    /// overridden for the life of the screen — so a number the LIST measured after the page's
+    /// own last re-read could never be shown. One stale read, and the page was stale forever.
+    ///
+    /// NEWEST WINS, AND WHOLESALE. Both maps are snapshots of the same account store, so the
+    /// later snapshot is simply the better one and its absences are real absences. Merging
+    /// them per key would resurrect a fact the account has since dropped — the same reason
+    /// `withReadings` replaces rather than merges while the STORE merges.
+    ///
+    /// A MAP WITH NOTHING IN IT LOSES TO ONE THAT HAS SOMETHING. `nil` is not an instant, and
+    /// the page's own rule for a recorder the store cannot speak for is to keep what it was
+    /// pushed with rather than flash "nobody ever asked" — see `deviceNotFound` above.
+    /// A RE-READ THAT FAILED TAKES NOTHING AWAY, and that is why this takes the last map that
+    /// was successfully read rather than the latest outcome. A page that lost its numbers
+    /// because it could not confirm them would be throwing away the only true thing it has —
+    /// the last figures the recorder itself stated — over a problem with a file on this phone.
+    /// What a failed read withdraws is the CLAIM to have just checked, and `note(for:)` owns
+    /// that.
+    public static func readings(pushed: [String: RecordingDeviceReading],
+                                lastRead: [String: RecordingDeviceReading]?)
+        -> [String: RecordingDeviceReading] {
+        guard let found = lastRead else { return pushed }
+        guard let heardInPushed = pushed.values.map(\.observedAt).max() else { return found }
+        guard let heardInReRead = found.values.map(\.observedAt).max() else { return pushed }
+        return heardInPushed > heardInReRead ? pushed : found
+    }
+
+    /// WHAT THE PAGE SAYS ABOUT THE READ ITSELF, or nothing when there is nothing to say.
+    ///
+    /// `nil` for a re-read that has not happened and for one that found the account's facts.
+    /// `nil` for `deviceNotFound` too: the account answered, and it is not holding this
+    /// recorder — which the page states by other means the moment the list drops the row.
+    public static func note(for reRead: RecordingDevicePageReReading?) -> String? {
+        switch reRead {
+        case .none, .refreshed, .deviceNotFound:
+            return nil
+        case .noAccountScope, .storeUnreadable:
+            return factsUnreadableNote
+        }
     }
 }

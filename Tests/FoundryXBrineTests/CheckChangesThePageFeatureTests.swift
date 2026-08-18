@@ -157,7 +157,15 @@ private actor CheckRefreshWorld {
             // WHAT THE PAGE DOES WHEN A CHECK ENDS, and the one line this whole scenario is
             // about. `App/DeviceScreen.swift` runs the same call from the same event; the gate
             // in `DeviceCompositionRootGateTests` is what holds it there.
-            pageInput = RecordingDevicePageFacts.refreshed(try requirePushedInput())
+            let pushed = try requirePushedInput()
+            let reRead = RecordingDevicePageFacts.reRead(pushed.identity)
+            guard case .refreshed(let found) = reRead else {
+                throw BrineStepError(
+                    "the re-read did not find this account's facts for the recorder it just "
+                        + "checked — it answered \(reRead)")
+            }
+            pageInput = pushed.withReadings(
+                RecordingDevicePageFacts.readings(pushed: pushed.readings, lastRead: found))
 
         case "a check against that recorder is in flight":
             check = .checking
