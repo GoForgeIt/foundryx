@@ -38,6 +38,10 @@ struct SettingsScreen: View {
     @State private var agentName =
         AmbientPrefs.agentName() ?? ""
     @State private var fullContextGrading = AmbientPrefs.fullContextGrading()
+    /// "Preview a notification" used to call `AmbientNotifier.postPreview()` bare and
+    /// discard the outcome — the same defect the onboarding step was fixed for, one screen
+    /// over. The row now says what the phone did.
+    @StateObject private var previewNudge = AmbientSampleNudge()
     /// Intelligent Action: surface OTHER people's action lines inline (ON) vs
     /// collect them under "Heard from others" (OFF, the owner-first default).
     @State private var othersInline = ActionSurfacePolicy.othersInline()
@@ -262,9 +266,16 @@ struct SettingsScreen: View {
                         fullContextGrading = AmbientPrefs.fullContextGrading()
                     }
 
-                    Button("Preview a notification") { AmbientNotifier.postPreview() }
-                    Text("See how a nudge feels before anything real triggers.")
-                        .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                    Button("Preview a notification") { previewNudge.fireSample() }
+                    if !previewNudge.hasFired {
+                        Text("See how a nudge feels before anything real triggers.")
+                            .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                    } else {
+                        // Same decision, same words, same source of truth as the onboarding
+                        // step: FoundryXKit, keyed on what the phone actually reported.
+                        Text(previewNudge.said.detail)
+                            .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+                    }
 
                     NavigationLink("What it's noticing") { AmbientDebugView() }
                 }

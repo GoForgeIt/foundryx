@@ -49,8 +49,14 @@ enum RecorderPageSurface {
     /// EVERY VIEW TYPE THAT IS THE RECORDER PAGE, with the file it lives in. The proof view
     /// is in the population deliberately: a sentence invented there would appear in the
     /// build's picture of the page and would be read as the page's own.
+    /// `PocketRecordingDetailSheet` IS IN THE POPULATION BECAUSE IT IS PART OF THE PAGE. It is
+    /// the page about one recording, reached by tapping a row on the shelf, and every sentence
+    /// and colour in it is read as the recorder page's own. Left out, a whole screen's worth of
+    /// copy would have been invented in a body while this gate went on reporting the surface
+    /// clean — which is precisely the shape of the defect it was built for.
     static let renderedTypes: [(type: String, file: String)] = [
         ("RecordingDevicePageView", pageFile),
+        ("PocketRecordingDetailSheet", pageFile),
         ("RecorderPageProof", proofFile),
     ]
 
@@ -66,7 +72,102 @@ enum RecorderPageSurface {
         "PocketKeyCustodyPresentation",
         "PocketRecorderCustodyPromise",
         "DeviceMetricsPresentation",
+        "PocketRecordingDetailPresentation",
+        "PocketRemoveFromRecorderPresentation",
+        "PocketPresencePresentation",
     ]
+
+    /// THE EXISTENCE HALF, PER BODY RATHER THAN OVER THE HEAP.
+    ///
+    /// `the page still says things that were written where they can be checked` sums the
+    /// references across every body and asks for more than zero. That is enough to stop the
+    /// prohibition passing on a page that says nothing, and it is NOT enough to stop it passing
+    /// on a NEW body that says nothing — one silent view hides behind the other two's totals.
+    /// This is the per-body form: a body that DRAWS WORDS must take at least one of them from
+    /// the kit.
+    ///
+    /// THE QUALIFIER IS LOAD-BEARING AND WAS MEASURED, not assumed. `RecorderPageProof` is a
+    /// MOUNT — it constructs the shipped page inside a `NavigationStack` and draws no text of
+    /// its own — so a flat "every body cites the kit" rule reds on it for being what it is. The
+    /// hole this closes is a body that renders words while citing no kit type: the literal
+    /// prohibition cannot see a `Text(someConstant)` whose constant is declared OUTSIDE the
+    /// declaration being scanned, and that is the one way a sentence can be invented in `App/`
+    /// and still pass.
+    static let wordDrawingElements = ["Text(", "Button(", "Label(", "navigationTitle("]
+
+    static func bodiesRenderingNoKitSentence() throws -> [String] {
+        var silent: [String] = []
+        for (type, file) in renderedTypes {
+            guard let body = declarationBody(of: type, in: try text(of: file)) else {
+                silent.append("\(file): declares no \(type)")
+                continue
+            }
+            let code = AppSourceTree.code(of: body)
+            guard wordDrawingElements.contains(where: { code.contains($0) }) else { continue }
+            if presentationReferences(in: body).isEmpty { silent.append("\(file) \(type)") }
+        }
+        return silent
+    }
+
+    /// The other direction: how many of the read bodies actually draw words. Without it the
+    /// rule above is satisfied by a surface where nothing draws anything.
+    static func bodiesThatDrawWords() throws -> [String] {
+        var drawing: [String] = []
+        for (type, file) in renderedTypes {
+            guard let body = declarationBody(of: type, in: try text(of: file)) else { continue }
+            let code = AppSourceTree.code(of: body)
+            if wordDrawingElements.contains(where: { code.contains($0) }) { drawing.append(type) }
+        }
+        return drawing
+    }
+
+    // MARK: - What one shelf row can be touched with
+
+    /// WHETHER THE SHELF ROW IS A CONTROL AT ALL.
+    ///
+    /// THE DEFECT, MEASURED. The row was a `VStack` of `HStack`s whose only interactive element
+    /// was `Remove it from the recorder`, drawn behind
+    /// `PocketRemoveFromRecorderPresentation.isOffered` — false for all nineteen recordings on
+    /// `PKT01_BLUE_26079bc5`, because not one of them has ever been brought over. So on the one
+    /// device this page was built for, not a single row had a single thing a finger could do.
+    ///
+    /// This reads the `ForEach` over the shelf's rows and asks whether its content opens with a
+    /// `Button`. It is deliberately NOT "the body contains a Button somewhere": the page has
+    /// four other buttons above the list, and every one of them would satisfy that.
+    static func shelfRowBody() throws -> String? {
+        let body = declarationBody(of: "RecordingDevicePageView",
+                                   in: try text(of: pageFile)) ?? ""
+        let code = AppSourceTree.code(of: body)
+        guard let start = code.range(of: "detail.manifest.rows.enumerated()") else { return nil }
+        // From the ForEach's opening brace, balanced to its close: the row's whole content.
+        guard let open = code.range(of: "{", range: start.upperBound..<code.endIndex)
+        else { return nil }
+        var depth = 0
+        var out = String()
+        for c in code[open.lowerBound...] {
+            if c == "{" { depth += 1 }
+            if c == "}" {
+                depth -= 1
+                if depth == 0 { return out }
+            }
+            out.append(c)
+        }
+        return nil
+    }
+
+    /// The first SwiftUI element the row's content declares, as a bare word. `Button` means the
+    /// row itself is what the finger presses; anything else means the row is a readout with, at
+    /// best, a control buried inside it.
+    static func firstElementOfTheShelfRow() throws -> String? {
+        guard let row = try shelfRowBody() else { return nil }
+        let trimmed = row.drop(while: { $0 == "{" || $0.isWhitespace })
+        // `in` closes the ForEach's parameter list; the content starts after it.
+        let afterIn = trimmed.range(of: "in").map { trimmed[$0.upperBound...] } ?? trimmed
+        return afterIn
+            .drop(while: { $0.isWhitespace })
+            .prefix(while: { $0.isLetter || $0.isNumber || $0 == "_" })
+            .description
+    }
 
     // MARK: - Reading a file
 
