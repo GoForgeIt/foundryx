@@ -26,7 +26,7 @@ Feature: Pocket is a stored-file recording device in the one device list
     Then its hero reports the link as connected with battery and firmware
     And no recording pill, recording state, or Live Activity surface is present
 
-  Scenario: The storage manifest distinguishes custody and states the size the recorder gave
+  Scenario: The storage manifest distinguishes custody and states only a length somebody measured
     Given recorder files that FoundryX has and files only on the recorder
     When the storage manifest presentation is built
     Then each recording shows its custody, and how long it runs only if it was measured
