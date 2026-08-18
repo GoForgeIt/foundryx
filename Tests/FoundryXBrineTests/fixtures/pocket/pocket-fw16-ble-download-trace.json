@@ -1,0 +1,3061 @@
+{
+  "fixture": "pocket-fw16-ble-download-trace",
+  "version": 1,
+  "captured_utc": "2026-08-18",
+  "captured_by": "an instrumented COPY of pocket-libre (MIT) run from this Mac over CoreBluetooth via bleak; the reference at ~/Development/pocket-libre was NOT modified",
+  "device": {
+    "advertised_name": "PKT01_BLUE_26079bc5",
+    "device_firmware": "1.6",
+    "wifi_firmware": "V8",
+    "peripheral_uuid": "08322547-B7D1-0875-DA0C-0CE9BC1AE529",
+    "negotiated_att_mtu": 247,
+    "battery_percent_at_capture": 100
+  },
+  "recording": {
+    "date": "2026-08-07",
+    "timestamp": "20260807142852",
+    "listing_number": 4,
+    "announced_bytes": 19770,
+    "note": "The LISTING number (4) and the ANNOUNCED byte count (19770) are different units. Nothing may be sized, bounded, or timed from the listing number."
+  },
+  "WHAT_IS_ELIDED_AND_WHY": [
+    "Every audio notification's BODY. The payload is Nick's real recording. Each audio event keeps its arrival time and its byte LENGTH, which is all a replay needs.",
+    "The session key. The authentication frame is recorded as `APP&SK&<REDACTED>` with its true wire length (23 bytes) preserved so a length-sensitive replay is still faithful.",
+    "TO REPLAY A BYTE STREAM: slice Tests/FoundryXBrineTests/fixtures/pocket/pocket-fw16-3s.mp3 (already in this repo, provenance-clean, real MPEG-2 L3 32 kbps 16 kHz frames) into the `lengths` array below. The first byte of the real transfer was the MP3 sync word, so the slice needs no preamble prepended \u2014 see measurements.preamble_bytes_before_sync_word."
+  ],
+  "gatt": {
+    "control": {
+      "uuid": "001120a3-2233-4455-6677-889912345678",
+      "note": "BIDIRECTIONAL \u2014 APP& is written here and MCU& notifies back here"
+    },
+    "audio": {
+      "uuid": "001120a1-2233-4455-6677-889912345678",
+      "note": "MP3 payload notifications only"
+    },
+    "battery": {
+      "uuid": "00002a19-0000-1000-8000-00805f9b34fb",
+      "note": "read once after connect; forces the bond"
+    }
+  },
+  "runs": {
+    "A_single_download_audio_subscribed_at_establish": {
+      "purpose": "the ground-truth ordering, connect to last byte",
+      "audio_subscription_issued": "at session establish, BEFORE authentication \u2014 i.e. the foundryx ordering, NOT pocket-libre's per-download ordering",
+      "events": [
+        {
+          "t_ms": 0.19,
+          "ev": "scan_start",
+          "address": "08322547-B7D1-0875-DA0C-0CE9BC1AE529"
+        },
+        {
+          "t_ms": 221.034,
+          "ev": "scan_done",
+          "name": "PKT01_BLUE_26079bc5"
+        },
+        {
+          "t_ms": 224.671,
+          "ev": "connect_start"
+        },
+        {
+          "t_ms": 1401.422,
+          "ev": "connect_done",
+          "mtu": 247
+        },
+        {
+          "t_ms": 1451.225,
+          "ev": "read",
+          "char": "00002a19-0000-1000-8000-00805f9b34fb",
+          "len": 1,
+          "note": "forces bonding",
+          "value": 100
+        },
+        {
+          "t_ms": 1511.24,
+          "ev": "subscribe",
+          "char": "001120a3-2233-4455-6677-889912345678",
+          "role": "control"
+        },
+        {
+          "t_ms": 1570.707,
+          "ev": "subscribe",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "note": "EARLY \u2014 foundryx ordering, not the reference's"
+        },
+        {
+          "t_ms": 1570.727,
+          "ev": "tx",
+          "char": "001120a3-2233-4455-6677-889912345678",
+          "role": "control",
+          "len": 23,
+          "text": "APP&SK&<REDACTED>",
+          "response": false
+        },
+        {
+          "t_ms": 1630.774,
+          "ev": "rx",
+          "char": "001120a3-2233-4455-6677-889912345678",
+          "role": "control",
+          "len": 9,
+          "text": "MCU&SK&OK"
+        },
+        {
+          "t_ms": 2373.737,
+          "ev": "control_wait_expired",
+          "after_frames": 1
+        },
+        {
+          "t_ms": 2373.754,
+          "ev": "auth",
+          "ok": true
+        },
+        {
+          "t_ms": 2373.764,
+          "ev": "tx",
+          "char": "001120a3-2233-4455-6677-889912345678",
+          "role": "control",
+          "len": 31,
+          "text": "APP&U&2026-08-07&20260807142852",
+          "response": false
+        },
+        {
+          "t_ms": 2410.602,
+          "ev": "rx",
+          "char": "001120a3-2233-4455-6677-889912345678",
+          "role": "control",
+          "len": 11,
+          "text": "MCU&U&19770"
+        },
+        {
+          "t_ms": 2411.913,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2414.444,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2416.706,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2416.728,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2442.972,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2443.119,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2446.558,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2446.582,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2473.033,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2473.163,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2476.22,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2476.333,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2502.999,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2503.245,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2506.362,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2506.522,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2533.049,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 192,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2533.158,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2536.041,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2536.064,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2538.973,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2563.068,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2563.213,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2565.985,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2566.108,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2568.986,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2591.998,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2594.169,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2594.286,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2595.796,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2599.127,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2623.192,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2623.305,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2625.911,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 192,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2626.017,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2628.039,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2653.022,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2653.128,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2655.953,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2656.097,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2659.201,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2683.029,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2683.122,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2685.999,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2686.094,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2689.202,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2713.182,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2713.206,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2715.903,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2716.067,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2718.207,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 192,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2743.061,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2743.083,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2745.953,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2746.06,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2749.069,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2773.338,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2773.447,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2775.935,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2776.033,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2779.114,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2803.217,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2803.325,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2805.975,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2806.004,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2809.094,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2832.951,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2861.336,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 192,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2862.937,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2865.904,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2865.984,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2892.932,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2893.043,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2895.996,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2896.101,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2923.084,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2923.112,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2925.982,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2926.114,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2953.369,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2953.508,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2956.06,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 214,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2956.256,
+          "ev": "rx",
+          "char": "001120a3-2233-4455-6677-889912345678",
+          "role": "control",
+          "len": 7,
+          "text": "MCU&OFF"
+        },
+        {
+          "t_ms": 3457.409,
+          "ev": "control_wait_expired",
+          "after_frames": 2
+        },
+        {
+          "t_ms": 3457.43,
+          "ev": "announced",
+          "bytes": 19770
+        },
+        {
+          "t_ms": 8458.019,
+          "ev": "audio_stall",
+          "consecutive": 1,
+          "have": 19770
+        },
+        {
+          "t_ms": 13459.227,
+          "ev": "audio_stall",
+          "consecutive": 2,
+          "have": 19770
+        },
+        {
+          "t_ms": 18460.043,
+          "ev": "audio_stall",
+          "consecutive": 3,
+          "have": 19770
+        },
+        {
+          "t_ms": 23461.127,
+          "ev": "audio_stall",
+          "consecutive": 4,
+          "have": 19770
+        },
+        {
+          "t_ms": 28462.28,
+          "ev": "audio_stall",
+          "consecutive": 5,
+          "have": 19770
+        },
+        {
+          "t_ms": 28462.295,
+          "ev": "transfer_done",
+          "seconds": 26.088536,
+          "bytes": 19770
+        },
+        {
+          "t_ms": 28462.297,
+          "ev": "trailing_listen_start",
+          "seconds": 8.0
+        },
+        {
+          "t_ms": 36463.409,
+          "ev": "trailing_listen_end",
+          "total_audio": 19770
+        },
+        {
+          "t_ms": 36550.857,
+          "ev": "unsubscribe",
+          "char": "001120a1-2233-4455-6677-889912345678"
+        },
+        {
+          "t_ms": 36670.993,
+          "ev": "unsubscribe",
+          "char": "001120a3-2233-4455-6677-889912345678"
+        },
+        {
+          "t_ms": 36671.5,
+          "ev": "disconnect"
+        },
+        {
+          "t_ms": 36671.572,
+          "ev": "disconnected_by_us"
+        },
+        {
+          "t_ms": 36671.585,
+          "ev": "mp3_sync_offset",
+          "offset": 0
+        }
+      ],
+      "chunks": {
+        "count": 82,
+        "bytes": 19770,
+        "length_histogram": {
+          "192": 4,
+          "214": 1,
+          "244": 77
+        },
+        "first_at_ms": 2411.896,
+        "last_at_ms": 2956.049,
+        "span_ms": 544.153,
+        "bytes_per_second": 36331.7,
+        "gap_ms": {
+          "n": 81,
+          "min": 0.03,
+          "p50": 2.546,
+          "p90": 24.977,
+          "max": 28.364,
+          "mean": 6.718
+        },
+        "inter_chunk_gaps_ms": [
+          2.532,
+          2.265,
+          0.03,
+          26.233,
+          0.159,
+          3.427,
+          0.037,
+          26.438,
+          0.143,
+          3.034,
+          0.136,
+          26.654,
+          0.251,
+          3.108,
+          0.173,
+          26.511,
+          0.128,
+          2.875,
+          0.032,
+          2.888,
+          24.104,
+          0.154,
+          2.76,
+          0.137,
+          2.873,
+          23.004,
+          2.176,
+          0.123,
+          1.508,
+          3.317,
+          24.072,
+          0.124,
+          2.598,
+          0.115,
+          2.016,
+          24.977,
+          0.117,
+          2.814,
+          0.153,
+          3.077,
+          23.846,
+          0.104,
+          2.869,
+          0.102,
+          3.102,
+          23.961,
+          0.051,
+          2.686,
+          0.173,
+          2.131,
+          24.854,
+          0.032,
+          2.851,
+          0.126,
+          3.0,
+          24.267,
+          0.119,
+          2.482,
+          0.105,
+          3.062,
+          24.111,
+          0.119,
+          2.643,
+          0.037,
+          3.079,
+          23.857,
+          28.364,
+          1.615,
+          2.977,
+          0.087,
+          26.942,
+          0.118,
+          2.948,
+          0.106,
+          26.975,
+          0.038,
+          2.848,
+          0.14,
+          27.259,
+          0.148,
+          2.546
+        ],
+        "lengths": [
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          192,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          192,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          192,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          192,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          244,
+          214
+        ]
+      },
+      "announced_bytes": 19770,
+      "received_bytes": 19770
+    },
+    "B_two_downloads_one_session_no_resubscribe": {
+      "purpose": "does the audio subscription survive a completed transfer, and is MCU&OFF reproducible",
+      "audio_subscription_issued": "once, at session establish; NEVER re-issued between the two downloads; no re-authentication between them either",
+      "events": [
+        {
+          "t_ms": 0.131,
+          "ev": "scan_start",
+          "address": "08322547-B7D1-0875-DA0C-0CE9BC1AE529"
+        },
+        {
+          "t_ms": 801.505,
+          "ev": "scan_done",
+          "name": "PKT01_BLUE_26079bc5"
+        },
+        {
+          "t_ms": 816.977,
+          "ev": "connect_start"
+        },
+        {
+          "t_ms": 1706.467,
+          "ev": "connect_done",
+          "mtu": 247
+        },
+        {
+          "t_ms": 1757.257,
+          "ev": "read",
+          "char": "00002a19-0000-1000-8000-00805f9b34fb",
+          "len": 1,
+          "note": "forces bonding",
+          "value": 100
+        },
+        {
+          "t_ms": 1817.273,
+          "ev": "subscribe",
+          "char": "001120a3-2233-4455-6677-889912345678",
+          "role": "control"
+        },
+        {
+          "t_ms": 1877.422,
+          "ev": "subscribe",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "note": "EARLY \u2014 foundryx ordering, not the reference's"
+        },
+        {
+          "t_ms": 1877.462,
+          "ev": "tx",
+          "char": "001120a3-2233-4455-6677-889912345678",
+          "role": "control",
+          "len": 23,
+          "text": "APP&SK&<REDACTED>",
+          "response": false
+        },
+        {
+          "t_ms": 1939.12,
+          "ev": "rx",
+          "char": "001120a3-2233-4455-6677-889912345678",
+          "role": "control",
+          "len": 9,
+          "text": "MCU&SK&OK"
+        },
+        {
+          "t_ms": 2682.292,
+          "ev": "control_wait_expired",
+          "after_frames": 1
+        },
+        {
+          "t_ms": 2682.337,
+          "ev": "auth",
+          "ok": true
+        },
+        {
+          "t_ms": 2682.36,
+          "ev": "pass_start",
+          "index": 0
+        },
+        {
+          "t_ms": 2682.371,
+          "ev": "tx",
+          "char": "001120a3-2233-4455-6677-889912345678",
+          "role": "control",
+          "len": 31,
+          "text": "APP&U&2026-08-07&20260807142852",
+          "response": false
+        },
+        {
+          "t_ms": 2719.034,
+          "ev": "rx",
+          "char": "001120a3-2233-4455-6677-889912345678",
+          "role": "control",
+          "len": 11,
+          "text": "MCU&U&19770"
+        },
+        {
+          "t_ms": 2719.199,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2721.713,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2721.826,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2723.793,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2750.192,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2750.332,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2751.789,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2751.884,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2779.949,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2780.143,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2782.056,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2782.163,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2809.934,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2838.182,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2839.659,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2841.799,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2841.921,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 192,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2869.763,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2869.864,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2872.509,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2872.591,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2899.639,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2899.728,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2901.717,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2901.816,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2929.681,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2929.706,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2931.755,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2931.775,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2959.661,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2959.778,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2961.71,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2961.798,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2988.734,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 192,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 2990.453,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3019.644,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3019.753,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3047.752,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3049.46,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3051.718,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3051.809,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3053.591,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3079.639,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3079.747,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3081.694,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3081.783,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3083.619,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3109.628,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3109.73,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3111.495,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3111.58,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 192,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3113.419,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3139.648,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3139.768,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3141.763,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3141.849,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3143.55,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3169.646,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3169.743,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3171.711,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3171.803,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3173.46,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3199.645,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3199.789,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3201.737,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3201.829,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3203.587,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3228.933,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 192,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3229.101,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3230.441,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3233.595,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3259.745,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3259.766,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3261.641,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3261.757,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3289.657,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3289.769,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3291.596,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3291.682,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3319.613,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3319.713,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3321.6,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 214,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 3321.678,
+          "ev": "rx",
+          "char": "001120a3-2233-4455-6677-889912345678",
+          "role": "control",
+          "len": 7,
+          "text": "MCU&OFF"
+        },
+        {
+          "t_ms": 3822.685,
+          "ev": "control_wait_expired",
+          "after_frames": 2
+        },
+        {
+          "t_ms": 3822.697,
+          "ev": "announced",
+          "bytes": 19770
+        },
+        {
+          "t_ms": 8824.928,
+          "ev": "audio_stall",
+          "consecutive": 1,
+          "have": 19770
+        },
+        {
+          "t_ms": 13827.271,
+          "ev": "audio_stall",
+          "consecutive": 2,
+          "have": 19770
+        },
+        {
+          "t_ms": 18829.513,
+          "ev": "audio_stall",
+          "consecutive": 3,
+          "have": 19770
+        },
+        {
+          "t_ms": 23831.057,
+          "ev": "audio_stall",
+          "consecutive": 4,
+          "have": 19770
+        },
+        {
+          "t_ms": 28831.389,
+          "ev": "audio_stall",
+          "consecutive": 5,
+          "have": 19770
+        },
+        {
+          "t_ms": 28831.416,
+          "ev": "transfer_done",
+          "seconds": 26.149046,
+          "bytes": 19770
+        },
+        {
+          "t_ms": 28831.418,
+          "ev": "trailing_listen_start",
+          "seconds": 8.0
+        },
+        {
+          "t_ms": 36833.534,
+          "ev": "trailing_listen_end",
+          "total_audio": 19770
+        },
+        {
+          "t_ms": 36833.592,
+          "ev": "pass_start",
+          "index": 1
+        },
+        {
+          "t_ms": 36833.608,
+          "ev": "tx",
+          "char": "001120a3-2233-4455-6677-889912345678",
+          "role": "control",
+          "len": 31,
+          "text": "APP&U&2026-08-07&20260807142852",
+          "response": false
+        },
+        {
+          "t_ms": 37156.813,
+          "ev": "rx",
+          "char": "001120a3-2233-4455-6677-889912345678",
+          "role": "control",
+          "len": 11,
+          "text": "MCU&U&19770"
+        },
+        {
+          "t_ms": 37158.09,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37161.135,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37161.23,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37165.024,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37219.151,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37220.956,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37220.977,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37277.925,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37279.012,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37281.056,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37283.313,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37338.707,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37339.391,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37342.609,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37342.652,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37459.06,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37459.441,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 192,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37462.741,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37462.789,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37464.766,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37518.661,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37578.536,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37580.076,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37582.59,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37582.632,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37584.157,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37638.653,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37639.688,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37643.082,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37643.11,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37645.486,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37657.303,
+          "ev": "control_wait_expired",
+          "after_frames": 1
+        },
+        {
+          "t_ms": 37657.341,
+          "ev": "announced",
+          "bytes": 19770
+        },
+        {
+          "t_ms": 37698.549,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37699.512,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37702.496,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 192,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37757.639,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37758.982,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37762.014,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37762.093,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37765.082,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37817.825,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37819.166,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37822.125,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37822.316,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37825.191,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37877.921,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37879.369,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37882.144,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37882.332,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37885.175,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37937.839,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37939.062,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 192,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37942.102,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37942.299,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37944.286,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37998.004,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 37999.208,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38002.358,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38002.4,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38014.249,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38014.298,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38017.407,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38017.447,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38029.461,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38029.762,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38032.441,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38032.559,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38044.246,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38044.303,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 192,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38047.076,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38047.244,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38059.248,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38059.473,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38062.338,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38062.377,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38074.539,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38074.574,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38077.382,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38077.53,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38089.256,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38089.315,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38092.115,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 244,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38092.237,
+          "ev": "rx",
+          "char": "001120a1-2233-4455-6677-889912345678",
+          "role": "audio",
+          "len": 214,
+          "body": "ELIDED"
+        },
+        {
+          "t_ms": 38092.376,
+          "ev": "reached_announced",
+          "have": 19770
+        },
+        {
+          "t_ms": 38092.381,
+          "ev": "transfer_done",
+          "seconds": 1.258779,
+          "bytes": 19770
+        },
+        {
+          "t_ms": 38092.382,
+          "ev": "trailing_listen_start",
+          "seconds": 8.0
+        },
+        {
+          "t_ms": 38103.311,
+          "ev": "rx",
+          "char": "001120a3-2233-4455-6677-889912345678",
+          "role": "control",
+          "len": 7,
+          "text": "MCU&OFF"
+        },
+        {
+          "t_ms": 46092.605,
+          "ev": "trailing_listen_end",
+          "total_audio": 19770
+        },
+        {
+          "t_ms": 46112.769,
+          "ev": "unsubscribe",
+          "char": "001120a1-2233-4455-6677-889912345678"
+        },
+        {
+          "t_ms": 46144.01,
+          "ev": "unsubscribe",
+          "char": "001120a3-2233-4455-6677-889912345678"
+        },
+        {
+          "t_ms": 46144.549,
+          "ev": "disconnect"
+        },
+        {
+          "t_ms": 46144.686,
+          "ev": "disconnected_by_us"
+        },
+        {
+          "t_ms": 46144.696,
+          "ev": "mp3_sync_offset",
+          "offset": 0
+        }
+      ],
+      "passes": [
+        {
+          "index": 0,
+          "announced_bytes": 19770,
+          "received_bytes": 19770,
+          "chunks": {
+            "count": 82,
+            "bytes": 19770,
+            "length_histogram": {
+              "192": 4,
+              "214": 1,
+              "244": 77
+            },
+            "first_at_ms": 2719.185,
+            "last_at_ms": 3321.592,
+            "span_ms": 602.407,
+            "bytes_per_second": 32818.3,
+            "gap_ms": {
+              "n": 81,
+              "min": 0.026,
+              "p50": 1.762,
+              "p90": 27.836,
+              "max": 29.182,
+              "mean": 7.437
+            },
+            "inter_chunk_gaps_ms": [
+              2.513,
+              0.124,
+              1.957,
+              26.39,
+              0.158,
+              1.452,
+              0.102,
+              28.031,
+              0.227,
+              1.9,
+              0.121,
+              27.753,
+              28.253,
+              1.472,
+              2.153,
+              0.125,
+              27.836,
+              0.108,
+              2.646,
+              0.076,
+              27.043,
+              0.1,
+              1.981,
+              0.099,
+              27.863,
+              0.033,
+              2.046,
+              0.026,
+              27.874,
+              0.116,
+              1.94,
+              0.092,
+              26.927,
+              1.725,
+              29.182,
+              0.119,
+              27.992,
+              1.714,
+              2.259,
+              0.084,
+              1.789,
+              26.04,
+              0.117,
+              1.945,
+              0.092,
+              1.823,
+              26.012,
+              0.112,
+              1.762,
+              0.088,
+              1.837,
+              26.221,
+              0.119,
+              2.004,
+              0.089,
+              1.607,
+              26.18,
+              0.106,
+              1.965,
+              0.086,
+              1.663,
+              26.178,
+              0.152,
+              1.946,
+              0.094,
+              1.757,
+              25.334,
+              0.181,
+              1.34,
+              3.152,
+              26.144,
+              0.032,
+              1.867,
+              0.123,
+              27.889,
+              0.122,
+              1.812,
+              0.102,
+              27.921,
+              0.11,
+              1.882
+            ],
+            "lengths": [
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              192,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              192,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              192,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              192,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              214
+            ]
+          }
+        },
+        {
+          "index": 1,
+          "announced_bytes": 19770,
+          "received_bytes": 19770,
+          "chunks": {
+            "count": 82,
+            "bytes": 19770,
+            "length_histogram": {
+              "192": 4,
+              "214": 1,
+              "244": 77
+            },
+            "first_at_ms": 37158.078,
+            "last_at_ms": 38092.233,
+            "span_ms": 934.155,
+            "bytes_per_second": 21163.5,
+            "gap_ms": {
+              "n": 81,
+              "min": 0.028,
+              "p50": 2.364,
+              "p90": 53.713,
+              "max": 116.387,
+              "mean": 11.533
+            },
+            "inter_chunk_gaps_ms": [
+              3.046,
+              0.101,
+              3.783,
+              54.128,
+              1.81,
+              0.028,
+              56.934,
+              1.096,
+              2.043,
+              2.249,
+              55.391,
+              0.685,
+              3.228,
+              0.029,
+              116.387,
+              0.411,
+              3.298,
+              0.059,
+              1.974,
+              53.839,
+              59.908,
+              1.559,
+              2.465,
+              0.098,
+              1.514,
+              54.442,
+              1.092,
+              3.395,
+              0.036,
+              2.364,
+              53.049,
+              0.978,
+              2.985,
+              55.147,
+              1.347,
+              3.033,
+              0.081,
+              2.989,
+              52.731,
+              1.343,
+              2.963,
+              0.196,
+              2.873,
+              52.722,
+              1.452,
+              2.775,
+              0.193,
+              2.842,
+              52.656,
+              1.23,
+              3.039,
+              0.198,
+              1.984,
+              53.713,
+              1.211,
+              3.15,
+              0.046,
+              11.843,
+              0.055,
+              3.103,
+              0.047,
+              12.004,
+              0.307,
+              2.679,
+              0.118,
+              11.684,
+              0.061,
+              2.772,
+              0.17,
+              11.998,
+              0.231,
+              2.863,
+              0.043,
+              12.154,
+              0.042,
+              2.803,
+              0.15,
+              11.724,
+              0.062,
+              2.801,
+              0.123
+            ],
+            "lengths": [
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              192,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              192,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              192,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              192,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              244,
+              214
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "measurements": {
+    "order_of_operations": [
+      "scan -> connect (CoreBluetooth, ~0.9-1.2 s)",
+      "READ 00002a19 (battery). Forces the bond. Without it 0000ffd2 refuses with CBATTErrorDomain 15 and the device answers nothing anywhere.",
+      "subscribe control 001120a3",
+      "subscribe audio 001120a1  [MEASURED: may be done here, before auth]",
+      "write APP&SK&<key>  ->  MCU&SK&OK",
+      "write APP&U&<date>&<timestamp>  ->  MCU&U&<bytes> on the CONTROL characteristic",
+      "audio notifications stream on 001120a1, first one ~1 ms after MCU&U&",
+      "MCU&OFF on the CONTROL characteristic, ~0.2-11 ms after the LAST audio chunk"
+    ],
+    "audio_subscription_must_be_per_download": false,
+    "audio_subscription_evidence": "Run A subscribed at establish and got all 19,770 bytes. Run B ran TWO downloads on one subscription with no re-subscribe and no re-auth; both delivered 19,770/19,770 with an identical 82-chunk shape. Subscribing per download (pocket-libre commands.py:245) is therefore NOT a protocol requirement.",
+    "announce_latency_ms": {
+      "samples": [
+        36.838,
+        36.663,
+        323.205
+      ],
+      "note": "APP&U write -> MCU&U&<bytes> notification. THIS is the number an 8 s control deadline was supposed to cover; the worst sample is 0.32 s."
+    },
+    "chunk_size_bytes": {
+      "modal": 244,
+      "observed": [
+        192,
+        214,
+        244
+      ],
+      "note": "244 = negotiated ATT MTU 247 minus the 3-byte notification header. Short chunks appear mid-stream, not only at the end \u2014 do not assume a fixed chunk size."
+    },
+    "preamble_bytes_before_sync_word": 0,
+    "preamble_note": "The FIRST byte of the FIRST audio notification is 0xFF 0xF3 (frame header 0xFFF348C4, MPEG-2 Layer III, 32 kbps, 16 kHz, mono). There is NO preamble on fw 1.6. PocketBLEProtocolClient.swift's comment above `maximumPreambleBytes` says 'a Pocket prefixes its payload with a short preamble' \u2014 measured here, it does not. The trim is harmless (offset 0) but its stated premise is wrong.",
+    "terminator": {
+      "frame": "MCU&OFF",
+      "characteristic": "001120a3 (control)",
+      "observations": 3,
+      "ms_after_last_audio_chunk": [
+        0.207,
+        0.086,
+        11.078
+      ],
+      "note": "SEEN THREE TIMES OUT OF THREE, always immediately after the final audio chunk. Whether it means 'transfer complete' or 'transfer engine off' is not settled by three samples; what IS settled is that it exists, that it lands on the control characteristic, and that a client which stops consuming at the announced byte count will sometimes leave it queued for the NEXT control read."
+    },
+    "throughput_bytes_per_second": {
+      "runA": 36331.7,
+      "runB_pass0": 32818.3,
+      "runB_pass1": 21163.5,
+      "note": "All three are ~21-36 KB/s, which DISAGREES with the ~18 KB/s in foundryx-hearth/reference/pocket-ble-protocol.md. That figure was wall-clock over a whole pocket-libre invocation, which includes its own dead time (below). Design to the SLOW number; measure against these."
+    },
+    "largest_inter_chunk_gap_ms": 116.387,
+    "gap_note": "Gaps cluster at ~2 ms with a ~26 ms beat every 4 chunks \u2014 4 x 244 B per connection event. The LARGEST gap seen anywhere in three transfers is under 120 ms. An 8,000 ms per-chunk deadline is ~70x the worst observed gap: inter-chunk latency is NOT what an 8 s deadline is failing on.",
+    "reference_implementation_dead_time": "pocket-libre's own download loop waits on an audio event BEFORE checking whether the announced byte count is already satisfied (commands.py:265-286). When a transfer completes inside `_send`'s control-wait window \u2014 which is what happens for any file small enough \u2014 the loop then burns 5 x 5 s of stall timeouts before returning. MEASURED: 26.09 s and 26.15 s of wall clock for a transfer whose audio took 0.54 s. Check the byte count first; do not copy this loop."
+  }
+}

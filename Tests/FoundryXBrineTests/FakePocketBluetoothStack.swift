@@ -124,8 +124,59 @@ final class FakePocketBLEStack: @unchecked Sendable {
         }
     }
 
+    /// HOW A TRANSFER IS SPREAD OVER TIME, AND WHAT THE FIRMWARE SAYS WHEN IT ENDS.
+    ///
+    /// THE FAKE HAD NO TIME AXIS AT ALL, AND THAT IS WHY THE 8-SECOND BUG SHIPPED. `handleWrite`
+    /// answered `APP&U&` by emitting every chunk in a tight synchronous `while` loop and then
+    /// stopping — no delay between notifications and no end-of-transfer frame. A defect whose
+    /// entire mechanism is "the transfer lasts longer than one deadline" is UNREPRESENTABLE
+    /// against a recorder that finishes a transfer in zero wall-clock seconds, so every Pocket
+    /// scenario in this repository could be green while no file over ~19 KB could ever come off
+    /// a real recorder.
+    ///
+    /// `gapsSeconds` is the silence BEFORE each chunk after the first, `lengths` is how the
+    /// content is cut up on the wire (the real device does not use a fixed size — 244 with
+    /// occasional 192 and a short tail), and `terminatorAfterSeconds` is when `MCU&OFF` lands
+    /// on the CONTROL characteristic after the last audio notification.
+    ///
+    /// The values every scenario uses are replayed from
+    /// `fixtures/pocket/pocket-fw16-ble-download-trace.json`, not invented here.
+    struct DownloadWireTiming: Sendable {
+        /// Silence before chunk *n+1*. Shorter than the chunk count means the remaining
+        /// chunks follow the last stated gap.
+        let gapsSeconds: [TimeInterval]
+        /// Wire chunk sizes, in order. `nil` falls back to the fixed `notificationBytes` cut.
+        let lengths: [Int]?
+        /// When `MCU&OFF` arrives after the final chunk. `nil` is a firmware that says nothing.
+        let terminatorAfterSeconds: TimeInterval?
+
+        init(gapsSeconds: [TimeInterval], lengths: [Int]? = nil,
+             terminatorAfterSeconds: TimeInterval? = nil) {
+            self.gapsSeconds = gapsSeconds
+            self.lengths = lengths
+            self.terminatorAfterSeconds = terminatorAfterSeconds
+        }
+
+        /// The frame observed three times out of three on fw 1.6, immediately after the last
+        /// audio chunk of a COMPLETE transfer.
+        static let terminatorFrame = "MCU&OFF"
+
+        func gap(before index: Int) -> TimeInterval {
+            guard index > 0, !gapsSeconds.isEmpty else { return 0 }
+            return gapsSeconds[min(index - 1, gapsSeconds.count - 1)]
+        }
+
+        func width(at index: Int, fallback: Int) -> Int {
+            guard let lengths, !lengths.isEmpty else { return fallback }
+            return lengths[min(index, lengths.count - 1)]
+        }
+    }
+
     let deviceId: UUID
     let deviceName: String
+    /// `nil` keeps the old zero-time behaviour, so every scenario written before there was a
+    /// clock is unchanged.
+    private let downloadTiming: DownloadWireTiming?
     private let behaviour: KeyBehaviour
     /// The key this recorder is holding right now, which the WiFi read-back is derived from.
     /// It changes only when the firmware genuinely takes a new one.
@@ -261,7 +312,9 @@ final class FakePocketBLEStack: @unchecked Sendable {
          inventory: [ScriptedRecording] = [],
          answersInventory: Bool = true,
          removalBehaviour: RemovalBehaviour = .removesWhatItHolds,
+         downloadTiming: DownloadWireTiming? = nil,
          behaviour: KeyBehaviour? = nil) {
+        self.downloadTiming = downloadTiming
         self.inventory = inventory
         self.answersInventory = answersInventory
         self.removalBehaviour = removalBehaviour
@@ -382,6 +435,13 @@ final class FakePocketBLEStack: @unchecked Sendable {
     }
 
     fileprivate func deliver(_ body: @escaping (BLEEventSink) -> Void) {
+        deliver(after: 0, body)
+    }
+
+    /// THE SAME DELIVERY, PUT ON THE CLOCK. A real radio hands notifications up milliseconds
+    /// apart; the difference between that and a synchronous burst is the whole of the defect
+    /// this fake previously could not express.
+    fileprivate func deliver(after delay: TimeInterval, _ body: @escaping (BLEEventSink) -> Void) {
         lock.lock()
         let queue = self.queue
         let sink = self.sink
@@ -393,7 +453,11 @@ final class FakePocketBLEStack: @unchecked Sendable {
         // move is one that reached nobody. It is the only way "the app stopped listening when
         // I left the page" is a checkable claim instead of a reassurance.
         lock.lock(); handedToTransport += 1; lock.unlock()
-        queue.async { body(sink) }
+        if delay <= 0 {
+            queue.async { body(sink) }
+        } else {
+            queue.asyncAfter(deadline: .now() + delay) { body(sink) }
+        }
     }
 
     private var handedToTransport = 0
@@ -637,16 +701,35 @@ final class FakePocketBLEStack: @unchecked Sendable {
                 return
             }
             notifyControl("MCU&U&\(file.announcedSizeBytes ?? file.sizeBytes)")
+            let timing = downloadTiming
             var offset = content.startIndex
+            var index = 0
+            var elapsed: TimeInterval = 0
             while offset < content.endIndex {
-                let end = content.index(offset, offsetBy: Self.notificationBytes,
+                let width = timing?.width(at: index, fallback: Self.notificationBytes)
+                    ?? Self.notificationBytes
+                let end = content.index(offset, offsetBy: max(1, width),
                                         limitedBy: content.endIndex) ?? content.endIndex
-                notifyAudio(content.subdata(in: offset..<end))
+                elapsed += timing?.gap(before: index) ?? 0
+                notifyAudio(content.subdata(in: offset..<end), after: elapsed)
                 offset = end
+                index += 1
             }
-            // AND THEN IT STOPS. A recorder whose `content` is shorter than what it announced
-            // says nothing more, which is exactly what a transfer that died partway looks like
-            // from the phone: no error frame, just silence.
+            // AND THEN THE TERMINATOR, OR NOTHING.
+            //
+            // `MCU&OFF` on the CONTROL characteristic, 0.086-11.078 ms after the last audio
+            // chunk, three observations out of three on fw 1.6. It arrives AFTER the announced
+            // byte count is satisfied — i.e. after the client's own transfer loop has already
+            // stopped consuming — so it is left queued for whatever reads the control channel
+            // NEXT. That is a frame the shipped client used to hand to the next command as its
+            // answer, and the fake could not say it at all.
+            //
+            // A recorder whose `content` is shorter than what it announced says nothing at all,
+            // which is exactly what a transfer that died partway looks like from the phone: no
+            // error frame, just silence.
+            if let terminator = timing?.terminatorAfterSeconds {
+                notifyControl(DownloadWireTiming.terminatorFrame, after: elapsed + terminator)
+            }
             return
         } else if command == "WIFI" {
             // THE READ-BACK, DERIVED FROM WHAT THE FIRMWARE IS ACTUALLY HOLDING.
@@ -708,20 +791,20 @@ final class FakePocketBLEStack: @unchecked Sendable {
     /// several frames.
     static let notificationBytes = 180
 
-    private func notifyAudio(_ bytes: Data) {
+    private func notifyAudio(_ bytes: Data, after delay: TimeInterval = 0) {
         guard let audio = peripheral
             .discoveredCharacteristic(Self.characteristicUUID(map.audio)) else { return }
-        deliver { [weak self] sink in
+        deliver(after: delay) { [weak self] sink in
             guard let self else { return }
             audio.value = bytes
             sink.blePeripheral(self.peripheral, didUpdateValueFor: audio, error: nil)
         }
     }
 
-    private func notifyControl(_ text: String) {
+    private func notifyControl(_ text: String, after delay: TimeInterval = 0) {
         guard let control = peripheral
             .discoveredCharacteristic(Self.characteristicUUID(map.control)) else { return }
-        deliver { [weak self] sink in
+        deliver(after: delay) { [weak self] sink in
             guard let self else { return }
             control.value = Data(text.utf8)
             sink.blePeripheral(self.peripheral, didUpdateValueFor: control, error: nil)

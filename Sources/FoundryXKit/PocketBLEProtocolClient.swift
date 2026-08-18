@@ -62,11 +62,42 @@ public enum PocketTransportEvent: Sendable {
     case audio(Data, generation: UInt64)
 }
 
+/// WHICH KIND OF WAIT THIS IS, WHICH IS THE ONLY THING A DEADLINE CAN HONESTLY BE SIZED FROM.
+///
+/// A control read is a ROUND TRIP: a frame was written and the recorder answers. Measured on
+/// `PKT01_BLUE_26079bc5` (fw 1.6, 2026-08-18), `APP&U&…` -> `MCU&U&<bytes>` took 36.8, 36.7 and
+/// 323.2 ms. An audio chunk is not a round trip at all — it is the next instalment of something
+/// already flowing, and what bounds it is the SILENCE the recorder is allowed to leave between
+/// instalments (measured p50 2.5 ms, p90 25.0 ms, worst 116.4 ms across three transfers).
+///
+/// Before this distinction existed, both were bounded by one number and a transfer could not
+/// outlive it. A file at the measured 21-36 KB/s takes as long as it takes: the owner's largest
+/// recording is tens of minutes on the wire, and no whole-transfer number is right for it.
+public enum PocketTransportWait: Sendable, Equatable {
+    /// A frame the recorder owes in reply to one this app just wrote.
+    case control
+    /// The next instalment of a transfer already under way.
+    case audioChunk
+}
+
 public protocol PocketBLETransport: Sendable {
     func availableCharacteristics() async throws -> Set<String>
     func write(_ data: Data, to characteristic: String) async throws
     func nextEvent(generation: UInt64) async throws -> PocketTransportEvent
+    /// The same wait, told WHAT is being waited for so the transport can bound it accordingly.
+    func nextEvent(generation: UInt64, waitingFor: PocketTransportWait) async throws
+        -> PocketTransportEvent
     func close() async
+}
+
+public extension PocketBLETransport {
+    /// A transport that draws no distinction keeps its single bound. Scripted transports in the
+    /// suite deliver on demand and have no clock, so this is the honest default for them — the
+    /// distinction only means something to a transport with a real radio behind it.
+    func nextEvent(generation: UInt64, waitingFor: PocketTransportWait) async throws
+        -> PocketTransportEvent {
+        try await nextEvent(generation: generation)
+    }
 }
 
 public struct PocketCharacteristicMap: Sendable, Equatable {
@@ -377,11 +408,16 @@ public actor PocketBLEClient {
 
     /// HOW MUCH OF A FILE MAY ARRIVE BEFORE THE SYNC WORD IS FOUND.
     ///
-    /// The trim exists because a Pocket prefixes its payload with a short preamble the audio
-    /// pipeline cannot use, and the sync word is where the recording starts. Bounding the search
-    /// is what lets the rest of the transfer stream: past this many bytes with no `0xFF 0xF3`,
-    /// the answer is "this is not the audio this build understands" and no more of it is held.
-    /// Generous — a Pocket's preamble is tens of bytes, not thousands.
+    /// THE PREMISE THIS USED TO STATE IS FALSE ON THE ONLY FIRMWARE ANYBODY HAS MEASURED. It
+    /// said "a Pocket prefixes its payload with a short preamble". Measured on fw 1.6 across
+    /// three complete transfers: the FIRST byte of the FIRST audio notification is the sync
+    /// word — frame header `0xFF 0xF3 0x48 0xC4`, MPEG-2 Layer III, 32 kbps, 16 kHz, mono — and
+    /// the file on disk is exactly the announced length. The preamble is ZERO bytes, and the
+    /// trim is inert.
+    ///
+    /// It stays because the search has to be BOUNDED either way: this is the point past which a
+    /// stream with no `0xFF 0xF3` in it is not audio this build understands, and no more of it
+    /// is held. Defensive, not descriptive.
     public static let maximumPreambleBytes = 4 * 1024
 
     /// THE CEILING ON ONE FILE, AND THE ARITHMETIC THAT NOW SETS IT.
@@ -437,7 +473,12 @@ public actor PocketBLEClient {
             var received = 0               // bytes taken off the radio, sync word or not
 
             while received < size {
-                let event = try await nextEvent(operation: .download)
+                // BOUNDED BY THE SILENCE, NOT BY THE LENGTH OF THE FILE. `.audioChunk` is what
+                // tells the transport this is an instalment of something already flowing, so
+                // the deadline that applies is the longest gap a transfer may contain rather
+                // than the round-trip budget a command answer gets. There is deliberately no
+                // bound on the loop as a whole.
+                let event = try await nextEvent(operation: .download, waitingFor: .audioChunk)
                 guard case .audio(let chunk, let eventGeneration) = event,
                       eventGeneration == generation else { continue }
                 received += chunk.count
@@ -517,19 +558,42 @@ public actor PocketBLEClient {
         return String(response.dropFirst(prefix.count))
     }
 
+    /// THE FRAME A FINISHED TRANSFER LEAVES BEHIND.
+    ///
+    /// Measured three times out of three on `PKT01_BLUE_26079bc5` (fw 1.6, 2026-08-18): the
+    /// firmware puts `MCU&OFF` on the CONTROL characteristic 0.086-11.078 ms after the last
+    /// audio chunk of a complete transfer. That is AFTER the announced byte count is satisfied,
+    /// so `download`'s loop — which stops on the count, correctly — has already gone. Nothing
+    /// drained it, so it sat in the link's pending queue and was handed to the NEXT command as
+    /// its answer: a second bring-over, and the `LIST&` re-read inside `removeRecording`, both
+    /// died on `.malformedResponse` against a recorder that had done nothing wrong.
+    ///
+    /// It is SKIPPED, never awaited and never treated as completion. What the frame means is
+    /// not settled by three samples, and whether a truncated transfer emits one is unmeasured;
+    /// the announced byte count remains the only completion condition. Consuming it costs one
+    /// queued frame and closes the failure outright.
+    static let transferTerminatorFrame = "MCU&OFF"
+
     private func nextControl(operation: PocketOperation) async throws -> String {
         while true {
             let event = try await nextEvent(operation: operation)
             guard case .control(let data, let eventGeneration) = event, eventGeneration == generation else { continue }
             guard let text = String(data: data, encoding: .ascii) else { throw PocketProtocolError.malformedResponse }
+            if text == PocketBLEClient.transferTerminatorFrame {
+                await diagnostics("discarded an end-of-transfer frame left over from a download")
+                continue
+            }
             return text
         }
     }
 
-    private func nextEvent(operation: PocketOperation) async throws -> PocketTransportEvent {
+    private func nextEvent(operation: PocketOperation,
+                           waitingFor: PocketTransportWait = .control) async throws
+        -> PocketTransportEvent {
         do {
             try Task.checkCancellation()
-            let event = try await transport.nextEvent(generation: generation)
+            let event = try await transport.nextEvent(generation: generation,
+                                                      waitingFor: waitingFor)
             try Task.checkCancellation()
             return event
         } catch { throw mapError(error, operation: operation) }
