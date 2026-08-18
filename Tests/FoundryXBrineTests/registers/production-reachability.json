@@ -720,15 +720,94 @@
       ],
       "verdict": "reachable",
       "why": "it was written to guard the one gesture that cannot be undone and had NO call site anywhere in the app, while Forget — which destroys a key and no audio — sat behind an alert. A written-but-unreachable confirmation is worse than none, because the copy gates count it as shipped."
+    },
+    {
+      "id": "onboarding-flow-view",
+      "name": "the onboarding flow the app presents on a first run",
+      "declared_in": "App/OnboardingFlowView.swift",
+      "declaration_anchor": "struct OnboardingFlowView: View {",
+      "call_pattern": "OnboardingFlowView(",
+      "reached_from": [
+        {
+          "via": "root-view",
+          "anchor": "            OnboardingFlowView(baseDir: CaptureWAL.documentsCaptures(),"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "registered so the ambient step below chains to the composition root rather than to itself. RootView HOSTING onboarding is also the fact that made the launch-time notification prompt wrong: RootView runs first, so a prompt raised there always beat the step that promises a notification to the ask."
+    },
+    {
+      "id": "ambient-sample-nudge-model",
+      "name": "AmbientSampleNudge — the sample nudge's errand, out of the SwiftUI body",
+      "declared_in": "App/OnboardingFlowView.swift",
+      "declaration_anchor": "final class AmbientSampleNudge: ObservableObject {",
+      "call_pattern": "AmbientSampleNudge(",
+      "reached_from": [
+        {
+          "via": "onboarding-flow-view",
+          "anchor": "    @StateObject private var nudge = AmbientSampleNudge()"
+        },
+        {
+          "via": "settings-screen",
+          "anchor": "    @StateObject private var previewNudge = AmbientSampleNudge()"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "BOTH surfaces that promise a nudge are registered, because the rule held at one site only is the rule the second site does not have: the onboarding step was fixed to report what the phone did while Settings went on calling `AmbientNotifier.postPreview()` bare, one screen over, with a caption that said the same thing whatever happened."
+    },
+    {
+      "id": "ambient-sample-nudge-post",
+      "name": "AmbientNotifier.postPreview — the sample nudge itself, with its outcome",
+      "declared_in": "App/AmbientNotifier.swift",
+      "declaration_anchor": "    static func postPreview(",
+      "call_pattern": "AmbientNotifier.postPreview",
+      "reached_from": [
+        {
+          "via": "ambient-sample-nudge-model",
+          "anchor": "        AmbientNotifier.postPreview { [weak self] outcome in"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "ABSENT FROM THIS REGISTER while it was the subject of a fix that shipped green and was then refuted by mutation. The one gate in this repository designed to ask 'is it reached?' did not cover it. The anchor is the REPORTING call: `postPreview()` bare would still satisfy the call pattern, so `testNoCallerAnywhereDiscardsTheSampleNudgeOutcome` holds the shape and this row holds the reach."
+    },
+    {
+      "id": "ambient-nudge-plan",
+      "name": "AmbientNudgePlan.firstStep — the sample nudge's decisions, where a test can execute them",
+      "declared_in": "Sources/FoundryXKit/AmbientNudgePlan.swift",
+      "declaration_anchor": "    public static func firstStep(permission: AmbientNudgePermission,",
+      "call_pattern": "AmbientNudgePlan.firstStep(",
+      "reached_from": [
+        {
+          "via": "ambient-sample-nudge-post",
+          "anchor": "            let step = AmbientNudgePlan.firstStep("
+        }
+      ],
+      "verdict": "reachable",
+      "why": "the whole point of moving the decision into the kit is that `swift test` can run it — which is worth nothing if the app stops asking. This row is what turns 'AmbientNudgePlanTests is green' into evidence about the shipping app: delete the call in `deliver` and the plan is a correct, tested, unreached table, which is instance five of the defect this register exists for."
+    },
+    {
+      "id": "ambient-notification-surface",
+      "name": "the foreground presenter and confirm-card actions, installed at launch and asking for nothing",
+      "declared_in": "App/AmbientNotifier.swift",
+      "declaration_anchor": "    static func installNotificationSurface() {",
+      "call_pattern": "AmbientNotifier.installNotificationSurface(",
+      "reached_from": [
+        {
+          "via": "root-view",
+          "anchor": "            AmbientNotifier.installNotificationSurface()"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "this line replaced `AmbientNotifier.requestAuthorizationIfNeeded()`, which raised the OS permission alert anonymously on every launch. Without the presenter iOS silently swallows a local notification while the app is foregrounded — exactly the situation during onboarding — so removing the launch prompt must NOT remove the launch install, and this row is what says so if somebody deletes the line."
     }
   ],
   "_verdict_counts_are_equality": "Declared as exact counts, never bounds. A bound would let the unreachable roster grow by one without anybody moving this file, which is precisely how four capabilities reached `main` unreached.",
   "verdict_counts": {
-    "reachable": 37,
+    "reachable": 42,
     "undetermined": 1,
     "unreachable": 9
   },
   "_floor": "A register that lost its rows would be a silent full pass, so the population is asserted before its contents are.",
-  "minimum_capabilities": 47,
+  "minimum_capabilities": 52,
   "minimum_entry_points": 1
 }

@@ -133,13 +133,27 @@ private enum NudgeHonestySteps {
                         offenders.joined(separator: "\n"))
                 }
             },
+            // EXECUTED, not read. This step used to grep `deliver`'s source for
+            // `requestAuthorization(` — a string that is present whether or not the running
+            // program ever reaches it. The decision now lives in FoundryXKit, so the step
+            // asks it what it decides, for the situation a first run is actually in: nobody
+            // has been asked yet, and there is no account, because onboarding is where
+            // accounts come from.
             defineCheck("the sample nudge asks me for notification permission") { _, _, _ in
-                let deliver = try OnboardingAmbientNudgeHonestyTests.functionBody(
-                    named: "deliver", inAppFile: "App/AmbientNotifier.swift")
-                guard deliver.contains("requestAuthorization(") else {
+                let step = AmbientNudgePlan.firstStep(
+                    permission: .notDetermined, isPreview: true,
+                    hasBinding: false, bindingIsCurrent: false)
+                guard step == .ask else {
                     throw BrineStepError(
-                        "the sample-nudge delivery path never asks for permission, so a " +
-                        "first-run notification is dropped by iOS")
+                        "on a first run the sample nudge does \(step) instead of asking for " +
+                        "permission, so iOS drops the notification the step just promised")
+                }
+                // …and the unbound sample still goes out once permission is granted. The
+                // original defect was refusing it for want of an account.
+                let granted = AmbientNudgePlan.afterAsking(granted: true)
+                guard granted == .schedule else {
+                    throw BrineStepError(
+                        "permission was granted and the sample still does \(granted)")
                 }
             },
             defineCheck("the sample nudge can be shown while the app is open") { _, _, _ in

@@ -606,26 +606,99 @@ struct OnboardingVoiceStandalone: View {
 
 // MARK: - Step 3: ambient opt-in
 
-/// What the sample nudge actually did, held where the view can watch it.
+/// THE SAMPLE NUDGE'S ERRAND — owned here, not in a SwiftUI body.
 ///
-/// `AmbientNotifier.postPreview` reports from whatever queue `UNUserNotificationCenter`
-/// calls back on, so the outcome needs a MainActor-isolated home. A `@MainActor final
-/// class` is implicitly Sendable, which is what lets the `@Sendable` report closure carry
-/// it across that boundary without dragging the (non-Sendable) view along.
+/// `AmbientNotifier.postPreview` reports from whatever queue the notification centre calls
+/// back on, so the outcome needs a MainActor-isolated home. A `@MainActor final class` is
+/// implicitly Sendable, which is what lets the `@Sendable` report closure carry it across
+/// that boundary without dragging the (non-Sendable) view along.
+///
+/// It is a MODEL rather than a value the view's closure writes into because `swift test`
+/// cannot compile `App/`: a decision taken inside a `View` body is untestable by
+/// construction, which is exactly how "We just sent a sample nudge" shipped over a function
+/// that had sent nothing. Everything the step decides is here, where the app-hosted
+/// scenario lane can drive it and assert on what it settled to.
+///
+/// It also OWNS THE CLOCK. A centre that never calls back is indistinguishable from a
+/// swallowed early return, and both used to leave the step reading "Checking whether the
+/// sample nudge can go out" forever, with no way out of the screen but the promise
+/// unresolved. After `patience` seconds with no answer the step says the sample did not go
+/// out — which is true, and is the one thing the old code could never say.
 @MainActor
-final class AmbientNudgeReport: ObservableObject {
+final class AmbientSampleNudge: ObservableObject {
+    /// What the phone actually did. `.pending` only until the first answer arrives.
     @Published private(set) var attempt: AmbientNudgeAttempt = .pending
+    /// Has the user turned it on? Drives which half of the step is showing.
+    @Published private(set) var isOn = false
+    /// Has a sample been asked for at all? Until it has, `attempt` is `.pending` because
+    /// nothing has been tried — which is a different thing from waiting on an answer, and a
+    /// surface that cannot tell them apart says "checking" before anyone has tapped.
+    @Published private(set) var hasFired = false
 
-    func record(_ attempt: AmbientNudgeAttempt) { self.attempt = attempt }
+    /// How long to wait for the phone before saying the sample did not go out. A
+    /// constructor argument with a production default — not a hidden environment knob — so
+    /// a scenario can wait a fraction of a second instead of ten.
+    private let patience: TimeInterval
+    private var clock: Task<Void, Never>?
+    /// EXACTLY ONE outcome is recorded. Whichever answer arrives first — the centre's or
+    /// the clock's — wins, and the other is ignored.
+    private var settled = false
+
+    init(patience: TimeInterval = 10) { self.patience = patience }
+
+    /// What the "Turn it on" button does, in full. Ambient intelligence goes on (that write
+    /// stands whatever the sample does), the agent gets its default name, and the sample
+    /// nudge is fired at the step that just promised one.
+    func turnOn() {
+        _ = AmbientPrefs.setEnabled(true)
+        // The agent answers to "Foundry" out of the box (renameable in Settings) — a named
+        // agent is the invocation ritual.
+        if AmbientPrefs.agentName() == nil {
+            _ = AmbientPrefs.setAgentName("Foundry")
+        }
+        isOn = true
+        fireSample()
+    }
+
+    /// Fire the sample and start the clock. Also the Settings entry point, where ambient
+    /// intelligence is already on and only the sample is wanted.
+    func fireSample() {
+        settled = false
+        hasFired = true
+        attempt = .pending
+        clock?.cancel()
+        clock = Task { [weak self, patience] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, patience) * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.record(.unavailable)
+        }
+        AmbientNotifier.postPreview { [weak self] outcome in
+            Task { @MainActor in self?.record(outcome) }
+        }
+    }
+
+    /// The single settle point. Public so the app-hosted scenarios can drive the step's
+    /// reaction to an outcome directly as well as through the real notifier.
+    func record(_ outcome: AmbientNudgeAttempt) {
+        guard !settled else { return }
+        settled = true
+        clock?.cancel()
+        clock = nil
+        attempt = outcome
+    }
+
+    /// The step's words, keyed on what actually happened. Never a literal in a body.
+    var said: OnboardingAmbientConfirmation {
+        OnboardingAmbientStepCopy.confirmation(for: attempt)
+    }
 }
 
 struct OnboardingAmbientStep: View {
     let onDone: () -> Void
-    @State private var enabled = false
     /// The step used to announce "We just sent a sample nudge" on the line after calling a
-    /// function that, with no account bound, posted nothing and returned silently. It now
-    /// says whatever actually happened (FX-4a).
-    @StateObject private var nudge = AmbientNudgeReport()
+    /// function that, with no account bound, posted nothing and returned silently. Every
+    /// decision it makes now lives in the model, where a test can run it (FX-4a).
+    @StateObject private var nudge = AmbientSampleNudge()
 
     var body: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x4) {
@@ -641,16 +714,16 @@ struct OnboardingAmbientStep: View {
             // they had not seen. These are inert: no action closure reaches the broker,
             // and nothing here is stored as a real card
             // (features/onboarding-ambient-preview.feature).
-            if !enabled {
+            if !nudge.isOn {
                 ScrollView { AmbientPreviewCards() }
                     .frame(maxHeight: 300)
             }
 
-            if enabled {
+            if nudge.isOn {
                 // Every word here comes from FoundryXKit, keyed on what the notifier
                 // actually reported — a literal in this body could not know, and that is
                 // precisely how the false claim shipped.
-                let said = OnboardingAmbientStepCopy.confirmation(for: nudge.attempt)
+                let said = nudge.said
                 Label(said.headline, systemImage: said.symbolName)
                     .grainTextStyle(.body)
                     .foregroundStyle(said.claimsNudgeSent ? GrainColor.sage : GrainColor.textMuted)
@@ -659,27 +732,16 @@ struct OnboardingAmbientStep: View {
             }
 
             Spacer()
-            if enabled {
+            if nudge.isOn {
                 GrainButton("Done", variant: .filled, size: .regular) { onDone() }
                     .padding(.bottom, GrainSpacing.x4)
             } else {
-                GrainButton("Turn it on", variant: .filled, size: .regular) {
-                    _ = AmbientPrefs.setEnabled(true)
-                    // The agent answers to "Foundry" out of the box (renameable in
-                    // Settings) — a named agent is the invocation ritual.
-                    if AmbientPrefs.agentName() == nil {
-                        _ = AmbientPrefs.setAgentName("Foundry")
-                    }
-                    // Deterministic first-feel: fire the sample nudge NOW, while
-                    // they're looking, so the first real one is familiar — and ask for
-                    // notification permission HERE, at the step that promises one.
-                    // Whatever comes back is what the screen says; nothing is assumed.
-                    let sink = nudge
-                    AmbientNotifier.postPreview { outcome in
-                        Task { @MainActor in sink.record(outcome) }
-                    }
-                    enabled = true
-                }
+                // Deterministic first-feel: the sample nudge fires NOW, while they're
+                // looking, so the first real one is familiar — and notification permission
+                // is asked for HERE, at the step that promises one. Whatever comes back is
+                // what the screen says; nothing is assumed, and nothing is decided in this
+                // body, which no test in this repository can execute.
+                GrainButton("Turn it on", variant: .filled, size: .regular) { nudge.turnOn() }
                 GrainButton("Not now", variant: .outlined, size: .regular) { onDone() }
                     .padding(.bottom, GrainSpacing.x4)
             }

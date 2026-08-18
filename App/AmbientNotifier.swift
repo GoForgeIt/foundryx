@@ -80,6 +80,91 @@ final class AmbientNotificationPresenter: NSObject, UNUserNotificationCenterDele
     }
 }
 
+/// THE NOTIFICATION CENTRE, AS THE SIX THINGS THIS FILE DOES TO IT.
+///
+/// `UNUserNotificationCenter` is a final ObjC class with a private initialiser, so nothing
+/// in a test can stand in for it. That is not a small inconvenience: it is why every guard
+/// over this file was a `contains()` over its own source text, and why three separate
+/// one-line mutations to the delivery path — including one that told a user who had just
+/// tapped "Don't Allow" to go and check their lock screen — shipped 1536/1536 green.
+///
+/// This protocol is the seam. Production runs `LiveAmbientNotificationCentre`, a direct
+/// forward to `UNUserNotificationCenter.current()` that holds no decisions at all;
+/// `Tests/FoundryXAppScenarioTests` substitutes a scripted one and can then assert what the
+/// phone was actually asked and actually handed — a count, not a spelling.
+protocol AmbientNotificationCentre: Sendable {
+    /// Install the foreground presenter and the confirm-card actions. PROMPTS FOR NOTHING.
+    func installSurface(delegate: UNUserNotificationCenterDelegate,
+                        categories: Set<UNNotificationCategory>)
+    /// What iOS currently allows.
+    func permission(_ completion: @escaping @Sendable (AmbientNudgePermission) -> Void)
+    /// Raise the one OS permission prompt. `true` iff the user granted it.
+    func ask(_ completion: @escaping @Sendable (Bool) -> Void)
+    /// Hand a request to iOS. `true` iff iOS accepted it — the ONLY evidence that permits
+    /// the word "sent".
+    func hand(_ request: UNNotificationRequest,
+              _ completion: @escaping @Sendable (Bool) -> Void)
+    /// Withdraw specific requests (a scope that moved under an in-flight `add`).
+    func withdraw(identifiers: [String])
+    /// Withdraw everything — the identity transition.
+    func withdrawEverything()
+}
+
+/// The production centre. Deliberately decision-free: every branch worth testing lives in
+/// `AmbientNudgePlan`, so there is nothing here for a test to have missed.
+struct LiveAmbientNotificationCentre: AmbientNotificationCentre {
+    static let shared = LiveAmbientNotificationCentre()
+    private var centre: UNUserNotificationCenter { .current() }
+
+    func installSurface(delegate: UNUserNotificationCenterDelegate,
+                        categories: Set<UNNotificationCategory>) {
+        let c = centre
+        c.delegate = delegate
+        c.setNotificationCategories(categories)
+    }
+
+    func permission(_ completion: @escaping @Sendable (AmbientNudgePermission) -> Void) {
+        centre.getNotificationSettings { completion(AmbientNudgePermission($0.authorizationStatus)) }
+    }
+
+    func ask(_ completion: @escaping @Sendable (Bool) -> Void) {
+        centre.requestAuthorization(options: [.alert, .sound]) { granted, _ in completion(granted) }
+    }
+
+    func hand(_ request: UNNotificationRequest,
+              _ completion: @escaping @Sendable (Bool) -> Void) {
+        centre.add(request) { completion($0 == nil) }
+    }
+
+    func withdraw(identifiers: [String]) {
+        let c = centre
+        c.removePendingNotificationRequests(withIdentifiers: identifiers)
+        c.removeDeliveredNotifications(withIdentifiers: identifiers)
+    }
+
+    func withdrawEverything() {
+        let c = centre
+        c.removeAllPendingNotificationRequests()
+        c.removeAllDeliveredNotifications()
+    }
+}
+
+extension AmbientNudgePermission {
+    /// TOTAL by construction. `@unknown default` becomes `.denied` because the only safe
+    /// assumption about a status this build does not understand is that iOS will not show
+    /// the nudge, and claiming a send we cannot verify is the defect this lane exists for.
+    init(_ status: UNAuthorizationStatus) {
+        switch status {
+        case .authorized:    self = .authorized
+        case .provisional:   self = .provisional
+        case .ephemeral:     self = .ephemeral
+        case .notDetermined: self = .notDetermined
+        case .denied:        self = .denied
+        @unknown default:    self = .denied
+        }
+    }
+}
+
 enum AmbientNotifier {
     static let cardCategory = "AMBIENT_CARD"
     static let runAction = "AMBIENT_RUN"
@@ -87,12 +172,26 @@ enum AmbientNotifier {
     private static let ownerScopeKey = "accountScope"
     private static let ownerGenerationKey = "accountGeneration"
 
+    #if DEBUG
+    /// The scripted centre `Tests/FoundryXAppScenarioTests` installs. Same sanctioned shape
+    /// as `PocketRecorderCheckModel.attachmentFactoryForScenarios` — `#if DEBUG`, so
+    /// `scripts/ci-gates.sh phase_leak` compiles it out of Release entirely.
+    nonisolated(unsafe) static var notificationCentreForScenarios: AmbientNotificationCentre?
+    #endif
+
+    /// The one place this file reaches the OS. Every other function goes through here, so a
+    /// scenario that installs a scripted centre sees EVERY call the app makes.
+    static var centre: AmbientNotificationCentre {
+        #if DEBUG
+        if let scripted = notificationCentreForScenarios { return scripted }
+        #endif
+        return LiveAmbientNotificationCentre.shared
+    }
+
     /// Withdraw every queued or already-visible account notification immediately.
     /// Any callback already in flight also rechecks its captured AccountBinding.
     static func clearForIdentityTransition() {
-        let center = UNUserNotificationCenter.current()
-        center.removeAllPendingNotificationRequests()
-        center.removeAllDeliveredNotifications()
+        centre.withdrawEverything()
     }
 
     static func isCurrentOwner(_ userInfo: [AnyHashable: Any]) -> Bool {
@@ -131,38 +230,44 @@ enum AmbientNotifier {
         #if DEBUG
         // Screen-proof harness: never touch the notification centre (a prompt would cover
         // a screenshot). No effect on a normal launch.
-        if ProcessInfo.processInfo.arguments.contains(where: { $0.hasSuffix("Preview") }) { return }
+        if isScreenProofHarness { return }
         #endif
-        let center = UNUserNotificationCenter.current()
-        center.delegate = AmbientNotificationPresenter.shared
-        center.setNotificationCategories([
-            UNNotificationCategory(
-                identifier: cardCategory,
-                actions: [
-                    UNNotificationAction(identifier: runAction, title: "Run",
-                                         options: [.foreground]),
-                    UNNotificationAction(identifier: dismissAction, title: "Dismiss",
-                                         options: []),
-                ],
-                intentIdentifiers: [], options: [.customDismissAction]),
-        ])
+        centre.installSurface(
+            delegate: AmbientNotificationPresenter.shared,
+            categories: [
+                UNNotificationCategory(
+                    identifier: cardCategory,
+                    actions: [
+                        UNNotificationAction(identifier: runAction, title: "Run",
+                                             options: [.foreground]),
+                        UNNotificationAction(identifier: dismissAction, title: "Dismiss",
+                                             options: []),
+                    ],
+                    intentIdentifiers: [], options: [.customDismissAction]),
+            ])
     }
 
-    /// Ask once for notification permission (banner + sound) and install the surface.
-    /// Best-effort — a denied user simply never sees ambient nudges; nothing else changes.
-    static func requestAuthorizationIfNeeded() {
-        #if DEBUG
-        // Screen-proof harness: never raise the OS permission prompt (it would cover a
-        // screenshot). No effect on a normal launch.
-        if ProcessInfo.processInfo.arguments.contains(where: { $0.hasSuffix("Preview") }) { return }
-        #endif
-        installNotificationSurface()
-        let center = UNUserNotificationCenter.current()
-        center.getNotificationSettings { settings in
-            guard settings.authorizationStatus == .notDetermined else { return }
-            center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
-        }
+    // `requestAuthorizationIfNeeded` USED TO LIVE HERE, and `RootView` called it
+    // unconditionally on every launch (`App/RootView.swift`, the `#else` shipping arm of a
+    // `#if DEBUG || PERF_HARNESS`). RootView also HOSTS onboarding, as a `.fullScreenCover`,
+    // so RootView ran first: the OS prompt appeared before the user had been told what a
+    // notification from this app would even be for, and the ambient step's promise —
+    // "and ask for notification permission HERE, at the step that promises one" — was dead
+    // code in practice, because by the time the step ran the status was no longer
+    // `.notDetermined`.
+    //
+    // It is DELETED rather than left unused. An unused function is one line away from being
+    // called again, and the only permission prompt this app may raise is one raised by
+    // `deliver`, which reports what the user answered to the surface that made the promise.
+    // `installNotificationSurface` above is what launch calls now: it installs the presenter
+    // and the card actions and touches authorization not at all.
+
+    #if DEBUG
+    /// The screen-proof harness (`-…Preview` launch arguments). Compiled out of Release.
+    private static var isScreenProofHarness: Bool {
+        ProcessInfo.processInfo.arguments.contains(where: { $0.hasSuffix("Preview") })
     }
+    #endif
 
     /// Post the ROUTED outcome of a real gate candidate. Lookups notify with the
     /// actual answer from the user's memory (informational). todo/playbook/workflow/agent
@@ -282,12 +387,15 @@ enum AmbientNotifier {
     /// the work and lets the caller claim it happened. Now every path ends in exactly one
     /// `report`, and the caller renders `OnboardingAmbientStepCopy.confirmation(for:)`.
     ///
-    /// It also ASKS, here, at the step that promises the notification. Authorization was
-    /// only ever requested from `RootView`, so at this step the status is very likely
-    /// `.notDetermined` and iOS would drop the nudge; `installNotificationSurface` puts the
-    /// foreground presenter in place (without it iOS swallows the banner while the app is
-    /// open, which is exactly the situation during onboarding) and `deliver` raises the
-    /// single permission prompt and reports the user's answer.
+    /// It also ASKS, here, at the step that promises the notification — and that is now
+    /// true rather than merely intended. Authorization used to be requested by `RootView`
+    /// on every launch, anonymously, and RootView is what HOSTS onboarding, so RootView ran
+    /// first and the status here was no longer `.notDetermined` by the time the step that
+    /// promised a notification got to ask. That launch prompt is deleted;
+    /// `installNotificationSurface` puts the foreground presenter in place (without it iOS
+    /// swallows the banner while the app is open, which is exactly the situation during
+    /// onboarding) and `deliver` raises the single permission prompt and reports the
+    /// user's answer.
     static func postPreview(
         report: @escaping @Sendable (AmbientNudgeAttempt) -> Void = { _ in }
     ) {
@@ -308,27 +416,31 @@ enum AmbientNotifier {
     /// content, no seed and no tap payload. Every other caller passes a real binding and
     /// the account-scoped behaviour below is unchanged. `report`, when supplied, is called
     /// EXACTLY ONCE on every path — including the paths that used to `return` in silence.
+    /// EVERY BRANCH BELOW IS `AmbientNudgePlan`'s, NOT THIS FUNCTION'S.
+    ///
+    /// This used to decide for itself, inside a closure handed to
+    /// `UNUserNotificationCenter.getNotificationSettings` — a place no test in this
+    /// repository can enter. So the guards over it read its own source text, and a
+    /// one-character change from `report?(.refused)` to `report?(.scheduled)` on the
+    /// permission-denied arm shipped green, because the banned string was still present on
+    /// an untouched line. What is left here is translation and side effects: ask the plan,
+    /// do what it says. Change an answer and `AmbientNudgePlanTests` goes red on `swift
+    /// test`; change the wiring and the app-hosted scenario goes red on a simulator.
     private static func deliver(title: String, body: String, preview: Bool,
                                 seed: String? = nil, answerText: String? = nil,
                                 captureId: String? = nil,
                                 binding: CaptureAccountScope.AccountBinding?,
                                 report: (@Sendable (AmbientNudgeAttempt) -> Void)? = nil) {
         #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains(where: { $0.hasSuffix("Preview") }) {
+        if isScreenProofHarness {
             // Screen-proof harness: no OS prompts. Nothing was scheduled, so say so
             // rather than letting the caller claim a nudge it never got.
-            report?(.unavailable)
+            report?(AmbientNudgePlan.whenTheCentreIsUnreachable)
             return
         }
         #endif
-        // A real (non-preview) notification carries the user's own words and a tap payload
-        // that acts on their account — it may not go out unbound.
-        guard preview || binding != nil else {
-            report?(.unavailable)
-            return
-        }
-        let center = UNUserNotificationCenter.current()
-        let schedule: (String?, UInt64?) -> Void = { ownerScope, ownerGeneration in
+        let centre = self.centre
+        let schedule: @Sendable (String?, UInt64?) -> Void = { ownerScope, ownerGeneration in
             let content = UNMutableNotificationContent()
             content.title = title
             content.body = body
@@ -354,27 +466,25 @@ enum AmbientNotifier {
                 content: content,
                 trigger: UNTimeIntervalNotificationTrigger(
                     timeInterval: 0.5, repeats: false))
-            center.add(req) { error in
-                if error != nil {
-                    // Handed to iOS and REFUSED. Never report this as a send.
-                    report?(.unavailable)
-                    return
-                }
-                report?(.scheduled)
-                // `add` is asynchronous. If a transition raced the request after
+            // `UNNotificationRequest` is not Sendable, so the completion carries the
+            // IDENTIFIER rather than the request it belongs to.
+            let identifier = req.identifier
+            centre.hand(req) { accepted in
+                report?(AmbientNudgePlan.afterHandingToSystem(accepted: accepted))
+                guard accepted else { return }
+                // `hand` is asynchronous. If a transition raced the request after
                 // the transition's bulk clear, withdraw this exact stale request.
                 guard let binding, !binding.isCurrent else { return }
-                center.removePendingNotificationRequests(
-                    withIdentifiers: [req.identifier])
-                center.removeDeliveredNotifications(
-                    withIdentifiers: [req.identifier])
+                centre.withdraw(identifiers: [identifier])
             }
         }
-        let fire: () -> Void = {
-            guard let binding else {
-                schedule(nil, nil)          // unbound sample
-                return
-            }
+        // NO BARE `return` BELOW, deliberately. The guard that every exit from this function
+        // reports first reads the source, and it used to carry an exemption for
+        // `guard let binding` — which matched any identifier beginning "binding" and
+        // laundered a planted silent return straight through a green suite. The exemption is
+        // gone, so this code owes it no special case.
+        let fire: @Sendable () -> Void = {
+            guard let binding else { return schedule(nil, nil) }   // unbound sample
             let ran = CaptureAccountScope.perform(as: binding) { captured in
                 schedule(captured.scope, captured.generation)
             }
@@ -382,21 +492,27 @@ enum AmbientNotifier {
             // here. Nothing was scheduled.
             if ran == nil { report?(.unavailable) }
         }
-        center.getNotificationSettings { settings in
-            if let binding,
-               CaptureAccountScope.perform(as: binding, { _ in true }) != true {
-                report?(.unavailable)
-                return
+        // The plan asks at most once, so a `.ask` arriving here scheduled nothing — and a
+        // path that scheduled nothing may not claim a send.
+        let settle: @Sendable (AmbientNudgeStep) -> Void = { step in
+            switch step {
+            case .schedule: fire()
+            case .report(let outcome): report?(outcome)
+            case .ask: report?(.unavailable)
             }
-            switch settings.authorizationStatus {
-            case .authorized, .provisional, .ephemeral:
-                fire()
-            case .notDetermined:
-                center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
-                    if granted { fire() } else { report?(.refused) }
-                }
-            default:
-                report?(.refused)   // denied — respect it, and SAY it
+        }
+        centre.permission { permission in
+            let step = AmbientNudgePlan.firstStep(
+                permission: permission,
+                isPreview: preview,
+                hasBinding: binding != nil,
+                bindingIsCurrent: binding.map {
+                    CaptureAccountScope.perform(as: $0, { _ in true }) == true
+                } ?? false)
+            if step == .ask {
+                centre.ask { granted in settle(AmbientNudgePlan.afterAsking(granted: granted)) }
+            } else {
+                settle(step)
             }
         }
     }
