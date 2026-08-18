@@ -133,7 +133,9 @@ public final class RemoteSession: ObservableObject {
         req.httpMethod = "POST"
         req.setValue("text/plain", forHTTPHeaderField: "Content-Type")
         req.httpBody = payload.data(using: .utf8)
-        Task { _ = try? await URLSession.shared.data(for: req) }  // fire-and-forget
+        // THE SAME CHOKE POINT `DoorLog` SHIPS THROUGH, so a test run's sign-in trace cannot
+        // reach the production relay either.
+        FoundryXDiagShipping.send(req)  // fire-and-forget
     }
 
     /// On launch / appear: if already signed in, resolve the host silently.
