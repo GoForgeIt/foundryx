@@ -444,12 +444,21 @@ struct RecordingDevicePageView: View {
     /// `nil` until a check ends, so a page nothing has happened on renders exactly the value
     /// it was pushed with.
     @State private var refreshedInput: RecordingDeviceListInput?
-    /// WHICH RECORDING THE OWNER IS BEING ASKED ABOUT, by the recorder's own `<date>/<timestamp>`.
+    // `confirmingRemovalOf` USED TO LIVE HERE, holding the ID of the recording a removal was
+    // being confirmed for. The removal is no longer fired from a row, so the page no longer
+    // owns that question: it belongs to `PocketRecordingDetailSheet`, which is about exactly
+    // one recording and therefore needs no ID to keep the confirmation and its subject in
+    // agreement. Deleted rather than left as unread state.
+
+    /// WHICH RECORDING THE OWNER OPENED, by the recorder's own `<date>/<timestamp>`.
     ///
-    /// It holds the ID rather than a Bool because the confirmation is per-recording and the
-    /// sentence it shows names where THAT recording's copy is. A Bool plus a separate "current
-    /// row" is two pieces of state that can disagree, on the one gesture that cannot be undone.
-    @State private var confirmingRemovalOf: String?
+    /// THE ID RATHER THAN THE PAGE VALUE, on purpose. The page is derived from the shelf
+    /// reading, and the shelf reading changes underneath an open sheet — a bring-over started
+    /// from this sheet re-reads custody and the recording moves from "only on the recorder" to
+    /// "in Solleva". Holding the derived value would freeze the sheet on the state the tap
+    /// happened in, so the one screen that exists to say where a recording is would go on
+    /// saying the old answer while the transfer it started was landing.
+    @State private var inspecting: String?
     /// §10 custody. The key is fetched from the Keychain only when the owner asks for it, and
     /// it does not outlive the sheet that showed it.
     @State private var showingKeyCustody = false
@@ -608,24 +617,30 @@ struct RecordingDevicePageView: View {
             Text(PocketRecorderCostPresentation.forgetMessage(warning: page.forgetWarning,
                                                               presences: check.presences))
         }
-        // THE DESTRUCTIVE TAP'S OWN CONFIRMATION. `isPresented` is derived from the ID rather
-        // than held separately, so dismissing the dialog and forgetting which recording it was
-        // about are the same event.
-        .alert(PocketRemoveFromRecorderPresentation.action,
-               isPresented: Binding(get: { confirmingRemovalOf != nil },
-                                    set: { if !$0 { confirmingRemovalOf = nil } })) {
-            Button(PocketRemoveFromRecorderPresentation.cancelConfirmAction, role: .cancel) {
-                confirmingRemovalOf = nil
+        // ONE RECORDING, OPENED. The list is where a person finds a recording; this is where
+        // they can do anything with it. It resolves the page on every redraw rather than
+        // capturing it at the tap, so a transfer started inside the sheet moves the sheet's own
+        // three places while it lands.
+        .sheet(isPresented: Binding(get: { inspecting != nil },
+                                    set: { if !$0 { inspecting = nil } })) {
+            NavigationStack {
+                PocketRecordingDetailSheet(
+                    page: inspecting.flatMap { check.detailPage(for: $0, brain: brain) },
+                    brain: brain,
+                    isBusy: check.isChecking || check.isBringingOver || check.isRemoving,
+                    onBringOver: { id in
+                        check.bringOver(id: id,
+                                        hardwareToken: input.identity.hardwareToken,
+                                        advertisedName: input.displayName,
+                                        into: manager)
+                    },
+                    onRemove: { id in
+                        check.removeFromRecorder(id: id,
+                                                 hardwareToken: input.identity.hardwareToken,
+                                                 advertisedName: input.displayName)
+                    },
+                    onClose: { inspecting = nil })
             }
-            Button(PocketRemoveFromRecorderPresentation.confirmAction, role: .destructive) {
-                guard let id = confirmingRemovalOf else { return }
-                confirmingRemovalOf = nil
-                check.removeFromRecorder(id: id,
-                                         hardwareToken: input.identity.hardwareToken,
-                                         advertisedName: input.displayName)
-            }
-        } message: {
-            Text(PocketRemoveFromRecorderPresentation.confirmation(for: brain))
         }
         // LEAVING THE PAGE STOPS THE ERRAND. Without this the check or the transfer carried on
         // with nobody watching it — a `CBCentralManager` still connected to the recorder, a
@@ -1006,6 +1021,26 @@ struct RecordingDevicePageView: View {
         if let detail = check.detail {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(detail.manifest.rows.enumerated()), id: \.offset) { _, row in
+                    // THE ROW IS THE CONTROL, AND UNTIL THIS IT WAS NOT ONE.
+                    //
+                    // THE DEFECT, MEASURED ON NICK'S OWN UNIT. This was a `VStack` of `HStack`s
+                    // and the only interactive thing it ever carried was `Remove it from the
+                    // recorder`, drawn behind `isOffered` — which is FALSE for all nineteen of
+                    // his recordings, because not one of them has been brought over. So on the
+                    // one device this page was built for, not a single row had a single
+                    // interactive element: nineteen things a person could read and none they
+                    // could touch.
+                    //
+                    // TAPPING IT OPENS THE PAGE ABOUT THAT RECORDING, which is also where the
+                    // second half of the same gap is closed: `Bring over` takes
+                    // `PocketBringOver.offeredNext`'s pick and there was no way to say "that
+                    // one". The whole decision — what the page says, and which of the two
+                    // actions this recording actually admits — is
+                    // `PocketRecordingDetailPresentation`, in the kit, because a rule written
+                    // in a body is a rule no test in this repository can read.
+                    Button {
+                        inspecting = row.id
+                    } label: {
                     // TWO LINES, EACH WITH THE WHOLE WIDTH. What the recording IS on the
                     // first; where it is on the second.
                     //
@@ -1072,34 +1107,41 @@ struct RecordingDevicePageView: View {
                                     .foregroundStyle(GrainColor.textFaint)
                             }
                             Spacer(minLength: GrainSpacing.x2)
-                            // THE AFFORDANCE DOES NOT EXIST FOR A RECORDING SOLLEVA HAS NOT
-                            // PROVED IT HOLDS. Nick's ruling in his own words, and this is the
-                            // predicate itself rather than a disabled button - a greyed-out
-                            // control for a state a person cannot reach from here is a puzzle,
-                            // not an affordance. `isOffered` reads the SAME reading the row
-                            // above is drawn from.
-                            if PocketRemoveFromRecorderPresentation
-                                .isOffered(for: row.presence) {
-                                // IT ASKS FIRST. Until this shipped, the row fired the removal
-                                // on the tap while FORGET — which destroys a key and no audio
-                                // — sat behind an `.alert`. The less recoverable gesture was
-                                // the less guarded one, and `confirmation(for:)`, written
-                                // precisely to guard it, had no call site anywhere in the app.
-                                Button {
-                                    confirmingRemovalOf = row.id
-                                } label: {
-                                    Text(PocketRemoveFromRecorderPresentation.action)
-                                        .grainTextStyle(.caption)
-                                        .fixedSize()
-                                }
-                                .buttonStyle(.grain(.text))
-                                .disabled(check.isRemoving || check.isChecking
-                                          || check.isBringingOver)
-                            }
+                            // THE DESTRUCTIVE CONTROL LEFT THE ROW, and it did not lose its
+                            // gate on the way out. It was the row's only interactive element
+                            // and it is drawn behind `isOffered`, so on a recorder where
+                            // nothing has been brought over the row had nothing at all. It now
+                            // lives on the page about ONE recording, still behind the SAME
+                            // predicate — `PocketRecordingDetailPresentation.removalRefusal`
+                            // calls `isOffered(for:)` rather than re-deriving it — and beside
+                            // the sentence saying why it is absent, which the row never had.
+                            //
+                            // This is what says the row leads somewhere. It is a glyph rather
+                            // than a word because the row already carries five facts and a
+                            // sixth would be read as a sixth fact.
+                            Image(systemName: "chevron.right")
+                                .imageScale(.small)
+                                .foregroundStyle(GrainColor.textFaint)
                         }
                     }
                     .padding(.vertical, GrainSpacing.x2)
+                    // THE WHOLE ROW IS THE TARGET, not just the glyph and the words. Without
+                    // this the gaps between the five facts are dead space in the middle of a
+                    // control.
+                    .contentShape(Rectangle())
+                    // ^ the Button's LABEL ends here. The modifiers below belong to the Button
+                    // itself, and the row's content is deliberately left at its original
+                    // indentation so this change reads as "the same row, now pressable" rather
+                    // than as ninety rewritten lines.
+                    }
+                    .buttonStyle(.plain)
                     .accessibilityElement(children: .combine)
+                    // THE ROW'S ADDRESS IS THE RECORDER'S OWN NAME FOR THE FILE. A combined
+                    // accessibility element has a label assembled out of five facts, which is
+                    // not something a proof can name; this is what lets the simulator run open
+                    // a SPECIFIC row and assert what that row's page offers. It is an
+                    // identifier, not a sentence — nothing renders it.
+                    .accessibilityIdentifier(row.id)
                     .overlay(alignment: .bottom) { hairline }
                 }
 
@@ -1431,6 +1473,181 @@ struct RecordingDevicePageView: View {
     }
 }
 
+// MARK: - One recording, opened
+
+/// THE PAGE ABOUT ONE RECORDING ON A RECORDER — the thing this app did not have.
+///
+/// WHAT IT IS FOR. The shelf is a list of what a recorder is holding, and a list is where a
+/// person FINDS a recording. Until this existed there was nowhere to go from there: the row
+/// carried one control, gated on a predicate false for every recording on the measured device,
+/// and the page's own `Bring over` took `PocketBringOver.offeredNext`'s pick — so an owner
+/// looking at the recording they made this morning had no way to ask for that one.
+///
+/// EVERY WORD AND EVERY DECISION IS `PocketRecordingDetailPresentation`. This body chooses
+/// nothing: which of the two actions this recording admits, and the sentence explaining the one
+/// it does not, are computed in the kit where `swift test` can hold them. The removal it offers
+/// runs through the SAME `isOffered(for:)` the shelf row ran through and the same
+/// `confirmation(for:)` the page-level alert used, moved here rather than copied — the
+/// confirmation now lives on the view that owns the gesture, so there is one of it.
+///
+/// `page == nil` IS A STATE, NOT AN ERROR TO SWALLOW. The listing is restated on every check
+/// while the safety readings are restated only on a check that reached the recorder, so one
+/// good check followed by one failed one leaves rows with no readings behind them. The sheet
+/// says so, in the line the removal path already earned for exactly that state, rather than
+/// rendering an empty page with two dead buttons.
+struct PocketRecordingDetailSheet: View {
+    let page: PocketRecordingDetailPage?
+    let brain: BrainChoice
+    /// The radio is doing something. One radio, one idea of whether it is busy — the same rule
+    /// the check model states about itself.
+    let isBusy: Bool
+    let onBringOver: (String) -> Void
+    let onRemove: (String) -> Void
+    let onClose: () -> Void
+
+    /// PER-SHEET, AND A BOOL IS CORRECT HERE. On the page this had to be an ID, because one
+    /// page has many rows and a Bool plus a "current row" is two pieces of state that can
+    /// disagree on the one gesture that cannot be undone. This sheet IS one recording, so the
+    /// identity is the sheet's and there is nothing for a second value to disagree with.
+    @State private var confirmingRemoval = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: GrainSpacing.x6) {
+                if let page {
+                    facts(of: page)
+                    places(of: page)
+                    actions(of: page)
+                    notes(of: page)
+                } else {
+                    Text(PocketRemoveFromRecorderPresentation.cannotActOnThisNowLine)
+                        .grainTextStyle(.body)
+                        .foregroundStyle(GrainColor.textMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, GrainSpacing.x4)
+            .padding(.vertical, GrainSpacing.x6)
+        }
+        .grainBackground()
+        // THE SHEET IS ADDRESSABLE AS A CONTAINER, and this is not cosmetic. iOS keeps the
+        // presenting page in the accessibility tree underneath a sheet, so a proof that asked
+        // the APPLICATION whether "Bring over" is on screen was answered by the shelf's own
+        // bring-over control sitting behind this one — measured, on the first simulator run of
+        // this screen. Every assertion about what THIS page offers is scoped to this element.
+        .accessibilityIdentifier("recording-detail-sheet")
+        .navigationTitle(page?.title ?? "")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button(PocketRecordingDetailPresentation.closeAction) { onClose() }
+            }
+        }
+        // IT ASKS FIRST, AND IT ASKS HERE. This alert used to hang off the whole recorder page
+        // because the tap did; the tap moved, so it moved with it. Same three sentences, same
+        // `confirmation(for:)` that names where the copy already is.
+        .alert(PocketRemoveFromRecorderPresentation.action,
+               isPresented: $confirmingRemoval) {
+            Button(PocketRemoveFromRecorderPresentation.cancelConfirmAction,
+                   role: .cancel) { confirmingRemoval = false }
+            Button(PocketRemoveFromRecorderPresentation.confirmAction, role: .destructive) {
+                confirmingRemoval = false
+                guard let token = page?.fileToken else { return }
+                onRemove(token)
+                onClose()
+            }
+        } message: {
+            Text(PocketRemoveFromRecorderPresentation.confirmation(for: brain))
+        }
+    }
+
+    /// WHAT THE RECORDING IS: when it was made, how big it is, and the recorder's own name for
+    /// it. All three are values the recorder reported; not one is a sentence this file wrote.
+    @ViewBuilder
+    private func facts(of page: PocketRecordingDetailPage) -> some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+            ForEach(Array(page.facts.enumerated()), id: \.offset) { _, fact in
+                HStack(alignment: .firstTextBaseline, spacing: GrainSpacing.x3) {
+                    Text(fact.label)
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.textFaint)
+                    Spacer(minLength: GrainSpacing.x2)
+                    Text(fact.value)
+                        .grainTextStyle(.body)
+                        .foregroundStyle(GrainColor.ink)
+                        .multilineTextAlignment(.trailing)
+                }
+            }
+        }
+    }
+
+    /// THE THREE PLACES, ONE PER LINE, EACH WITH ITS OWN AGE — the long form the shelf row had
+    /// to give up to fit nineteen of itself on a screen. There is one recording here and no
+    /// list to get past, so nothing is compressed.
+    ///
+    /// AND NO SUMMARY ABOVE THEM. `PocketPresencePresentation.label` is DERIVED from these
+    /// three; drawing both is the same fact twice, which is the defect the row's own gate
+    /// exists to catch. One recording does not make it acceptable.
+    @ViewBuilder
+    private func places(of page: PocketRecordingDetailPage) -> some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+            Text(PocketRecordingDetailPresentation.placesHeading)
+                .grainTextStyle(.caption)
+                .fontWeight(.semibold)
+                .foregroundStyle(GrainColor.forgeBlue)
+            ForEach(Array(page.places.enumerated()), id: \.offset) { _, line in
+                Text(PocketPresencePresentation.oneLine(line))
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// ONLY THE ACTIONS THIS RECORDING ADMITS. The list comes from the kit; this body has no
+    /// `if` of its own to get wrong, which is the whole reason the decision is over there.
+    @ViewBuilder
+    private func actions(of page: PocketRecordingDetailPage) -> some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x3) {
+            ForEach(page.actions, id: \.self) { action in
+                Button {
+                    switch action {
+                    case .bringItOver:
+                        // THE OWNER SAID "THAT ONE". The transfer is hours over BLE for a long
+                        // file, and the page behind this sheet is where its progress and its
+                        // outcome are already rendered — so the sheet gets out of the way
+                        // rather than becoming a second place that reports the same errand.
+                        onBringOver(page.fileToken)
+                        onClose()
+                    case .removeFromRecorder:
+                        confirmingRemoval = true
+                    }
+                } label: {
+                    Text(action.title).frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.grain(action.isDestructive ? .text : .filled))
+                .disabled(isBusy)
+            }
+        }
+    }
+
+    /// WHY AN ACTION IS NOT HERE. The row's rule was "the predicate itself rather than a
+    /// disabled button", which is right and was only half of it: nineteen rows offered nothing
+    /// and said nothing about why. These are the sentences.
+    @ViewBuilder
+    private func notes(of page: PocketRecordingDetailPage) -> some View {
+        VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+            ForEach(Array(page.notes.enumerated()), id: \.offset) { _, note in
+                Text(note)
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
 // MARK: - "Connect and check now", and the session it opens
 
 /// THE APP SIDE OF ONE CHECK.
@@ -1621,11 +1838,23 @@ final class PocketRecorderCheckModel: ObservableObject {
     ///   photographed. WITHOUT IT THE PICTURE CONTRADICTS ITSELF: the header states what a
     ///   check is doing, so a mount that hands over an answered shelf and no instant
     ///   photographs "Not checked yet" above a list of files the recorder just named.
+    /// - Parameter proofShelf: the listing the panel was built from, and
+    ///   `proofPresences`: where each of those recordings is, in the SAME order.
+    ///
+    ///   THEY ARE NOT DECORATION AND THE PICTURE IS WRONG WITHOUT THEM. The page about one
+    ///   recording is resolved from these two — `detailPage(for:)` asks
+    ///   `PocketRecordingDetailPresentation.located`, which pairs an id in the listing with the
+    ///   reading at its index — and a mount that handed over a rendered panel and neither of
+    ///   its sources photographs every row opening onto "Solleva can't act on that recording
+    ///   right now". That is a real state and it is the WRONG one: it is what a page shows
+    ///   after a failed check, not what a shelf that just answered shows.
     init(proofIsChecking: Bool = false,
          proofDetail: StoredFileDeviceDetailPresentation? = nil,
          proofMessage: String? = nil,
          proofOfferedRecording: PocketRecording? = nil,
-         proofShelfAnsweredAt: Date? = nil) {
+         proofShelfAnsweredAt: Date? = nil,
+         proofShelf: [PocketRecording] = [],
+         proofPresences: [PocketRecordingPresence]? = nil) {
         // A PHOTOGRAPH RUNS NO ERRAND, so it never takes any time — but the lease must exist
         // or the model has a stored property this initialiser leaves unset.
         lease = PocketBackgroundLease(time: Self.backgroundTime())
@@ -1634,6 +1863,8 @@ final class PocketRecorderCheckModel: ObservableObject {
         message = proofMessage
         offeredRecording = proofOfferedRecording
         shelfObservedAt = proofShelfAnsweredAt
+        shelfRecordings = proofShelf
+        presences = proofPresences
     }
     #endif
 
@@ -2010,8 +2241,62 @@ final class PocketRecorderCheckModel: ObservableObject {
     ///   over is one call, and it is the only line of this whole leg that is about the app
     ///   rather than about the recording.
     func bringOver(hardwareToken: String, advertisedName: String, into manager: CaptureManager) {
-        guard !isChecking, !isBringingOver else { return }
         guard let recording = offeredRecording else { return }
+        bringOver(recording: recording, hardwareToken: hardwareToken,
+                  advertisedName: advertisedName, into: manager)
+    }
+
+    /// THE OWNER ASKED FOR THAT ONE.
+    ///
+    /// THE DEFECT THIS CLOSES. The only bring-over this app had took
+    /// `PocketBringOver.offeredNext`'s pick — smallest first, minus what this phone holds —
+    /// which is a good default and was the ONLY thing anybody could ask for. A person looking
+    /// at the recording they made this morning could not ask for it; they could ask for
+    /// whatever the comparator elected, once, and then again.
+    ///
+    /// - Parameter id: the recorder's OWN name for the file, `<date>/<timestamp>`, carried from
+    ///   the row rather than re-derived from a title. The lookup is
+    ///   `PocketRecordingDetailPresentation.located`, which is the SAME call the detail page
+    ///   was built from — so the recording that gets asked for is the one the sheet was
+    ///   describing, not whatever shares its index.
+    ///
+    /// EVERY EXIT SAYS SOMETHING, like the removal's. A shelf that cannot answer for this id is
+    /// reachable — the listing is restated on every check while the readings are restated only
+    /// on a check that reached the recorder — and a tap that returned in silence there would be
+    /// a control that looks live, does nothing, and explains nothing.
+    func bringOver(id: String, hardwareToken: String, advertisedName: String,
+                   into manager: CaptureManager) {
+        guard let found = PocketRecordingDetailPresentation.located(id,
+                                                                    among: shelfRecordings,
+                                                                    presences: presences) else {
+            bringOverMessage = PocketRemoveFromRecorderPresentation.cannotActOnThisNowLine
+            return
+        }
+        bringOver(recording: found.recording, hardwareToken: hardwareToken,
+                  advertisedName: advertisedName, into: manager)
+    }
+
+    /// EVERYTHING KNOWN ABOUT ONE LISTED RECORDING, AND THE ACTIONS IT ADMITS.
+    ///
+    /// `nil` when the shelf cannot answer for this id, which the sheet renders as the line that
+    /// says so. Nothing is decided here: the whole page is
+    /// `PocketRecordingDetailPresentation.page`, in the kit, where `swift test` can hold it.
+    func detailPage(for id: String,
+                    brain: BrainChoice,
+                    now: Date = Date()) -> PocketRecordingDetailPage? {
+        guard let found = PocketRecordingDetailPresentation.located(id,
+                                                                    among: shelfRecordings,
+                                                                    presences: presences)
+        else { return nil }
+        return PocketRecordingDetailPresentation.page(for: found.recording,
+                                                      presence: found.presence,
+                                                      brain: brain,
+                                                      now: now)
+    }
+
+    private func bringOver(recording: PocketRecording, hardwareToken: String,
+                           advertisedName: String, into manager: CaptureManager) {
+        guard !isChecking, !isBringingOver else { return }
         guard let identifier = UUID(uuidString: hardwareToken) else {
             bringOverMessage = PocketRecorderCheckPresentation.notThisRecorderLine
             return

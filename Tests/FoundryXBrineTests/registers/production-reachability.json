@@ -699,12 +699,12 @@
       "call_pattern": ".isOffered(for:",
       "reached_from": [
         {
-          "via": "device-screen",
-          "anchor": "                                .isOffered(for: row.presence) {"
+          "via": "pocket-recording-detail-page",
+          "anchor": "        if PocketRemoveFromRecorderPresentation.isOffered(for: presence) { return nil }"
         }
       ],
       "verdict": "reachable",
-      "why": "the ruling's clause 'the affordance does not exist for a recording we have not brought over', as CODE. It reads the same predicate the consent factories read, so the button and the consent cannot disagree. It is enumerated because a destructive capability that is present, unreached and unenumerated is the worst row this register can hold — and for a while this one was present, reached by a bare `if` in a SwiftUI body, and enumerated nowhere."
+      "why": "ITS CALL SITE MOVED AND THAT IS THE POINT OF THE MOVE \u2014 it was a bare `if` in a SwiftUI body, which is code `swift test` cannot compile and therefore cannot hold; it is now read by `PocketRecordingDetailPresentation.removalRefusal`, a value the whole 27-placement population is put through. the ruling's clause 'the affordance does not exist for a recording we have not brought over', as CODE. It reads the same predicate the consent factories read, so the button and the consent cannot disagree. It is enumerated because a destructive capability that is present, unreached and unenumerated is the worst row this register can hold — and for a while this one was present, reached by a bare `if` in a SwiftUI body, and enumerated nowhere."
     },
     {
       "id": "pocket-remove-confirmation",
@@ -720,15 +720,61 @@
       ],
       "verdict": "reachable",
       "why": "it was written to guard the one gesture that cannot be undone and had NO call site anywhere in the app, while Forget — which destroys a key and no audio — sat behind an alert. A written-but-unreachable confirmation is worse than none, because the copy gates count it as shipped."
+    },
+    {
+      "id": "pocket-recording-detail-page",
+      "name": "what one recording's page says, and which of the two actions it admits",
+      "declared_in": "Sources/FoundryXKit/PocketRecordingDetail.swift",
+      "declaration_anchor": "    public static func page(for recording: PocketRecording,",
+      "call_pattern": "PocketRecordingDetailPresentation.page(",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "        return PocketRecordingDetailPresentation.page(for: found.recording,"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "the decision behind a row being something a person can press: what the opened page states, and which of the two actions that recording actually admits. It is enumerated because the thing it replaced \u2014 a bare `if` on `isOffered` inside a SwiftUI body \u2014 is the exact shape this register exists to make impossible to lose."
+    },
+    {
+      "id": "pocket-recording-located",
+      "name": "pairing the row a finger landed on with the safety reading it was drawn from",
+      "declared_in": "Sources/FoundryXKit/PocketRecordingDetail.swift",
+      "declaration_anchor": "    public static func located(_ id: String,",
+      "call_pattern": "PocketRecordingDetailPresentation.located(",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "        guard let found = PocketRecordingDetailPresentation.located(id,",
+          "sites": 2
+        }
+      ],
+      "verdict": "reachable",
+      "why": "TWO call sites on purpose \u2014 the page a row opens, and the transfer that page asks for \u2014 and they are the SAME resolution, so the recording that gets asked for is the one the page was describing. Pairing a row to a reading by array position is how a removal reaches a different recording than the one under the finger, and this firmware spells its timestamps two ways on one device."
+    },
+    {
+      "id": "pocket-recording-detail-sheet",
+      "name": "the screen about one recording on a recorder",
+      "declared_in": "App/DeviceScreen.swift",
+      "declaration_anchor": "struct PocketRecordingDetailSheet: View",
+      "call_pattern": "PocketRecordingDetailSheet(",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "                PocketRecordingDetailSheet("
+        }
+      ],
+      "verdict": "reachable",
+      "why": "a whole screen, and screens in this file have shipped orphaned before (`PocketOnboardingView`, a row above). It also holds the removal confirmation, which had no call site anywhere in the app for its first life."
     }
   ],
   "_verdict_counts_are_equality": "Declared as exact counts, never bounds. A bound would let the unreachable roster grow by one without anybody moving this file, which is precisely how four capabilities reached `main` unreached.",
   "verdict_counts": {
-    "reachable": 37,
+    "reachable": 40,
     "undetermined": 1,
     "unreachable": 9
   },
   "_floor": "A register that lost its rows would be a silent full pass, so the population is asserted before its contents are.",
-  "minimum_capabilities": 47,
+  "minimum_capabilities": 50,
   "minimum_entry_points": 1
 }

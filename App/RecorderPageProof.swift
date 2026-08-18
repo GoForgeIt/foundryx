@@ -185,6 +185,20 @@ enum RecorderPageProofFixture {
     /// When the recorder answered the listing, so every place carries its own age.
     static let listedAt = Date(timeIntervalSince1970: 1_786_000_000)
 
+    /// THE SAME THREE READINGS THE ROWS ARE DRAWN FROM, IN THE LISTING'S ORDER — because that
+    /// is how the page about one recording finds them. Derived from `presences` above rather
+    /// than written out a second time: two spellings of "where is this recording" is the shape
+    /// this whole surface exists to keep out, and it would put a page's answer at odds with the
+    /// row it was opened from.
+    static var shelfPresences: [PocketRecordingPresence] {
+        recordings.map {
+            presences["\($0.date)/\($0.timestamp)"] ?? PocketRecordingPresence(
+                onRecorder: PocketPlaceReading(answer: .yes, observedAt: listedAt),
+                onThisPhone: .neverAsked,
+                safeElsewhere: .neverAsked)
+        }
+    }
+
     /// The shelf, built by the two kit calls the live check makes and by nothing else.
     static var detail: StoredFileDeviceDetailPresentation {
         StoredFileDevicePresentation.detail(
@@ -239,9 +253,18 @@ enum RecorderPageProofFixture {
             // files the recorder has just named — a page contradicting itself in two lines,
             // which is the failure this file's own header says teaches a reviewer to distrust
             // the pictures.
+            // THE PANEL'S TWO SOURCES, HANDED OVER WITH IT. The page about one recording is
+            // resolved from the listing and the readings, not from the rendered panel — so a
+            // mount that passed only the panel would photograph every row opening onto
+            // "Solleva can't act on that recording right now", which is the state of a page
+            // whose check FAILED, over a shelf that has just answered. They are built from the
+            // same two values the rows are, in the same order, by the same kit call the live
+            // path uses.
             return PocketRecorderCheckModel(proofDetail: detail,
                                             proofOfferedRecording: offered,
-                                            proofShelfAnsweredAt: listedAt)
+                                            proofShelfAnsweredAt: listedAt,
+                                            proofShelf: recordings,
+                                            proofPresences: shelfPresences)
         }
     }
 }
