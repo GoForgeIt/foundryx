@@ -1001,16 +1001,23 @@ private struct MainTabs: View {
                                          binding: workBinding)
                 }
             }
-            // Skip the OS notification prompt under the screen-proof harness so it never
-            // covers a screenshot (no effect on a normal launch). The shipping build asks
-            // unconditionally — the harness suppression is compiled out entirely (leak gate).
-            #if DEBUG || PERF_HARNESS
-            if !ProcessInfo.processInfo.arguments.contains("-MainPreview") {
-                AmbientNotifier.requestAuthorizationIfNeeded()
-            }
-            #else
-            AmbientNotifier.requestAuthorizationIfNeeded()
-            #endif
+            // LAUNCH INSTALLS THE SURFACE AND ASKS FOR NOTHING.
+            //
+            // This line used to be `AmbientNotifier.requestAuthorizationIfNeeded()`, run
+            // unconditionally on every launch. RootView also HOSTS onboarding (the
+            // `.fullScreenCover` below), so RootView ran first and the OS permission alert
+            // appeared before the user had been told what a notification from this app
+            // would be for — and by the time the ambient step ran, the step that PROMISES
+            // a notification and claims to ask for it, the status was no longer
+            // `.notDetermined`, so its own ask was dead code.
+            //
+            // `installNotificationSurface` registers the foreground presenter (without it
+            // iOS silently swallows a local notification while the app is open) and the
+            // Run/Dismiss card actions. It touches authorization not at all. The prompt now
+            // belongs to whichever surface promises a notification — the ambient onboarding
+            // step, Settings → "Preview a notification", and the first real candidate — each
+            // of which reports what the user answered instead of firing anonymously.
+            AmbientNotifier.installNotificationSurface()
         }
         // Ship the on-device ambient GATE/CARD signal (redacted — DERIVED action +
         // outcome only, NEVER the utterance/window/seed) to the desktop door on the
