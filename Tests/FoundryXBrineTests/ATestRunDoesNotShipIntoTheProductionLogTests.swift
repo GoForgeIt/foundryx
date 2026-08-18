@@ -50,7 +50,8 @@ final class ATestRunDoesNotShipIntoTheProductionLogTests: XCTestCase {
             FoundryXDiagShipping.looksLikeATestProcess(
                 environment: ["HOME": "/var/mobile", "TMPDIR": "/private/var/tmp"],
                 linkedTestFramework: false,
-                executablePath: "/private/var/containers/Bundle/Application/ABC/FoundryX.app/FoundryX"),
+                executablePath: "/private/var/containers/Bundle/Application/ABC/FoundryX.app/FoundryX",
+                isSimulator: false),
             "a shipping app on a handset is being read as a test process, so nothing it logs "
                 + "would ever reach the relay")
     }
@@ -62,7 +63,8 @@ final class ATestRunDoesNotShipIntoTheProductionLogTests: XCTestCase {
             FoundryXDiagShipping.looksLikeATestProcess(
                 environment: [:],
                 linkedTestFramework: true,
-                executablePath: "/Users/x/Library/Developer/CoreSimulator/Devices/A/FoundryX.app/FoundryX"))
+                executablePath: "/Users/x/Library/Developer/CoreSimulator/Devices/A/FoundryX.app/FoundryX",
+                isSimulator: true))
     }
 
     /// The same lane, seen from the environment instead — xcodebuild sets these for every
@@ -73,7 +75,8 @@ final class ATestRunDoesNotShipIntoTheProductionLogTests: XCTestCase {
                 FoundryXDiagShipping.looksLikeATestProcess(
                     environment: [key: "/tmp/whatever"],
                     linkedTestFramework: false,
-                    executablePath: "/Applications/FoundryX.app/FoundryX"),
+                    executablePath: "/Applications/FoundryX.app/FoundryX",
+                    isSimulator: false),
                 "\(key) present is a test host, and it was not recognised")
         }
     }
@@ -84,11 +87,62 @@ final class ATestRunDoesNotShipIntoTheProductionLogTests: XCTestCase {
             FoundryXDiagShipping.looksLikeATestProcess(
                 environment: [:],
                 linkedTestFramework: false,
-                executablePath: ".build/debug/FoundryXPackageTests.xctest/Contents/MacOS/FoundryXPackageTests"))
+                executablePath: ".build/debug/FoundryXPackageTests.xctest/Contents/MacOS/FoundryXPackageTests",
+                isSimulator: false))
         XCTAssertTrue(
             FoundryXDiagShipping.looksLikeATestProcess(
                 environment: [:], linkedTestFramework: false,
-                executablePath: "/usr/bin/xctest"))
+                executablePath: "/usr/bin/xctest", isSimulator: false))
+    }
+
+    /// THE XCUITEST LANE, WHICH NOTHING HERE COULD SEE.
+    ///
+    /// `UITests/` holds twenty-six suites and every one of them launches `XCUIApplication()` —
+    /// the SHIPPING app, in its own process, in a simulator. That process is not the test
+    /// runner: it does not link XCTest, it gets none of the XCTest environment (the runner
+    /// does), and its `argv[0]` is `FoundryX.app/FoundryX`. Every signal this predicate had
+    /// therefore answered NO, and the app went on doing what it does on a phone —
+    /// `App/FoundryXApp.swift` wires `PerfSink` and `App/RootView.swift` wires `DoorLog.shared`
+    /// at `RemoteConfig.fromBundle()`, whose `GatewayHTTPURL` is
+    /// `https://gateway.goforgeit.com` in `App/Info.plist` for EVERY configuration. So
+    /// `phase_uiproof` posted into the live relay, and the fix that stopped the app-hosted
+    /// suite did not touch it.
+    ///
+    /// THE ENVELOPE MEASURED ON 2026-08-18 IS THE EVIDENCE. `device=arm64 battery=-1`:
+    /// `device` is `uname().machine`, which in a simulator is the HOST architecture rather than
+    /// an `iPhone15,2`, and a simulator has no battery to report. Those two fields are the
+    /// fingerprint of a machine that is nobody's handset.
+    ///
+    /// SO THE FACT IS THE SIMULATOR, NOT A LAUNCH ARGUMENT. `targetEnvironment(simulator)` is
+    /// decided by the compiler, cannot be spoofed, and cannot be forgotten — whereas making
+    /// twenty-six suites each set a launch environment key is the registry-that-rots this file
+    /// already refuses elsewhere, and this project has shipped auth-bypass launch arguments
+    /// into Release before.
+    func testTheAppLaunchedByAUITestRunnerIsNotMistakenForAHandset() {
+        XCTAssertTrue(
+            FoundryXDiagShipping.looksLikeATestProcess(
+                environment: ["HOME": "/Users/x/Library/Developer/CoreSimulator/Devices/A/data"],
+                linkedTestFramework: false,
+                executablePath: "/Users/x/Library/Developer/CoreSimulator/Devices/A/data/Containers/Bundle/Application/B/FoundryX.app/FoundryX",
+                isSimulator: true),
+            "the app under an XCUITest is read as a real handset, so every `perf …` and "
+                + "`cmd errand.*` line a `phase_uiproof` run writes is POSTed to the production "
+                + "relay's /diag/log — the same instrument, the same `device=arm64 battery=-1` "
+                + "envelope, and the same defect the app-hosted lane was fixed for")
+    }
+
+    /// AND THE OTHER DIRECTION, WHICH IS THE ONE THAT COSTS MORE IF IT IS WRONG. A shipping app
+    /// on real hardware is not a simulator and is not a test, and it must still ship — that log
+    /// is how a recorder that stopped mid-transfer is diagnosed at all.
+    func testARealHandsetIsStillNotASimulator() {
+        XCTAssertFalse(
+            FoundryXDiagShipping.looksLikeATestProcess(
+                environment: ["HOME": "/var/mobile"],
+                linkedTestFramework: false,
+                executablePath: "/private/var/containers/Bundle/Application/ABC/FoundryX.app/FoundryX",
+                isSimulator: false),
+            "a phone in somebody's pocket is being withheld, which blinds the only instrument "
+                + "this project has for the recorder")
     }
 
     // MARK: - The device log: recorded here, withheld from the relay

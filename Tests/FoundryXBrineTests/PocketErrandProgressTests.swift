@@ -212,4 +212,63 @@ final class PocketErrandProgressTests: XCTestCase {
         XCTAssertFalse(PocketErrandInFlight(subject: PocketErrandCommand.shelfSubject,
                                             recordingId: nil).isAboutOneRecording)
     }
+
+    // MARK: - Whether a second errand may start at all
+
+    /// ONE RADIO, ONE ERRAND, HELD OVER THE WHOLE POPULATION — every subject, and both an
+    /// errand about one recording and one about the recorder itself.
+    ///
+    /// THE DEFECT IT ANSWERS TO. Five functions on the recorder page's model begin an errand,
+    /// and each decided admission for itself from the three published busy flags. Two of them —
+    /// the shelf check and the bring-over funnel — guarded `!isChecking, !isBringingOver` and
+    /// said NOTHING about a removal, and the band's button was disabled on the same two. So
+    /// during a removal that button was live directly above a band whose own sentence reads
+    /// "It can only do one at a time".
+    func testNoErrandIsAdmittedWhileAnyErrandIsInFlight() {
+        for subject in PocketErrandCommand.everySubject {
+            for recordingId in [mine, theirs, nil] {
+                let running = PocketErrandInFlight(subject: subject, recordingId: recordingId)
+                XCTAssertFalse(
+                    PocketErrandProgressPresentation.admitsANewErrand(running),
+                    "a second errand is admitted while \(subject) is running for "
+                        + "\(recordingId ?? "the whole recorder"). It would overwrite the "
+                        + "in-flight identity, so the running errand's row stops spinning and "
+                        + "its `errand.stop` is written under the new one's subject")
+            }
+        }
+    }
+
+    /// THE HALF THAT MATTERS MORE. A rule that never admits anything is a recorder page whose
+    /// every control is dead — which is a worse defect than the one it is here to fix.
+    func testAnIdleRadioAdmitsAnErrand() {
+        XCTAssertTrue(PocketErrandProgressPresentation.admitsANewErrand(nil),
+                      "nothing is running and no errand may start, so every control on the "
+                          + "recorder page is permanently dead")
+    }
+
+    /// THE ADMISSION AND THE ROW AGREE, over the whole population.
+    ///
+    /// `blocksAnAction` is what greys a control out on ONE recording's surface; this is what
+    /// the page's own entry points ask before beginning anything. If the two could disagree,
+    /// there would be a control that looks live and whose tap is dropped in silence — the
+    /// defect this surface has spent a week removing everywhere else.
+    func testTheAdmissionAgreesWithWhatEverySurfaceGreysOut() {
+        for subject in PocketErrandCommand.everySubject {
+            for recordingId in [mine, theirs, nil] {
+                let running = PocketErrandInFlight(subject: subject, recordingId: recordingId)
+                let admits = PocketErrandProgressPresentation.admitsANewErrand(running)
+                for token in [mine, theirs] {
+                    let blocks = PocketErrandProgressPresentation
+                        .progress(running, for: token).blocksAnAction
+                    XCTAssertEqual(admits, !blocks,
+                                   "the page would admit an errand a row is greyed out for, or "
+                                       + "refuse one it offers: subject=\(subject) "
+                                       + "about=\(recordingId ?? "recorder") row=\(token)")
+                }
+            }
+        }
+        // Non-vacuity in the other direction: idle admits, and blocks nothing.
+        XCTAssertTrue(PocketErrandProgressPresentation.admitsANewErrand(nil))
+        XCTAssertFalse(PocketErrandProgressPresentation.progress(nil, for: mine).blocksAnAction)
+    }
 }

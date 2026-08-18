@@ -1323,7 +1323,16 @@ struct RecordingDevicePageView: View {
                 Text(PocketBringOverPresentation.actionTitle).frame(maxWidth: .infinity)
             }
             .buttonStyle(.grain(.outlined))
-            .disabled(check.isBringingOver || check.isChecking)
+            // THE CONTROL AND THE SENTENCE UNDER IT NOW COME FROM THE SAME RULE.
+            //
+            // This read `.disabled(check.isBringingOver || check.isChecking)` — two of the
+            // three busy flags — so during a REMOVAL it stayed live directly above a band
+            // whose own words are "It can only do one at a time". A tap there began a second
+            // errand, which overwrites `inFlight` and with it the identity of the errand
+            // already running: the removal's row stopped spinning, this one's started, and the
+            // single `finishErrand` that followed wrote one `errand.stop` under the wrong
+            // subject and the wrong `about=`.
+            .disabled(!PocketErrandProgressPresentation.admitsANewErrand(check.inFlight))
             .padding(.top, GrainSpacing.x3)
 
             // THE THIRD SURFACE, AND IT WAS THE ONE NICK WAS ACTUALLY LOOKING AT.
@@ -1392,7 +1401,17 @@ struct RecordingDevicePageView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.grain(.outlined))
-            .disabled(check.isBringingOver || check.isChecking || !PocketRecorderCheckModel.fastSyncCanRun)
+            // THE FOURTH CONTROL, and the source gate found it rather than a reading did.
+            //
+            // It ORed the same two busy flags the bring-over button did, so during a REMOVAL it
+            // was live — and `fastSync`'s own guard did refuse a removal, which makes this the
+            // worse half of the pair: not a second errand, but a button that looks enabled and
+            // whose tap is dropped in silence. Both spellings are now the one rule, so a
+            // control and the entry point behind it cannot disagree about whether the radio is
+            // free. The capability half — whether a fast sync can run here AT ALL — is a
+            // different question and stays exactly where it was.
+            .disabled(!PocketErrandProgressPresentation.admitsANewErrand(check.inFlight)
+                      || !PocketRecorderCheckModel.fastSyncCanRun)
             .padding(.top, GrainSpacing.x2)
 
             Text(PocketRecorderCheckModel.fastSyncCanRun
@@ -2017,7 +2036,7 @@ final class PocketRecorderCheckModel: ObservableObject {
     ///   See `BrainChoice.uploadAckProvesAnotherPlace`.
     func run(hardwareToken: String, advertisedName: String,
              library: URL, stages: [String: CaptureStage], brain: BrainChoice) {
-        guard !isChecking, !isBringingOver else { return }
+        guard PocketErrandProgressPresentation.admitsANewErrand(inFlight) else { return }
         guard let identifier = UUID(uuidString: hardwareToken) else {
             message = PocketRecorderCheckPresentation.notThisRecorderLine
             detail = nil
@@ -2444,7 +2463,7 @@ final class PocketRecorderCheckModel: ObservableObject {
 
     private func bringOver(recording: PocketRecording, hardwareToken: String,
                            advertisedName: String, into manager: CaptureManager) {
-        guard !isChecking, !isBringingOver else { return }
+        guard PocketErrandProgressPresentation.admitsANewErrand(inFlight) else { return }
         guard let identifier = UUID(uuidString: hardwareToken) else {
             bringOverMessage = PocketRecorderCheckPresentation.notThisRecorderLine
             return
@@ -2557,7 +2576,7 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// `presences` — the published read model — and handed straight to the errand, which hands
     /// it to `PocketDeleteConsent`'s failable factory. Nothing here recomputes it.
     func removeFromRecorder(id: String, hardwareToken: String, advertisedName: String) {
-        guard !isChecking, !isBringingOver, !isRemoving else { return }
+        guard PocketErrandProgressPresentation.admitsANewErrand(inFlight) else { return }
         // EVERY EXIT SAYS SOMETHING. This guard used to `return` in silence, and the state it
         // catches is REACHABLE: `shelfRecordings` is restated on EVERY check while `presences`
         // and `detail` are only restated on a check that reached the recorder, so one good
@@ -2607,7 +2626,7 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// `PocketAutoClear.decision` refuses anything that synced before the control was armed.
     private func clearWhatTheArmedControlAllows(hardwareToken: String,
                                                 advertisedName: String) async {
-        guard !isRemoving, !isChecking, !isBringingOver else { return }
+        guard PocketErrandProgressPresentation.admitsANewErrand(inFlight) else { return }
         guard let identifier = UUID(uuidString: hardwareToken) else { return }
         let identity = Self.custodyIdentity(for: hardwareToken)
         let control = RecordingDeviceStore.autoClear(for: identity)
@@ -2717,7 +2736,7 @@ extension PocketRecorderCheckModel {
     ///   default here would be a decision about whether a recording is safe.
     func fastSync(hardwareToken: String, advertisedName: String, into manager: CaptureManager,
                   brain: BrainChoice) {
-        guard !isChecking, !isBringingOver, !isRemoving else { return }
+        guard PocketErrandProgressPresentation.admitsANewErrand(inFlight) else { return }
         guard let recording = offeredRecording else { return }
         guard let identifier = UUID(uuidString: hardwareToken) else {
             bringOverMessage = PocketRecorderCheckPresentation.notThisRecorderLine

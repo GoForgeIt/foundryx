@@ -130,6 +130,37 @@ public enum PocketErrandProgressPresentation {
         return progress(inFlight, for: fileToken)
     }
 
+    /// MAY A NEW ERRAND START? ONE RADIO, ONE ERRAND — asked once, here, by every control that
+    /// offers one and every entry point that would begin one.
+    ///
+    /// WHAT WAS IN THE TREE BEFORE THIS, MEASURED IN THE SOURCE. Five functions on the recorder
+    /// page's model begin an errand and each decided admission for itself, from the three
+    /// published busy flags, ORed by hand — and they did not agree. `run` (the shelf check) and
+    /// the bring-over funnel guarded `!isChecking, !isBringingOver` and said NOTHING about a
+    /// removal; the two removal paths and the fast sync guarded all three. The band above the
+    /// list disabled its button on two of the three as well. So while a removal ran, that band
+    /// drew its own sentence — "Solleva is taking another recording off this recorder. It can
+    /// only do one at a time." — underneath a "Bring it over" button that was still live, and
+    /// the tap was taken.
+    ///
+    /// WHY IT IS PART OF "WHICH RECORDING IS THIS ERRAND ABOUT" AND NOT A SEPARATE BUG. The
+    /// page records which recording an errand is for in exactly one place — the `inFlight` this
+    /// function is asked about — and a second errand OVERWRITES it. The removal's row stops
+    /// spinning mid-removal, the transfer's row starts, and the one `finishErrand` that follows
+    /// writes a single `errand.stop` carrying the wrong subject and the wrong `about=`. The
+    /// live log is then left holding a start that never stopped and a stop that never started,
+    /// for two different recordings — which is precisely the pairing `about=` was added to make
+    /// readable.
+    ///
+    /// WHY `inFlight` AND NOT THE FLAGS. It is the one piece of state cleared on EVERY path an
+    /// errand can end by: `finishErrand` clears it OUTSIDE the token guard, deliberately, so a
+    /// cancel that raced the finish cannot leave it set. The flags are not — `cancel()` clears
+    /// `isChecking` and `isBringingOver` and leaves `isRemoving` exactly as it found it — so an
+    /// admission asked of the flags can be answered by a flag no path ever puts down.
+    public static func admitsANewErrand(_ inFlight: PocketErrandInFlight?) -> Bool {
+        inFlight == nil
+    }
+
     /// What is happening TO THIS RECORDING, named after the errand rather than after a generic
     /// "working". "Bringing this recording over…" and "Taking this recording off the recorder…"
     /// are different enough that somebody glancing at a row knows which one they asked for.
