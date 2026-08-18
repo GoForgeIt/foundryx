@@ -76,6 +76,7 @@ a11y-identifier	App/DeviceScreen.swift	connect-a-recording-device
 a11y-identifier	App/DeviceScreen.swift	hide-unnamed-devices
 a11y-identifier	App/DeviceScreen.swift	recorder-facts-note
 a11y-identifier	App/DeviceScreen.swift	recorder-light-sentence
+a11y-identifier	App/DeviceScreen.swift	recording-detail-sheet
 a11y-identifier	App/DeviceScreen.swift	recording-device-attach-message
 a11y-identifier	App/DeviceScreen.swift	recording-device-row
 a11y-identifier	App/DeviceScreen.swift	recording-device-status
