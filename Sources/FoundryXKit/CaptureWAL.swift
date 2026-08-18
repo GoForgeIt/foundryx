@@ -15,6 +15,32 @@
 
 import Foundation
 
+/// WHERE A WAL'S SEGMENTS ACTUALLY GO — the fact a `DoorTarget` cannot carry.
+///
+/// A `DoorTarget` is an ADDRESS. It is held whether or not anything is ever posted to
+/// it, so it answers "where would this go" and not "where did this go", and the two
+/// diverge on the tier most owners start on. Nick's phone ACK'd nine segments of a
+/// voice note at 2026-08-17T12:00:53Z that reached no destination on earth: the
+/// phone-only brain installs `uploadSegment: { _, _, _ in }`, a closure that succeeds by
+/// doing nothing, and the WAL then wrote a `.ack` marker and advanced its durable
+/// watermark past bytes it had never sent. Every instrument agreed the segments were
+/// safe. This enum is what the WAL says instead of guessing from its target.
+public enum CaptureUploadRoute: Sendable, Equatable {
+    /// Over the network to a real door — LAN-direct, or down the relay tunnel.
+    case door
+    /// The bytes NEVER LEAVE THIS HANDSET. The "upload" is a local no-op, so the ACK is
+    /// SELF-ISSUED and no other place holds this audio. Naming it is the point: a log
+    /// that says "saved to computer" here is the sentence that cost a day.
+    case thisPhoneOnly
+    /// An injected handler that named itself — a harness, or a seam standing in for a
+    /// real destination.
+    case named(String)
+    /// An injected handler that did NOT name itself. The WAL knows only that it did not
+    /// POST, so it refuses to claim the target's address; it says the ACK is untraceable,
+    /// which is the honest reading and the one that would have been shouted at 12:00Z.
+    case unnamedHandler
+}
+
 public enum CaptureStage: String, Sendable, Codable {
     case recording        // source streaming, frames arriving
     case savedOnPhone     // ≥1 segment durable in the WAL, not all ACK'd yet
@@ -83,6 +109,10 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     /// Test seam: when set, replaces the real door POST for each segment (so the
     /// drain/backoff/auth-expired paths are exercised deterministically, no network).
     private let uploadOverride: (@Sendable (UInt64, Data) async throws -> Void)?
+
+    /// Where this WAL's bytes actually go. Derived at init from whether an override is
+    /// installed unless the owner names it — see [`CaptureUploadRoute`].
+    public let route: CaptureUploadRoute
 
     private let io = DispatchQueue(label: "foundryx.capture-wal")
     private let ioKey = DispatchSpecificKey<Bool>()
@@ -282,13 +312,18 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
                 chunkFrames: Int = 50,            // ~1s at Omi's ~50 frames/s
                 session: URLSession = URLSession(configuration: .ephemeral),
                 log: DoorLog? = .shared,
-                upload: (@Sendable (UInt64, Data) async throws -> Void)? = nil) {
+                upload: (@Sendable (UInt64, Data) async throws -> Void)? = nil,
+                route: CaptureUploadRoute? = nil) {
         self.captureId = captureId
         self.target = target
         self.session = session
         self.log = log
         self.chunkFrames = chunkFrames
         self.uploadOverride = upload
+        // An override that did not name itself is UNTRACEABLE, never "the target". The
+        // WAL knows it is not POSTing; it must not borrow an address to describe bytes
+        // it kept. Only a WAL that really posts may name the door.
+        self.route = route ?? (upload == nil ? .door : .unnamedHandler)
         io.setSpecific(key: ioKey, value: true)
         let currentBinding = CaptureAccountScope.currentAccountBinding()
         let root = baseDir ?? binding?.root
@@ -503,7 +538,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
         // them so they will never be re-sent. One line per drain — not per segment, which
         // on a thousand-segment backlog would evict the ring it is written into.
         log?.info("capture \(captureId): uploading \(jobs.count) segment(s) → "
-                  + "\(Self.uploadDestination(target))")
+                  + "\(Self.uploadDestination(target, route: route))")
 
         await withTaskGroup(of: SegmentUploadResult.self) { group in
             var next = 0
@@ -532,7 +567,8 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
                         advanceWatermark(throughAcked: seq)                        // durable resume point moves forward
                         invalidateStatusCache()   // synced count/watermark changed → rescan next warm
                         uploaded += 1
-                        log?.info(Self.ackLine(captureId: captureId, seq: seq, target: target))
+                        log?.info(Self.ackLine(captureId: captureId, seq: seq, target: target,
+                                               route: route))
                         publish()
                     } catch {
                         firstTransientError = "ack marker write failed for segment \(seq): \((error as NSError).localizedDescription)"
@@ -615,11 +651,28 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     /// It names the ROUTE, never the grant: `target.bearer` is deliberately absent, and
     /// `DoorLog` ships to the relay, so a token in here would be a credential leaving the
     /// device in a diagnostic.
-    static func uploadDestination(_ target: DoorTarget) -> String {
-        if let relay = target.relay {
-            return "relay tunnel \(relay.tunnelId)"
+    ///
+    /// `target` alone is NOT enough to answer the question, which is the whole reason the
+    /// nine ACKs of 2026-08-17T12:00Z were untraceable. When an upload override is
+    /// installed the WAL never POSTs anything, so the target it holds is an address the
+    /// bytes did not go to — on the phone-only tier that address is `http://127.0.0.1:1`,
+    /// a loopback port nothing listens on. The route says which of those two worlds this
+    /// WAL is in.
+    static func uploadDestination(_ target: DoorTarget,
+                                  route: CaptureUploadRoute = .door) -> String {
+        switch route {
+        case .door:
+            if let relay = target.relay {
+                return "relay tunnel \(relay.tunnelId)"
+            }
+            return target.baseURL.appendingPathComponent("foundryx/capture").absoluteString
+        case .thisPhoneOnly:
+            return "this phone only — nothing was sent"
+        case .named(let name):
+            return name
+        case .unnamedHandler:
+            return "an unnamed local handler — nothing was sent, this ACK cannot be traced"
         }
-        return target.baseURL.appendingPathComponent("foundryx/capture").absoluteString
     }
 
     /// ONE PINNED FORM for the ACK line, so the log and the test read the same sentence.
@@ -629,8 +682,9 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     /// bought precisely because he has no computer. That string is what led a reader to
     /// conclude, from the phone's own log, that a cell-brain user was in computer mode,
     /// and to report it as measured fact.
-    static func ackLine(captureId: String, seq: UInt64, target: DoorTarget) -> String {
-        "capture \(captureId): segment \(seq) ACK'd by \(uploadDestination(target))"
+    static func ackLine(captureId: String, seq: UInt64, target: DoorTarget,
+                        route: CaptureUploadRoute = .door) -> String {
+        "capture \(captureId): segment \(seq) ACK'd by \(uploadDestination(target, route: route))"
     }
 
     /// POST one segment. Throws on any non-200 so the segment stays pending. In
