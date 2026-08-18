@@ -150,4 +150,66 @@ final class PocketErrandProgressTests: XCTestCase {
     func testEveryActionHasAnAnswer() {
         XCTAssertEqual(PocketRecordingDetailAction.allCases.count, 2)
     }
+
+    // MARK: - The band above the list — the third surface
+
+    /// THE ONE NICK WAS ACTUALLY LOOKING AT. That band's button offers exactly one file, so its
+    /// spinner is a claim about THAT file. It read `if check.isBringingOver` — true for any
+    /// transfer — so asking for a different recording from that recording's own page made it
+    /// say "Bringing this recording over…" beneath a button about a file nothing was happening
+    /// to. That is "not just at the top", in the place he was looking.
+    func testTheBandSpinsOnlyForTheRecordingItsButtonOffers() {
+        let offered = "2026-08-12/20260812090000"
+        let another = "2026-08-11/20260811153632"
+
+        let mine = PocketErrandProgressPresentation.bandProgress(
+            PocketErrandInFlight(subject: PocketErrandCommand.bringOverSubject,
+                                 recordingId: offered),
+            for: offered)
+        XCTAssertTrue(mine.isThisRecording,
+                      "the band does not spin for the recording its own button offers")
+        XCTAssertEqual(mine.line, PocketBringOverPresentation.inProgressLine)
+
+        let theirs = PocketErrandProgressPresentation.bandProgress(
+            PocketErrandInFlight(subject: PocketErrandCommand.bringOverSubject,
+                                 recordingId: another),
+            for: offered)
+        XCTAssertFalse(theirs.isThisRecording,
+                       "the band claims the recording it OFFERS is coming over while a "
+                           + "different one actually is")
+        XCTAssertNotNil(theirs.line,
+                        "and it must still say something — a band that goes blank while the "
+                            + "button above it is disabled explains nothing")
+    }
+
+    /// AND IT STAYS QUIET FOR A CHECK, because the headline directly above it already says
+    /// "Checking the recorder…". The same sentence twice on one screen is the defect the row's
+    /// presence chips were rebuilt to stop; a band is not a licence to do it again.
+    func testTheBandSaysNothingAboutAnErrandThatIsAboutTheWholeRecorder() {
+        let shelf = PocketErrandInFlight(subject: PocketErrandCommand.shelfSubject,
+                                         recordingId: nil)
+        let band = PocketErrandProgressPresentation.bandProgress(shelf, for: "2026-08-12/1")
+
+        XCTAssertEqual(band, .idle,
+                       "the band repeats the panel headline's own sentence underneath it")
+        XCTAssertNil(band.line)
+        // NON-VACUITY, and it is the whole point of this rule existing separately: a ROW must
+        // still hear about a shelf check, because its readings are being replaced under it.
+        XCTAssertEqual(PocketErrandProgressPresentation.progress(shelf, for: "2026-08-12/1"),
+                       .elsewhere(PocketRecorderCheckPresentation.checkingLine),
+                       "the band's exception leaked into the rule every other surface asks")
+    }
+
+    /// Nothing running is nothing drawn, on this surface as on the others.
+    func testAnIdleBandDrawsNothing() {
+        XCTAssertEqual(PocketErrandProgressPresentation.bandProgress(nil, for: "a/b"), .idle)
+    }
+
+    /// The errand knows whether it is about one recording, and that is what the band asks.
+    func testAnErrandSaysWhetherItIsAboutOneRecording() {
+        XCTAssertTrue(PocketErrandInFlight(subject: PocketErrandCommand.bringOverSubject,
+                                           recordingId: "2026-08-12/1").isAboutOneRecording)
+        XCTAssertFalse(PocketErrandInFlight(subject: PocketErrandCommand.shelfSubject,
+                                            recordingId: nil).isAboutOneRecording)
+    }
 }

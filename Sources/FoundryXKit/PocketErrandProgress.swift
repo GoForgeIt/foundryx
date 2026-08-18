@@ -37,6 +37,15 @@ public struct PocketErrandInFlight: Sendable, Equatable {
         self.subject = subject
         self.recordingId = recordingId
     }
+
+    /// WHETHER THIS ERRAND IS ABOUT ONE RECORDING rather than about the recorder itself.
+    ///
+    /// A fact about the errand, not a second rule: `progress(_:for:)` folds a whole-recorder
+    /// errand into `.elsewhere`, which is right for a ROW (an action taken while the shelf is
+    /// being replaced would be taken against a listing on its way out) and wrong for the band
+    /// above the list — the panel's headline already says "Checking the recorder…" while a
+    /// check runs, and a band repeating it underneath is the same fact twice on one screen.
+    public var isAboutOneRecording: Bool { recordingId != nil }
 }
 
 /// WHAT ONE RECORDING'S SURFACE SHOWS WHILE AN ERRAND IS IN FLIGHT.
@@ -96,6 +105,29 @@ public enum PocketErrandProgressPresentation {
             return .thisRecording(thisRecordingLine(subject: inFlight.subject))
         }
         return .elsewhere(anotherRecordingLine(subject: inFlight.subject))
+    }
+
+    /// WHAT THE BAND ABOVE THE LIST SHOWS — the same question, minus the one answer the panel's
+    /// headline already owns.
+    ///
+    /// THE BAND IS THE THIRD SURFACE and it was the last one left on a global Bool. Its spinner
+    /// read `if check.isBringingOver`, which is true for ANY transfer, under a button that
+    /// offers exactly one file (`PocketBringOver.offered`'s pick) — so asking for a different
+    /// recording from that recording's own page made this band say "Bringing this recording
+    /// over…" beneath a button about a file nothing was happening to. That is Nick's "not just
+    /// at the top", in the place he was looking.
+    ///
+    /// WHY IT IS NOT JUST `progress(_:for:)`. A whole-recorder errand folds into `.elsewhere`,
+    /// which is right for a ROW — while the shelf is being replaced an action would be taken
+    /// against a listing on its way out — and wrong here: this band sits DIRECTLY BENEATH a
+    /// headline that already says "Checking the recorder…" while a check runs, and repeating it
+    /// is the same fact twice on one screen. So a check is `.idle` to this surface and to no
+    /// other, which is a rule, so it lives here rather than as a second condition in a SwiftUI
+    /// body that nothing in this repository can execute.
+    public static func bandProgress(_ inFlight: PocketErrandInFlight?,
+                                    for fileToken: String) -> PocketErrandProgress {
+        guard inFlight?.isAboutOneRecording == true else { return .idle }
+        return progress(inFlight, for: fileToken)
     }
 
     /// What is happening TO THIS RECORDING, named after the errand rather than after a generic

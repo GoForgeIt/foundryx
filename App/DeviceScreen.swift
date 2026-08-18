@@ -1326,14 +1326,32 @@ struct RecordingDevicePageView: View {
             .disabled(check.isBringingOver || check.isChecking)
             .padding(.top, GrainSpacing.x3)
 
-            if check.isBringingOver {
-                HStack(spacing: GrainSpacing.x2) {
-                    ProgressView().tint(GrainColor.forgeBlue)
-                    Text(PocketBringOverPresentation.inProgressLine)
-                        .grainTextStyle(.caption)
-                        .foregroundStyle(GrainColor.textMuted)
+            // THE THIRD SURFACE, AND IT WAS THE ONE NICK WAS ACTUALLY LOOKING AT.
+            //
+            // This read `if check.isBringingOver` — true for ANY transfer — under a button
+            // that offers exactly one file, `PocketBringOver.offered`'s pick. So asking for a
+            // different recording from that recording's own page made this band say "Bringing
+            // this recording over…" beneath a button about a file nothing was happening to.
+            // It asks the SAME rule the row and the sheet ask, with the offered recording's
+            // own token, so the three cannot disagree about which recording is moving. When
+            // the errand is somebody else's it says so in words instead of spinning, which is
+            // also the sentence that explains why the button above it is disabled.
+            if let offered = check.offeredRecording {
+                let progress = PocketErrandProgressPresentation
+                    .bandProgress(check.inFlight,
+                                  for: PocketRecordingDetailPresentation.fileToken(offered))
+                if let line = progress.line {
+                    HStack(spacing: GrainSpacing.x2) {
+                        if progress.isThisRecording {
+                            ProgressView().tint(GrainColor.forgeBlue)
+                        }
+                        Text(line)
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(GrainColor.textMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.top, GrainSpacing.x2)
                 }
-                .padding(.top, GrainSpacing.x2)
             }
 
             // WHAT HAPPENED, IN WORDS, INCLUDING WHEN NOTHING WAS KEPT. A bring-over that

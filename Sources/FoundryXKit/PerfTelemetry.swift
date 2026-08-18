@@ -288,13 +288,23 @@ public final class PerfSink: @unchecked Sendable {
         ship(batch)
     }
 
+    /// THE FOURTH DIAGNOSTIC SENDER, and it went through the choke point last.
+    ///
+    /// This POSTs to the relay's `/diag/log` — the same endpoint `DoorLog`, `RemoteSession` and
+    /// `DeletionRecorder` use, resolved from the same `RemoteConfig.fromBundle()` and wired in
+    /// `App/FoundryXApp.swift`'s `init`. That `init` runs inside the app-hosted scenario bundle
+    /// exactly as it runs on a handset, because the bundle is injected into the REAL
+    /// application process — so when the other three were withheld under test and this one was
+    /// not, `cmd errand.*` stopped arriving from the simulator suite and `perf …` carried on.
+    /// Same instrument, same envelope, same install id: half a fix reads on the relay as a
+    /// whole one.
     private func ship(_ batch: [String]) {
         guard let endpoint, !batch.isEmpty else { return }
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
         req.setValue("text/plain", forHTTPHeaderField: "Content-Type")
         req.httpBody = (batch.joined(separator: "\n") + "\n").data(using: .utf8)
-        session.dataTask(with: req).resume()   // fire-and-forget, like DoorLog
+        FoundryXDiagShipping.send(req, using: session)   // fire-and-forget, like DoorLog
     }
 
     // Convenience emitters (production call sites).
