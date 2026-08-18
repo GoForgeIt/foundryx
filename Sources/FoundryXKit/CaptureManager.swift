@@ -1557,10 +1557,20 @@ public final class CaptureManager: ObservableObject {
     /// door (a down/absent door must not be hammered; the on-device title stands).
     private static let maxExternalTitleFailures = 3
 
-    /// Test seam: override the per-segment door upload for every WAL this manager
-    /// builds (so the bounded-retry / backoff / abandon / re-auth paths are exercised
-    /// deterministically without a live door). nil ⇒ the real door POST.
+    /// Override the per-segment door upload for every WAL this manager builds. NOT a
+    /// test seam, whatever it was called before: the PHONE-ONLY brain ships one in
+    /// production (`CaptureBackend`'s `localMode`), a closure that succeeds by doing
+    /// nothing, and that is precisely how nine segments were ACK'd to nowhere. nil ⇒
+    /// the real door POST.
     private let uploadSegment: (@Sendable (String, UInt64, Data) async throws -> Void)?
+
+    /// What the override above actually does with the bytes, in words the WAL can log.
+    /// nil ⇒ let the WAL derive it, which for an unnamed override is "untraceable".
+    ///
+    /// Readable so the wiring itself can be held: which route a manager carries is a
+    /// production fact about a tier, not an implementation detail — the phone-only brain
+    /// naming itself is the entire fix.
+    public let uploadRoute: CaptureUploadRoute?
 
     public init(target: DoorTarget,
                 baseDir: URL? = nil,
@@ -1579,6 +1589,7 @@ public final class CaptureManager: ObservableObject {
                 liveTitleExternal: (@Sendable (String, String, Int) async throws -> String?)? = nil,
                 liveTitleBackoff: LiveTitleBackoff = .default,
                 uploadSegment: (@Sendable (String, UInt64, Data) async throws -> Void)? = nil,
+                uploadRoute: CaptureUploadRoute? = nil,
                 hydrationBeforeCommit: (@Sendable () async -> Void)? = nil,
                 drainTimerFactory: @escaping CaptureManagerDrainTimerFactory =
                     CaptureManager.defaultDrainTimerFactory,
@@ -1589,6 +1600,7 @@ public final class CaptureManager: ObservableObject {
         self.drainTimerFactory = drainTimerFactory
         self.discardedPruneBeforeDelete = discardedPruneBeforeDelete
         self.uploadSegment = uploadSegment
+        self.uploadRoute = uploadRoute
         self.makeLiveTranscriber = liveTranscriber
         self.liveTitler = liveTitler
         self.liveTitleCadence = liveTitleCadence
@@ -3683,8 +3695,9 @@ public final class CaptureManager: ObservableObject {
         }
     }
 
-    /// Build a WAL, threading the (test-only) per-segment upload override so every
-    /// capture this manager owns uploads through the same (real or injected) path.
+    /// Build a WAL, threading the per-segment upload override — AND the name of where
+    /// that override puts the bytes — so every capture this manager owns uploads
+    /// through the same path and says the same true thing about it.
     private nonisolated func makeWAL(captureId id: String) -> CaptureWAL {
         let upload: (@Sendable (UInt64, Data) async throws -> Void)?
         if let uploadSegment { upload = { seq, body in try await uploadSegment(id, seq, body) } }
@@ -3695,7 +3708,8 @@ public final class CaptureManager: ObservableObject {
             baseDir: baseDir,
             binding: accountBinding,
             log: log,
-            upload: upload)
+            upload: upload,
+            route: uploadRoute)
     }
 
     private func hasLocalAudio(_ captureId: String) -> Bool {

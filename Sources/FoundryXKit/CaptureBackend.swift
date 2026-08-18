@@ -68,6 +68,11 @@ extension CaptureManager {
                   // a scripted external to demonstrate the sharpen in the simulator.
                   liveTitleExternal: liveTitleExternal,
                   liveTitleBackoff: liveTitleBackoff,
-                  uploadSegment: localMode ? { @Sendable _, _, _ in } : nil)
+                  uploadSegment: localMode ? { @Sendable _, _, _ in } : nil,
+                  // NAME THE NO-OP. On this tier the "upload" keeps the bytes on the
+                  // handset, so the WAL must say so — every ACK it writes is
+                  // self-issued. The target it holds is a loopback address nothing
+                  // listens on; logging that would be a traceable-looking lie.
+                  uploadRoute: localMode ? .thisPhoneOnly : nil)
     }
 }

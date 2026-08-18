@@ -86,9 +86,18 @@ private final class SavedToLineWorld: @unchecked Sendable {
     }
 
     /// Drive one real sync pass and let the log's main-queue hop land.
+    ///
+    /// The closure stands in for a REAL DOOR's 200 — the scenarios here are about a
+    /// hosted Vault at an address this machine cannot listen on — so the route is
+    /// DECLARED rather than left to be derived. It has to be declared, because an
+    /// upload override that names nothing is now reported as untraceable instead of
+    /// borrowing its target's address: that default is the fix for nine segments ACK'd
+    /// by a phone-only brain to a loopback port nothing served. The derived `.door`
+    /// case is proved over a real socket in
+    /// features/an-upload-names-where-it-sent-the-bytes.feature.
     func uploadAndAck() async throws {
         let wal = CaptureWAL(captureId: captureId, target: target, baseDir: baseDir,
-                             log: log, upload: { _, _ in })
+                             log: log, upload: { _, _ in }, route: .door)
         let outcome = await wal.sync()
         guard outcome == .progressed else {
             throw BrineStepError("the seeded segment did not upload: \(outcome)")
