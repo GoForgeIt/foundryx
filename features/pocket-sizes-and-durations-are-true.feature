@@ -37,6 +37,12 @@ Feature: A recorder's sizes and lengths are true, or they are absent
     Then each row states the length its measured bytes imply
     And the page about it states that length too, and stops saying nobody knows
 
+  Scenario: A recording this phone is holding measures itself, and its neighbour still says nothing
+    Given this phone is holding the bytes of one listed recording and not the other
+    When the shelf works out how big each listed recording is
+    Then the held recording's row states the length its real bytes imply
+    And the row for the one nobody fetched still states nothing
+
   Scenario: The recorder says how full it is, and states no amount nobody can defend
     Given the recorder's own answer about its storage
     Then the line says how full it is

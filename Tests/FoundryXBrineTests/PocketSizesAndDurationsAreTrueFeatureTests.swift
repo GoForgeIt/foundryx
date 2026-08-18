@@ -24,7 +24,7 @@ final class PocketSizesAndDurationsAreTrueFeatureTests: XCTestCase {
         let result = try await BrineFeatureRunner.run(
             "pocket-sizes-and-durations-are-true",
             registry: StepRegistry(SizesAndDurationsSteps.make(world)))
-        XCTAssertEqual(result.passed, 4)
+        XCTAssertEqual(result.passed, 5)
     }
 }
 
@@ -34,10 +34,12 @@ private enum SizesAndDurationsSteps {
             "recorders listing one recording with wildly different listing numbers",
             "the two recordings that actually came off the recorder",
             "the recorder's own answer about its storage",
+            "this phone is holding the bytes of one listed recording and not the other",
         ]
         let whens = [
             "I look at the row each of them draws",
             "I open the page about that recording on each of them",
+            "the shelf works out how big each listed recording is",
         ]
         let thens = [
             "every row reads exactly the same, whatever the recorder listed",
@@ -50,6 +52,8 @@ private enum SizesAndDurationsSteps {
             "the line says how full it is",
             "it states no amount in bytes, kilobytes, megabytes or gigabytes",
             "the same fullness counted in another unit reads exactly the same",
+            "the held recording's row states the length its real bytes imply",
+            "the row for the one nobody fetched still states nothing",
         ]
         var steps = givens.map { phrase in
             defineStep(phrase) { context, _, _ in try await world.given(phrase); return context }
@@ -117,9 +121,50 @@ private actor SizesAndDurationsWorld {
     private var measuredRows: [StoredFileManifestRowPresentation] = []
     private var storageLine: String?
 
+    // MARK: - The custody half: a real store, a real file, real bytes on a real disk
+
+    /// THE ONE RECORDER THIS APP WAS BUILT FOR, as an identity custody can key a file by.
+    private static let identity = RecordingDeviceIdentity(shape: .filePull,
+                                                          hardwareToken: "PKT01_BLUE_26079bc5")
+    /// The recording whose bytes this phone is holding, and the one it is not. Both are
+    /// listed by the recorder; only the first has ever been fetched.
+    private static let heldTimestamp = "20260807142852"
+    private static let unfetchedTimestamp = "PH260811175026"
+
+    private var custodyRoot: URL?
+    private var shelfRows: [StoredFileManifestRowPresentation] = []
+
     // MARK: - Given
 
-    func given(_ phrase: String) throws {
+    func given(_ phrase: String) async throws {
+        switch phrase {
+
+        case "this phone is holding the bytes of one listed recording and not the other":
+            // A REAL STORE OVER A REAL DIRECTORY. `PocketRecorderFileStore` is the shipped
+            // custody, and the file is written where custody itself says the file lives, so
+            // what is being exercised is the production answer to "is this phone holding it"
+            // — not a double that returns a URL somebody typed.
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("pocket-extent-\(UUID().uuidString)", isDirectory: true)
+            custodyRoot = root
+            let store = PocketRecorderFileStore(root: root)
+            let held = store.url(for: PocketRecorderFileKey(identity: Self.identity,
+                                                            date: Self.date,
+                                                            timestamp: Self.heldTimestamp))
+            try FileManager.default.createDirectory(at: held.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            // 19,770 BYTES — the exact length of the first file that ever came off a Pocket.
+            // At the measured 4,000 B/s that is 4.94 s, which renders "5 sec"; the LISTING for
+            // the same recording was 4, which through the old `listing * 1024` arithmetic
+            // would render "1 sec". The two disagree, so this row cannot pass by accident.
+            try Data(count: Self.measured[0].bytes).write(to: held)
+
+        default:
+            try givenTheRest(phrase)
+        }
+    }
+
+    private func givenTheRest(_ phrase: String) throws {
         switch phrase {
         case "recorders listing one recording with wildly different listing numbers":
             rows = []; pages = []
@@ -152,8 +197,41 @@ private actor SizesAndDurationsWorld {
 
     // MARK: - When
 
-    func when(_ phrase: String) throws {
+    func when(_ phrase: String) async throws {
         switch phrase {
+
+        case "the shelf works out how big each listed recording is":
+            // THE PRODUCTION RESOLVER, END TO END, AND IT IS THE ONLY THING THAT CAN PUT A
+            // DEFENSIBLE MAGNITUDE ON A ROW. `PocketRecordingExtentReader.extents` is what the
+            // authenticated check and the recorder page both call; `PocketInventoryReader.
+            // manifest` is what turns recordings plus extents into shelf items; and
+            // `StoredFileDevicePresentation.manifest` is what draws them.
+            //
+            // WITHOUT THIS SCENARIO THE READER HAD NO TEST AT ALL. Every other assertion in
+            // this suite hands `PocketRecordingExtent.bytes(…)` to a presenter by hand, so a
+            // reader that answered `.listedUnitUnresolved` for every file on the disk would
+            // leave all 183 Pocket tests green while no row in the shipped app ever stated a
+            // length again — an absence that looks EXACTLY like the correct rendering for a
+            // recording nobody has fetched. Measured: with that one-line defect in place the
+            // whole Pocket/Recorder/StoredFile/reachability population passed.
+            guard let root = custodyRoot else {
+                throw BrineStepError("no custody root was prepared")
+            }
+            let recordings = [
+                PocketRecording(date: Self.date, timestamp: Self.heldTimestamp,
+                                sizeBytes: Self.measured[0].listing * 1_024),
+                PocketRecording(date: Self.date, timestamp: Self.unfetchedTimestamp,
+                                sizeBytes: Self.measured[1].listing * 1_024),
+            ]
+            let extents = await PocketRecordingExtentReader.extents(
+                recordings,
+                identity: Self.identity,
+                custody: PocketRecorderFileStore(root: root))
+            let items = PocketInventoryReader.manifest(recordings,
+                                                       extents: extents,
+                                                       listedAt: Self.listedAt)
+            shelfRows = StoredFileDevicePresentation.manifest(items, now: Self.now).rows
+
         case "I look at the row each of them draws":
             rows = try Self.listingNumbers.map { listing in
                 let manifest = PocketInventoryReader.manifest(
@@ -184,6 +262,37 @@ private actor SizesAndDurationsWorld {
 
     func then(_ phrase: String) throws {
         switch phrase {
+
+        case "the held recording's row states the length its real bytes imply":
+            guard shelfRows.count == 2 else {
+                throw BrineStepError("\(shelfRows.count) rows were drawn for two recordings")
+            }
+            guard shelfRows[0].extentLine == Self.measured[0].length else {
+                throw BrineStepError(
+                    "the row for a recording this phone is HOLDING states "
+                    + "\(shelfRows[0].extentLine.map { "\"\($0)\"" } ?? "nothing") rather than "
+                    + "\"\(Self.measured[0].length)\". Its 19,770 bytes are on the disk and "
+                    + "custody can see them; at the measured 4,000 B/s that is how long it "
+                    + "runs. \"1 sec\" would mean the row measured the listing (4 × 1,024) "
+                    + "instead of the file")
+            }
+
+        case "the row for the one nobody fetched still states nothing":
+            guard shelfRows.count == 2 else {
+                throw BrineStepError("\(shelfRows.count) rows were drawn for two recordings")
+            }
+            guard shelfRows[1].extentLine == nil else {
+                throw BrineStepError(
+                    "a recording this phone is NOT holding states "
+                    + "\"\(shelfRows[1].extentLine ?? "")\" — the only number anybody has for "
+                    + "it is the listing's, whose unit was measured and disproved")
+            }
+            // AND THE TWO ROWS ARE THE SAME SHELF, so this is not one rendering compared with
+            // a different one: both came out of a single resolve over a single custody.
+            guard shelfRows[0].id != shelfRows[1].id else {
+                throw BrineStepError("both rows describe one recording")
+            }
+            if let root = custodyRoot { try? FileManager.default.removeItem(at: root) }
 
         case "every row reads exactly the same, whatever the recorder listed":
             let rendered = rows.map(Self.everythingVisible(on:))
