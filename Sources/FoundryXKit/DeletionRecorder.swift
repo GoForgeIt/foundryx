@@ -56,7 +56,10 @@ public final class DeletionRecorder: @unchecked Sendable {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["lines": [line]])
-        session.dataTask(with: req).resume()
+        // THE SAME CHOKE POINT `DoorLog` SHIPS THROUGH. The local record above is kept whatever
+        // happens — it is what a billing dispute is answered from — and only the leg that
+        // leaves the machine is withheld when this process is a test run.
+        FoundryXDiagShipping.send(req, using: session)
     }
 
     /// Everything recorded so far, in order — the seams' read side.

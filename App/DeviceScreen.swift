@@ -640,7 +640,14 @@ struct RecordingDevicePageView: View {
                 PocketRecordingDetailSheet(
                     page: inspecting.flatMap { check.detailPage(for: $0, brain: brain) },
                     brain: brain,
-                    isBusy: check.isChecking || check.isBringingOver || check.isRemoving,
+                    // THE ERRAND THIS PAGE IS ABOUT, not "something is busy". It used to be
+                    // three ORed flags, which disabled this page's actions for another
+                    // recording's transfer and could say nothing about which — and which is
+                    // why the only place progress could be drawn was the top of the page
+                    // behind it.
+                    progress: inspecting.map {
+                        PocketErrandProgressPresentation.progress(check.inFlight, for: $0)
+                    } ?? .idle,
                     onBringOver: { id in
                         check.bringOver(id: id,
                                         hardwareToken: input.identity.hardwareToken,
@@ -1118,6 +1125,29 @@ struct RecordingDevicePageView: View {
                             Spacer(minLength: 0)
                         }
 
+                        // THE SPINNER IS ON THE ROW THE OWNER TAPPED.
+                        //
+                        // NICK: "if I do go back to the home screen, well, it is loading, it
+                        // should show the loading spinner on the specific recording that I
+                        // clicked to bring over not just at the top." It could not: the model
+                        // had one in-flight flag per KIND of errand and no subject on any of
+                        // them, so a page-level spinner was the only honest thing to draw.
+                        // WHICH row spins is `PocketErrandProgressPresentation`, in the kit,
+                        // and a row only ever spins for ITS OWN recording — a row that spun
+                        // for somebody else's transfer would be a lie about where the bytes
+                        // are going.
+                        if case .thisRecording(let line) = PocketErrandProgressPresentation
+                            .progress(check.inFlight, for: row.id) {
+                            HStack(spacing: GrainSpacing.x2) {
+                                ProgressView().tint(GrainColor.forgeBlue)
+                                Text(line)
+                                    .grainTextStyle(.caption)
+                                    .foregroundStyle(GrainColor.textMuted)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.7)
+                            }
+                        }
+
                         HStack(alignment: .firstTextBaseline, spacing: GrainSpacing.x3) {
                             if let age = row.presenceBlock.ageLine {
                                 Text(age)
@@ -1516,9 +1546,11 @@ struct RecordingDevicePageView: View {
 struct PocketRecordingDetailSheet: View {
     let page: PocketRecordingDetailPage?
     let brain: BrainChoice
-    /// The radio is doing something. One radio, one idea of whether it is busy — the same rule
-    /// the check model states about itself.
-    let isBusy: Bool
+    /// WHAT THE ERRAND IN FLIGHT MEANS FOR THIS RECORDING. One radio and one errand, so this
+    /// is still "the page cannot ask for a second thing" — but it now knows whether the thing
+    /// running is about the recording this page IS, which is the difference between showing
+    /// the owner their transfer and greying a button out at them.
+    let progress: PocketErrandProgress
     let onBringOver: (String) -> Void
     let onRemove: (String) -> Void
     let onClose: () -> Void
@@ -1573,7 +1605,13 @@ struct PocketRecordingDetailSheet: View {
                 confirmingRemoval = false
                 guard let token = page?.fileToken else { return }
                 onRemove(token)
-                onClose()
+                // THE SAME RULE THE TRANSFER CONSULTS, and it answers differently here: this
+                // ends with the recording gone from the recorder, and this surface resolves
+                // the page live — so staying would leave the owner reading "Solleva can't act
+                // on that recording right now" as the reward for a deletion that worked.
+                if !PocketRecordingDetailAction.removeFromRecorder.leavesThePageOpen {
+                    onClose()
+                }
             }
         } message: {
             Text(PocketRemoveFromRecorderPresentation.confirmation(for: brain))
@@ -1628,24 +1666,45 @@ struct PocketRecordingDetailSheet: View {
     @ViewBuilder
     private func actions(of page: PocketRecordingDetailPage) -> some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x3) {
+            // WHAT IS HAPPENING, WHERE THE OWNER ASKED FOR IT.
+            //
+            // NICK: "if I could click on an individual recording and click bring over, it
+            // should show me the loading screen right there rather than taking me back to the
+            // home screen." This sheet used to close itself the instant the transfer was asked
+            // for, on the reasoning that the page behind it reports the errand — which is true
+            // and is the wrong trade: the owner asked HERE. The spinner is for THIS recording
+            // only; an errand about another one gets the sentence and no spinner, because a
+            // spinner here would claim these bytes are moving and they are not.
+            if let line = progress.line {
+                HStack(spacing: GrainSpacing.x2) {
+                    if progress.isThisRecording { ProgressView().tint(GrainColor.forgeBlue) }
+                    Text(line)
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.textMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             ForEach(page.actions, id: \.self) { action in
                 Button {
                     switch action {
                     case .bringItOver:
-                        // THE OWNER SAID "THAT ONE". The transfer is hours over BLE for a long
-                        // file, and the page behind this sheet is where its progress and its
-                        // outcome are already rendered — so the sheet gets out of the way
-                        // rather than becoming a second place that reports the same errand.
+                        // THE OWNER SAID "THAT ONE".
                         onBringOver(page.fileToken)
-                        onClose()
+                        // WHETHER THIS PAGE STAYS is `PocketRecordingDetailAction`'s rule, in
+                        // the kit, because `swift test` cannot compile `App/`. A transfer
+                        // keeps the page — its progress belongs where the tap was.
+                        if !action.leavesThePageOpen { onClose() }
                     case .removeFromRecorder:
+                        // A DESTRUCTIVE ACTION IS ONLY ASKED FOR ONCE IT IS CONFIRMED, so
+                        // nothing closes here: the alert below is what carries it out and what
+                        // applies the same rule afterwards.
                         confirmingRemoval = true
                     }
                 } label: {
                     Text(action.title).frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.grain(action.isDestructive ? .text : .filled))
-                .disabled(isBusy)
+                .disabled(progress.blocksAnAction)
             }
         }
     }
@@ -1690,6 +1749,27 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// on top of a live one.
     @Published private(set) var isBringingOver = false
     @Published private(set) var bringOverMessage: String?
+
+    /// THE ERRAND IN FLIGHT, AND WHICH RECORDING IT IS ABOUT.
+    ///
+    /// NICK, WATCHING HIS OWN PAGE: "if I could click on an individual recording and click
+    /// bring over, it should show me the loading screen right there rather than taking me back
+    /// to the home screen, and then if I do go back to the home screen, well, it is loading, it
+    /// should show the loading spinner on the specific recording that I clicked to bring over
+    /// not just at the top."
+    ///
+    /// THE THREE FLAGS ABOVE CANNOT DO THAT. `isBringingOver` says a transfer is running and
+    /// says nothing about WHICH of nineteen recordings it is running for, so the only place a
+    /// spinner could honestly go was the top of the page — and the sheet the owner tapped had
+    /// to close itself and send them back there to see it. It is the same missing per-recording
+    /// identity that made the rows inert.
+    ///
+    /// It is set at `beginErrand` and cleared at `finishErrand`, which are the ONE start and
+    /// the ONE stop every errand on this page passes through, so a spinner cannot outlive the
+    /// errand it belongs to. What a surface DRAWS from it is
+    /// `PocketErrandProgressPresentation`, in the kit, because `swift test` cannot compile
+    /// `App/` and a rule written in a SwiftUI body is a rule nothing here can hold.
+    @Published private(set) var inFlight: PocketErrandInFlight?
     /// The file a tap would ask for, or `nil` when there is nothing to offer. It is the ONLY
     /// reason the check reads the unpresented shelf: durations and titles cannot be ordered.
     @Published private(set) var offeredRecording: PocketRecording?
@@ -2138,15 +2218,20 @@ final class PocketRecorderCheckModel: ObservableObject {
 
     /// `errand.start`, recorded before the radio is touched so a run that never came back is
     /// still legible as a run that was attempted.
-    private func beginErrand(_ subject: String) {
+    /// - Parameter about: the recorder's OWN name for the file this errand is for,
+    ///   `<date>/<timestamp>`, or `nil` when the errand is about the recorder itself. It is
+    ///   what puts the spinner on the row the owner tapped, and what lets the live log say
+    ///   which of nineteen recordings a transfer that never came back was for.
+    private func beginErrand(_ subject: String, about recording: String? = nil) {
         runningErrandSubject = subject
+        inFlight = PocketErrandInFlight(subject: subject, recordingId: recording)
         // BACKGROUND TIME IS TAKEN HERE BECAUSE THIS IS WHERE EVERY ERRAND BEGINS. Five entry
         // points reach it — the check, the bring-over, both removal paths and the fast sync —
         // and taking the assertion at each of them instead would be four chances to forget.
         // A refusal is not an error: the errand runs unprotected, and `sceneChanged(to:)` then
         // reads that as "an actual departure stops this", which is the truth.
         lease.begin(subject: subject)
-        DoorLog.shared.command(PocketErrandCommand.start, subject: subject)
+        DoorLog.shared.command(PocketErrandCommand.start, subject: subject, about: recording)
     }
 
     /// `errand.stop`, EXACTLY ONCE per start. Guarded by the subject token rather than by a
@@ -2158,9 +2243,20 @@ final class PocketRecorderCheckModel: ObservableObject {
         // could possibly hold it, including one that raced the token. `end()` is silent when
         // nothing is held, and an assertion that outlives its errand is how iOS kills the app.
         lease.end()
+        // THE SPINNER IS PUT OUT OUTSIDE THE GUARD, FOR THE SAME REASON THE TIME IS GIVEN BACK
+        // OUTSIDE IT. A spinner that outlives its errand is this page's oldest defect wearing a
+        // new hat — `isChecking` stuck true is what made the busy guard refuse every subsequent
+        // tap forever — so every path that could possibly have set it clears it, including one
+        // that raced the token.
+        let recording = inFlight?.recordingId
+        inFlight = nil
         guard let subject = runningErrandSubject else { return }
         runningErrandSubject = nil
-        DoorLog.shared.command(PocketErrandCommand.stop, subject: subject, outcome: outcome)
+        // THE STOP NAMES THE SAME RECORDING THE START DID, so a start and a stop can be paired
+        // in the live log without counting lines — which is the only way to read a page that
+        // ran five errands about four files.
+        DoorLog.shared.command(PocketErrandCommand.stop, subject: subject,
+                               about: recording, outcome: outcome)
         // AND THE PAGE GOES AND RE-READS WHAT THAT ERRAND CHANGED.
         //
         // THIS IS THE CHOKE POINT AND THAT IS WHY IT IS HERE. The page used to re-read on the
@@ -2371,7 +2467,11 @@ final class PocketRecorderCheckModel: ObservableObject {
         }
         isBringingOver = true
         bringOverMessage = nil
-        beginErrand(PocketErrandCommand.bringOverSubject)
+        // THE ERRAND CARRIES THE RECORDING IT IS FOR. Not the offered pick and not an index —
+        // the recorder's own name for the file the owner actually asked for, which is what
+        // puts the spinner on their row instead of at the top of the page.
+        beginErrand(PocketErrandCommand.bringOverSubject,
+                    about: recording.date + "/" + recording.timestamp)
         let attachment = Self.makeAttachment(log: DoorLog.shared)
         self.attachment = attachment
         let custody = self.custody
@@ -2492,7 +2592,7 @@ final class PocketRecorderCheckModel: ObservableObject {
         let recording = shelfRecordings[index]
         isRemoving = true
         removalMessage = nil
-        beginErrand(PocketErrandCommand.removalSubject)
+        beginErrand(PocketErrandCommand.removalSubject, about: id)
         let attachment = Self.makeAttachment(log: DoorLog.shared)
         self.attachment = attachment
         let identity = Self.custodyIdentity(for: hardwareToken)
@@ -2537,7 +2637,7 @@ final class PocketRecorderCheckModel: ObservableObject {
                 continue
             }
             isRemoving = true
-            beginErrand(PocketErrandCommand.removalSubject)
+            beginErrand(PocketErrandCommand.removalSubject, about: token)
             let attachment = Self.makeAttachment(log: DoorLog.shared)
             self.attachment = attachment
             let panel = detail
@@ -2648,7 +2748,8 @@ extension PocketRecorderCheckModel {
         // attachment being NAMED and stored, `cancel()` cannot reach the radio it opened; and
         // without the `Task` being assigned to `errand`, leaving the page does not stop it.
         // The tap looked identical to `bringOver` and behaved like none of it.
-        beginErrand(PocketErrandCommand.bringOverSubject)
+        beginErrand(PocketErrandCommand.bringOverSubject,
+                    about: recording.date + "/" + recording.timestamp)
         let attachment = Self.makeAttachment(log: DoorLog.shared)
         self.attachment = attachment
         let custody = self.custody
