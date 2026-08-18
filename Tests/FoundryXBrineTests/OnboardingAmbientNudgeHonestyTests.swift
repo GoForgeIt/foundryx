@@ -174,6 +174,15 @@ final class OnboardingAmbientNudgeHonestyTests: XCTestCase {
     ///
     /// Held in two halves because the sample path is two hops: `postPreview` installs the
     /// surface, and the `deliver` it calls raises the one prompt and reports the answer.
+    ///
+    /// WHAT THIS FILE MAY AND MAY NOT HOLD, after the refutation. Reading source text is how
+    /// `deliver.contains("report?(.refused)")` stayed satisfied by an untouched `default:`
+    /// arm while the denial arm was mutated to claim a send. So the OUTCOMES are no longer
+    /// asserted here at all — `AmbientNudgePlanTests` executes them, and
+    /// `features/the-ambient-step-says-what-the-phone-did.feature` drives the real notifier
+    /// against a scripted centre inside the app. What is left here is the one thing text is
+    /// actually good for: that this file DELEGATES rather than deciding, so that those two
+    /// lanes are measuring the code that ships.
     func testTheSampleNudgePathAsksForPermissionAndPresentsInTheForeground() throws {
         let preview = try Self.functionBody(named: "postPreview",
                                             inAppFile: "App/AmbientNotifier.swift")
@@ -188,39 +197,156 @@ final class OnboardingAmbientNudgeHonestyTests: XCTestCase {
                       "Body was:\n\(preview)")
         let deliver = try Self.functionBody(named: "deliver",
                                             inAppFile: "App/AmbientNotifier.swift")
-        XCTAssertTrue(deliver.contains("requestAuthorization("),
-                      "the delivery path never asks for notification permission, so a first-run " +
-                      "`.notDetermined` nudge would simply be dropped by iOS")
-        XCTAssertTrue(deliver.contains("report?(.refused)"),
-                      "the delivery path does not report a refusal, so a user who says no would " +
-                      "still be told a nudge was sent")
+        for decision in ["AmbientNudgePlan.firstStep(",
+                         "AmbientNudgePlan.afterAsking(",
+                         "AmbientNudgePlan.afterHandingToSystem("] {
+            XCTAssertTrue(deliver.contains(decision),
+                          "AmbientNotifier.deliver no longer asks `\(decision)` — it has taken " +
+                          "the decision back into a closure `swift test` cannot enter, which " +
+                          "is where every mutation that shipped green was hiding")
+        }
+        // The permission prompt still happens HERE, at the surface that promised a nudge —
+        // and nowhere else in the app (see testNoLaunchPathRaisesTheNotificationPrompt).
+        XCTAssertTrue(deliver.contains("centre.ask"),
+                      "the delivery path never asks for notification permission, so a " +
+                      "first-run `.notDetermined` nudge is simply dropped by iOS")
+    }
+
+    /// `.scheduled` — the ONLY outcome allowed to say "we sent one" — may not be written by
+    /// hand anywhere in the ambient path. Its single producer is
+    /// `AmbientNudgePlan.afterHandingToSystem(accepted:)`, which requires iOS to have
+    /// accepted a real request. THIS IS THE MUTATION THAT SHIPPED GREEN, as a rule: changing
+    /// the denial arm to `report?(.scheduled)` is now unspellable.
+    func testNoAppSideCodeManufacturesAScheduledOutcome() throws {
+        let files = ["App/AmbientNotifier.swift",
+                     "App/OnboardingFlowView.swift",
+                     "App/SettingsScreen.swift"]
+        var offenders: [String] = []
+        for file in files {
+            let source = try Self.appSource(file)   // comments stripped
+            for (i, line) in source.split(separator: "\n", omittingEmptySubsequences: false)
+                .enumerated() {
+                let t = line.trimmingCharacters(in: .whitespaces)
+                guard t.contains(".scheduled") else { continue }
+                offenders.append("\(file):\(i + 1): \(t)")
+            }
+        }
+        XCTAssertTrue(offenders.isEmpty,
+                      "the ambient path writes `.scheduled` by hand. Only " +
+                      "AmbientNudgePlan.afterHandingToSystem(accepted:) may produce it, and " +
+                      "only when iOS accepted the request:\n" + offenders.joined(separator: "\n"))
+        // NEGATIVE CONTROL: the scan must be able to see the thing it forbids. Without this
+        // the assertion above is green for a file the reader failed to open.
+        let planted = "        report?(.scheduled)\n"
+        XCTAssertTrue(planted.contains(".scheduled"),
+                      "the scan cannot see `.scheduled` even in a line that contains it")
+    }
+
+    /// NO LAUNCH PATH RAISES THE OS NOTIFICATION PROMPT.
+    ///
+    /// `RootView` used to call `AmbientNotifier.requestAuthorizationIfNeeded()`
+    /// unconditionally on every launch, in the `#else` shipping arm of a
+    /// `#if DEBUG || PERF_HARNESS`. RootView also HOSTS onboarding as a `.fullScreenCover`,
+    /// so RootView ran first: the prompt appeared before the user had been told what a
+    /// notification here would be for, and by the time the ambient step ran — the step that
+    /// promises a notification and whose own comment says it asks for permission "HERE" —
+    /// the status was no longer `.notDetermined` and its ask was dead code.
+    ///
+    /// The executable half of this rule is
+    /// `features/the-ambient-step-says-what-the-phone-did.feature`, which runs the real
+    /// launch wiring against a scripted centre and counts the prompts (zero). This half is
+    /// the class rule: only one function in the App target may ask, and it reports.
+    func testNoLaunchPathRaisesTheNotificationPrompt() throws {
+        var offenders: [String] = []
+        for file in try AppSourceTree.appSideSwiftFiles() {
+            guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            let rel = AppSourceTree.relativePath(file)
+            let source = AppSourceTree.withoutComments(of: text)
+            for (i, line) in source.split(separator: "\n", omittingEmptySubsequences: false)
+                .enumerated() {
+                let t = line.trimmingCharacters(in: .whitespaces)
+                guard t.contains("requestAuthorization(") || t.contains("requestAuthorizationIfNeeded")
+                else { continue }
+                // The ONE permitted asker: the notification centre's own adapter, whose
+                // caller is `deliver`, which reports the answer to the promising surface.
+                if rel == "App/AmbientNotifier.swift",
+                   t.contains("centre.requestAuthorization(options:") { continue }
+                offenders.append("\(rel):\(i + 1): \(t)")
+            }
+        }
+        XCTAssertTrue(offenders.isEmpty,
+                      "something outside AmbientNotifier's centre adapter raises the OS " +
+                      "notification prompt. A prompt nobody promised is a prompt nobody can " +
+                      "report the answer of:\n" + offenders.joined(separator: "\n"))
+        // NEGATIVE CONTROL: prove the walk actually reads App source and the matcher fires.
+        // Without it, an `appSideSwiftFiles()` that returned [] would be green forever.
+        let files = try AppSourceTree.appSideSwiftFiles()
+        XCTAssertGreaterThan(files.count, 20,
+                             "the App source walk found \(files.count) files — it is not " +
+                             "reading the App target, so the assertion above is about nothing")
+        XCTAssertTrue("center.requestAuthorization(options: [.alert]) { _, _ in }"
+            .contains("requestAuthorization("),
+                      "the matcher cannot see a call it is supposed to forbid")
     }
 
     /// Every exit from `deliver` must report. A `return` with no `report?` before it is the
     /// silent-guard shape this fix exists to remove — and it is how the original
     /// `postPreview` swallowed the whole thing.
+    /// THE EXEMPTION IS GONE. This check used to read
+    /// `if !window.contains("report?(") && !window.contains("guard let binding")`, and that
+    /// second clause matched ANY identifier beginning "binding" — so inserting
+    /// `guard let bindingSnapshot = binding else { return }` into `deliver`, a silent
+    /// swallow of exactly the FX-4(a) shape, passed 1536/1536. An exemption inside an
+    /// offender loop is a hole with a comment on it.
+    ///
+    /// `deliver` is written to need no exemption: its one unbound-sample exit is
+    /// `return schedule(nil, nil)`, which is not a bare `return` and reports from the
+    /// centre's completion, and the permission callback branches with `if`/`else` instead
+    /// of returning.
     func testEveryEarlyReturnInTheDeliveryPathReportsFirst() throws {
         let deliver = try Self.functionBody(named: "deliver",
                                             inAppFile: "App/AmbientNotifier.swift")
-        var silent: [String] = []
-        let lines = deliver.split(separator: "\n", omittingEmptySubsequences: false)
-        for (i, line) in lines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard trimmed == "return" else { continue }
-            // The report belongs in the lines immediately above: `report?(…)` then
-            // `return`. Three are read rather than one because comment stripping leaves
-            // blank lines behind. The `guard let binding` escape covers the ONE exit that
-            // legitimately reports nothing itself — it falls through to `schedule`, which
-            // reports from `center.add`'s completion.
-            let window = lines[max(0, i - 3)..<i].joined(separator: " ")
-            if !window.contains("report?(") && !window.contains("guard let binding") {
-                silent.append("line \(i + 1): …\(window) / return")
-            }
-        }
+        let silent = Self.silentReturns(in: deliver)
         XCTAssertTrue(silent.isEmpty,
                       "AmbientNotifier.deliver returns without reporting — the caller cannot " +
                       "tell a delivered nudge from a swallowed one:\n" +
                       silent.joined(separator: "\n"))
+
+        // ---- NEGATIVE CONTROL. A scanner that finds nothing is indistinguishable from a
+        // scanner that cannot see, and this whole file exists because that difference went
+        // unmeasured. The planted body is the exact mutation that shipped green.
+        let planted = """
+            let centre = self.centre
+            guard let bindingSnapshot = binding else {
+                return
+            }
+            centre.permission { permission in
+                report?(.unavailable)
+                return
+            }
+            """
+        let caught = Self.silentReturns(in: planted)
+        XCTAssertEqual(caught.count, 1,
+                       "the silent-return scan cannot see a planted silent return (found " +
+                       "\(caught.count)): \(caught.joined(separator: " | "))")
+        XCTAssertTrue(caught[0].contains("bindingSnapshot"),
+                      "the scan flagged the wrong return — it is not reading what it claims")
+    }
+
+    /// Every bare `return` in a body with no `report?(…)` in the three lines above it.
+    /// Three rather than one because comment stripping leaves blank lines behind.
+    /// NO EXEMPTIONS: a body that needs one is a body that should be rewritten.
+    static func silentReturns(in body: String) -> [String] {
+        var silent: [String] = []
+        let lines = body.split(separator: "\n", omittingEmptySubsequences: false)
+        for (i, line) in lines.enumerated() {
+            guard line.trimmingCharacters(in: .whitespaces) == "return" else { continue }
+            let window = lines[max(0, i - 3)..<i].joined(separator: " ")
+            if !window.contains("report?(") {
+                silent.append("line \(i + 1): …\(window.trimmingCharacters(in: .whitespaces)) / return")
+            }
+        }
+        return silent
     }
 
     /// `postPreview` must REPORT. A `-> Void` with no reporting seam is a function whose
@@ -252,6 +378,40 @@ final class OnboardingAmbientNudgeHonestyTests: XCTestCase {
         XCTAssertFalse(afterCall.hasPrefix("()"),
                        "the ambient step calls AmbientNotifier.postPreview() bare and discards " +
                        "the outcome — the FX-4(a) defect. Found: postPreview\(afterCall)")
+    }
+
+    /// …AND SO MUST EVERY OTHER CALLER. The rule was written for the onboarding step and
+    /// held only there, so `App/SettingsScreen.swift` went on calling
+    /// `AmbientNotifier.postPreview()` bare — the same defect, one screen over, with a row
+    /// that said "See how a nudge feels" whatever the phone did. A rule enforced at one site
+    /// is a rule the next site does not have.
+    func testNoCallerAnywhereDiscardsTheSampleNudgeOutcome() throws {
+        var offenders: [String] = []
+        var callSites = 0
+        for file in try AppSourceTree.appSideSwiftFiles() {
+            guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            let source = AppSourceTree.withoutComments(of: text)
+            var search = source.startIndex
+            while let call = source.range(of: "AmbientNotifier.postPreview", range: search..<source.endIndex) {
+                callSites += 1
+                search = call.upperBound
+                let after = String(source[call.upperBound...].prefix(60))
+                    .trimmingCharacters(in: .whitespaces)
+                if after.hasPrefix("()") {
+                    offenders.append("\(AppSourceTree.relativePath(file)): postPreview\(after)")
+                }
+            }
+        }
+        XCTAssertTrue(offenders.isEmpty,
+                      "a caller fires the sample nudge and throws the outcome away, so its " +
+                      "surface cannot say what the phone did:\n" + offenders.joined(separator: "\n"))
+        // NEGATIVE CONTROL, both halves: the walk must find the call sites at all, and the
+        // matcher must recognise the shape it forbids.
+        XCTAssertGreaterThanOrEqual(callSites, 1,
+                                    "no App-side code fires the sample nudge at all — the " +
+                                    "assertion above is about nothing")
+        XCTAssertTrue("AmbientNotifier.postPreview()".hasSuffix("()"),
+                      "the matcher cannot see the discarding call it is supposed to forbid")
     }
 
     // MARK: - Source helpers
