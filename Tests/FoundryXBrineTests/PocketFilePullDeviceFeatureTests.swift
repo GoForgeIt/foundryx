@@ -39,7 +39,7 @@ private enum PocketFilePullSteps {
             "offline storage is present without exposing the uncalibrated storage pair",
             "its hero reports the link as connected with battery and firmware",
             "no recording pill, recording state, or Live Activity surface is present",
-            "each recording shows its custody and the size the recorder stated",
+            "each recording shows its custody, and how long it runs only if it was measured",
             "no active source FrameRouter WAL Live Activity or live state mutation occurs"
         ]
         var steps = givens.map { phrase in defineStep(phrase) { context, _, _ in await world.given(phrase); return context } }
@@ -86,12 +86,16 @@ private actor PocketFilePullWorld {
                 firmware: .reported("1.6"), manifest: [])
         case "the storage manifest presentation is built":
             manifest = StoredFileDevicePresentation.manifest([
-                .init(id: "a", title: "Walkthrough", sizeBytes: 88_000,
+                // ONE MEASURED, ONE NOT — the two states a shelf row can be in. The first has
+                // been brought over, so its byte count is real and its length is stated; the
+                // second has only a listing, whose unit was measured and disproved on
+                // 2026-08-18, so it states nothing.
+                .init(id: "a", title: "Walkthrough", extent: .bytes(88_000),
                       presence: PocketRecordingPresence(
                         onRecorder: .init(answer: .yes, observedAt: manifestReadAt),
                         onThisPhone: .init(answer: .yes, observedAt: manifestReadAt),
                         safeElsewhere: .neverAsked)),
-                .init(id: "b", title: "Wed 4:02 PM", sizeBytes: 48_000,
+                .init(id: "b", title: "Wed 4:02 PM", extent: .listedUnitUnresolved,
                       presence: PocketRecordingPresence(
                         onRecorder: .init(answer: .yes, observedAt: manifestReadAt),
                         onThisPhone: .init(answer: .no, observedAt: manifestReadAt),
@@ -125,8 +129,10 @@ private actor PocketFilePullWorld {
             XCTAssertEqual(detail?.linkLabel, "Connected"); XCTAssertEqual(detail?.battery, "72%"); XCTAssertEqual(detail?.firmware, "1.6")
         case "no recording pill, recording state, or Live Activity surface is present":
             XCTAssertEqual(detail?.showsRecordingState, false); XCTAssertEqual(detail?.showsLiveActivity, false)
-        case "each recording shows its custody and the size the recorder stated":
-            XCTAssertEqual(manifest?.rows.map(\.size), ["85 KB", "46 KB"])
+        case "each recording shows its custody, and how long it runs only if it was measured":
+            // 88,000 bytes at the measured 32 kbps CBR (4,000 B/s) is 22 seconds. The second
+            // row has only a listing number, and a listing number is not a magnitude.
+            XCTAssertEqual(manifest?.rows.map(\.extentLine), ["22 sec", nil])
             XCTAssertEqual(manifest?.rows.map(\.presenceLabel), ["In Solleva", "Only on the recorder"])
         case "no active source FrameRouter WAL Live Activity or live state mutation occurs":
             XCTAssertEqual(effects, .zero)

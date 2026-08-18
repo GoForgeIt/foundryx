@@ -25,6 +25,16 @@
 // that offers the action and a consent that refuses it cannot disagree. The ceiling is
 // `PocketBLEClient.maximumDownloadBytes`, the same constant `PocketBringOver.run` refuses
 // against before it touches the radio.
+//
+// ONE DIVERGENCE, STATED RATHER THAN LEFT TO BE FOUND. Since 2026-08-18 this page applies that
+// ceiling ONLY to a MEASURED byte count (`PocketRecordingExtent.bytes`), because the listing's
+// fifth field is in a unit that has been measured and disproved — a listing of 4 was 19,770
+// real bytes. `PocketBringOver.run` still pre-checks `recording.sizeBytes`, which is that same
+// listing number times 1,024. So a recording with a listing over 262,144 is OFFERED here and
+// would be refused there. On every device anybody has measured this is unreachable — the
+// largest listing on `PKT01_BLUE_26079bc5` is 7,192 — and the transfer's own ceiling on the
+// ANNOUNCED size is the check that means anything. The pre-check belongs to the transfer path
+// and is left to whoever owns it; it is named here so it is a known divergence, not a surprise.
 
 import Foundation
 
@@ -79,8 +89,10 @@ public struct PocketRecordingDetailPage: Equatable, Sendable {
     public let fileToken: String
     /// The heading: the recorder's reported instant, re-spaced and never re-interpreted.
     public let title: String
-    /// Its date and its size, each labelled. The long form, because there is one recording on
-    /// this page and no list to get past.
+    /// What is actually known, each labelled. The long form, because there is one recording on
+    /// this page and no list to get past — and SHORTER than it used to be: the `Size` row is
+    /// gone, because it printed the listing's fifth field in a unit measured and disproved on
+    /// 2026-08-18, and a `Length` row appears only once somebody has a real byte count.
     public let facts: [PocketRecordingDetailFact]
     /// The three places, one line each, each with its own age. NOT accompanied by
     /// `PocketPresencePresentation.label` — that summary is DERIVED from these three, and the
@@ -152,7 +164,11 @@ public enum PocketRecordingDetailPresentation {
     //
     // THE DATE STAYED AND THE LABEL WENT. A recording on a recorder has no name but its
     // instant, so the instant IS the heading, and `factsNeverRepeatTheHeading` holds it.
-    public static let sizeLabel = "Size"
+    /// "LENGTH", NOT "SIZE". A size in bytes is a fact about a file; how long the recording
+    /// runs is the fact a person is actually after, and it is the one this app can now defend
+    /// — 32 kbps CBR is 4,000 bytes/second, measured off the first two files that ever came
+    /// off a Pocket. The row is only drawn when somebody has a real byte count.
+    public static let lengthLabel = "Length"
     /// The wire identity, shown because it is what a person reads back to somebody when a
     /// transfer goes wrong, and because ONE device spells it two different ways.
     public static let recorderNameLabel = "The recorder calls it"
@@ -182,9 +198,10 @@ public enum PocketRecordingDetailPresentation {
     /// render rather than over whichever one a test author remembered. The lines it borrows
     /// are named by their owners, never re-spelled here.
     public static var everyLine: [String] {
-        [placesHeading, sizeLabel, recorderNameLabel, closeAction,
+        [placesHeading, lengthLabel, recorderNameLabel, closeAction,
          alreadyHereLine, notOnTheRecorderLine, tooBigLine]
             + PocketRecordingDetailAction.allCases.map(\.title)
+            + PocketRecordingExtentPresentation.everyLine
     }
 
     // MARK: - Finding the one the finger landed on
@@ -222,9 +239,15 @@ public enum PocketRecordingDetailPresentation {
     ///   that one rather than "not confirmed yet", which implies waiting would help.
     /// - Parameter now: the instant the ages are rendered against, injected rather than read
     ///   off the clock inside, so a scenario states an age instead of racing one.
+    /// - Parameter extent: how big this recording ACTUALLY is, when anybody has measured it.
+    ///   The default is the honest one and is also the ordinary one: a recording that has
+    ///   never been fetched has only a listing number, whose unit has been measured and
+    ///   disproved (`PocketRecordingExtent`), so this page states no magnitude for it and says
+    ///   so in a sentence instead.
     public static func page(for recording: PocketRecording,
                             presence: PocketRecordingPresence,
                             brain: BrainChoice,
+                            extent: PocketRecordingExtent = .listedUnitUnresolved,
                             now: Date) -> PocketRecordingDetailPage {
         var actions: [PocketRecordingDetailAction] = []
         var notes: [String] = []
@@ -232,7 +255,7 @@ public enum PocketRecordingDetailPresentation {
         // THE BRING-OVER. Additive, so it asks only that nothing KNOWN rules it out: the phone
         // already holding the bytes, the recorder answering that it does not have them, or a
         // file over the ceiling the transfer refuses before it opens a session.
-        if let refusal = bringOverRefusal(for: recording, presence: presence) {
+        if let refusal = bringOverRefusal(for: presence, extent: extent) {
             notes.append(refusal)
         } else {
             actions.append(.bringItOver)
@@ -247,28 +270,50 @@ public enum PocketRecordingDetailPresentation {
             actions.append(.removeFromRecorder)
         }
 
+        // AND WHY THERE IS NO LENGTH, once, in words. A stated absence with no way out of it
+        // is a shrug — the rule the readings strip already follows — and the way out is the
+        // `Bring it over` button decided immediately above.
+        if !extent.isMeasured {
+            notes.append(PocketRecordingExtentPresentation.unknownUntilBroughtOverLine)
+        }
+
         return PocketRecordingDetailPage(
             fileToken: fileToken(recording),
             title: PocketRecordingLabel.title(date: recording.date,
                                               timestamp: recording.timestamp),
+            // THE LENGTH FACT IS OMITTED, NOT BLANKED, when nobody has measured this
+            // recording. A `Length` row holding "—" or "Unknown" is the absence with a label
+            // in front of it; the sentence in `notes` says the true thing instead, and names
+            // the action on this same page that would settle it.
             facts: [
-                PocketRecordingDetailFact(
-                    label: sizeLabel,
-                    value: StoredFileDevicePresentation.extent(sizeBytes: recording.sizeBytes)),
+                PocketRecordingExtentPresentation.line(extent).map {
+                    PocketRecordingDetailFact(label: lengthLabel, value: $0)
+                },
                 PocketRecordingDetailFact(label: recorderNameLabel,
                                           value: fileToken(recording)),
-            ],
+            ].compactMap { $0 },
             places: PocketPresencePresentation.lines(presence, now: now),
             actions: actions,
             notes: notes)
     }
 
     /// `nil` ⇒ the bring-over is offered.
-    public static func bringOverRefusal(for recording: PocketRecording,
-                                        presence: PocketRecordingPresence) -> String? {
+    ///
+    /// THE CEILING IS CHECKED AGAINST A MEASURED BYTE COUNT AND NOTHING ELSE. It used to be
+    /// checked against `recording.sizeBytes`, which is the listing's fifth field scaled by
+    /// 1,024 — a unit measured and disproved on 2026-08-18 — so "This recording is bigger than
+    /// Solleva can bring over" was a claim about size derived from a number that is not a size.
+    /// A recording nobody has measured is OFFERED, and the transfer's own ceiling on the
+    /// announced byte count is what refuses it if it really is too big. Predicting a refusal
+    /// from an unresolved unit is how a person is told no about a file that would have come
+    /// over fine.
+    public static func bringOverRefusal(for presence: PocketRecordingPresence,
+                                        extent: PocketRecordingExtent) -> String? {
         if presence.onThisPhone.answer == .yes { return alreadyHereLine }
         if presence.onRecorder.answer == .no { return notOnTheRecorderLine }
-        if recording.sizeBytes > PocketBLEClient.maximumDownloadBytes { return tooBigLine }
+        if let bytes = extent.byteCount, bytes > PocketBLEClient.maximumDownloadBytes {
+            return tooBigLine
+        }
         return nil
     }
 

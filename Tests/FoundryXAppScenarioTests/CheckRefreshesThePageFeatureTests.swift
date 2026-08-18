@@ -205,7 +205,7 @@ private final class PageReReadWorld {
             // A CHECK RE-TAKES THE STAGE SNAPSHOT, which is what lets the shelf state that the
             // recording is now safe elsewhere — and therefore what makes it removable at all.
             try await runCheck()
-            freeSpaceBefore = try requireReading("Free space").value
+            freeSpaceBefore = try requireReading("Storage").value
             guard freeSpaceBefore != nil else {
                 throw BrineStepError(
                     "the page carries no free-space figure before the removal, so \"it shows "
@@ -333,7 +333,7 @@ private final class PageReReadWorld {
             }
 
         case "that page shows more free space than it showed before the removal":
-            let now = try requireReading("Free space").value
+            let now = try requireReading("Storage").value
             guard let before = freeSpaceBefore, let now else {
                 throw BrineStepError("the page has no free-space figure to compare")
             }
@@ -344,8 +344,11 @@ private final class PageReReadWorld {
                         + "store. The one number a person watches while they clear space is "
                         + "the one number that did not move")
             }
-            guard try megabytesFree(now) > megabytesFree(before) else {
-                throw BrineStepError("free space went from \(before) to \(now) across a "
+            // LESS FULL, which is the same claim the other way up. The line states a RATIO
+            // now — the recorder's storage unit is unresolved, so an amount cannot be
+            // defended — and a removal makes the recorder emptier, not fuller.
+            guard try percentFull(now) < percentFull(before) else {
+                throw BrineStepError("the recorder went from \(before) to \(now) across a "
                                         + "removal — the wrong way")
             }
 
@@ -398,10 +401,11 @@ private final class PageReReadWorld {
             acceptedSecret: Self.secret,
             // A FILE BIG ENOUGH FOR THE PAGE'S OWN WORDS TO MOVE WHEN IT LEAVES.
             //
-            // The free-space line reads "47.9 MB free of 59.6 MB" — one decimal of a megabyte,
-            // so ~102 KB of resolution. The 3-second fixture is 12 KB, and a recorder freeing
-            // 12 KB honestly prints the same sentence it printed before. Asserting the number
-            // changed would then be asserting nothing, whatever the page did.
+            // The storage line reads "19% full" — whole percentage points of 61,032, so ~610
+            // units of resolution. The 3-second fixture is 12 KB, and a recorder freeing that
+            // honestly prints the same sentence it printed before. Asserting the number
+            // changed would then be asserting nothing, whatever the page did. A listing of
+            // 2,000,000 frees 1,953 and takes the page from 19% full to 16% full.
             //
             // THE LISTED SIZE AND THE TRANSFERRED BYTES DIVERGE BY DESIGN HERE, which is a
             // shape this fixture exists to model: real firmware answers `LIST&<day>` and
@@ -493,12 +497,16 @@ private final class PageReReadWorld {
         return line
     }
 
-    /// "47.9 MB free of 59.6 MB" → 47.9. The page's own words, read back as a number, so the
-    /// comparison is over what the owner sees rather than over a field behind it.
-    private func megabytesFree(_ sentence: String) throws -> Double {
+    /// "19% full" → 19. The page's own words, read back as a number, so the comparison is over
+    /// what the owner sees rather than over a field behind it.
+    ///
+    /// IT USED TO PARSE "47.9 MB free of 59.6 MB". That sentence is gone: `MCU&SPA` states its
+    /// two figures in a unit nobody has resolved, and rendering them as megabytes is what put
+    /// "225 KB free of 57.6 MB" on a 64 GB recorder's page.
+    private func percentFull(_ sentence: String) throws -> Double {
         guard let first = sentence.split(separator: " ").first,
-              let value = Double(first) else {
-            throw BrineStepError("the free-space line reads \"\(sentence)\", which states no "
+              let value = Double(first.replacingOccurrences(of: "%", with: "")) else {
+            throw BrineStepError("the storage line reads \"\(sentence)\", which states no "
                                     + "number this scenario can compare")
         }
         return value

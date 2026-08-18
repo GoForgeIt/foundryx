@@ -29,7 +29,7 @@ Feature: Pocket is a stored-file recording device in the one device list
   Scenario: The storage manifest distinguishes custody and states the size the recorder gave
     Given recorder files that FoundryX has and files only on the recorder
     When the storage manifest presentation is built
-    Then each recording shows its custody and the size the recorder stated
+    Then each recording shows its custody, and how long it runs only if it was measured
 
   Scenario: A stored-file lifecycle has no live-pipeline effects
     Given spies around every live capture boundary

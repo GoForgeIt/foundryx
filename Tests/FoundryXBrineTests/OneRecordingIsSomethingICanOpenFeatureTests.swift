@@ -238,26 +238,45 @@ final class OneRecordingIsSomethingICanOpenFeatureTests: XCTestCase {
                 return ctx
             },
 
-            defineStep("it states the size and the date the recorder itself reported") { ctx, _, _ in
+            defineStep("it states no length for a recording nobody has measured, and says why") { ctx, _, _ in
                 guard let page = world.page, let recording = world.recording else {
                     throw BrineStepError("no page was built")
                 }
-                let size = page.facts.first {
-                    $0.label == PocketRecordingDetailPresentation.sizeLabel
-                }
-                guard let size else {
-                    throw BrineStepError("the page states no size")
-                }
-                guard size.value == StoredFileDevicePresentation
-                    .extent(sizeBytes: recording.sizeBytes) else {
+                // THIS STEP USED TO READ "it states the size the recorder itself reported",
+                // and the size it checked was the listing's fifth field relabelled kilobytes.
+                // On 2026-08-18 the recording behind a listing of 4 came off the device and
+                // was 19,770 bytes; behind a listing of 46, 185,078. The unit is unresolved,
+                // so this page states NOTHING about extent until somebody measures one.
+                guard !page.facts.contains(where: {
+                    $0.label == PocketRecordingDetailPresentation.lengthLabel
+                }) else {
                     throw BrineStepError(
-                        "the size reads \"\(size.value)\", which is not the recorder's own "
-                            + "figure. The row that divided these bytes by an unmeasured 4,000 "
-                            + "bytes/second printed \"44 min\" on all nineteen")
+                        "the page states a length for a recording nobody has fetched — its "
+                            + "facts are \(page.facts.map { "\($0.label)=\($0.value)" })")
                 }
-                guard !PocketMeasuredFigures.shelfRowMayStateDuration else {
+                guard page.notes.contains(
+                    PocketRecordingExtentPresentation.unknownUntilBroughtOverLine) else {
                     throw BrineStepError(
-                        "the fabricated duration has been re-admitted; this page would state it")
+                        "the page says nothing about WHY there is no length — a stated absence "
+                            + "with no way out of it is a shrug. Its notes are \(page.notes)")
+                }
+                guard !PocketMeasuredFigures.mayStateAnExtentFromTheListing else {
+                    throw BrineStepError(
+                        "the listing number has been re-admitted as a magnitude; this page "
+                            + "would print one")
+                }
+                // AND THE PAGE DOES STATE IT ONCE SOMEBODY HAS. The paired-existence half:
+                // "no length" is satisfied by a page that can never state one.
+                let measured = PocketRecordingDetailPresentation.page(
+                    for: recording, presence: Self.onlyOnTheRecorder, brain: .myComputer,
+                    extent: .bytes(19_770), now: Self.now)
+                guard measured.facts.contains(where: {
+                    $0.label == PocketRecordingDetailPresentation.lengthLabel
+                        && $0.value == "5 sec"
+                }) else {
+                    throw BrineStepError(
+                        "a recording measured at 19,770 bytes — 32 kbps CBR is 4,000 B/s — "
+                            + "does not state its length: \(measured.facts.map(\.label))")
                 }
                 // THE DATE IS THE HEADING, NOT A LABELLED FACT — see the next step. A recording
                 // on a recorder has no name but its instant, and the first simulator run of
@@ -289,7 +308,7 @@ final class OneRecordingIsSomethingICanOpenFeatureTests: XCTestCase {
                 let repeated = PocketRecordingDetailPage(
                     fileToken: page.fileToken, title: page.title,
                     facts: page.facts + [PocketRecordingDetailFact(
-                        label: PocketRecordingDetailPresentation.sizeLabel, value: page.title)],
+                        label: PocketRecordingDetailPresentation.lengthLabel, value: page.title)],
                     places: page.places, actions: page.actions, notes: page.notes)
                 guard !repeated.factsNeverRepeatTheHeading else {
                     throw BrineStepError(
@@ -564,11 +583,18 @@ final class OneRecordingIsSomethingICanOpenFeatureTests: XCTestCase {
             },
 
             defineStep("a recording bigger than Solleva can carry says that instead of offering the tap") { ctx, _, _ in
+                // THE CEILING IS MEASURED AGAINST A MEASURED BYTE COUNT, and that is the whole
+                // change here. It used to be measured against `PocketRecording.sizeBytes` —
+                // the listing's fifth field times 1,024 — so "This recording is bigger than
+                // Solleva can bring over" was a claim about a size derived from a number that
+                // is not a size, and on 2026-08-18 a listing of 4 turned out to be 19,770
+                // bytes. A recording nobody has measured is now OFFERED; the transfer's own
+                // ceiling on the announced byte count is what refuses it if it really is big.
                 let huge = PocketRecording(date: "2026-08-11", timestamp: "20260811120000",
-                                           sizeBytes: PocketBLEClient.maximumDownloadBytes + 1)
+                                           sizeBytes: 0)
                 let page = PocketRecordingDetailPresentation.page(
-                    for: huge, presence: Self.onlyOnTheRecorder,
-                    brain: .myComputer, now: Self.now)
+                    for: huge, presence: Self.onlyOnTheRecorder, brain: .myComputer,
+                    extent: .bytes(PocketBLEClient.maximumDownloadBytes + 1), now: Self.now)
                 guard !page.offers(.bringItOver) else {
                     throw BrineStepError(
                         "a recording over the ceiling is offered a transfer that refuses before "
@@ -578,15 +604,24 @@ final class OneRecordingIsSomethingICanOpenFeatureTests: XCTestCase {
                     throw BrineStepError("the ceiling is enforced in silence")
                 }
                 // AND ONE BYTE UNDER IS OFFERED, so this is a ceiling and not a refusal.
-                let atTheCeiling = PocketRecording(
-                    date: "2026-08-11", timestamp: "20260811120001",
-                    sizeBytes: PocketBLEClient.maximumDownloadBytes)
                 guard PocketRecordingDetailPresentation.page(
-                    for: atTheCeiling, presence: Self.onlyOnTheRecorder,
-                    brain: .myComputer, now: Self.now).offers(.bringItOver) else {
+                    for: huge, presence: Self.onlyOnTheRecorder, brain: .myComputer,
+                    extent: .bytes(PocketBLEClient.maximumDownloadBytes),
+                    now: Self.now).offers(.bringItOver) else {
                     throw BrineStepError(
                         "a recording exactly at the ceiling is refused, so the boundary is off "
                             + "by one from the one the transfer enforces")
+                }
+                // AND A RECORDING NOBODY MEASURED IS NOT REFUSED ON A GUESS. Whatever the
+                // listing said, the page cannot know this file is too big.
+                guard PocketRecordingDetailPresentation.page(
+                    for: PocketRecording(date: "2026-08-11", timestamp: "20260811120002",
+                                         sizeBytes: PocketBLEClient.maximumDownloadBytes * 4),
+                    presence: Self.onlyOnTheRecorder, brain: .myComputer,
+                    now: Self.now).offers(.bringItOver) else {
+                    throw BrineStepError(
+                        "a recording with a large LISTING number is refused as too big, which "
+                            + "is a size claim drawn from a unit that has been disproved")
                 }
                 return ctx
             },

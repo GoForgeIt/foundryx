@@ -39,6 +39,27 @@
 // WHAT IS DELIBERATELY NOT REGISTERED HERE: "read 20 minutes ago". That is this PHONE's clock
 // measuring itself (`RecordingDeviceReadingPresentation.ago`), not a claim about a recorder.
 // This registry governs claims about the DEVICE.
+//
+// AMENDMENT, 2026-08-18 — TWO ENTRIES CHANGED SIDES, AND ONE OF THEM WAS THE ANSWER TO THE
+// OTHER'S "closed by".
+//
+//   Two files came off `PKT01_BLUE_26079bc5` — the first ever. `MCU&U&` announced 19,770 bytes
+//   for a recording the listing called 4, and 185,078 for one it called 46.
+//
+//   * `recorder.recordingSize` WAS PRINTED and is now WITHHELD. Its support said "The listing
+//     states kilobytes per file", which the pair above disproves twice over — as bytes the
+//     listing is out by 4,943x then 4,023x, as kibibytes by 4.83x then 3.93x. A unit off by a
+//     VARYING factor is not a unit, and the row was printing "4 KB" for a 19,770-byte file.
+//   * `recorder.recordingDuration` WAS WITHHELD and is now PRINTED — but only over a real byte
+//     count. Its old `closedBy` asked for exactly this: pull a recording and decode it. Both
+//     files are MPEG-2 Layer III, 32 kbps, 16 kHz, mono (frame header 0xFFF348C4), and 32 kbps
+//     CBR is 4,000 bytes/second. So the divisor that used to be a fabrication is measured; what
+//     makes it honest is not the number but what it divides.
+//   * `recorder.freeSpace` still prints, and prints a RATIO. `recorder.storageAmount` is new
+//     and withheld: the storage frame's unit is no more resolved than the listing's.
+//
+//   The register worked. Both moves are one-line support changes, made beside the paragraph
+//   saying what would justify them, which is what this file is for.
 
 import Foundation
 
@@ -111,10 +132,17 @@ public enum PocketMeasuredFigures {
     /// The write-up — including the section naming everything that was NOT measured.
     public static let benchArtifact = "PKT01_BLUE_26079bc5-fw1.6-20260816-bench.md"
 
+    /// THE FIRST TWO FILES THAT EVER CAME OFF A POCKET, 2026-08-18. It is what entitles this
+    /// app to state a LENGTH, and simultaneously what disqualifies the listing number from
+    /// stating anything at all.
+    public static let firstDownloadArtifact =
+        "PKT01_BLUE_26079bc5-fw1.6-20260818-first-download.md"
+
     public enum Id {
         public static let battery = "recorder.battery"
         public static let firmware = "recorder.firmware"
         public static let freeSpace = "recorder.freeSpace"
+        public static let storageAmount = "recorder.storageAmount"
         public static let recordingSize = "recorder.recordingSize"
         public static let recordingDuration = "recorder.recordingDuration"
         public static let fastSyncSpeed = "recorder.fastSyncSpeed"
@@ -136,39 +164,76 @@ public enum PocketMeasuredFigures {
 
         PocketFigure(
             id: Id.freeSpace,
-            renderedBy: "RecordingDeviceReadingPresentation.freeSpace",
+            renderedBy: "RecordingDeviceReadingPresentation.storageFullness",
             describes: "how full the recorder is",
-            // USED AND TOTAL, BOTH FROM THE DEVICE. Free is their difference; the capacity is
-            // the recorder's own, never a size this app decided a Pocket has.
+            // A RATIO, WHICH IS UNIT-FREE, AND THAT IS THE WHOLE REASON IT SURVIVES.
+            // `MCU&SPA&<used>&<total>` states two numbers in a unit nobody has resolved — the
+            // hardware is a 64 GB recorder and these figures are five digits — so used ÷ total
+            // is every bit of this frame that can be defended, and it is also the thing a
+            // person opens the page to find out. Rendering it as "225 KB free of 57.6 MB" is
+            // what this app used to do, and it is wrong however the unit is eventually read.
             support: .recorderSaidSo(artifact: verbProbeArtifact,
                                      frame: "MCU&SPA&058767&058992")),
 
         PocketFigure(
+            id: Id.storageAmount,
+            renderedBy: "(nothing — withheld; the recorder's storage unit is unresolved)",
+            describes: "how much room is left on the recorder, as an amount",
+            support: .planningGuess(
+                because: """
+                    MCU&SPA&058767&058992 states used and total in a unit nobody has resolved. \
+                    The sum of the 19 listed recordings matches that total, so the figure is \
+                    internally consistent — but the listing's own unit is unresolved too, so \
+                    the two agree with each other and with nothing measured. Rendered as \
+                    kilobytes it reads "225 KB free of 57.6 MB" on a 64 GB recorder, which is \
+                    wrong however it is read.
+                    """,
+                closedBy: """
+                    Record a clip of a known byte length onto PKT01_BLUE_26079bc5, take \
+                    APP&SPACE before and after, and record the delta against the bytes. \
+                    Tracked upstream as O-STORAGE-UNIT.
+                    """)),
+
+        PocketFigure(
             id: Id.recordingSize,
-            renderedBy: "StoredFileDevicePresentation.manifest",
-            describes: "how big one recording on the shelf is",
-            // The listing states kilobytes per file. That is the number, and it is the ONLY
-            // number about a recording's extent that a Pocket has ever given us.
-            support: .recorderSaidSo(artifact: verbProbeArtifact,
-                                     frame: "MCU&F&2026-08-07&20260807153240&2648")),
+            renderedBy: "(nothing — withheld; the listing's unit is unresolved)",
+            describes: "how big one recording on the shelf is, before it has been fetched",
+            // THIS FIGURE USED TO BE PRINTED, AND THE SUPPORT ABOVE IT USED TO SAY "the
+            // listing states kilobytes per file". THAT IS REFUTED. Two files pulled on
+            // 2026-08-18 announced 19,770 bytes against a listing of 4, and 185,078 bytes
+            // against a listing of 46 — off by 4,943x then 4,023x read as bytes, 4.83x then
+            // 3.93x read as kibibytes. A unit that is off by a VARYING factor is not a unit.
+            support: .planningGuess(
+                because: """
+                    The fifth field of MCU&F&<date>&<stamp>&<n> is not bytes and is not \
+                    kilobytes. Measured on PKT01_BLUE_26079bc5 fw1.6: listing 4 announced \
+                    19,770 bytes and listing 46 announced 185,078 bytes, which is 4,943x then \
+                    4,023x as bytes, and 4.83x then 3.93x as kibibytes. Both readings shipped \
+                    at different times; a row printed "4 KB" for a 19,770-byte recording. A \
+                    unit off by a varying factor is not a unit, so no size, ceiling, buffer, \
+                    progress bar or duration may derive from this number.
+                    """,
+                closedBy: """
+                    Pull a THIRD file from a different size band off PKT01_BLUE_26079bc5 and \
+                    compare its listing number with its MCU&U& announcement. Two points fit \
+                    many rules; the leading one is that the number is the DURATION IN SECONDS, \
+                    since floor(19770/4000)=4 and floor(185078/4000)=46 both land exactly. \
+                    Tracked upstream as O-LISTING-UNIT.
+                    """)),
 
         PocketFigure(
             id: Id.recordingDuration,
-            renderedBy: "StoredFileDevicePresentation.manifest",
-            describes: "how long one recording lasts",
-            support: .planningGuess(
-                because: """
-                    A duration is not stated by any recorder. It was derived by dividing the \
-                    stated kilobytes by 4,000 bytes/second — a constant that descends from a \
-                    third-party decode of firmware 1.3.3 and from a fixture this repo encoded \
-                    itself (ffmpeg + lame) to match that belief. No audio has ever been \
-                    transferred off a Pocket: APP&U was refused at the 2026-08-16 bench because \
-                    it ties up the owner's radio for minutes to hours.
-                    """,
-                closedBy: """
-                    Pull one recording off PKT01_BLUE_26079bc5, decode it, and record the \
-                    stated kilobytes against the decoded seconds.
-                    """)),
+            renderedBy: "PocketRecordingExtentPresentation.line",
+            describes: "how long one recording lasts, once its true byte count is known",
+            // MEASURED, AND ONLY FROM A REAL BYTE COUNT. `MCU&U&19770` is the size the
+            // recorder announced for 2026-08-07/20260807142852, and 19,770 bytes arrived. The
+            // file decodes as MPEG-2 Layer III, 32 kbps, 16 kHz, mono — frame header
+            // 0xFFF348C4 — and 32 kbps CBR is exactly 4,000 bytes per second.
+            //
+            // THE DIVISOR IS THE SAME 4,000 THAT USED TO BE A FABRICATION. What changed is
+            // what it divides: a byte count a recorder announced, or a file this phone holds,
+            // instead of a listing number in an unresolved unit.
+            support: .recorderSaidSo(artifact: firstDownloadArtifact, frame: "MCU&U&19770")),
 
         PocketFigure(
             id: Id.fastSyncSpeed,
@@ -219,13 +284,35 @@ public enum PocketMeasuredFigures {
 
     // MARK: - What production asks
 
-    /// May a shelf row say how long a recording lasts?
+    /// May a surface say how long a recording lasts, GIVEN A REAL BYTE COUNT?
     ///
-    /// Asked by `StoredFileDevicePresentation.manifest` on every row it draws, so re-admitting
-    /// the figure is a one-line change HERE — where the reason it was withheld is written
-    /// down — and never a quiet edit in a view.
-    public static var shelfRowMayStateDuration: Bool {
+    /// Asked by `PocketRecordingExtentPresentation.line` on every extent it renders. The byte
+    /// count is `MCU&U&<n>` or the length of the file this phone holds; the divisor is the
+    /// measured 4,000 B/s. Nothing here permits a length derived from anything else.
+    public static var mayStateLengthFromAMeasuredByteCount: Bool {
         figure(Id.recordingDuration)?.isPrinted ?? false
+    }
+
+    /// May ANY surface put a magnitude in front of a person that came out of the listing?
+    ///
+    /// This is the question the old `shelfRowMayStateDuration` should have been asking. A row
+    /// used to answer "no duration" and then print "4 KB" — a different magnitude out of the
+    /// same unresolved number, which is the same defect with a different unit stapled on. The
+    /// register refuses the NUMBER, not one rendering of it.
+    public static var mayStateAnExtentFromTheListing: Bool {
+        figure(Id.recordingSize)?.isPrinted ?? false
+    }
+
+    /// May the readings strip say how full the recorder is? Asked by
+    /// `RecordingDeviceReadingPresentation.storageFullness` every time it renders.
+    public static var mayStateHowFullTheRecorderIs: Bool {
+        figure(Id.freeSpace)?.isPrinted ?? false
+    }
+
+    /// May the storage line state an AMOUNT — kilobytes, megabytes, anything with a unit?
+    /// The ratio is separately entitled by `Id.freeSpace`; this is the amount, and it is not.
+    public static var storageMayStateAnAmount: Bool {
+        figure(Id.storageAmount)?.isPrinted ?? false
     }
 
     /// May the fast-sync offer claim it is quicker — in a number or in words?

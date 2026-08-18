@@ -63,7 +63,7 @@ final class RecordingDevicePageProofUITests: XCTestCase {
 
         // THE READINGS STRIP. Every label renders; nothing has been read, so each offers the
         // action that would read it rather than a dash or a plausible zero.
-        for label in ["Battery", "Free space", "Firmware"] {
+        for label in ["Battery", "Storage", "Firmware"] {
             XCTAssertTrue(app.staticTexts[label].firstMatch.waitForExistence(timeout: 10),
                           "the readings strip did not draw \"\(label)\" — its body did not build")
         }

@@ -177,15 +177,22 @@ public enum PocketInventoryReader {
     ///
     /// - Parameter listedAt: when the recorder answered the listing, so `On the recorder`
     ///   carries its own age like every other place.
+    /// - Parameter extents: how big each recording ACTUALLY is, for the ones anybody has
+    ///   measured — keyed `<date>/<timestamp>` like `presences`. A row with no entry gets
+    ///   `.listedUnitUnresolved`, which prints no magnitude at all, because the listing's own
+    ///   fifth field is in a unit that has been measured and disproved twice over
+    ///   (`PocketRecordingExtent`). It is NOT defaulted from `sizeBytes`: that is precisely
+    ///   the substitution that put "4 KB" on a 19,770-byte recording.
     public static func manifest(_ recordings: [PocketRecording],
                                 presences: [String: PocketRecordingPresence] = [:],
+                                extents: [String: PocketRecordingExtent] = [:],
                                 listedAt: Date? = nil) -> [StoredFileManifestItem] {
         recordings.map {
             let id = "\($0.date)/\($0.timestamp)"
             return StoredFileManifestItem(
                 id: id,
                 title: PocketRecordingLabel.title(date: $0.date, timestamp: $0.timestamp),
-                sizeBytes: $0.sizeBytes,
+                extent: extents[id] ?? .listedUnitUnresolved,
                 presence: presences[id] ?? PocketRecordingPresence(
                     onRecorder: PocketPlaceReading(answer: .yes, observedAt: listedAt),
                     onThisPhone: .neverAsked,
@@ -555,12 +562,21 @@ public enum PocketRecorderCheck {
                 durability: durability,
                 listedAt: listedAt,
                 askedAt: listedAt)
+            // AND HOW BIG EACH ONE ACTUALLY IS, FROM THE SAME AUTHORITY. Custody is asked
+            // where custody was handed over; a recording this phone is holding can state its
+            // length, and one that has never been fetched states nothing — the listing's own
+            // number is in a unit that has been measured and disproved.
+            let extents = await PocketRecordingExtentReader.extents(
+                recordings,
+                identity: identity.recordingDeviceIdentity,
+                custody: custody)
             return .checked(StoredFileDevicePresentation.detail(
                 name: observation.reportedName,
                 link: .connected,
                 battery: declared.state(of: .batteryLevel),
                 firmware: declared.state(of: .firmwareVersion),
                 manifest: PocketInventoryReader.manifest(recordings, presences: presences,
+                                                         extents: extents,
                                                          listedAt: listedAt),
                 now: listedAt))
         } catch let error as PocketProtocolError {

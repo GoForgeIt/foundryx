@@ -28,7 +28,7 @@ private enum MeasuredNumbersSteps {
     static func make(_ world: MeasuredNumbersWorld) -> [StepDefinition] {
         let givens = [
             "the figures Solleva can print about a recorder",
-            "a recorder that lists two recordings with the sizes it stated",
+            "a recorder that lists two recordings whose real sizes were measured later",
             "the words Solleva uses to offer fast sync",
             "the bench sitting held on the recorder",
         ]
@@ -39,8 +39,8 @@ private enum MeasuredNumbersSteps {
             "each printed figure names an observation taken off a recorder",
             "each of those observations is on file, naming the recorder and the firmware it ran",
             "at least one figure is printed",
-            "each row shows the size that came off the recorder",
-            "no row says how long a recording lasts",
+            "no row states a size or a length drawn from the listing",
+            "a row whose real byte count is known does state how long it runs",
             "none of them claim it is faster",
             "they say what it actually does instead",
             "every figure resting on a planning guess is withheld",
@@ -66,9 +66,17 @@ private actor MeasuredNumbersWorld {
 
     // MARK: - What the bench actually saw, as the recorder said it
 
-    /// The two sizes on `MCU&F&2026-08-07&…`, in the unit the recorder states them in.
-    /// 2,648 KB and 1,712 KB — two real rows from the real shelf, not round numbers.
-    private static let statedKilobytes = [2_648, 1_712]
+    /// THE TWO LISTING NUMBERS WHOSE REAL SIZE IS KNOWN, and they are the whole argument.
+    ///
+    /// `MCU&F&<date>&<stamp>&<n>` said 4 and 46 for these two recordings. Both files came off
+    /// `PKT01_BLUE_26079bc5` on 2026-08-18 and `MCU&U&` announced **19,770** and **185,078**
+    /// bytes. As bytes the listing is out by 4,943x then 4,023x; as kibibytes the real file is
+    /// 4.83x then 3.93x larger. A unit off by a VARYING factor is not a unit.
+    ///
+    /// This suite used to carry `statedKilobytes = [2_648, 1_712]` and assert the rows printed
+    /// "2.6 MB" and "1.7 MB" from them. That is the assertion this scenario now forbids.
+    private static let listingNumbers = [4, 46]
+    private static let announcedBytes = [19_770, 185_078]
 
     private var figures: [PocketFigure] = []
     private var manifest: StoredFileManifestPresentation?
@@ -103,9 +111,7 @@ private actor MeasuredNumbersWorld {
         case "the figures Solleva can print about a recorder":
             figures = PocketMeasuredFigures.all
 
-        case "a recorder that lists two recordings with the sizes it stated":
-            // Kilobytes as the wire carries them, turned into the bytes the manifest item
-            // declares. The shelf's own unit conversion is under test, so it is not short-cut.
+        case "a recorder that lists two recordings whose real sizes were measured later":
             figures = PocketMeasuredFigures.all
 
         case "the words Solleva uses to offer fast sync":
@@ -130,10 +136,12 @@ private actor MeasuredNumbersWorld {
             // THE SHIPPED RENDERER, not a copy of its arithmetic. `App/DeviceScreen.swift`
             // draws exactly these rows.
             manifest = StoredFileDevicePresentation.manifest(
-                Self.statedKilobytes.enumerated().map { index, kilobytes in
+                Self.listingNumbers.indices.map { index in
                     StoredFileManifestItem(id: "2026-08-07/\(index)",
                                            title: "Recording \(index + 1)",
-                                           sizeBytes: kilobytes * 1_024,
+                                           // A recording nobody has fetched. The listing DID
+                                           // state a number; there is nowhere to put it.
+                                           extent: .listedUnitUnresolved,
                                            presence: .nothingAsked)
                 })
         default:
@@ -191,45 +199,61 @@ private actor MeasuredNumbersWorld {
                     RecordingDeviceReading(value: "1.6", observedAt: now),
                 RecordingDeviceCapabilityKey.freeSpace.rawValue:
                     RecordingDeviceReading(
-                        value: RecordingDeviceReadingPresentation.freeSpace(
-                            usedKilobytes: 58_767, capacityKilobytes: 58_992),
+                        value: RecordingDeviceReadingPresentation.storageFullness(
+                            used: 58_767, total: 58_992) ?? "",
                         observedAt: now),
             ], now: now)
             guard lines.allSatisfy(\.wasRead), lines.count == 3 else {
                 throw BrineStepError("the readings strip did not print the three measured facts")
             }
+            // A RATIO, NOT AN AMOUNT. This used to require "225 KB free of" — which is what a
+            // 64 GB recorder rendered on Nick's phone, and is wrong however the unit is read.
+            // `used / total` cancels the unit the recorder never told us.
             guard lines.contains(where: { $0.value == "58%" }),
                   lines.contains(where: { $0.value == "1.6" }),
-                  lines.contains(where: { ($0.value ?? "").contains("225 KB free of") }) else {
+                  lines.contains(where: { $0.value == "99% full" }) else {
                 throw BrineStepError(
                     "the strip printed \(lines.compactMap(\.value)), not the recorder's own numbers")
             }
 
-        case "each row shows the size that came off the recorder":
-            guard let rows = manifest?.rows, rows.count == Self.statedKilobytes.count else {
+        case "no row states a size or a length drawn from the listing":
+            guard let rows = manifest?.rows, rows.count == Self.listingNumbers.count else {
                 throw BrineStepError("the page drew \(manifest?.rows.count ?? 0) rows")
             }
-            let expected = Self.statedKilobytes.map {
-                RecordingDeviceReadingPresentation.size(kilobytes: $0)
-            }
-            guard rows.map(\.size) == expected else {
-                throw BrineStepError("rows show \(rows.map(\.size)), not \(expected)")
-            }
-
-        case "no row says how long a recording lasts":
-            guard let rows = manifest?.rows else { throw BrineStepError("no page was opened") }
-            // A duration in this app's own vocabulary: "44 min", "1 hr 12 min", "22 sec".
-            let duration = try NSRegularExpression(pattern: #"\d+\s*(sec|min|hr)\b"#)
+            // ANY MAGNITUDE, NOT ONE SPELLING OF ONE. "4 KB" and "44 min" are the same defect
+            // in two units, and the second was shipped as the fix for the first.
+            let magnitude = try NSRegularExpression(
+                pattern: #"\d+(\.\d+)?\s*(B|KB|MB|GB|bytes|sec|secs|min|mins|hr|hrs|hours?)\b"#)
             for row in rows {
-                let text = ([row.title, row.size, row.presenceLabel]
+                let text = ([row.title, row.extentLine ?? "", row.presenceLabel]
                             + row.places.flatMap { [$0.place, $0.answer, $0.age] })
                     .joined(separator: " ")
                 let range = NSRange(text.startIndex..., in: text)
-                if duration.firstMatch(in: text, range: range) != nil {
+                if magnitude.firstMatch(in: text, range: range) != nil {
                     throw BrineStepError(
-                        "a row states a duration — \"\(text)\" — and no recorder has ever "
-                        + "told this app how long a recording is")
+                        "a row states a magnitude — \"\(text)\" — for a recording whose only "
+                        + "number is the listing's, and the listing's unit is unresolved: "
+                        + "listing 4 was 19,770 bytes and listing 46 was 185,078")
                 }
+            }
+
+        case "a row whose real byte count is known does state how long it runs":
+            // THE PAIRED-EXISTENCE HALF. "No row states a magnitude" is satisfied by a shelf
+            // that can never state one, and a shelf that can never say how long anything is
+            // is not the goal — it is the same silence with a different cause.
+            let measured = StoredFileDevicePresentation.manifest(
+                Self.announcedBytes.enumerated().map { index, bytes in
+                    StoredFileManifestItem(id: "2026-08-07/\(index)",
+                                           title: "Recording \(index + 1)",
+                                           extent: .bytes(bytes),
+                                           presence: .nothingAsked)
+                })
+            // 19,770 / 4,000 = 4.94 s; 185,078 / 4,000 = 46.27 s. The divisor is measured:
+            // both files decode MPEG-2 Layer III, 32 kbps, 16 kHz, mono (header 0xFFF348C4).
+            guard measured.rows.map(\.extentLine) == ["5 sec", "46 sec"] else {
+                throw BrineStepError(
+                    "rows with real byte counts state \(measured.rows.map(\.extentLine)) "
+                    + "rather than the lengths 4,000 bytes/second implies")
             }
 
         case "none of them claim it is faster":
@@ -267,10 +291,17 @@ private actor MeasuredNumbersWorld {
             }
             // AND PRODUCTION AGREES. The three questions the shipped surfaces ask this
             // register, asserted here so a surface that stops asking is a red, not a shrug.
-            guard !PocketMeasuredFigures.shelfRowMayStateDuration,
+            guard !PocketMeasuredFigures.mayStateAnExtentFromTheListing,
+                  !PocketMeasuredFigures.storageMayStateAnAmount,
                   !PocketMeasuredFigures.fastSyncOfferMayClaimSpeed,
                   !PocketMeasuredFigures.deleteMayClaimReclaimedSpace else {
                 throw BrineStepError("a surface is permitted to print an unmeasured figure")
+            }
+            // AND THE TWO THAT ARE PERMITTED, so this is a register that can still say yes.
+            guard PocketMeasuredFigures.mayStateLengthFromAMeasuredByteCount,
+                  PocketMeasuredFigures.mayStateHowFullTheRecorderIs else {
+                throw BrineStepError(
+                    "the register permits nothing, so every prohibition above is vacuous")
             }
 
         case "each withheld figure says why nobody has measured it yet":

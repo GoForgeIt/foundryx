@@ -704,7 +704,7 @@
         }
       ],
       "verdict": "reachable",
-      "why": "ITS CALL SITE MOVED AND THAT IS THE POINT OF THE MOVE \u2014 it was a bare `if` in a SwiftUI body, which is code `swift test` cannot compile and therefore cannot hold; it is now read by `PocketRecordingDetailPresentation.removalRefusal`, a value the whole 27-placement population is put through. the ruling's clause 'the affordance does not exist for a recording we have not brought over', as CODE. It reads the same predicate the consent factories read, so the button and the consent cannot disagree. It is enumerated because a destructive capability that is present, unreached and unenumerated is the worst row this register can hold — and for a while this one was present, reached by a bare `if` in a SwiftUI body, and enumerated nowhere."
+      "why": "ITS CALL SITE MOVED AND THAT IS THE POINT OF THE MOVE — it was a bare `if` in a SwiftUI body, which is code `swift test` cannot compile and therefore cannot hold; it is now read by `PocketRecordingDetailPresentation.removalRefusal`, a value the whole 27-placement population is put through. the ruling's clause 'the affordance does not exist for a recording we have not brought over', as CODE. It reads the same predicate the consent factories read, so the button and the consent cannot disagree. It is enumerated because a destructive capability that is present, unreached and unenumerated is the worst row this register can hold — and for a while this one was present, reached by a bare `if` in a SwiftUI body, and enumerated nowhere."
     },
     {
       "id": "pocket-remove-confirmation",
@@ -722,6 +722,25 @@
       "why": "it was written to guard the one gesture that cannot be undone and had NO call site anywhere in the app, while Forget — which destroys a key and no audio — sat behind an alert. A written-but-unreachable confirmation is worse than none, because the copy gates count it as shipped."
     },
     {
+      "id": "pocket-recording-extent",
+      "name": "how big each listed recording actually is, for the ones anybody measured",
+      "declared_in": "Sources/FoundryXKit/PocketRecordingExtent.swift",
+      "declaration_anchor": "    public static func extents(_ recordings: [PocketRecording],",
+      "call_pattern": "PocketRecordingExtentReader.extents(",
+      "reached_from": [
+        {
+          "via": "pocket-recorder-check",
+          "anchor": "            let extents = await PocketRecordingExtentReader.extents("
+        },
+        {
+          "via": "device-screen",
+          "anchor": "        let extents = await PocketRecordingExtentReader.extents(shelfRecordings,"
+        }
+      ],
+      "verdict": "reachable",
+      "why": "THE ONLY THING THAT CAN PUT A DEFENSIBLE MAGNITUDE ON A SHELF ROW, and it is enumerated because unreached it would be invisible: every row would simply render nothing, which is also the correct rendering for a recording nobody has measured. A capability whose absence looks exactly like its correct output is the worst kind this register can hold. On 2026-08-18 two files came off PKT01_BLUE_26079bc5 and disproved every reading of the listing's fifth field this app had shipped — 4 announced 19,770 bytes, 46 announced 185,078 — so the listing can no longer state a size or a length, and a real byte count is the only thing that can. TWO CALL SITES, both asking CUSTODY, which is the one authority on whether this phone is holding a file: the authenticated check resolves them inside the session, and the page re-resolves them after a transfer moves custody with the session already closed — the same two callers, for the same reason, as pocket-presence-predicate's single resolver."
+    },
+    {
       "id": "pocket-recording-detail-page",
       "name": "what one recording's page says, and which of the two actions it admits",
       "declared_in": "Sources/FoundryXKit/PocketRecordingDetail.swift",
@@ -730,11 +749,11 @@
       "reached_from": [
         {
           "via": "device-screen",
-          "anchor": "        return PocketRecordingDetailPresentation.page(for: found.recording,"
+          "anchor": "        return PocketRecordingDetailPresentation.page("
         }
       ],
       "verdict": "reachable",
-      "why": "the decision behind a row being something a person can press: what the opened page states, and which of the two actions that recording actually admits. It is enumerated because the thing it replaced \u2014 a bare `if` on `isOffered` inside a SwiftUI body \u2014 is the exact shape this register exists to make impossible to lose."
+      "why": "the decision behind a row being something a person can press: what the opened page states, and which of the two actions that recording actually admits. It is enumerated because the thing it replaced — a bare `if` on `isOffered` inside a SwiftUI body — is the exact shape this register exists to make impossible to lose."
     },
     {
       "id": "pocket-recording-located",
@@ -750,7 +769,7 @@
         }
       ],
       "verdict": "reachable",
-      "why": "TWO call sites on purpose \u2014 the page a row opens, and the transfer that page asks for \u2014 and they are the SAME resolution, so the recording that gets asked for is the one the page was describing. Pairing a row to a reading by array position is how a removal reaches a different recording than the one under the finger, and this firmware spells its timestamps two ways on one device."
+      "why": "TWO call sites on purpose — the page a row opens, and the transfer that page asks for — and they are the SAME resolution, so the recording that gets asked for is the one the page was describing. Pairing a row to a reading by array position is how a removal reaches a different recording than the one under the finger, and this firmware spells its timestamps two ways on one device."
     },
     {
       "id": "pocket-recording-detail-sheet",
@@ -849,11 +868,11 @@
   ],
   "_verdict_counts_are_equality": "Declared as exact counts, never bounds. A bound would let the unreachable roster grow by one without anybody moving this file, which is precisely how four capabilities reached `main` unreached.",
   "verdict_counts": {
-    "reachable": 45,
+    "reachable": 46,
     "undetermined": 1,
     "unreachable": 9
   },
   "_floor": "A register that lost its rows would be a silent full pass, so the population is asserted before its contents are.",
-  "minimum_capabilities": 55,
+  "minimum_capabilities": 56,
   "minimum_entry_points": 1
 }

@@ -39,8 +39,10 @@ import Foundation
 /// The two fields are inseparable ON PURPOSE. Every constructor takes both, so there is no
 /// representable value that carries a number without carrying its age.
 public struct RecordingDeviceReading: Codable, Equatable, Sendable {
-    /// Exactly what will be shown. Formatting happens where the recorder's units are known
-    /// (kilobytes, percent), not in a view.
+    /// Exactly what will be shown. Formatting happens where what the recorder's numbers MEAN
+    /// is known — percent for the battery, a fullness ratio for storage — not in a view. It
+    /// used to say "kilobytes, percent"; the kilobytes were an assumption about `MCU&SPA` that
+    /// nothing had measured, and `storageFullness` is where it went.
     public let value: String
     /// THIS PHONE'S CLOCK, at the moment the recorder answered. Never the recorder's own —
     /// a Pocket's clock is unset out of the box (`PocketConversationClock`), so dating a
@@ -88,10 +90,13 @@ public enum RecordingDeviceReadingPresentation {
 
     /// The facts a record-then-sync recorder can state, in the order they are shown.
     ///
-    /// FREE SPACE SITS SECOND, not last, because it is the one a person opens this page to
-    /// look at. `gapRecovery` is absent: it is a capability, not a reading — nothing is ever
-    /// measured for it — and `offlineStorage` is absent because free space is what that row
-    /// was standing in for while nobody was asking `APP&SPACE`.
+    /// STORAGE SITS SECOND, not last, because it is the one a person opens this page to look
+    /// at. `gapRecovery` is absent: it is a capability, not a reading — nothing is ever
+    /// measured for it — and `offlineStorage` is absent because this row is what it was
+    /// standing in for while nobody was asking `APP&SPACE`.
+    ///
+    /// The key is still spelled `freeSpace`: it is a persisted store key, and renaming it
+    /// would silently orphan every reading an installed app has already kept.
     public static let order: [RecordingDeviceCapabilityKey] = [
         .batteryLevel, .freeSpace, .firmwareVersion,
     ]
@@ -99,7 +104,10 @@ public enum RecordingDeviceReadingPresentation {
     public static func label(for key: RecordingDeviceCapabilityKey) -> String {
         switch key {
         case .batteryLevel:    return "Battery"
-        case .freeSpace:       return "Free space"
+        // "STORAGE", NOT "FREE SPACE". The reading beside it is now `99% full` — a ratio,
+        // because the recorder's storage unit is unresolved (see `storageFullness`) — and
+        // "Free space: 99% full" is a label and a value answering two different questions.
+        case .freeSpace:       return "Storage"
         case .firmwareVersion: return "Firmware"
         default:               return key.rawValue
         }
@@ -231,29 +239,49 @@ public enum RecordingDeviceReadingPresentation {
         "\(count) \(noun)\(count == 1 ? "" : "s")"
     }
 
-    /// The recorder's own two numbers, as one line.
+    /// HOW FULL THE RECORDER IS — a ratio, because a ratio is the only part of this frame
+    /// that survives not knowing the unit.
     ///
-    /// BOTH HALVES ARE MEASURED. `MCU&SPA&<used>&<total>` states used and total in kilobytes;
-    /// free is their difference and the capacity is the recorder's, never a size this app
-    /// decided a Pocket has. A recorder that reports more used than it has capacity for is
-    /// clamped at zero free rather than rendered as a negative number.
-    public static func freeSpace(usedKilobytes: Int, capacityKilobytes: Int) -> String {
-        let free = max(0, capacityKilobytes - usedKilobytes)
-        return "\(size(kilobytes: free)) free of \(size(kilobytes: capacityKilobytes))"
+    /// WHAT THIS USED TO SAY, ON NICK'S PHONE, ABOUT A 64 GB RECORDER:
+    ///
+    ///     225 KB free of 57.6 MB
+    ///
+    /// `MCU&SPA&058767&058992` states used and total in a unit NOBODY HAS RESOLVED. This file
+    /// asserted it was kilobytes; the same assumption in the listing parser has since been
+    /// measured and disproved (`PocketRecordingExtent` — listing 4 was 19,770 real bytes and
+    /// listing 46 was 185,078, off by a varying factor), and nothing distinguishes the storage
+    /// frame's unit from the listing's. So the amount is withheld and the RATIO is printed:
+    /// `used / total` cancels the unit, is what a person opens this page to find out, and is
+    /// exactly as true whether those five digits are kilobytes, seconds or blocks.
+    ///
+    /// `nil` when the recorder states no capacity at all — a division by zero has no honest
+    /// rendering, and "0% full" for a recorder that answered nothing is an absence with a
+    /// number painted over it.
+    ///
+    /// A recorder reporting more used than total reads as full rather than as over 100%.
+    /// IT ASKS `PocketMeasuredFigures` FIRST, like every other figure this app prints about a
+    /// recorder, so withdrawing the ratio is a one-line change in the register — beside the
+    /// frame that entitles it — and never a quiet edit in a view.
+    public static func storageFullness(used: Int, total: Int) -> String? {
+        guard PocketMeasuredFigures.mayStateHowFullTheRecorderIs,
+              total > 0, used >= 0 else { return nil }
+        // FLOOR, NOT ROUNDED, AND IT MATTERS AT EXACTLY ONE PLACE — the top. Nick's recorder
+        // reports 58,767 of 58,992, which is 99.6% and ROUNDS TO "100% full". It is not full:
+        // it took another recording that same day. "100%" tells a person they cannot record
+        // when they can, and that is the one direction this figure must not err in. Only a
+        // recorder reporting at least as much used as it has capacity reads as 100.
+        let percent = used >= total ? 100 : Int(Double(used) / Double(total) * 100)
+        return "\(percent)% full"
     }
 
-    /// Kilobytes as the unit a person reads. `String(format:)` without a locale is POSIX, so
-    /// the decimal separator cannot drift with the handset's region.
-    public static func size(kilobytes: Int) -> String {
-        let kilobytes = max(0, kilobytes)
-        if kilobytes >= 1_048_576 {
-            return String(format: "%.1f GB", Double(kilobytes) / 1_048_576)
-        }
-        if kilobytes >= 1_024 {
-            return String(format: "%.1f MB", Double(kilobytes) / 1_024)
-        }
-        return "\(kilobytes) KB"
-    }
+    // A SENTENCE EXPLAINING WHY THERE IS NO MEGABYTES FIGURE WAS WRITTEN HERE AND DELETED.
+    //
+    // Nothing rendered it. Copy that exists in the kit, is enumerated by a `everyLine` family
+    // and is drawn by no surface is the exact shape the reachability register exists to catch
+    // — the gates count it as shipped and a person never reads it. The strip says "99% full",
+    // which is the fact somebody opens this page for; the reason the amount is missing is
+    // recorded in `PocketMeasuredFigures` under `recorder.storageAmount`, where the person who
+    // wants to re-admit it will be standing.
 }
 
 // MARK: - Keeping them

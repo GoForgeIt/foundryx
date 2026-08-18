@@ -135,8 +135,13 @@ enum RecorderPageProofFixture {
                     RecordingDeviceReading(value: firmwareVersion, observedAt: listedAt),
                 RecordingDeviceCapabilityKey.freeSpace.rawValue:
                     RecordingDeviceReading(
-                        value: RecordingDeviceReadingPresentation.freeSpace(
-                            usedKilobytes: 2_000_000, capacityKilobytes: 8_000_000),
+                        // A RATIO, through the shipped renderer. `MCU&SPA`'s two figures are
+                        // in a unit nobody has resolved, so the amount is withheld and
+                        // `used / total` — which cancels the unit — is what the strip shows.
+                        // `?? ""` never fires here: the capacity below is non-zero, and the
+                        // proof would rather draw an empty reading than invent a percentage.
+                        value: RecordingDeviceReadingPresentation.storageFullness(
+                            used: 2_000_000, total: 8_000_000) ?? "",
                         observedAt: listedAt),
             ]
         }
@@ -151,9 +156,14 @@ enum RecorderPageProofFixture {
             readings: readings)
     }
 
-    /// THREE RECORDINGS, IN BOTH TIMESTAMP FORMATS THE DEVICE ACTUALLY USES. Sizes are bytes;
-    /// the wire reports kilobytes and the listing parser converts, and getting that unit wrong
-    /// once already cost a whole set of durations.
+    /// THREE RECORDINGS, IN BOTH TIMESTAMP FORMATS THE DEVICE ACTUALLY USES.
+    ///
+    /// `sizeBytes` HERE IS THE LISTING NUMBER TIMES 1,024, WHICH IS WHAT THE PARSER PRODUCES
+    /// AND WHICH MEANS NOTHING. On 2026-08-18 a listing of 4 turned out to be 19,770 real
+    /// bytes and a listing of 46 to be 185,078 — off by a varying factor, so it is not a unit.
+    /// These three rows therefore draw NO extent at all, which is exactly the picture a person
+    /// gets from a shelf nobody has fetched anything off. A proof that showed a size here
+    /// would be a picture of the defect.
     static let recordings: [PocketRecording] = [
         PocketRecording(date: "2026-08-11", timestamp: "PH260811175026", sizeBytes: 2_764_000),
         PocketRecording(date: "2026-08-07", timestamp: "20260807142852", sizeBytes: 14_400_000),

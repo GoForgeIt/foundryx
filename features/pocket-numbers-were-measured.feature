@@ -15,11 +15,11 @@ Feature: Every number Solleva prints about a recorder was measured on a recorder
     And each of those observations is on file, naming the recorder and the firmware it ran
     And at least one figure is printed
 
-  Scenario: A recording's row states the size the recorder itself stated
-    Given a recorder that lists two recordings with the sizes it stated
+  Scenario: A recording's row states nothing about its extent until somebody measured it
+    Given a recorder that lists two recordings whose real sizes were measured later
     When I open that recorder's page
-    Then each row shows the size that came off the recorder
-    And no row says how long a recording lasts
+    Then no row states a size or a length drawn from the listing
+    And a row whose real byte count is known does state how long it runs
 
   Scenario: Fast sync is offered as what it does, never as a speed nobody timed
     Given the words Solleva uses to offer fast sync
