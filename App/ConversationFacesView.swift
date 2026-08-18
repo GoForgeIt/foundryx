@@ -91,6 +91,12 @@ struct ConversationFacesView: View {
     /// Set once a synth has been attempted this open, so a transcript the model yields
     /// nothing for doesn't re-run the expensive synth on every subsequent load-path call.
     @State private var synthAttempted = false
+    /// THE GATE'S DECISIONS FOR THIS CAPTURE. Read once per load from the lane's own JSONL, so
+    /// the Actions face can say WHICH kind of nothing it is holding.
+    @State private var decisions: [AmbientDecision] = []
+    /// The one-way name latch. An early name shows only until the settled one lands, and the
+    /// settled one is never given back — see `ConversationNameOnTheRow`.
+    @State private var nameOnTheRow = ConversationNameOnTheRow()
     @State private var confirmDelete = false
     @State private var didCopy = false
     @State private var receiptExpanded = false
@@ -245,6 +251,47 @@ struct ConversationFacesView: View {
         TranscriptSearchCapability.meaningSearchOffered(meaningIndex)
     }
 
+    // MARK: - where this recording is
+
+    /// WHETHER ANYTHING CAME OUT OF IT, joined in the kit from the gate's own decision log.
+    private var ambientReading: AmbientReading {
+        AmbientReading.reading(hasTranscript: transcriptText != nil,
+                               decisions: decisions,
+                               surfaced: actions.rows.count)
+    }
+
+    /// THE JOURNEY. Every input is something this phone measured, and the join itself lives in
+    /// `CaptureJourneyReading.detail` so `swift test` can execute it — this property is a
+    /// forwarding call and deliberately contains no rule of its own.
+    ///
+    /// `brain` (NOT `local`) decides the destination: `local` is a Bool that reads false on both
+    /// the computer and the cell tiers, which is the crush that told a Vault owner with no
+    /// computer that his voice notes were saved to one.
+    private var journey: CaptureJourney {
+        CaptureJourney.build(.detail(
+            status: manager.captures.first { $0.status.id == captureId }?.status,
+            brain: brain,
+            // `heldHere` is the recorder's OWN file, on this phone. Its presence is evidence the
+            // transfer FINISHED — `.arrived`, not "a transfer is happening" — and nothing in the
+            // app measures the bytes as they come, so there is no `.measured` reading to pass.
+            // Wiring a live one is the BLE client's seam, not this view's.
+            transfer: heldHere != nil ? .arrived : RecorderTransfer.none,
+            cardStage: provisional?.stage,
+            content: content,
+            hasTranscript: transcriptText != nil,
+            separatedSpeakers: diarizedTranscript?.speakers.count ?? 0,
+            hasSummary: summaryText != nil,
+            synthesizingSummary: summarizing,
+            decisions: decisions,
+            surfaced: actions.rows.count))
+    }
+
+    /// Re-take the name reading. Called whenever a transcript or a title could have changed; the
+    /// latch inside `ConversationNameOnTheRow` is what makes calling it often harmless.
+    private func refreshName() {
+        nameOnTheRow.adopt(early: earlyName?.name, settled: settledTitle)
+    }
+
     // MARK: - body
 
     var body: some View {
@@ -252,6 +299,20 @@ struct ConversationFacesView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: GrainSpacing.x4) {
                     metadataHeader
+                    // WHAT IS HAPPENING TO THIS RECORDING. Shown while any step is still
+                    // unfinished and stepped aside once everything that can finish has — a
+                    // ladder of ticks on a settled recording is furniture, not information.
+                    if journey.current != nil {
+                        CaptureJourneyStrip(journey: journey)
+                    }
+                    // THE NAME SAYS IT IS EARLY, for exactly as long as it is early. A rename
+                    // somebody was told to expect is a rename; one they were not is a glitch.
+                    if nameOnTheRow.isProvisional, let note = earlyName?.note {
+                        Text(note)
+                            .grainTextStyle(.caption)
+                            .foregroundStyle(GrainColor.textFaint)
+                            .accessibilityIdentifier("early-name-note")
+                    }
                     facePicker
                     switch face {
                     case .summary: summaryFace
@@ -301,6 +362,11 @@ struct ConversationFacesView: View {
         }
         .refreshable { await fetchFromDoor() }
         .task { await initialLoad() }
+        .task { await loadDecisions() }
+        // The two readings the name depends on, each of which can land minutes after the view
+        // opened: the transcript (which makes an early name possible) and the settled title.
+        .onChange(of: transcriptText) { _ in refreshName() }
+        .onChange(of: settledTitle) { _ in refreshName() }
         .onAppear {
             loadFaceData()
             syncModel.bind(captureId: captureId, baseDir: CaptureWAL.documentsCaptures())
@@ -561,7 +627,13 @@ struct ConversationFacesView: View {
     @ViewBuilder private var actionsFace: some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x4) {
             if actions.isEmpty {
-                Text(ConversationActionsPresentation.emptyStateText)
+                // WHICH KIND OF NOTHING. `ConversationActionsPresentation.emptyStateText` —
+                // "Nothing surfaced from this voice note yet." — was shown to a recording with
+                // no transcript, to one the gate read and found nothing in, and to one whose
+                // gate never ran, so it could not answer Nick's "or if any ambient intelligence
+                // came from it?" for three of its four meanings. `AmbientReading` reads the
+                // lane's own decision log and says which it is.
+                Text(ambientReading.line)
                     .grainTextStyle(.body)
                     .foregroundStyle(GrainColor.textMuted)
                     .padding(.vertical, GrainSpacing.x3)
@@ -783,6 +855,24 @@ struct ConversationFacesView: View {
         // disk mid-fetch); the shared builder falls back to the cache.
         actions = ActionFeedbackFlow.presentation(captureId: captureId,
                                                   transcript: diarizedTranscript)
+        nameOnTheRow.adopt(early: earlyName?.name, settled: settledTitle)
+    }
+
+    /// THE GATE'S OWN RECORD FOR THIS CAPTURE — the evidence that separates "read and found
+    /// nothing" from "never read" from "could not read".
+    ///
+    /// OFF THE MAIN ACTOR, DELIBERATELY. `readDecisions` reads and decodes the WHOLE decision
+    /// JSONL, which grows one line per gated window for every capture on the phone. This app has
+    /// already paid for a main-thread whole-file read on a detail open once (175 `card.json`
+    /// loads at `RootView:627`, measured as a 6.6 s nav stall); a second one added by hand would
+    /// be the same defect with a different file name.
+    private func loadDecisions() async {
+        let url = AmbientPrefs.decisionLogURL()
+        let id = captureId
+        let read = await Task.detached(priority: .utility) {
+            AmbientLane.readDecisions(at: url).filter { $0.captureId == id }
+        }.value
+        decisions = read
     }
 
     // MARK: - Transcript face
@@ -1206,14 +1296,26 @@ struct ConversationFacesView: View {
 
     // MARK: - title / copy
 
-    private var navTitle: String {
+    /// The authoritative name, if one exists anywhere. Nil is what makes an early name eligible.
+    private var settledTitle: String? {
         if let t = content?.title, !t.isEmpty { return t }
         if let t = cached?.title, !t.isEmpty { return t }
         if let t = provisional?.title, !t.isEmpty { return t }
-        guard let t = transcriptText, !t.isEmpty else { return "Voice note" }
-        let words = t.split(whereSeparator: { $0 == " " || $0 == "\n" }).prefix(6).joined(separator: " ")
-        return words.isEmpty ? "Voice note" : words
+        return nil
     }
+
+    /// THE EARLY NAME, from the recording's opening window, the moment any transcript exists.
+    ///
+    /// It replaces a six-word prefix of the whole transcript that this view took as a title —
+    /// which named a recording after wherever its first six words happened to fall, with no
+    /// filler-skipping and no salience, and with nothing on screen saying it was provisional.
+    private var earlyName: EarlyConversationName.Offer? {
+        EarlyConversationName.offer(segments: diarizedTranscript?.segments ?? [],
+                                    paragraphs: content?.paragraphs ?? [],
+                                    flat: transcriptText)
+    }
+
+    private var navTitle: String { nameOnTheRow.name ?? "Voice note" }
 
     private func copyTranscript() {
         guard let text = copyableTranscript else { return }

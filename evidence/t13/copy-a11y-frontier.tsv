@@ -28,6 +28,7 @@ a11y-identifier	App/ArtifactViewers.swift	artifact-export
 a11y-identifier	App/ArtifactViewers.swift	artifact-image
 a11y-identifier	App/ArtifactViewers.swift	artifact-markdown
 a11y-identifier	App/ArtifactViewers.swift	artifact-unavailable
+a11y-identifier	App/CaptureJourneyStrip.swift	capture-journey
 a11y-identifier	App/CaptureScreen.swift	live-hero-pause
 a11y-identifier	App/CaptureScreen.swift	record-block-reason
 a11y-identifier	App/CaptureScreen.swift	record-cta
@@ -61,6 +62,7 @@ a11y-identifier	App/ConversationFacesView.swift	actions-empty-state
 a11y-identifier	App/ConversationFacesView.swift	add-an-action
 a11y-identifier	App/ConversationFacesView.swift	conversation-device
 a11y-identifier	App/ConversationFacesView.swift	copy-transcript
+a11y-identifier	App/ConversationFacesView.swift	early-name-note
 a11y-identifier	App/ConversationFacesView.swift	face-\(f.rawValue)
 a11y-identifier	App/ConversationFacesView.swift	heard-from-others
 a11y-identifier	App/ConversationFacesView.swift	listen-elapsed
