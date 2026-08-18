@@ -52,12 +52,24 @@ public final class DoorLog: ObservableObject, @unchecked Sendable {
         public let name: String
         /// What the command was about, as a token.
         public let subject: String
+        /// WHICH RECORDING THIS ERRAND IS FOR — the recorder's own name for the file,
+        /// `<date>/<timestamp>` — or `nil` when the command is not about one.
+        ///
+        /// IT IS SEPARATE FROM `subject` BECAUSE THEY ANSWER DIFFERENT QUESTIONS. `subject` is
+        /// the KIND of errand (`shelf` / `bring-over` / `remove-from-recorder`), which is what
+        /// a reader filters by; this is which of nineteen files it was for. Until it existed,
+        /// a slow transfer in the live log was legible as "a bring-over started and never
+        /// stopped" and NOT as "the 27-minute one started and never stopped" — and those are
+        /// different diagnoses.
+        public let about: String?
         /// How it ended, or `nil` while it is still running. A command with no outcome that
         /// never gains one is itself the finding.
         public let outcome: String?
 
-        public init(ts: Date, name: String, subject: String, outcome: String?) {
-            self.ts = ts; self.name = name; self.subject = subject; self.outcome = outcome
+        public init(ts: Date, name: String, subject: String, about: String? = nil,
+                    outcome: String?) {
+            self.ts = ts; self.name = name; self.subject = subject
+            self.about = about; self.outcome = outcome
         }
     }
 
@@ -73,8 +85,10 @@ public final class DoorLog: ObservableObject, @unchecked Sendable {
     /// on-call reader used to be able to see and now cannot — a diagnostic regression sold as
     /// an improvement. The entry's text is a PINNED wire form for the same reason
     /// `FoundryXDiagContext.wireHeader` is: a server-side grep depends on it.
-    public func command(_ name: String, subject: String = "", outcome: String? = nil) {
-        let made = Command(ts: Date(), name: name, subject: subject, outcome: outcome)
+    public func command(_ name: String, subject: String = "", about: String? = nil,
+                        outcome: String? = nil) {
+        let made = Command(ts: Date(), name: name, subject: subject, about: about,
+                           outcome: outcome)
         if Thread.isMainThread {
             appendCommand(made)
         } else {
@@ -102,9 +116,15 @@ public final class DoorLog: ObservableObject, @unchecked Sendable {
     /// compare against.
     public static let succeeded = "ok"
 
-    /// ONE PINNED WIRE FORM for a command line: `cmd <name> subject=<subject>[ outcome=<o>]`.
+    /// ONE PINNED WIRE FORM for a command line:
+    /// `cmd <name> subject=<subject>[ about=<file>][ outcome=<o>]`.
+    ///
+    /// `about` IS APPENDED, NEVER INSERTED, and it is absent when there is nothing to say. A
+    /// server-side grep depends on this shape, so a field added in the middle would silently
+    /// retire every line an on-call reader already knows how to read.
     static func wireForm(_ command: Command) -> String {
         var text = "cmd \(command.name) subject=\(command.subject)"
+        if let about = command.about { text += " about=\(about)" }
         if let outcome = command.outcome { text += " outcome=\(outcome)" }
         return text
     }
@@ -246,7 +266,13 @@ public final class DoorLog: ObservableObject, @unchecked Sendable {
         req.httpMethod = "POST"
         req.setValue("text/plain", forHTTPHeaderField: "Content-Type")
         req.httpBody = body.data(using: .utf8)
-        URLSession.shared.dataTask(with: req).resume()  // fire-and-forget
+        // THE ONE LEG OFF THIS MACHINE, AND THE ONE PLACE THAT CAN REFUSE IT. On 2026-08-18,
+        // 385 `cmd errand.*` lines reached the LIVE relay from a simulator running the
+        // scenario suite — convincing, well-formed noise in the instrument this project
+        // diagnoses the recorder with. `FoundryXDiagShipping` withholds a batch when the
+        // process is a test run and counts the refusal, so the gate that says so cannot pass
+        // vacuously.
+        FoundryXDiagShipping.send(req)
     }
 
     /// All entries as copyable plain text — one line each: `ISO8601 [LEVEL] text`.

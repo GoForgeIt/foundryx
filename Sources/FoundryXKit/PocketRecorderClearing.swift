@@ -289,6 +289,13 @@ public enum PocketRemoveFromRecorderPresentation {
     /// `isOffered(for:)`, which is the same predicate the consent factories read.
     public static let action = "Remove it from the recorder"
 
+    /// WHILE IT IS HAPPENING, TO THIS ONE FILE. The page used to caption its spinner with
+    /// `action` — a BUTTON's words ("Remove it from the recorder") standing in for a progress
+    /// line, which reads as an instruction rather than as a report. It is also what a row shows
+    /// while the errand is about that row, so it says "this recording" the way the transfer's
+    /// own in-progress line does.
+    public static let inProgressLine = "Taking this recording off the recorder…"
+
     /// THE TWO ANSWERS TO THE CONFIRMATION. They did not exist, which is part of why the
     /// confirmation itself had no call site: a sentence with no buttons is not a dialog.
     /// Named for the act rather than "OK", the same rule the mint consent follows.
@@ -397,7 +404,7 @@ public enum PocketRemoveFromRecorderPresentation {
     /// THE POPULATION. Every line this behaviour can render, so a claim about its copy is held
     /// over the whole set rather than over whichever string a test author remembered.
     public static var everyLine: [String] {
-        var lines = [action, confirmAction, cancelConfirmAction, notProvenSafeLine,
+        var lines = [action, inProgressLine, confirmAction, cancelConfirmAction, notProvenSafeLine,
                      recorderRefusedLine, stillListedLine, cannotActOnThisNowLine,
                      removedLine, nowhereElseLine, autoClearTitle,
                      autoClearUnavailableLine, autoClearNotRetroactiveLine]
