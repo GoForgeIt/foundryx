@@ -10,6 +10,21 @@
 import Foundation
 
 public enum BrainSeeder {
+    /// WHICH BRAINS, ON BEING CONNECTED, RE-ARM THE AUDIO THE PHONE KEPT.
+    ///
+    /// It lives here rather than inline in `App/RootView.swift` because `App/` is compiled
+    /// by no test target: a boundary that cannot be executed cannot be falsified, and this
+    /// is the boundary that decides whether a stranded recording is ever offered a
+    /// destination again.
+    /// It asks `uploadAckProvesAnotherPlace` rather than naming brains, so a fourth brain
+    /// cannot be added and silently left out of the one path that recovers stranded audio.
+    /// It used to name `.myComputer` alone: an owner who connected a VAULT re-armed
+    /// nothing, and every recording his phone had self-ACK'd stayed stranded behind a
+    /// watermark that had already moved past it.
+    public static func rearmsOnConnecting(_ choice: BrainChoice) -> Bool {
+        choice.uploadAckProvesAnotherPlace
+    }
+
     /// Re-arm every non-Lore-confirmed local conversation for the door drain.
     /// Idempotent: a second call re-arms nothing new once Lore confirms them.
     /// Returns the number of captures re-armed.
@@ -25,7 +40,10 @@ public enum BrainSeeder {
                 at: dir, includingPropertiesForKeys: nil)) ?? []
             let segs = files.filter { $0.pathExtension == "opus" }
             guard !segs.isEmpty else { continue }   // nothing to seed
-            for f in files where f.pathExtension == "ack" {
+            // Both markers: a `.ack` written by the pre-fix phone-only drain (a claim
+            // about a place that never held the bytes) and a `.held` written by this one
+            // (an honest note that only this phone did). Neither survives a re-arm.
+            for f in files where f.pathExtension == "ack" || f.pathExtension == "held" {
                 try? FileManager.default.removeItem(at: f)
             }
             try? FileManager.default.removeItem(at: dir.appendingPathComponent(".upload-watermark"))

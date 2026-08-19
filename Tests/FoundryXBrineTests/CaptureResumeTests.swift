@@ -98,7 +98,8 @@ final class CaptureResumeTests: ProcessGlobalStateTestCase {
 
         let rec = SeqRecorder()
         let wal = CaptureWAL(captureId: id, target: target(), baseDir: dir,
-                             upload: { seq, _ in try rec.send(seq) })
+                             upload: { seq, _ in try rec.send(seq) },
+                             route: .named("a desktop door, stood in for by this harness"))
 
         XCTAssertEqual(wal.uploadWatermark(), 4, "watermark derived from on-disk acks (contiguous run 0…4)")
 
@@ -119,7 +120,8 @@ final class CaptureResumeTests: ProcessGlobalStateTestCase {
         // First run fails transiently on seq 3 → seqs 0,1,2 ACK'd, 3 fails.
         let rec1 = SeqRecorder(); rec1.failSeq = 3
         let wal1 = CaptureWAL(captureId: id, target: target(), baseDir: dir,
-                              upload: { seq, _ in try rec1.send(seq) })
+                              upload: { seq, _ in try rec1.send(seq) },
+                             route: .named("a desktop door, stood in for by this harness"))
         let out1 = await wal1.sync()
         XCTAssertEqual(out1, .failed, "a transient door error stops the pass (not poison)")
         XCTAssertTrue(Set(rec1.seqs).isSuperset(of: [0, 1, 2, 3]), "attempted through the failing seq")
@@ -136,7 +138,8 @@ final class CaptureResumeTests: ProcessGlobalStateTestCase {
         // Relaunch: a brand-new WAL on the same dir resumes from the persisted watermark.
         let rec2 = SeqRecorder()
         let wal2 = CaptureWAL(captureId: id, target: target(), baseDir: dir,
-                              upload: { seq, _ in try rec2.send(seq) })
+                              upload: { seq, _ in try rec2.send(seq) },
+                             route: .named("a desktop door, stood in for by this harness"))
         XCTAssertEqual(wal2.uploadWatermark(), 2, "the fresh WAL loads the persisted watermark")
 
         await drainToDone(wal2)
@@ -159,7 +162,8 @@ final class CaptureResumeTests: ProcessGlobalStateTestCase {
         try FileManager.default.createDirectory(at: seg, withIntermediateDirectories: true)
 
         let wal = CaptureWAL(captureId: id, target: target(), baseDir: dir,
-                             upload: { _, _ in })   // upload would succeed — but the read fails first
+                             upload: { _, _ in },
+                             route: .named("a desktop door, stood in for by this harness"))   // upload would succeed — but the read fails first
         let out = await wal.sync()
         guard case .poisoned = out else { return XCTFail("expected .poisoned, got \(out)") }
         // The (corrupt) segment is still on disk — poison never deletes audio.
