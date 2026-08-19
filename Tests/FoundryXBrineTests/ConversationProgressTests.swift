@@ -25,19 +25,24 @@ final class ConversationProgressTests: XCTestCase {
         XCTAssertEqual(resolve(.savedToComputer, door: .stored), .savedToComputer)
     }
 
-    func testPhoneTierLabelsNeverSayComputer() {
-        // Phone-only tier: there is NO computer — segments are durable on the phone —
+    func testEachTierGetsItsOwnLabelsAndNoOthers() {
+        // Phone-only tier: there is NO second place — segments are durable on the phone —
         // so "saved to computer" / generic "transcribing" would be a lie.
-        XCTAssertEqual(ConversationProgress.savedToComputer.label(local: true), "Saved on phone")
-        XCTAssertEqual(ConversationProgress.transcribing.label(local: true), "Transcribing on this phone…")
+        XCTAssertEqual(ConversationProgress.savedToComputer.label(destination: .phone), "Saved on phone")
+        XCTAssertEqual(ConversationProgress.transcribing.label(destination: .phone), "Transcribing on this phone…")
         // Computer-brain tier keeps the desktop vocabulary.
-        XCTAssertEqual(ConversationProgress.savedToComputer.label(local: false), "Saved to computer")
-        XCTAssertEqual(ConversationProgress.transcribing.label(local: false), "Transcribing…")
-        // Shared labels are brain-agnostic.
-        for local in [true, false] {
-            XCTAssertEqual(ConversationProgress.recording.label(local: local), "Taking a note")
-            XCTAssertEqual(ConversationProgress.ready.label(local: local), "Ready")
-            XCTAssertEqual(ConversationProgress.savedOnPhone.label(local: local), "Saved on phone")
+        XCTAssertEqual(ConversationProgress.savedToComputer.label(destination: .computer), "Saved to computer")
+        XCTAssertEqual(ConversationProgress.transcribing.label(destination: .computer), "Transcribing…")
+        // THE CELL IS ITS OWN TIER — this is the line the Bool could not express, and the
+        // reason a Vault owner's chip used to say "Saved to computer".
+        XCTAssertEqual(ConversationProgress.savedToComputer.label(destination: .vault), "Saved to your Vault")
+        XCTAssertNotEqual(ConversationProgress.savedToComputer.label(destination: .vault),
+                          ConversationProgress.savedToComputer.label(destination: .computer))
+        // Shared labels are tier-agnostic — they name no place, so they cannot name a wrong one.
+        for destination in CaptureDestination.allCases {
+            XCTAssertEqual(ConversationProgress.recording.label(destination: destination), "Taking a note")
+            XCTAssertEqual(ConversationProgress.ready.label(destination: destination), "Ready")
+            XCTAssertEqual(ConversationProgress.savedOnPhone.label(destination: destination), "Saved on phone")
         }
     }
 
@@ -59,12 +64,16 @@ final class ConversationProgressTests: XCTestCase {
         XCTAssertEqual(resolve(.savedToComputer, door: .stored, cached: true), .ready)
     }
 
+    /// THE CONVENIENCE THAT DEFAULTED TO A COMPUTER IS GONE. This read
+    /// `ConversationProgress.savedToComputer.label` — a property whose body was
+    /// `label(local: false)`, i.e. a chip that named a Mac chosen by nobody. Every call
+    /// site now says which tier it means.
     func testLabelsAreCalm() {
-        XCTAssertEqual(ConversationProgress.recording.label, "Taking a note")
-        XCTAssertEqual(ConversationProgress.savedOnPhone.label, "Saved on phone")
-        XCTAssertEqual(ConversationProgress.savedToComputer.label, "Saved to computer")
-        XCTAssertEqual(ConversationProgress.transcribing.label, "Transcribing…")
-        XCTAssertEqual(ConversationProgress.ready.label, "Ready")
+        XCTAssertEqual(ConversationProgress.recording.label(destination: .computer), "Taking a note")
+        XCTAssertEqual(ConversationProgress.savedOnPhone.label(destination: .computer), "Saved on phone")
+        XCTAssertEqual(ConversationProgress.savedToComputer.label(destination: .computer), "Saved to computer")
+        XCTAssertEqual(ConversationProgress.transcribing.label(destination: .computer), "Transcribing…")
+        XCTAssertEqual(ConversationProgress.ready.label(destination: .computer), "Ready")
         XCTAssertTrue(ConversationProgress.failed.needsRetry)
     }
 
@@ -102,8 +111,20 @@ final class ConversationProgressTests: XCTestCase {
     }
 
     func testStepLabelsAreTierHonest() {
-        XCTAssertEqual(Step.saved.label(local: false), "Saved to computer")
-        XCTAssertEqual(Step.saved.label(local: true), "Saved on phone")
-        XCTAssertEqual(Step.transcribing.label(local: true), "Transcribing on phone")
+        XCTAssertEqual(Step.saved.label(destination: .computer), "Saved to computer")
+        XCTAssertEqual(Step.saved.label(destination: .phone), "Saved on phone")
+        XCTAssertEqual(Step.saved.label(destination: .vault), "Saved to your Vault")
+        XCTAssertEqual(Step.transcribing.label(destination: .phone), "Transcribing on phone")
+        // THE POPULATION, not three remembered spellings: every step, every tier, and no
+        // two tiers sharing a sentence that names a place.
+        for step in Step.allCases {
+            let byTier = CaptureDestination.allCases.map { step.label(destination: $0) }
+            XCTAssertFalse(byTier.contains(where: \.isEmpty))
+            if byTier.contains(where: { $0.localizedCaseInsensitiveContains("computer") }) {
+                XCTAssertNotEqual(step.label(destination: .vault),
+                                  step.label(destination: .computer),
+                                  "the \(step) step gives the Vault the computer's words")
+            }
+        }
     }
 }

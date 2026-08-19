@@ -32,7 +32,7 @@ final class CaptureCardPresentationTests: XCTestCase {
                          pollerSummary: String? = nil,
                          droppedReason: String? = nil,
                          hasCachedTranscript: Bool = false,
-                         local: Bool = false,
+                         destination: CaptureDestination = .computer,
                          categoryName: String? = nil,
                          categoryAutoFiled: Bool = false,
                          waveform: [Double] = []) -> CaptureCardPresentation {
@@ -40,7 +40,7 @@ final class CaptureCardPresentationTests: XCTestCase {
             status: status, meta: meta, card: card,
             pollerStage: pollerStage, pollerTitle: pollerTitle,
             pollerSummary: pollerSummary, droppedReason: droppedReason,
-            hasCachedTranscript: hasCachedTranscript, local: local,
+            hasCachedTranscript: hasCachedTranscript, destination: destination,
             categoryName: categoryName, categoryAutoFiled: categoryAutoFiled,
             waveform: waveform)
     }
@@ -126,7 +126,7 @@ final class CaptureCardPresentationTests: XCTestCase {
                                pollerStage: .organized).statusWord,
                        "Ready")
         // Phone-only tier: there is no computer — the words stay on-device.
-        XCTAssertEqual(present(status: status(stage: .savedOnPhone, synced: 2), local: true).statusWord,
+        XCTAssertEqual(present(status: status(stage: .savedOnPhone, synced: 2), destination: .phone).statusWord,
                        "Saved on this phone")
     }
 

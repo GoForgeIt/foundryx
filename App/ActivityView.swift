@@ -32,7 +32,6 @@ struct ActivityView: View {
     /// default) so the recap wait's rotating facts are true for the tier actually in
     /// use; `local` (EXT1's act-in-chat gate) is derived from it.
     let destination: CaptureDestination
-    private var local: Bool { destination == .phone }
 
     /// The living conversation recaps (prototype "13 Activity"). Rebuilds the DAILY
     /// recap on the conversation-finished event; refreshes weekly on demand. Lives
@@ -131,7 +130,7 @@ struct ActivityView: View {
         // EXT1: the SAME action options sheet the detail's Actions face opens.
         .sheet(item: $actionSelection) { sel in
             ActionFeedbackFlow.sheet(row: sel.row, captureId: sel.captureId,
-                                     local: local) { reload() }
+                                     destination: destination) { reload() }
         }
         .onAppear { reload() }
         // Build both recaps on appear; the model then rebuilds the DAILY recap live

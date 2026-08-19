@@ -23,14 +23,14 @@ import Grain
     /// list (features/action-speaker-attribution.feature).
     static func sheet(row: ConversationActionsPresentation.Row,
                       captureId: String,
-                      local: Bool,
+                      destination: CaptureDestination,
                       inOthersGroup: Bool = false,
                       onChanged: @escaping () -> Void) -> ActionOptionsSheet {
         // Act-in-chat exists only where a composer actually exists to prefill:
         // the computer tier always has one; the phone tier hides its composer
         // behind the Apple Intelligence gate — offering the option there would
         // strand the user on the upgrade prompt with an invisible seed.
-        let chatCanCompose = !local || makeSystemChatModel() != nil
+        let chatCanCompose = destination != .phone || makeSystemChatModel() != nil
 
         // EXT2: an action already acted on leads back to ITS chat (validated
         // against the live chat store; a dead link is pruned, never routed to).

@@ -52,15 +52,13 @@ struct ConversationFacesView: View {
     /// required: a default here is a decision about whether a recording is safe, made by
     /// whoever forgot to pass it.
     ///
-    /// IT IS NOT `local`. `local` decides which WORDS the stepper uses; this decides whether a
-    /// segment upload-ack is evidence of a copy anywhere other than this handset. On the
-    /// phone-only tier that ack is self-issued (`CaptureBackend` passes a closure that succeeds
-    /// by doing nothing), so reading `local` as though it were the brain would answer
+    /// IT IS NOT `destination`. The tier decides which WORDS a surface uses; this decides
+    /// whether a segment upload-ack is evidence of a copy anywhere other than this handset. On
+    /// the phone-only tier that ack is self-issued (`CaptureBackend` passes a closure that
+    /// succeeds by doing nothing), so reading the tier as though it were the brain would answer
     /// "safe elsewhere: Yes" for a recording whose only copy is on this phone — the same
     /// predicate that arms the delete button.
     let brain: BrainChoice
-    /// DERIVED, never stored — the phone-only spelling some sub-flows still take.
-    private var local: Bool { destination == .phone }
     /// The semantic-search seam. No embedding index exists on the phone today,
     /// so the default is nil and the meaning toggle is ABSENT (never a dead
     /// control). Inject a real, available index and the toggle appears.
@@ -823,7 +821,7 @@ struct ConversationFacesView: View {
     /// ActionFeedbackFlow (EXT1: one component across every action surface):
     /// continue-in-chat (linked), act-in-chat (prefill), refine, not-an-action.
     private func actionOptionsSheet(_ row: ConversationActionsPresentation.Row) -> some View {
-        ActionFeedbackFlow.sheet(row: row, captureId: captureId, local: local,
+        ActionFeedbackFlow.sheet(row: row, captureId: captureId, destination: destination,
                                  inOthersGroup: selectedFromOthers) {
             loadFaceData()
         }

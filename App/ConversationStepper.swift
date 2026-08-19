@@ -16,8 +16,10 @@ import Grain
 /// (that's the caller's call — this view always renders what it's given).
 struct ConversationStepper: View {
     let progress: ConversationProgress
-    /// Phone-only tier → "Saved on phone" / "Transcribing on phone" labels.
-    var local: Bool = false
+    /// WHERE THIS ACCOUNT ACTUALLY SAVES. No default: `var local: Bool = false` is a
+    /// DECISION THAT NAMED A COMPUTER, made by whoever forgot to pass anything, and it
+    /// could not tell a Vault from a Mac in the first place.
+    let destination: CaptureDestination
 
     private let steps = ConversationProgress.Step.allCases
 
@@ -41,7 +43,7 @@ struct ConversationStepper: View {
         let state = progress.state(of: step)
         VStack(spacing: GrainSpacing.x1) {
             dot(state)
-            Text(step.label(local: local))
+            Text(step.label(destination: destination))
                 .grainTextStyle(.caption)
                 .foregroundStyle(labelColor(state))
                 .multilineTextAlignment(.center)
@@ -110,7 +112,7 @@ struct ConversationStepper: View {
         let names = steps.map { step -> String in
             let s = progress.state(of: step)
             let mark = s == .done ? "done" : s == .active ? "in progress" : s == .failed ? "failed" : "pending"
-            return "\(step.label(local: local)): \(mark)"
+            return "\(step.label(destination: destination)): \(mark)"
         }
         return "Voice note progress. " + names.joined(separator: ", ")
     }

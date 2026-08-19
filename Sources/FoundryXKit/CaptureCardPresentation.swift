@@ -49,7 +49,7 @@ public struct CaptureCardPresentation: Equatable, Sendable {
                             pollerSummary: String?,
                             droppedReason: String?,
                             hasCachedTranscript: Bool,
-                            local: Bool,
+                            destination: CaptureDestination,
                             categoryName: String?,
                             categoryAutoFiled: Bool,
                             waveform: [Double],
@@ -75,9 +75,10 @@ public struct CaptureCardPresentation: Equatable, Sendable {
         return CaptureCardPresentation(
             title: title(card: card, pollerTitle: pollerTitle, start: start),
             summaryLine: summary(card: card, pollerTitle: pollerTitle, pollerSummary: pollerSummary),
-            statusWord: manualRecoveryInProgress ? "Sending to computer…" :
-                statusWord(progress: progress, droppedReason: droppedReason, local: local,
-                           syncError: status.lastSyncError),
+            statusWord: manualRecoveryInProgress
+                ? manualRecoveryInProgressWord(destination: destination)
+                : statusWord(progress: progress, droppedReason: droppedReason,
+                             destination: destination, syncError: status.lastSyncError),
             metaLine: metaLine,
             categoryLabel: label,
             waveform: waveform,
@@ -85,7 +86,39 @@ public struct CaptureCardPresentation: Equatable, Sendable {
     }
 
     /// Explicitly names the destination and intent; this is never a vague "Retry".
-    public static let manualRecoveryActionTitle = "Send to computer"
+    ///
+    /// IT WAS A CONSTANT THAT SAID "computer", offered to every tier — so a phone-only
+    /// owner and a Vault owner were both invited to send a voice note to a machine they
+    /// do not have. A constant is a Bool with one value: it cannot answer "which of
+    /// three", so it is a function of the tier now.
+    public static func manualRecoveryActionTitle(destination: CaptureDestination) -> String {
+        switch destination {
+        case .phone:    return "Save on this phone"
+        case .computer: return "Send to computer"
+        case .vault:    return "Send to your Vault"
+        }
+    }
+
+    /// The VoiceOver hint on that button. It was the bare literal "Retries sending this
+    /// voice note's audio to your computer" in the view body — a sentence no test in this
+    /// repository could execute, naming a machine two of the three tiers do not have.
+    public static func manualRecoveryHint(destination: CaptureDestination) -> String {
+        switch destination {
+        case .phone:    return "Retries saving this voice note's audio on this phone"
+        case .computer: return "Retries sending this voice note's audio to your computer"
+        case .vault:    return "Retries sending this voice note's audio to your Vault"
+        }
+    }
+
+    /// The status word WHILE that recovery is in flight. Same reason, same shape — this
+    /// was the bare literal "Sending to computer…" inside `make`.
+    public static func manualRecoveryInProgressWord(destination: CaptureDestination) -> String {
+        switch destination {
+        case .phone:    return "Saving on this phone…"
+        case .computer: return "Sending to computer…"
+        case .vault:    return "Sending to your Vault…"
+        }
+    }
 
     // MARK: title — content first, never an identifier
 
@@ -131,10 +164,18 @@ public struct CaptureCardPresentation: Equatable, Sendable {
 
     // MARK: status — one human word
 
-    /// The single human status word. A sync problem (pending segments, transport
-    /// errors) reads as "Waiting for computer" — the raw error NEVER reaches a card.
+    /// The single human status word, PER TIER. A sync problem (pending segments,
+    /// transport errors) reads as "Waiting for computer" / "Waiting for your Vault" —
+    /// the raw error NEVER reaches a card.
+    ///
+    /// THIS TOOK `local: Bool`. `App/CaptureScreen.swift` derived that bit as
+    /// `destination == .phone`, which answers `false` for BOTH the computer and the cell,
+    /// so every conversation card on a Vault owner's home screen said "Waiting for
+    /// computer" and then "Saved to computer" about a machine he does not own — the exact
+    /// sentence `3371f9d` fixed one line over and `236c4b2` fixed for the waits.
     static func statusWord(progress: ConversationProgress, droppedReason: String?,
-                           local: Bool, syncError: String? = nil) -> String {
+                           destination: CaptureDestination,
+                           syncError: String? = nil) -> String {
         if syncError?.hasPrefix("incomplete:") == true {
             return "Incomplete — audio kept on this phone"
         }
@@ -142,13 +183,24 @@ public struct CaptureCardPresentation: Equatable, Sendable {
         case .recording:
             return "Taking a note"
         case .savedOnPhone:
-            // Durable on the phone, not yet with the computer — whether the last
+            // Durable on the phone, not yet with the second place — whether the last
             // sync attempt errored is a log line, not card copy.
-            return local ? "Saved on this phone" : "Waiting for computer"
+            switch destination {
+            case .phone:    return "Saved on this phone"
+            case .computer: return "Waiting for computer"
+            case .vault:    return "Waiting for your Vault"
+            }
         case .savedToComputer:
-            return local ? "Saved on this phone" : "Saved to computer"
+            switch destination {
+            case .phone:    return "Saved on this phone"
+            case .computer: return "Saved to computer"
+            case .vault:    return "Saved to your Vault"
+            }
         case .transcribing:
-            return local ? "Transcribing on this phone" : "Transcribing"
+            switch destination {
+            case .phone:            return "Transcribing on this phone"
+            case .computer, .vault: return "Transcribing"
+            }
         case .ready:
             return "Ready"
         case .failed:
