@@ -1,22 +1,34 @@
 // WaitingExperience — the ONE honest-wait presentation model (perf track WS-C).
 //
 // The app is on-device first, so most user-visible waits are irreducible on-device
-// model runs or a network hop to the user's own Mac. Rather than lie with a fake
-// progress bar or a bare spinner, every wait longer than ~1s renders the SAME
-// component, driven by this model, which does three things:
+// model runs or a network hop to the user's own brain — their Mac over the relayed
+// door, or their Vault (a hosted cell) over its direct HTTPS door. Rather than lie
+// with a fake progress bar or a bare spinner, every wait longer than ~1s renders the
+// SAME component, driven by this model, which does three things:
 //
 //   1. NAMES what's happening in plain, honest language, TRUE to the mechanism
-//      (on-device Apple Foundation Models for recap/title, on-device Whisper for
-//      transcription, an end-to-end-encrypted relay hop to the user's Mac for door
-//      fetches, and a durable segment upload for sync/backfill).
+//      (on-device Apple Foundation Models for recap/title on the phone tier, the
+//      brain's own pipeline elsewhere, an end-to-end-encrypted relay hop for Mac
+//      door fetches, a direct encrypted connection for the Vault, and a durable
+//      segment upload for sync/backfill).
 //   2. Shows REAL progress ONLY where it is measurable — the sync/backfill drain,
 //      where `syncedSegments / totalSegments` is a genuine determinate fraction.
 //      The model waits (recap/title/transcription/door) get NO fake bar; they get
 //      elapsed-aware phase text instead ("still working — longer recordings take
 //      longer").
 //   3. Rotates a small deck of genuinely-true, useful facts about what FoundryX is
-//      doing locally with the user's data (privacy-forward, plus real library stats
-//      when cheaply available) — deterministic + injectable, so it is unit-tested.
+//      doing with the user's data (privacy-forward, plus real library stats when
+//      cheaply available) — deterministic + injectable, so it is unit-tested.
+//
+// THE TIER IS `CaptureDestination`, NEVER A BOOL. This file used to take
+// `onDevice: Bool` — a two-way switch written before the cell tier existed — so
+// `.vault` fell into the `.computer` arm byte-identically and a cell owner was told
+// "Speech-to-text runs on your own Mac — the audio never goes to a server we run":
+// false three ways at once (the audio DID go to a server we run, it did NOT stay
+// there, and no Mac was involved). Every switch below is exhaustive over
+// `CaptureDestination` with no default, so a FOURTH tier fails to compile until it
+// makes an explicit decision about its own words — the same pattern the saved-to
+// line adopted in 3371f9d. WaitingDestinationGateTests sweeps every string here.
 //
 // This is the pure, view-agnostic layer (lives in FoundryXKit so Brine + unit tests
 // drive it with no UIKit). `WaitingExperienceView` (App target) binds a TimelineView
@@ -30,15 +42,17 @@ import Foundation
 /// a named waiting experience. Each maps to a real, measured mechanism.
 public enum WaitKind: String, Sendable, CaseIterable, Equatable {
     /// On-device LLM recap of a day/week of conversations (Apple Foundation Models).
+    /// Recaps run on the phone on EVERY tier.
     case recap
-    /// On-device foundation-model titling of a conversation (or the Mac's model, whose
-    /// title arrives asynchronously) — the "Untitled" placeholder wait.
+    /// Foundation-model titling of a conversation — on the phone, or by the brain's own
+    /// pipeline (Mac / Vault) whose title arrives asynchronously.
     case title
-    /// On-device speech-to-text of a capture (Whisper), the slowest local wait.
+    /// Speech-to-text of a capture — on-device Whisper on the phone tier; the brain's
+    /// speech service elsewhere.
     case transcription
-    /// Fetching a conversation's content from the user's Mac over the encrypted relay.
+    /// Fetching a conversation's content from the resolved brain.
     case doorFetch
-    /// Draining the phone-side write-ahead log up to the user's Mac (segment backfill).
+    /// Draining the phone-side write-ahead log up to the resolved brain (segment backfill).
     case sync
 }
 
@@ -74,37 +88,87 @@ public struct WaitCopy: Equatable, Sendable {
         self.privacyLine = privacyLine
     }
 
-    /// The copy for a wait kind. `onDevice` picks the honest destination for the two
-    /// waits whose mechanism differs by tier: titling and sync happen on the phone in
-    /// the phone-only tier, and on the user's Mac in the computer tier.
-    public static func make(for kind: WaitKind, onDevice: Bool) -> WaitCopy {
+    /// The copy for a wait kind on a tier. Every claim below is load-bearing:
+    ///
+    ///   - The PHONE tier is the only one allowed to say the audio never leaves a
+    ///     device in the owner's hands.
+    ///   - The COMPUTER tier reuses the already-shipped PrivacyView sentence — the
+    ///     Mac ORCHESTRATES transcription via one cloud speech service; it does not
+    ///     perform it, so "transcribing locally" was false even here.
+    ///   - The VAULT tier says what is true without frightening: a private machine
+    ///     that's yours alone, one speech service, purpose-limited. It must NEVER
+    ///     claim "the audio never goes to a server we run" (the Vault IS one) and
+    ///     must never mention a Mac or the relay (a Vault owner has neither).
+    public static func make(for kind: WaitKind, destination: CaptureDestination) -> WaitCopy {
         switch kind {
         case .recap:
-            return WaitCopy(
-                headline: "Summarizing on your iPhone",
-                privacyLine: "The recap is written by a model running entirely on your device — no voice note text is sent anywhere to summarize it.")
+            // Recaps run on the phone on every tier — one true sentence, three tiers.
+            switch destination {
+            case .phone, .computer, .vault:
+                return WaitCopy(
+                    headline: "Summarizing on your iPhone",
+                    privacyLine: "The recap is written by a model running entirely on your device — no voice note text is sent anywhere to summarize it.")
+            }
         case .title:
-            return WaitCopy(
-                headline: "Naming this voice note",
-                privacyLine: onDevice
-                    ? "A model on your iPhone is reading the transcript to write its title and summary."
-                    : "A model on your Mac is reading the transcript to write its title and summary.")
+            switch destination {
+            case .phone:
+                return WaitCopy(
+                    headline: "Naming this voice note",
+                    privacyLine: "A model on your iPhone is reading the transcript to write its title and summary.")
+            case .computer:
+                return WaitCopy(
+                    headline: "Naming this voice note",
+                    privacyLine: "A model on your Mac is reading the transcript to write its title and summary.")
+            case .vault:
+                return WaitCopy(
+                    headline: "Naming this voice note",
+                    privacyLine: "A model in your Vault is reading the transcript to write its title and summary.")
+            }
         case .transcription:
-            return WaitCopy(
-                headline: "Transcribing locally",
-                privacyLine: onDevice
-                    ? "Speech-to-text runs on your iPhone — the audio never leaves your phone."
-                    : "Speech-to-text runs on your own Mac — the audio never goes to a server we run.")
+            switch destination {
+            case .phone:
+                return WaitCopy(
+                    headline: "Transcribing on this iPhone",
+                    privacyLine: "Speech-to-text runs on your iPhone — the audio never leaves this device.")
+            case .computer:
+                return WaitCopy(
+                    headline: "Transcribing on your computer",
+                    privacyLine: "Your computer turns the audio into text with one speech service, for that and nothing else. It never touches our servers.")
+            case .vault:
+                return WaitCopy(
+                    headline: "Transcribing in your Vault",
+                    privacyLine: "Your Vault is a private machine that's yours alone. It turns the audio into text with one speech service, for that and nothing else.")
+            }
         case .doorFetch:
-            return WaitCopy(
-                headline: "Fetching from your Mac",
-                privacyLine: "Coming over the end-to-end-encrypted tunnel to your computer — even the relay can't read it.")
+            switch destination {
+            case .phone:
+                return WaitCopy(
+                    headline: "Opening this voice note",
+                    privacyLine: "Read straight from this phone's own storage — nothing leaves your device.")
+            case .computer:
+                return WaitCopy(
+                    headline: "Fetching from your Mac",
+                    privacyLine: "Coming over the end-to-end-encrypted tunnel to your computer — even the relay can't read it.")
+            case .vault:
+                return WaitCopy(
+                    headline: "Fetching from your Vault",
+                    privacyLine: "Coming straight from your own Vault over an encrypted connection.")
+            }
         case .sync:
-            return WaitCopy(
-                headline: onDevice ? "Catching up" : "Copying to your computer",
-                privacyLine: onDevice
-                    ? "Each segment is written to your phone's disk before anything else — nothing is ever lost."
-                    : "Each segment is written to your phone's disk first, then copied to your Mac — the phone keeps its own copy too.")
+            switch destination {
+            case .phone:
+                return WaitCopy(
+                    headline: "Catching up",
+                    privacyLine: "Each segment is written to your phone's disk before anything else — nothing is ever lost.")
+            case .computer:
+                return WaitCopy(
+                    headline: "Copying to your computer",
+                    privacyLine: "Each segment is written to your phone's disk first, then copied to your Mac — the phone keeps its own copy too.")
+            case .vault:
+                return WaitCopy(
+                    headline: "Copying to your Vault",
+                    privacyLine: "Each segment is written to your phone's disk first, then copied to your Vault — the phone keeps its own copy too.")
+            }
         }
     }
 }
@@ -118,8 +182,11 @@ public struct WaitCopy: Equatable, Sendable {
 /// nil before the first threshold (the base copy stands).
 public enum WaitPhaseText {
     /// Ordered (after-seconds, phrase) ladders. Pick the LAST rung whose threshold is
-    /// ≤ elapsed. `sync` is determinate and has no ladder here.
-    static func ladder(for kind: WaitKind) -> [(after: TimeInterval, text: String)] {
+    /// ≤ elapsed. `sync` is determinate and has no ladder here. The door rung names the
+    /// place being reached — the tunnel is a COMPUTER-tier fact (the Vault has no relay
+    /// and the phone has no network hop at all).
+    static func ladder(for kind: WaitKind,
+                       destination: CaptureDestination) -> [(after: TimeInterval, text: String)] {
         switch kind {
         case .recap:
             return [
@@ -135,18 +202,30 @@ public enum WaitPhaseText {
                 (45, "Nearly there — this was a long one."),
             ]
         case .doorFetch:
-            return [
-                (3, "Still reaching your Mac — the tunnel may be waking up."),
-            ]
+            switch destination {
+            case .phone:
+                return [
+                    (3, "Still opening — one moment."),
+                ]
+            case .computer:
+                return [
+                    (3, "Still reaching your Mac — the tunnel may be waking up."),
+                ]
+            case .vault:
+                return [
+                    (3, "Still reaching your Vault — it may be waking up."),
+                ]
+            }
         case .sync:
             return []
         }
     }
 
     /// The phase phrase to show after `elapsed` seconds, or nil to keep the base copy.
-    public static func phrase(for kind: WaitKind, elapsed: TimeInterval) -> String? {
+    public static func phrase(for kind: WaitKind, destination: CaptureDestination,
+                              elapsed: TimeInterval) -> String? {
         var chosen: String?
-        for rung in ladder(for: kind) where elapsed >= rung.after {
+        for rung in ladder(for: kind, destination: destination) where elapsed >= rung.after {
             chosen = rung.text
         }
         return chosen
@@ -167,11 +246,18 @@ public enum WaitProgressLabel {
     }
 
     /// "214 of 1,210 segments safely on your computer" — the honest sync count. `nil`
-    /// for indeterminate progress (no fake number). `onDevice` phrases the destination.
-    public static func syncLabel(_ progress: WaitProgress, onDevice: Bool) -> String? {
+    /// for indeterminate progress (no fake number). `destination` phrases the place the
+    /// segments actually land.
+    public static func syncLabel(_ progress: WaitProgress,
+                                 destination: CaptureDestination) -> String? {
         guard case let .determinate(done, total) = progress, total > 0 else { return nil }
         let clampedDone = min(done, total)
-        let where_ = onDevice ? "saved on your phone" : "safely on your computer"
+        let where_: String
+        switch destination {
+        case .phone:    where_ = "saved on your phone"
+        case .computer: where_ = "safely on your computer"
+        case .vault:    where_ = "safely in your Vault"
+        }
         let unit = total == 1 ? "segment" : "segments"
         return "\(grouped(clampedDone)) of \(grouped(total)) \(unit) \(where_)"
     }
@@ -208,14 +294,15 @@ public struct WaitingTipDeck: Equatable, Sendable {
 
     public init(tips: [WaitingTip]) {
         // Never empty — fall back to a single evergreen fact so `tip(at:)` is total.
-        self.tips = tips.isEmpty ? [WaitingTip(Self.evergreen[0])] : tips
+        self.tips = tips.isEmpty ? [WaitingTip(Self.evergreen(for: .phone)[0])] : tips
     }
 
-    public init(kind: WaitKind, onDevice: Bool, stats: WaitingLibraryStats = .none) {
+    public init(kind: WaitKind, destination: CaptureDestination,
+                stats: WaitingLibraryStats = .none) {
         var out: [String] = []
-        out.append(contentsOf: Self.kindFacts(kind, onDevice: onDevice))
-        out.append(contentsOf: Self.evergreen)
-        out.append(contentsOf: Self.statFacts(stats, onDevice: onDevice))
+        out.append(contentsOf: Self.kindFacts(kind, destination: destination))
+        out.append(contentsOf: Self.evergreen(for: destination))
+        out.append(contentsOf: Self.statFacts(stats, destination: destination))
         // De-dupe while preserving order (a kind fact may repeat an evergreen one).
         var seen = Set<String>()
         let deduped = out.filter { seen.insert($0).inserted }
@@ -231,43 +318,102 @@ public struct WaitingTipDeck: Equatable, Sendable {
         return tips[i]
     }
 
-    // Evergreen, always-true facts about the app's actual mechanism.
-    static let evergreen: [String] = [
-        "Every segment is written to your phone's disk before it's sent — a dropped connection never loses a word.",
-        "Your transcripts are stored as plain text on your phone, ready to search in an instant.",
-        "Your phone keeps its own copy of every voice note, even after it's backed up to your Mac.",
-        "The link to your Mac is end-to-end encrypted — even the relay that carries it can't read a thing.",
-        "Titles, summaries, and recaps are written by a model on your device, not in anyone's cloud.",
-    ]
-
-    static func kindFacts(_ kind: WaitKind, onDevice: Bool) -> [String] {
-        switch kind {
-        case .recap:
-            return ["This recap is drawn only from your own voice notes — the model is told never to invent details."]
-        case .title:
-            return ["The title comes from the transcript itself — no voice note content is uploaded to name it."]
-        case .transcription:
-            return onDevice
-                ? ["On-device transcription turns even a private conversation into text without it ever leaving your phone."]
-                : ["Transcription happens on your own Mac — your audio is never sent to our servers to be read."]
-        case .doorFetch:
-            return ["Your voice notes live on your Mac, not our servers — this is your own computer answering."]
-        case .sync:
-            return onDevice
-                ? ["Backing up locally keeps everything on devices you own — nothing is uploaded to us."]
-                : ["Once a segment reaches your Mac it can't be lost — and your phone still keeps its copy."]
+    // Evergreen, always-true facts about the app's actual mechanism ON THIS TIER.
+    // These used to be one unconditional list that told phone-only owners about a Mac
+    // and a relay neither of which existed for them — the tier decides the truth.
+    static func evergreen(for destination: CaptureDestination) -> [String] {
+        switch destination {
+        case .phone:
+            return [
+                "Every segment is written to your phone's disk the moment it's heard — a dropped connection never loses a word.",
+                "Your transcripts are stored as plain text on your phone, ready to search in an instant.",
+                "Your phone keeps the only copy of every voice note — nothing is uploaded to us.",
+                "Titles, summaries, and recaps are written by a model on your device, not in anyone's cloud.",
+            ]
+        case .computer:
+            return [
+                "Every segment is written to your phone's disk before it's sent — a dropped connection never loses a word.",
+                "Your transcripts are stored as plain text on your phone, ready to search in an instant.",
+                "Your phone keeps its own copy of every voice note, even after it's backed up to your Mac.",
+                "The link to your Mac is end-to-end encrypted — even the relay that carries it can't read a thing.",
+            ]
+        case .vault:
+            return [
+                "Every segment is written to your phone's disk before it's sent — a dropped connection never loses a word.",
+                "Your transcripts are stored as plain text on your phone, ready to search in an instant.",
+                "Your phone keeps its own copy of every voice note, even after it's saved to your Vault.",
+                "Your Vault answers over an encrypted connection — a private machine provisioned for you alone.",
+            ]
         }
     }
 
-    static func statFacts(_ stats: WaitingLibraryStats, onDevice: Bool) -> [String] {
+    static func kindFacts(_ kind: WaitKind, destination: CaptureDestination) -> [String] {
+        switch kind {
+        case .recap:
+            switch destination {
+            case .phone, .computer, .vault:
+                return ["This recap is drawn only from your own voice notes — the model is told never to invent details."]
+            }
+        case .title:
+            switch destination {
+            case .phone:
+                return ["The title comes from the transcript itself — nothing is uploaded to name it."]
+            case .computer:
+                return ["The title comes from the transcript itself, written by a model on your own computer."]
+            case .vault:
+                return ["Your Vault reads the transcript and writes the title with one model service — for that and nothing else."]
+            }
+        case .transcription:
+            switch destination {
+            case .phone:
+                return ["On-device transcription turns even a private conversation into text without it ever leaving your phone."]
+            case .computer:
+                return ["Your computer sends the audio to one speech service to transcribe — for that purpose and nothing else."]
+            case .vault:
+                return ["Your Vault sends the audio to one speech service to transcribe — for that purpose and nothing else."]
+            }
+        case .doorFetch:
+            switch destination {
+            case .phone:
+                return ["Your voice notes live on this phone — nothing has to be fetched from anywhere else."]
+            case .computer:
+                return ["Your voice notes live on your Mac, not our servers — this is your own computer answering."]
+            case .vault:
+                return ["Your voice notes live in your Vault — your own private machine answering directly."]
+            }
+        case .sync:
+            switch destination {
+            case .phone:
+                return ["Backing up locally keeps everything on a device you own — nothing is uploaded to us."]
+            case .computer:
+                return ["Once a segment reaches your Mac it can't be lost — and your phone still keeps its copy."]
+            case .vault:
+                return ["Once a segment reaches your Vault it can't be lost — and your phone still keeps its copy."]
+            }
+        }
+    }
+
+    static func statFacts(_ stats: WaitingLibraryStats,
+                          destination: CaptureDestination) -> [String] {
         var out: [String] = []
         if let c = stats.conversationCount, c > 0 {
             let unit = c == 1 ? "voice note" : "voice notes"
-            out.append("You've captured \(WaitProgressLabel.grouped(c)) \(unit) so far — kept on your own devices.")
+            let kept: String
+            switch destination {
+            case .phone:    kept = "kept on this phone"
+            case .computer: kept = "kept on your own devices"
+            case .vault:    kept = "kept on your phone and in your Vault"
+            }
+            out.append("You've captured \(WaitProgressLabel.grouped(c)) \(unit) so far — \(kept).")
         }
         if let s = stats.segmentsOnComputer, s > 0 {
             let unit = s == 1 ? "segment" : "segments"
-            let where_ = onDevice ? "kept safe on your phone" : "safely stored on your Mac"
+            let where_: String
+            switch destination {
+            case .phone:    where_ = "kept safe on your phone"
+            case .computer: where_ = "safely stored on your Mac"
+            case .vault:    where_ = "safely stored in your Vault"
+            }
             out.append("\(WaitProgressLabel.grouped(s)) \(unit) \(where_) and counting.")
         }
         return out
@@ -281,7 +427,7 @@ public struct WaitingTipDeck: Equatable, Sendable {
 /// SwiftUI layer is a thin binding with no copy or timing logic of its own.
 public struct WaitingExperienceModel: Equatable, Sendable {
     public let kind: WaitKind
-    public let onDevice: Bool
+    public let destination: CaptureDestination
     public let progress: WaitProgress
     public let stats: WaitingLibraryStats
 
@@ -289,29 +435,36 @@ public struct WaitingExperienceModel: Equatable, Sendable {
     /// time via a TimelineView, so there is no timer to retain or invalidate.
     public static let tipRotationInterval: TimeInterval = 4
 
+    /// `destination` has NO DEFAULT, deliberately — the same argument `RootGate` and
+    /// `ConversationFacesView.brain` already make: a default here is a decision about
+    /// where a user's audio went, made by whoever forgot to pass it. A defaulted
+    /// `onDevice: Bool = true` is exactly how the cell tier shipped reading "your own
+    /// Mac".
     public init(kind: WaitKind,
-                onDevice: Bool = true,
+                destination: CaptureDestination,
                 progress: WaitProgress = .indeterminate,
                 stats: WaitingLibraryStats = .none) {
         self.kind = kind
-        self.onDevice = onDevice
+        self.destination = destination
         self.progress = progress
         self.stats = stats
     }
 
-    public var copy: WaitCopy { .make(for: kind, onDevice: onDevice) }
+    public var copy: WaitCopy { .make(for: kind, destination: destination) }
 
     public var tipDeck: WaitingTipDeck {
-        WaitingTipDeck(kind: kind, onDevice: onDevice, stats: stats)
+        WaitingTipDeck(kind: kind, destination: destination, stats: stats)
     }
 
     /// The status line under the headline: the honest determinate count for sync, else
     /// the elapsed-aware phase phrase, else the base privacy line.
     public func statusLine(elapsed: TimeInterval) -> String {
-        if let label = WaitProgressLabel.syncLabel(progress, onDevice: onDevice) {
+        if kind == .sync,
+           let label = WaitProgressLabel.syncLabel(progress, destination: destination) {
             return label
         }
-        if let phase = WaitPhaseText.phrase(for: kind, elapsed: elapsed) {
+        if let phase = WaitPhaseText.phrase(for: kind, destination: destination,
+                                            elapsed: elapsed) {
             return phase
         }
         return copy.privacyLine

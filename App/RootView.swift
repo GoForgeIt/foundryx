@@ -1174,7 +1174,7 @@ private struct MainTabs: View {
                         decisionLogURL: AmbientPrefs.decisionLogURL(),
                         recapPoolProvider: { manager.recapConversationPool() },
                         onOpenChat: { seed in AmbientCardBroker.shared.run(seed: seed) },
-                        local: local
+                        destination: destination
                     )
                     .toolbar {
                         // LAZY destination: `NavigationLink`'s destination is built eagerly
@@ -1201,6 +1201,7 @@ private struct MainTabs: View {
                         } else if let accountBinding {
                             ChatScreen(
                                 target: target,
+                                destination: destination,
                                 store: chats,
                                 accountBinding: accountBinding,
                                 log: log,

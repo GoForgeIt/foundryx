@@ -208,12 +208,18 @@ public enum CaptureHomeCopy {
     /// The record CTA card's headline.
     public static let recordTitle = "Make a voice note"
 
-    /// The record CTA's reassurance line. Phone-only tier keeps the prototype's
-    /// exact copy; the computer tier says where the full history already lives.
-    public static func recordSubtitle(local: Bool) -> String {
-        local
-            ? "Saved on this phone. It joins your full history when your computer connects."
-            : "Saved on this phone. It joins your full history on your computer."
+    /// The record CTA's where-does-it-go line, per tier. Exhaustive over
+    /// `CaptureDestination` — a fourth brain fails to compile until it picks its words
+    /// (a Vault owner used to read "on your computer" because this was a Bool).
+    public static func recordSubtitle(destination: CaptureDestination) -> String {
+        switch destination {
+        case .phone:
+            return "Saved on this phone. It joins your full history when your computer connects."
+        case .computer:
+            return "Saved on this phone. It joins your full history on your computer."
+        case .vault:
+            return "Saved on this phone. It joins your full history in your Vault."
+        }
     }
 
     /// "Recent on this phone" headline + its "N conversations" row-meta.

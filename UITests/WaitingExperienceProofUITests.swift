@@ -30,8 +30,8 @@ final class WaitingExperienceProofUITests: XCTestCase {
 
     func testEveryWaitSiteNamesItselfHonestly() throws {
         proof("recap", headline: "Summarizing on your iPhone", index: 1)
-        proof("title", headline: "Naming this conversation", index: 2)
-        proof("transcription", headline: "Transcribing locally", index: 3)
+        proof("title", headline: "Naming this voice note", index: 2)
+        proof("transcription", headline: "Transcribing on this iPhone", index: 3)
         proof("door", headline: "Fetching from your Mac", index: 4)
         proof("sync", headline: "Copying to your computer", index: 5)
     }
