@@ -32,7 +32,7 @@ Feature: Taking a recording off the recorder, on purpose
     Given a recorder holding a recording Solleva has never checked on
     When I ask Solleva to take it off the recorder
     Then Solleva asked that recorder to remove that one recording and no other
-    And what I was told I would lose is that nothing else holds it
+    And what I was told is that Solleva has not checked where else it is
     And a Vault was suggested to me and it did not stand in the way
 
   Scenario: What I am told I am losing is different in each of the three cases
@@ -111,7 +111,7 @@ Feature: Taking a recording off the recorder, on purpose
     Given a recording Solleva has confirmed safe somewhere else
     When I choose to take it off the recorder
     Then I am asked to confirm first
-    And what I am asked names the recorder and says Solleva cannot get it back
+    And what I am asked names the recorder and says the act cannot be undone
     And what I am asked claims no copy anywhere
     And nothing is asked of the recorder until I confirm
 

@@ -71,7 +71,7 @@ private enum PocketRemoveSteps {
         let thens = [
             "the recorder is never asked to remove anything",
             "what I was told I would lose is that this leaves one copy, on my phone",
-            "what I was told I would lose is that nothing else holds it",
+            "what I was told is that Solleva has not checked where else it is",
             "a Vault was suggested to me and it did not stand in the way",
             "each one of them is a different sentence",
             "a Vault is offered only where this would leave no other copy",
@@ -81,7 +81,7 @@ private enum PocketRemoveSteps {
             "a recording the recorder is not holding offers nothing",
             "automatic clearing would take only the confirmed one",
             "it would not take a recording Solleva has never checked on",
-            "what I am asked names the recorder and says Solleva cannot get it back",
+            "what I am asked names the recorder and says the act cannot be undone",
             "what I am asked claims no copy anywhere",
             "Solleva asked that recorder to remove that one recording and no other",
             "the recorder's own shelf no longer lists it",
@@ -428,8 +428,8 @@ private actor PocketRemoveWorld {
         case "what I was told I would lose is that this leaves one copy, on my phone":
             try requireConsequence(.thisPhoneWillHoldTheOnlyCopy)
 
-        case "what I was told I would lose is that nothing else holds it":
-            try requireConsequence(.nothingElseHoldsIt)
+        case "what I was told is that Solleva has not checked where else it is":
+            try requireConsequence(.nobodyHasCheckedWhereElseItIs)
 
         case "a Vault was suggested to me and it did not stand in the way":
             guard let stated = consequenceStated else {
@@ -458,19 +458,62 @@ private actor PocketRemoveWorld {
                 "This leaves one copy, on this iPhone.",
                 "Solleva doesn't hold a copy of this recording. Taking it off the recorder "
                     + "ends it.",
+                "Solleva hasn't checked whether anything else has a copy of this. Taking it "
+                    + "off the recorder could be the end of it.",
             ]
             let shipped = PocketDeleteConsequence.allCases.map(\.sentence)
             guard shipped == required else {
-                throw BrineStepError("the three consequences read \(shipped)")
+                throw BrineStepError("the consequences read \(shipped)")
             }
-            guard Set(shipped).count == 3 else {
+            guard Set(shipped).count == required.count else {
                 throw BrineStepError("one sentence is used for more than one consequence")
+            }
+
+            // EVERY ONE OF THE NINE STATES, AND NOT ONE OF THEM MAY COUNT A PLACE NOBODY ASKED.
+            //
+            // THE DEFECT THIS EXISTS FOR WAS FOUND BY REVIEW, NOT BY DESIGN. The first draft
+            // mapped nine states onto three sentences, and four of them came out asserting a
+            // copy count over a place that had never answered: "This leaves one copy, on this
+            // iPhone" for a recording nobody had asked about elsewhere, and "Solleva doesn't
+            // hold a copy of this recording" for two more. A count is a categorical claim; over
+            // an unasked place it is simply wrong, and being wrong toward caution is still wrong
+            // when the app is the thing saying it.
+            for elsewhere in PocketPresenceAnswer.allCases {
+                for onPhone in PocketPresenceAnswer.allCases {
+                    let reading = PocketRecordingPresence(
+                        onRecorder: PocketPlaceReading(answer: .yes,
+                                                       observedAt: Self.armingInstant),
+                        onThisPhone: PocketPlaceReading(answer: onPhone, observedAt: nil),
+                        safeElsewhere: PocketPlaceReading(answer: elsewhere, observedAt: nil))
+                    let said = PocketDeleteConsequence.ofRemoving(reading)
+                    let counts = said == .thisPhoneWillHoldTheOnlyCopy
+                        || said == .nothingElseHoldsIt
+                    let bothAnswered = elsewhere != .unknown && onPhone != .unknown
+                    guard !counts || bothAnswered else {
+                        throw BrineStepError(
+                            "(elsewhere: \(elsewhere.rawValue), phone: \(onPhone.rawValue)) is "
+                                + "told \"\(said.sentence)\" — a count over a place nobody asked")
+                    }
+                }
+            }
+            // AND THE COUNTS ARE STILL REACHABLE, so the rule above is not satisfied by never
+            // stating one. Both fully-answered states must produce their own categorical
+            // sentence, or the fourth case has swallowed the two that matter most.
+            let bothSaidNo = PocketRecordingPresence(
+                onRecorder: PocketPlaceReading(answer: .yes, observedAt: Self.armingInstant),
+                onThisPhone: PocketPlaceReading(answer: .no, observedAt: Self.armingInstant),
+                safeElsewhere: PocketPlaceReading(answer: .no, observedAt: Self.armingInstant))
+            guard PocketDeleteConsequence.ofRemoving(bothSaidNo) == .nothingElseHoldsIt,
+                  PocketDeleteConsequence.ofRemoving(Self.onlyHere)
+                    == .thisPhoneWillHoldTheOnlyCopy else {
+                throw BrineStepError("a fully answered reading no longer states what it costs")
             }
 
         case "a Vault is offered only where this would leave no other copy":
             let offering = PocketDeleteConsequence.allCases
                 .filter { $0.vaultSuggestion != nil }
-            guard offering == [.thisPhoneWillHoldTheOnlyCopy, .nothingElseHoldsIt] else {
+            guard offering == [.thisPhoneWillHoldTheOnlyCopy, .nothingElseHoldsIt,
+                               .nobodyHasCheckedWhereElseItIs] else {
                 throw BrineStepError("a Vault is suggested on \(offering.map(\.rawValue)) — it "
                                         + "belongs where it is true and nowhere else")
             }
@@ -563,12 +606,20 @@ private actor PocketRemoveWorld {
                                         + "confirmation this behaviour wrote has no call site")
             }
 
-        case "what I am asked names the recorder and says Solleva cannot get it back":
+        case "what I am asked names the recorder and says the act cannot be undone":
             let asked = confirmationAsked ?? ""
-            guard asked.contains("off the recorder"), asked.contains("can't get it back") else {
+            // IT NAMES THE ACT, NOT THE RECORDING'S FATE. "Solleva can't get it back" was the
+            // first wording and it reads as "the recording is unrecoverable" — false for one
+            // a Vault already holds, and this band is shown for all four consequences.
+            guard asked.contains("off the recorder"), asked.contains("can't be undone") else {
                 throw BrineStepError("the confirmation reads \"\(asked)\" — it must name the "
                                         + "recorder as what the recording is leaving AND say "
-                                        + "that this does not come back")
+                                        + "that taking it off cannot be undone")
+            }
+            for fate in ["get it back", "gone", "lost forever"] where asked.contains(fate) {
+                throw BrineStepError("the confirmation says \"\(fate)\" about the RECORDING, "
+                                        + "which is false whenever something else holds a copy — "
+                                        + "what cannot be undone is the removal")
             }
 
         case "what I am asked claims no copy anywhere":

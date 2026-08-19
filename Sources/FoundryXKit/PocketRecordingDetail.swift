@@ -242,8 +242,21 @@ public enum PocketRecordingDetailPresentation {
         // THE REMOVAL. Destructive, and after Nick's 2026-08-18 ruling it asks for exactly one
         // positive answer: the recorder says it has this file. What the shelf can prove about a
         // copy elsewhere no longer withholds the control — it chooses the sentence stated beside
-        // it, which is `PocketDeleteConsequence` and which is on this page rather than buried in
-        // an alert, so the owner reads what it costs BEFORE reaching for the button.
+        // it, which is `PocketDeleteConsequence`.
+        //
+        // WHERE THE OWNER ACTUALLY READS IT, SAID ACCURATELY. This comment used to claim the
+        // consequence is read "BEFORE reaching for the button". IT IS NOT, and the claim was
+        // refuted by cross-vendor review on 2026-08-19: `PocketRecordingDetailSheet` renders
+        // facts, then places, then ACTIONS, then notes — so the consequence sits BELOW the
+        // destructive control, and the alert that gates the tap carries `confirmationLine`
+        // rather than this sentence. The owner is warned (the alert says the act cannot be
+        // undone) but is not warned SPECIFICALLY before pressing.
+        //
+        // IT IS NOT FIXED HERE BECAUSE IT CANNOT BE: the ordering and the alert's message both
+        // live in `App/DeviceScreen.swift`, which two other tracks hold open, and which
+        // `swift test` cannot compile in the first place. Carried, named, and not papered over
+        // by moving a consequence into `facts` to win a render position it has no business
+        // claiming.
         if let refusal = removalRefusal(for: presence, brain: brain) {
             notes.append(refusal)
         } else {

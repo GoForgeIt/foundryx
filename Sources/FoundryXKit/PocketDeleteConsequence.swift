@@ -34,22 +34,52 @@
 
 import Foundation
 
-/// WHAT IS ABOUT TO BE LOST, IN THE OWNER'S TERMS. Exactly three, and they are frozen.
+/// WHAT IS ABOUT TO BE LOST, IN THE OWNER'S TERMS. Four, and they are frozen.
 ///
-/// The three are the three states of *"what is the best custody this recording has today"*, which
+/// The first three are the states of *"what is the best custody this recording has today"*, which
 /// is the question Nick's ruling reframed the predicate around — not *"is the phone durable"*.
+///
+/// THE FOURTH EXISTS BECAUSE THREE WERE MEASURED TO LIE, and the measurement was cross-vendor
+/// adversarial review on 2026-08-19, not an opinion. `PocketRecordingPresence` carries THREE
+/// answers per place — `yes`, `no` and `unknown` — so `(safeElsewhere, onThisPhone)` has NINE
+/// states, and the first draft of this type mapped all nine onto three sentences. Four of the
+/// nine came out as categorical claims about places nobody had asked:
+///
+///   (unknown, yes)     → "This leaves one copy, on this iPhone."       ← an unasked elsewhere
+///   (unknown, no)      → "Solleva doesn't hold a copy…"                ← an unasked elsewhere
+///   (unknown, unknown) → "Solleva doesn't hold a copy…"                ← neither was asked
+///   (no,      unknown) → "Solleva doesn't hold a copy…"                ← an unasked phone
+///
+/// "One copy" and "doesn't hold a copy" are COUNTS. A count over a place nobody queried is not a
+/// cautious answer, it is a wrong one — and this whole file exists because the app told an owner
+/// something about custody that was not true. The rule is now: A CATEGORICAL CLAIM ONLY WHERE
+/// BOTH PLACES ANSWERED. Everything else gets the fourth case, which says so and warns hardest.
+///
+/// IT IS NOT AN EMPTY CASE AND IT IS NOT A FALLBACK. `.nobodyHasCheckedWhereElseItIs` is a
+/// SUBSTANTIVE state with its own sentence — the compile-time detector Nick's ruling turns on is
+/// that this type has no `.unspecified`, no `.none`, no `ExpressibleByNilLiteral` and no
+/// default-constructible arm, and a fourth named state breaks none of those.
+///
+/// THIS REFUTES `tracks/20260817T1730_…` AMENDMENT 1's AC20, which freezes the set at THREE.
+/// That AC was written on 2026-08-18, before the nine states were enumerated. The frozen set is
+/// FOUR, the reason is above, and the AC is the thing that changes — not the code, quietly.
 public enum PocketDeleteConsequence: String, Sendable, Equatable, CaseIterable {
 
     /// Something that is not the recorder has a CONFIRMED copy. Nothing is lost by removing it.
     case aCopyIsAlreadySomewhereElse
 
     /// This phone is holding the bytes and nothing else is. One copy survives, and it is on a
-    /// handset that can be dropped in a river.
+    /// handset that can be dropped in a river. BOTH places answered.
     case thisPhoneWillHoldTheOnlyCopy
 
     /// Solleva holds nothing. The recorder is the only place this recording exists, and taking
-    /// it off ends it. This is the sentence that must never be softened.
+    /// it off ends it. This is the sentence that must never be softened, and it is reachable
+    /// ONLY when both places were asked and both said no.
     case nothingElseHoldsIt
+
+    /// A PLACE WAS NEVER ASKED, so no count is available. The honest sentence, and the hardest
+    /// warning — because "we do not know" is not "we know it is fine".
+    case nobodyHasCheckedWhereElseItIs
 
     /// THE SENTENCE. Frozen here and never derived from the case name, so a test that compares
     /// against an independently written list is comparing against something.
@@ -63,6 +93,9 @@ public enum PocketDeleteConsequence: String, Sendable, Equatable, CaseIterable {
         case .nothingElseHoldsIt:
             return "Solleva doesn't hold a copy of this recording. Taking it off the recorder "
                 + "ends it."
+        case .nobodyHasCheckedWhereElseItIs:
+            return "Solleva hasn't checked whether anything else has a copy of this. Taking it "
+                + "off the recorder could be the end of it."
         }
     }
 
@@ -77,7 +110,8 @@ public enum PocketDeleteConsequence: String, Sendable, Equatable, CaseIterable {
         switch self {
         case .aCopyIsAlreadySomewhereElse:
             return nil
-        case .thisPhoneWillHoldTheOnlyCopy, .nothingElseHoldsIt:
+        case .thisPhoneWillHoldTheOnlyCopy, .nothingElseHoldsIt,
+             .nobodyHasCheckedWhereElseItIs:
             return "A Vault would keep a copy of this for you."
         }
     }
@@ -88,15 +122,26 @@ public enum PocketDeleteConsequence: String, Sendable, Equatable, CaseIterable {
     /// by `PocketShelfReadModel.presences`, and a second computation of "where is this" is how a
     /// screen comes to contradict itself.
     ///
-    /// `unknown` — a place nobody asked about — is NOT treated as a yes on either arm. So an
-    /// unresolved shelf states the STRONGER consequence, which over-warns rather than
-    /// under-warns. That direction is deliberate: this value cannot block anything, so the only
-    /// cost of being wrong toward caution is a sentence, and the only cost of being wrong the
-    /// other way is a recording.
+    /// A CATEGORICAL CLAIM ONLY WHERE BOTH PLACES ANSWERED. That single rule is what makes this
+    /// function total over the nine states without any of them producing a count nobody measured.
+    ///
+    /// `unknown` is never a yes — but it is never a NO either, and that second half is what the
+    /// first draft of this function got wrong. Falling through an unasked place into
+    /// `.nothingElseHoldsIt` looked like the cautious direction and reads, to an owner, as a
+    /// statement of fact: *"Solleva doesn't hold a copy of this recording."* Over-warning is only
+    /// safe when the warning is TRUE.
     public static func ofRemoving(_ presence: PocketRecordingPresence) -> PocketDeleteConsequence {
+        // A CONFIRMED COPY ELSEWHERE SETTLES IT ON ITS OWN. Whatever the phone answers, and
+        // whether or not it was asked, something that is not the recorder is holding this.
         if presence.safeElsewhere.answer == .yes { return .aCopyIsAlreadySomewhereElse }
-        if presence.onThisPhone.answer == .yes { return .thisPhoneWillHoldTheOnlyCopy }
-        return .nothingElseHoldsIt
+        // EVERY OTHER CATEGORICAL SENTENCE NEEDS BOTH ANSWERS.
+        guard presence.safeElsewhere.answer == .no,
+              presence.onThisPhone.answer != .unknown else {
+            return .nobodyHasCheckedWhereElseItIs
+        }
+        return presence.onThisPhone.answer == .yes
+            ? .thisPhoneWillHoldTheOnlyCopy
+            : .nothingElseHoldsIt
     }
 
     /// Every line this type can render, so a claim about its copy is held over the POPULATION

@@ -337,8 +337,15 @@ public enum PocketRemoveFromRecorderPresentation {
 
     /// The confirmation's words, as a constant, so the population below and every assertion
     /// about it read the same string the alert reads.
+    ///
+    /// IT SAYS THE ACT CANNOT BE UNDONE, NOT THAT THE RECORDING IS GONE. The first wording was
+    /// *"…and Solleva can't get it back"*, which reads as "the recording cannot be recovered" —
+    /// false for a recording a Vault is already holding, and this band is shown for all four
+    /// consequences. What is irreversible is the removal FROM THE RECORDER; whether anything is
+    /// lost is the consequence's sentence, and it is a different sentence on purpose.
+    /// *(Cross-vendor adversarial review, 2026-08-19.)*
     public static let confirmationLine =
-        "This takes the recording off the recorder, and Solleva can't get it back."
+        "Taking a recording off the recorder can't be undone."
 
     /// THE TAP THAT COULD NOT BE CARRIED OUT, AND IT SAYS SO.
     ///

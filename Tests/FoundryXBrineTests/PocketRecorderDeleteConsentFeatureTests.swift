@@ -480,9 +480,11 @@ private actor PocketDeleteConsentWorld {
             let consent = PocketDeleteConsent.ownerChoseThisRecording(
                 file, statingThat: .ofRemoving(.nothingAsked))
             XCTAssertEqual(consent.file, file)
-            XCTAssertEqual(consent.consequence, .nothingElseHoldsIt,
-                           "an UNASKED place was reported to the owner as a copy. unknown must "
-                               + "never read as yes in the sentence a deletion is stated with")
+            XCTAssertEqual(consent.consequence, .nobodyHasCheckedWhereElseItIs,
+                           "a reading where NOTHING was asked produced a categorical claim about "
+                               + "where this recording is. unknown may not read as a yes, and it "
+                               + "may not read as a no either — a count over a place nobody "
+                               + "queried is wrong in whichever direction it lands")
 
         case "what they were told is not the same sentence in those two cases":
             // THE PAIRED DISTINCTNESS, and it is what stops the two above being satisfied by a
