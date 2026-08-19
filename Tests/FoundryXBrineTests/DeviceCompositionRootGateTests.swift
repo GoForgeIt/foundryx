@@ -635,8 +635,10 @@ final class DeviceCompositionRootGateTests: XCTestCase {
             contentsOf: Self.repoRoot.appendingPathComponent("App/DeviceScreen.swift"),
             encoding: .utf8)
 
-        // NON-VACUITY FIRST: the affordance this gate is about is still on this screen.
-        XCTAssertTrue(screen.contains("PocketBringOver.run(peripheralIdentifier:"),
+        // NON-VACUITY FIRST: the affordance this gate is about is still on this screen. It
+        // used to anchor on `PocketBringOver.run(peripheralIdentifier:` — the one-file,
+        // one-session transfer the page owned before it owned a queue.
+        XCTAssertTrue(screen.contains("let queue = PocketTransferQueue("),
                       "App/DeviceScreen.swift no longer runs the bring-over — this gate is "
                           + "checking a file that no longer holds the boundary")
 
@@ -644,8 +646,34 @@ final class DeviceCompositionRootGateTests: XCTestCase {
                       "nothing in App/ hands the brought-over conversation to the capture "
                           + "owner, so the recording is a directory on disk that the running "
                           + "app does not know exists and will not upload until relaunch")
-        XCTAssertTrue(screen.contains("outcome.captureID"),
+        XCTAssertTrue(screen.contains("follow.adoptCaptureID"),
                       "the hand-off does not read the capture the bring-over actually produced")
+
+        // AND IT HAPPENS WHETHER OR NOT THE PAGE IS STILL THERE.
+        //
+        // THIS IS THE HALF THE OLD GATE COULD NOT SEE. The hand-off used to sit BEHIND
+        // `guard let self, !Task.isCancelled` — so a transfer the owner walked away from wrote
+        // every byte, built the conversation, and told nothing in the running app about it. A
+        // transfer that outlives its page is worth nothing if its RESULT does not, and the
+        // ordering of these two lines is the whole difference. `swift test` cannot compile
+        // `App/`, so it is read as a position in the file.
+        // SCOPED TO THE TRANSFER'S OWN ERRAND. `guard let self else { return }` is an ordinary
+        // shape in this file — the list screen has one 2,000 lines above — so the search starts
+        // at the queue this errand builds, and an unscoped comparison would be answering about
+        // somebody else's task.
+        guard let errand = screen.range(of: "let queue = PocketTransferQueue(") else {
+            return XCTFail("the bring-over no longer builds a transfer queue")
+        }
+        let tail = screen[errand.upperBound...]
+        guard let adopt = tail.range(of: "manager.adoptCompletedCapture(captureId:"),
+              let pageOnly = tail.range(of: "guard let self else { return }") else {
+            return XCTFail("the bring-over's durable half and its page half are no longer "
+                               + "distinguishable in App/DeviceScreen.swift")
+        }
+        XCTAssertTrue(adopt.lowerBound < pageOnly.lowerBound,
+                      "the conversation is handed to the capture owner only AFTER `guard let "
+                          + "self`, so leaving the recorder page mid-transfer loses the "
+                          + "recording the transfer completed")
         // AND THE MANAGER REACHES THE PAGE THAT DOES IT. Without this the call above cannot
         // compile — but the gate says so in words rather than leaving it to the build.
         XCTAssertTrue(screen.contains("into: manager"),

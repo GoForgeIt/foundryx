@@ -79,16 +79,29 @@ final class RecorderPageErrandWiringTests: XCTestCase {
                         + "page depends on every call site remembering to build one")
     }
 
-    /// THE LINK THE APP-HOSTED LANE STANDS IN FOR. `cancel()` proven to stop the errand is
-    /// worth nothing if leaving the page never calls it.
+    /// THE LINK THE APP-HOSTED LANE STANDS IN FOR. `departed()` proven to make the right call
+    /// is worth nothing if leaving the page never calls it.
+    ///
+    /// THE ANCHOR MOVED FROM `check.cancel()` TO `check.departed()` AND THAT IS THE FIX, not a
+    /// weakening: cancelling unconditionally is what killed a bring-over the moment its owner
+    /// looked at something else. Which errands a departure stops is
+    /// `PocketErrandDeparturePolicy`, held by
+    /// `features/a-transfer-outlives-the-page.feature` — and the PROHIBITION below is what
+    /// stops the old line coming back beside the new one.
     func testLeavingTheRecorderPageCancelsTheErrand() throws {
         let code = AppSourceTree.code(of: try source())
-        XCTAssertTrue(code.contains(".onDisappear { check.cancel() }"),
+        XCTAssertTrue(code.contains(".onDisappear { check.departed() }"),
                       """
-                      the recorder page does not cancel the errand when it goes away. \
-                      `PocketRecorderCheckModel.cancel()` can be perfect and the radio still \
+                      the recorder page does nothing when it goes away. \
+                      `PocketRecorderCheckModel.departed()` can be perfect and the radio still \
                       stays connected to a device nobody is looking at.
                       """)
+        XCTAssertFalse(code.contains(".onDisappear { check.cancel() }"),
+                       """
+                       the recorder page cancels EVERY errand when it goes away, including a \
+                       bring-over — which is the defect: a transfer measured at 18-36 KB/s is \
+                       exactly the errand a person walks away from, and walking away killed it.
+                       """)
         XCTAssertTrue(code.contains("@Environment(\\.scenePhase) private var scenePhase"),
                       "the page cannot notice being backgrounded")
         XCTAssertTrue(code.contains(".onChange(of: scenePhase)"),

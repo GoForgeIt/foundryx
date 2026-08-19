@@ -274,16 +274,16 @@
       "id": "pocket-bring-over-run",
       "name": "pulling one file off the recorder onto the phone",
       "declared_in": "Sources/FoundryXKit/PocketBringOver.swift",
-      "declaration_anchor": "public static func run(",
-      "call_pattern": "PocketBringOver.run(",
+      "declaration_anchor": "    public static func bringOver(on client: PocketBLEClient,",
+      "call_pattern": "PocketBringOver.bringOver(",
       "reached_from": [
         {
-          "via": "device-screen",
-          "anchor": "let outcome = await PocketBringOver.run(peripheralIdentifier: identifier,"
+          "via": "pocket-transfer-queue-run",
+          "anchor": "                await PocketBringOver.bringOver("
         }
       ],
       "verdict": "reachable",
-      "why": "the caller `PocketBLEClient.download` never had."
+      "why": "the caller `PocketBLEClient.download` never had. THE ROW MOVED FROM `run(...)` TO `bringOver(on:)` WHEN THE PAGE MOVED ONTO THE QUEUE: production no longer opens a session per file — `PocketTransferQueue` opens one and drains N items through this function, which is the per-file leg and therefore the capability. `run(...)`, the session-owning wrapper this row used to name, kept its tests and lost its production caller in the same commit; it is enumerated on its own row rather than left to look reached through this one."
     },
     {
       "id": "pocket-ble-download",
@@ -353,12 +353,12 @@
       "call_pattern": "PocketBringOverPresentation.message(for:",
       "reached_from": [
         {
-          "via": "device-screen",
-          "anchor": "self.bringOverMessage = PocketBringOverPresentation.message(for: outcome)"
+          "via": "pocket-transfer-queue-run",
+          "anchor": "            return PocketBringOverPresentation.message(for: outcome)"
         }
       ],
       "verdict": "reachable",
-      "why": "STEP 11, AND THE EXACT DEFECT THIS REGISTER EXISTS FOR. `PocketConversationClock` computed a clock warning on EVERY import and `PocketImportedCapture.clockWarning` carried it into a struct `PocketBringOver.conversation(_:)` threw away - a field with a producer, no consumer, and eight green Pocket feature files over the top of it. The warning now travels in `PocketBringOverOutcome.broughtOver`, is appended by `message(for:)`, and lands in the `Text(outcome)` `App/DeviceScreen.swift` already renders under the Bring over button. THE ROW IS ON `message(for:)` AND NOT ON THE CLOCK RULE ON PURPOSE: the clock rule is reached through `pocket-capture-import` already, and what was never reached was the RENDERING. `PocketRecorderClockFeatureTests` holds the producer/consumer scan; this row holds the fact that the consumer is on a screen."
+      "why": "STEP 11, AND THE EXACT DEFECT THIS REGISTER EXISTS FOR. `PocketConversationClock` computed a clock warning on EVERY import and `PocketImportedCapture.clockWarning` carried it into a struct `PocketBringOver.conversation(_:)` threw away - a field with a producer, no consumer, and eight green Pocket feature files over the top of it. The warning now travels in `PocketBringOverOutcome.broughtOver`, is appended by `message(for:)`, and lands in the `Text(outcome)` `App/DeviceScreen.swift` already renders under the Bring over button. ITS CALL SITE MOVED WITH THE TRANSFER: the page's message is now whatever `PocketTransferQueuePresentation.line(for:)` renders for the phase, and that renderer calls this one rather than rebuilding the sentence — a queue that spelled `broughtOverLine` itself would be a second surface silently dropping the warning again. THE ROW IS ON `message(for:)` AND NOT ON THE CLOCK RULE ON PURPOSE: the clock rule is reached through `pocket-capture-import` already, and what was never reached was the RENDERING. `PocketRecorderClockFeatureTests` holds the producer/consumer scan; this row holds the fact that the consumer is on a screen."
     },
     {
       "id": "capture-adopt-completed",
@@ -852,21 +852,36 @@
       "declared_in": "Sources/FoundryXKit/PocketTransferJob.swift",
       "declaration_anchor": "    public func run() async {",
       "call_pattern": "PocketTransferQueue(",
-      "reached_from": [],
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "        let queue = PocketTransferQueue("
+        }
+      ],
       "tested_from": [
         "Tests/FoundryXBrineTests/PocketTransferQueueFeatureTests.swift"
       ],
+      "verdict": "reachable",
+      "why": "PROMOTED. It arrived openly RED — the exact state `PocketDurableSync` shipped in silently, enumerated so it could not be reported as shipped — and the production caller it was waiting for now exists: `PocketRecorderCheckModel.bringOver` builds the queue, hands it the recording the owner tapped, and drains it. The page's `.onDisappear` no longer cancels a transfer (`PocketErrandDeparturePolicy`), the capture hand-off no longer sits behind `guard let self`, and the errand's closing token comes from `PocketTransferFollowThrough` rather than from a branch in `App/`. What the queue itself does — one session for N files, MCU&U&-denominated progress, a stop that keeps nothing, the 60/120/240/300 presence backoff — is proven in PocketTransferQueueFeatureTests; the wiring is proven in PocketTransferHandoffFeatureTests."
+    },
+    {
+      "id": "pocket-bring-over-single-session-wrapper",
+      "name": "PocketBringOver.run — one file on a session of its own",
+      "declared_in": "Sources/FoundryXKit/PocketBringOver.swift",
+      "declaration_anchor": "    public static func run(",
+      "call_pattern": "PocketBringOver.run(",
+      "reached_from": [],
       "verdict": "unreachable",
-      "why": "OPENLY RED ON ARRIVAL, ON PURPOSE — the exact state `PocketDurableSync` shipped in silently, enumerated this time so it cannot be reported as shipped. The queue is the kit half of 'a bring-over outlives the page': one authenticated session drains N files (measured possible on fw 1.6), progress is denominated in the MCU&U& announcement, a stop discards the partial and suppresses re-offer, a lost recorder earns the 60/120/240/300 presence backoff, and every retry says it restarts from zero because the wire admits no offset. All of that is feature-proven and mutation-graded in PocketTransferQueueFeatureTests. What does NOT exist yet is the production caller: `App/DeviceScreen.swift` still owns its errand as a Task on a @StateObject with `.onDisappear { check.cancel() }`, and moving the page onto this queue is the surface half of the same track, in a file another change owns. The day a production `PocketTransferQueue(` appears this row goes red and demands promotion."
+      "why": "AN HONEST RED, DECLARED IN THE COMMIT THAT CREATED IT rather than discovered later. `run(...)` opens one authenticated session, pulls one file and closes it. That was the recorder page's only transfer until the page moved onto `PocketTransferQueue`, which opens a session and drains N items through `bringOver(on:)` — the same per-file leg `run` wraps — with retries, progress and a stop `run` cannot express. So `run` now has tests and no production caller, which is precisely the shape this register exists to publish rather than let sit. It is kept, not deleted, because `PocketBringOverFeatureTests` and `PocketRecorderDeleteConsentFeatureTests` drive the whole one-file leg INCLUDING the session through it; the next track that touches this file should either route those suites through the queue and delete it, or give the fast-sync leg a reason to call it."
     }
   ],
   "_verdict_counts_are_equality": "Declared as exact counts, never bounds. A bound would let the unreachable roster grow by one without anybody moving this file, which is precisely how four capabilities reached `main` unreached.",
   "verdict_counts": {
-    "reachable": 45,
+    "reachable": 46,
     "undetermined": 1,
     "unreachable": 10
   },
   "_floor": "A register that lost its rows would be a silent full pass, so the population is asserted before its contents are.",
-  "minimum_capabilities": 55,
+  "minimum_capabilities": 56,
   "minimum_entry_points": 1
 }

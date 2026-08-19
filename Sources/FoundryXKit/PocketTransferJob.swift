@@ -93,8 +93,11 @@ public enum PocketTransferPhase: Sendable, Equatable {
     /// BEGINNING. The wire cannot express a resumable read and custody keeps no partial, so
     /// pretending otherwise would be a progress bar that lies about what a retry costs.
     case waitingToRetry(afterSeconds: TimeInterval, attempt: Int)
-    /// In Solleva, and a conversation.
-    case broughtOver(captureID: String)
+    /// In Solleva, and a conversation. `clockWarning` is carried for the reason
+    /// `PocketBringOverOutcome.broughtOver` carries it: it is a fact only the import could
+    /// establish about THIS recording, and a phase that dropped it would re-open the exact
+    /// producer-with-no-consumer hole `pocket-clock-warning-rendered` exists to hold shut.
+    case broughtOver(captureID: String, clockWarning: String?)
     /// It was already here; the recorder was not asked again.
     case alreadyHeld(captureID: String)
     /// The owner stopped it. Nothing was kept; the recording is still on the recorder.
@@ -177,7 +180,13 @@ public enum PocketTransferQueuePresentation {
         case .transferring: return PocketBringOverPresentation.inProgressLine
         case .waitingToRetry(let seconds, _):
             return seconds <= 0 ? stalledLine : outOfReachLine(afterSeconds: seconds)
-        case .broughtOver: return PocketBringOverPresentation.broughtOverLine
+        // THE SAME RENDERER THE SINGLE-TAP BRING-OVER USED, and not a second copy of its
+        // sentence: `message(for:)` is what appends the recorder-clock warning, and a queue
+        // that rebuilt the line itself would be a second surface that drops it.
+        case .broughtOver(let captureID, let clockWarning):
+            let outcome = PocketBringOverOutcome.broughtOver(bytes: 0, captureID: captureID,
+                                                             clockWarning: clockWarning)
+            return PocketBringOverPresentation.message(for: outcome)
         case .alreadyHeld: return PocketBringOverPresentation.alreadyHeldLine
         case .stopped: return stoppedLine
         case .failed(let line): return line
@@ -513,9 +522,10 @@ public actor PocketTransferQueue {
                 return .retryAfter(interval)
             case nil:
                 switch outcome.outcome {
-                case .broughtOver(_, let captureID, _):
+                case .broughtOver(_, let captureID, let clockWarning):
                     attemptsByRequest[request] = 0
-                    setPhase(request, .broughtOver(captureID: captureID))
+                    setPhase(request, .broughtOver(captureID: captureID,
+                                                   clockWarning: clockWarning))
                 case .alreadyHeld(let captureID):
                     setPhase(request, .alreadyHeld(captureID: captureID))
                 case .unreadableRecording:
