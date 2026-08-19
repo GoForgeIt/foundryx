@@ -47,11 +47,13 @@ struct ChatScreen: View {
     @Binding var showingChatList: Bool
 
     init(target: DoorTarget,
+         destination: CaptureDestination,
          store: ChatConversationStore,
          accountBinding: CaptureAccountScope.AccountBinding,
          log: DoorLog,
          showingChatList: Binding<Bool> = .constant(false)) {
         self.target = target
+        self.destination = destination
         self.store = store
         self.accountBinding = accountBinding
         self.log = log
