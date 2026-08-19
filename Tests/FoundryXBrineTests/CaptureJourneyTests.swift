@@ -91,7 +91,7 @@ final class CaptureJourneyTests: XCTestCase {
         let journey = CaptureJourney.build(.detail(
             status: nil, brain: .foundryCloud, transfer: .arrived, cardStage: "in_lore",
             content: nil, hasTranscript: true, separatedSpeakers: 0, hasSummary: false,
-            synthesizingSummary: false, decisions: [], surfaced: 0))
+            synthesizingSummary: false, decisions: [], actions: .empty, droppedReason: nil))
         for step in journey.steps {
             XCTAssertFalse(step.title.lowercased().contains("computer"), step.title)
             XCTAssertFalse((step.detail ?? "").lowercased().contains("computer"),
@@ -104,7 +104,7 @@ final class CaptureJourneyTests: XCTestCase {
         let journey = CaptureJourney.build(.detail(
             status: nil, brain: .justMyPhone, transfer: .none, cardStage: nil,
             content: nil, hasTranscript: false, separatedSpeakers: 0, hasSummary: false,
-            synthesizingSummary: false, decisions: [], surfaced: 0))
+            synthesizingSummary: false, decisions: [], actions: .empty, droppedReason: nil))
         XCTAssertNil(journey.step(.secondPlace))
     }
 
@@ -150,7 +150,7 @@ final class CaptureJourneyTests: XCTestCase {
             status: nil, brain: .foundryCloud, transfer: .none,
             cardStage: "some_stage_the_phone_has_never_heard_of", content: nil,
             hasTranscript: false, separatedSpeakers: 0, hasSummary: false,
-            synthesizingSummary: false, decisions: [], surfaced: 0)
+            synthesizingSummary: false, decisions: [], actions: .empty, droppedReason: nil)
         XCTAssertEqual(reading.door, .stored)
     }
 
@@ -196,6 +196,223 @@ final class CaptureJourneyTests: XCTestCase {
                                               surfaced: 0),
                        .readAndFoundNothing)
     }
+}
+
+// MARK: - THE ONE PRODUCTION JOIN, DRIVEN
+
+/// EVERY ARGUMENT `detail` TAKES IS DRIVEN THROUGH `detail`.
+///
+/// The journey has exactly one production call site — `ConversationFacesView.journey` —
+/// and it goes through `CaptureJourneyReading.detail`. The suite above tested the STEPS
+/// by handing `CaptureJourneyReading.init` a value directly, which is a different
+/// function: `transfer`, `separatedSpeakers` and `streaming` were forwarded by `detail`
+/// from only three call sites, none of which set them, so zeroing or nulling any of the
+/// three AT THE FORWARD left the whole suite green (30 tests, 0 failures) while "Off the
+/// recorder" hung waiting forever, the speaker count vanished, and the settled-denominator
+/// invariant — the thing that stops a growing total reading as a finished fraction —
+/// silently switched off.
+///
+/// So each argument is driven here through the real join, with the value it forwards
+/// OBSERVED in the built journey and its absence observed too.
+final class CaptureJourneyDetailForwardingTests: XCTestCase {
+
+    private func status(streaming: Bool, total: Int, synced: Int,
+                        stage: CaptureStage = .savedToComputer) -> CaptureStatus {
+        CaptureStatus(id: "cap-1", stage: stage, totalSegments: total, syncedSegments: synced,
+                      bytes: 1_024, startedAt: Date(timeIntervalSince1970: 1), streaming: streaming,
+                      lastSyncError: nil)
+    }
+
+    private func reading(transfer: RecorderTransfer = .none,
+                         status: CaptureStatus? = nil,
+                         cardStage: String? = nil,
+                         hasTranscript: Bool = true,
+                         separatedSpeakers: Int = 0,
+                         actions: ConversationActionsPresentation = .empty,
+                         decisions: [AmbientDecision] = [],
+                         droppedReason: String? = nil) -> CaptureJourneyReading {
+        CaptureJourneyReading.detail(
+            status: status, brain: .foundryCloud, transfer: transfer, cardStage: cardStage,
+            content: nil, hasTranscript: hasTranscript, separatedSpeakers: separatedSpeakers,
+            hasSummary: false, synthesizingSummary: false, decisions: decisions,
+            actions: actions, droppedReason: droppedReason)
+    }
+
+    // MARK: the transfer
+
+    /// MUTANT: `transfer: .none` at the forward. Every recording that HAD come off a
+    /// recorder loses its "Off the recorder" step entirely, and the page that is supposed
+    /// to say where the audio came from says nothing.
+    func testTheTransferItWasGivenReachesTheJourney() {
+        XCTAssertEqual(reading(transfer: .arrived).transfer, .arrived,
+                       "the join did not carry the transfer it was handed")
+        let arrived = CaptureJourney.build(reading(transfer: .arrived))
+        XCTAssertEqual(arrived.step(.offTheRecorder)?.state, .done,
+                       "an arrived transfer did not reach the journey through the join")
+        XCTAssertNil(CaptureJourney.build(reading(transfer: .none)).step(.offTheRecorder),
+                     "a phone recording grew a transfer step")
+        let inFlight = CaptureJourney.build(reading(
+            transfer: .measured(PullReading(delivered: 250_000, announced: 1_000_000,
+                                            finished: false))))
+        XCTAssertEqual(inFlight.step(.offTheRecorder)?.state, .working)
+        XCTAssertEqual(inFlight.step(.offTheRecorder)?.figure.percentText, "25%",
+                       "the measured bytes did not survive the join")
+    }
+
+    // MARK: the speakers
+
+    /// MUTANT: `separatedSpeakers: 0` at the forward. Zero is the ambiguous reading that
+    /// deliberately says NOTHING, so the whole speaker sentence disappears from every
+    /// diarized voice note and nothing anywhere goes red.
+    func testTheSpeakerCountItWasGivenReachesTheJourney() {
+        let three = CaptureJourney.build(reading(hasTranscript: true, separatedSpeakers: 3))
+        XCTAssertEqual(three.step(.transcript)?.detail, "3 speakers separated",
+                       "the speaker count did not survive the join")
+        let one = CaptureJourney.build(reading(hasTranscript: true, separatedSpeakers: 1))
+        XCTAssertEqual(one.step(.transcript)?.detail, "1 speaker separated")
+        // And zero still says nothing — the claim above is about forwarding, not about
+        // inventing a sentence where the door returned no speakers.
+        let none = CaptureJourney.build(reading(hasTranscript: true, separatedSpeakers: 0))
+        XCTAssertNil(none.step(.transcript)?.detail)
+    }
+
+    // MARK: still arriving
+
+    /// MUTANT: `streaming: false` at the forward. A live voice note's segments are still
+    /// being written, and the denominator is still growing — `settled` goes true, the
+    /// "Saved on this phone" step calls itself done while audio is still coming in, and
+    /// the second place renders a finished-looking fraction over a total that is about to
+    /// change. This is the exact overclaim the settled flag exists to prevent.
+    func testWhetherAudioIsStillArrivingReachesTheJourney() {
+        let live = CaptureJourney.build(reading(
+            status: status(streaming: true, total: 4, synced: 4, stage: .savedOnPhone)))
+        XCTAssertEqual(live.step(.onThisPhone)?.state, .working,
+                       "a still-streaming voice note called its phone step done")
+        XCTAssertNotEqual(live.step(.secondPlace)?.state, .done,
+                          "4 of 4 read as finished while the total was still growing")
+        XCTAssertNil(live.step(.secondPlace)?.figure.fraction,
+                     "an unsettled figure derived a fraction")
+
+        let finished = CaptureJourney.build(reading(
+            status: status(streaming: false, total: 4, synced: 4)))
+        XCTAssertEqual(finished.step(.onThisPhone)?.state, .done)
+        XCTAssertEqual(finished.step(.secondPlace)?.state, .done,
+                       "a finished, fully-synced voice note never settles")
+    }
+
+    /// The counts themselves come through the same forward.
+    func testTheSegmentCountsReachTheJourney() {
+        let j = CaptureJourney.build(reading(
+            status: status(streaming: false, total: 9, synced: 4)))
+        XCTAssertEqual(j.step(.onThisPhone)?.figure.line, "9 segments")
+        XCTAssertEqual(j.step(.secondPlace)?.state, .working)
+    }
+
+    // MARK: the drop reason
+
+    /// THE TESTED PATH NOTHING COULD REACH. `detail` hardcoded `droppedReason: nil`, so
+    /// `testAFailedTranscriptionSaysWhyRatherThanSpinning` above — which builds the
+    /// reading directly — passed over a branch the app could never enter. Every failed
+    /// voice note in the shipping build said "Transcription failed." while the specific
+    /// reason sat on the card tombstone.
+    func testAFailedTranscriptionSaysWhyThroughTheJoinTheAppActuallyUses() {
+        let j = CaptureJourney.build(reading(
+            status: status(streaming: false, total: 4, synced: 4),
+            cardStage: "failed", hasTranscript: false,
+            droppedReason: "silent_no_transcript"))
+        XCTAssertEqual(j.step(.transcript)?.state, .failed)
+        XCTAssertEqual(j.step(.transcript)?.detail, "No speech detected",
+                       "the drop reason did not survive the join — the generic line shipped")
+        // And it is the line the ROW shows: the transcript is the first unfinished step
+        // once the audio is safe, and a failed step's headline is its reason.
+        XCTAssertEqual(j.current?.phase, .transcript)
+        XCTAssertEqual(j.headline, "No speech detected")
+    }
+
+    /// Every reason the poller can publish arrives as its own sentence, and an absent one
+    /// still degrades to the generic line rather than to a crash or a wire token.
+    func testEveryDropReasonThePollerPublishesSurvivesTheJoin() {
+        for reason in ["silent_no_transcript", "noise", "junk_purge", "key_lost"] {
+            let j = CaptureJourney.build(reading(cardStage: "failed", hasTranscript: false,
+                                                 droppedReason: reason))
+            let detail = j.step(.transcript)?.detail
+            XCTAssertEqual(detail, ConversationProgress.failureMessage(droppedReason: reason),
+                           "\(reason) did not reach the step")
+            XCTAssertNotEqual(detail, "Transcription failed.",
+                              "\(reason) fell back to the generic line")
+            XCTAssertFalse(detail?.contains("_") ?? false,
+                           "a wire token reached a person: \(detail ?? "")")
+        }
+        let unknown = CaptureJourney.build(reading(cardStage: "failed", hasTranscript: false,
+                                                   droppedReason: nil))
+        XCTAssertEqual(unknown.step(.transcript)?.detail, "Transcription failed.")
+    }
+
+    // MARK: what counts as surfaced
+
+    private func othersRow() -> ConversationActionsPresentation.Row {
+        .init(id: "surfaced-1", label: "Send Sarah the deck", meta: nil, kind: .surfaced,
+              state: .open, utterance: "I'll send Sarah the deck")
+    }
+
+    /// THE CONTRADICTION, ON ONE SCREEN. `surfaced: actions.rows.count` excluded
+    /// `othersRows`, so a voice note whose only surfaced item was said by somebody else
+    /// reported zero and read "Solleva read this voice note and found nothing to act on"
+    /// — directly above an Actions face listing that very item under "Heard from others".
+    func testAnItemHeardFromSomeoneElseIsNotNothingToActOn() {
+        let face = ConversationActionsPresentation(rows: [], othersRows: [othersRow()])
+        XCTAssertFalse(face.isEmpty)
+        XCTAssertEqual(face.surfaced, 1,
+                       "the face is rendering an item it does not count as surfaced")
+        let candidate = AmbientDecision(ts: 1, captureId: "c", windowChars: 10,
+                                        outcome: .candidate, candidate: nil,
+                                        skipReason: nil, latencyMs: 1)
+        let reading = AmbientReading.reading(hasTranscript: true, decisions: [candidate],
+                                             actions: face)
+        XCTAssertEqual(reading, .surfaced(1))
+        XCTAssertNotEqual(reading, .readAndFoundNothing,
+                          "the page says it found nothing while showing an item")
+        XCTAssertFalse(reading.line.contains("found nothing"), reading.line)
+    }
+
+    /// AND THE JOURNEY STEP AGREES WITH THE FACE. The "Read for actions" step draws its
+    /// own count; it must be the count of what is on the screen, others included.
+    func testTheReadForActionsStepCountsWhatTheFaceRenders() {
+        let mixed = ConversationActionsPresentation(
+            rows: [.init(id: "user-1", label: "Book the van", meta: nil, kind: .user,
+                         state: .open)],
+            othersRows: [othersRow()])
+        let j = CaptureJourney.build(reading(actions: mixed))
+        XCTAssertEqual(j.step(.surfaced)?.figure.line, "2 items",
+                       "the step counted only part of the face")
+        XCTAssertEqual(j.step(.surfaced)?.detail, "2 items came out of this voice note.")
+    }
+
+    /// THE INVARIANT, over a population rather than one example: a face is empty if and
+    /// only if it surfaced nothing. Anything that can put a row on the screen has to be
+    /// counted, or the sentence above it goes false again.
+    func testAFaceSurfacesNothingExactlyWhenItIsEmpty() {
+        let row = othersRow()
+        let population: [ConversationActionsPresentation] = [
+            .init(rows: [], othersRows: []),
+            .init(rows: [row], othersRows: []),
+            .init(rows: [], othersRows: [row]),
+            .init(rows: [row], othersRows: [row]),
+        ]
+        for face in population {
+            XCTAssertEqual(face.surfaced == 0, face.isEmpty,
+                           "a face with \(face.rows.count) own + \(face.othersRows.count) "
+                           + "others rows counts \(face.surfaced) as surfaced")
+            let reading = AmbientReading.reading(hasTranscript: true, decisions: [], actions: face)
+            XCTAssertEqual(reading == .surfaced(face.surfaced), !face.isEmpty)
+        }
+    }
+}
+
+extension ConversationActionsPresentation {
+    /// A face with nothing on it — the fixture the join tests that are not ABOUT the
+    /// actions face pass in.
+    static let empty = ConversationActionsPresentation(rows: [], othersRows: [])
 }
 
 /// THE VOCABULARY GATE, EXTENDED TO THE COPY IT CANNOT SEE.

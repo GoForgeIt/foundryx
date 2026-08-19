@@ -157,7 +157,7 @@ final class DeletionDoesNotTrapMeFeatureTests: XCTestCase {
             defineCheck("I am offered to finish the deletion") { _, _, _ in
                 // The door-failure mapping is what carries the action text.
                 let msg = DoorFailureMessage.make(
-                    status: await MainActor.run { w.status }, underlying: nil)
+                    status: await MainActor.run { w.status }, underlying: nil, destination: .computer)
                 guard let action = msg.action, action.lowercased().contains("finish") else {
                     throw BrineStepError(
                         "no way out was offered — Retry deletion lives behind the very "

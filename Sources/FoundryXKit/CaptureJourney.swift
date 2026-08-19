@@ -224,6 +224,22 @@ public enum AmbientReading: Sendable, Equatable {
         return .readAndFoundNothing
     }
 
+    /// THE SAME JOIN, TAKING THE FACE ITSELF RATHER THAN A COUNT OF PART OF IT.
+    ///
+    /// `surfaced:` is an `Int`, and the view was computing it as `actions.rows.count` —
+    /// which EXCLUDES `othersRows`, the collapsed "Heard from others" group that is on the
+    /// same screen. A voice note whose only surfaced item was said by someone else
+    /// therefore rendered "Solleva read this voice note and found nothing to act on"
+    /// directly above that item. This overload removes the arithmetic from the seam
+    /// entirely: the caller hands over the face, and what counts as surfaced is decided
+    /// here, where a test runs it.
+    public static func reading(hasTranscript: Bool,
+                               decisions: [AmbientDecision],
+                               actions: ConversationActionsPresentation) -> AmbientReading {
+        reading(hasTranscript: hasTranscript, decisions: decisions,
+                surfaced: actions.surfaced)
+    }
+
     /// Whether this reading is FINISHED — the gate has said its piece.
     public var isSettled: Bool {
         switch self {
@@ -635,7 +651,8 @@ public extension CaptureJourneyReading {
                        hasSummary: Bool,
                        synthesizingSummary: Bool,
                        decisions: [AmbientDecision],
-                       surfaced: Int) -> CaptureJourneyReading {
+                       actions: ConversationActionsPresentation,
+                       droppedReason: String?) -> CaptureJourneyReading {
         let door: CaptureLifecycleStage = {
             if let wire = cardStage, !wire.isEmpty { return CaptureLifecycleStage(wire: wire) }
             return hasTranscript ? .transcribed : .stored
@@ -658,7 +675,16 @@ public extension CaptureJourneyReading {
             hasSummary: hasSummary,
             ambient: AmbientReading.reading(hasTranscript: hasTranscript,
                                             decisions: decisions,
-                                            surfaced: surfaced),
-            droppedReason: nil)
+                                            actions: actions),
+            // THE DOOR'S OWN REASON, FORWARDED.
+            //
+            // This was hardcoded `nil`, which made `transcriptStep`'s failure branch —
+            // and the tested sentence "a failed transcription says why" — UNREACHABLE
+            // from the one seam the app actually builds a journey through. Every `.failed`
+            // capture rendered the generic "Transcription failed." while the specific
+            // reason (`silent_no_transcript`, `noise`, `junk_purge`, `key_lost`) sat on
+            // the durable card tombstone the poller writes. A tested path nothing can
+            // reach is not a tested path.
+            droppedReason: droppedReason)
     }
 }

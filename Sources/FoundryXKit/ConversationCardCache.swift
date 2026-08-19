@@ -28,6 +28,16 @@ public struct ConversationCardMeta: Codable, Sendable, Equatable {
     /// Last known door pipeline stage string (advisory — the live poller is canonical
     /// while a card is on screen; this just gives a sensible value before the poll).
     public var stage: String?
+    /// Lore's terminal drop reason (`silent_no_transcript` | `noise` | `junk_purge` |
+    /// `key_lost`) once a capture FAILED.
+    ///
+    /// IT IS PERSISTED HERE BECAUSE THE DETAIL VIEW JOINS FROM THIS TOMBSTONE AND NOT
+    /// FROM A LIVE POLLER. The reason has always existed — `CaptureStatusPoller` publishes
+    /// it and the card face uses it — but the journey seam had nowhere to read it from and
+    /// hardcoded nil, so every failed voice note said the generic "Transcription failed."
+    /// while the specific sentence sat behind a `nil` literal. Read only under a failed
+    /// `stage`; a stale value under any other stage is inert by construction.
+    public var droppedReason: String?
     /// The on-device PROVISIONAL transcript body, persisted at finalize so the
     /// conversation shows readable content INSTANTLY (track 20260628) — before, and
     /// resilient to a slow/failed, Kiln transcription. Overridden by the Kiln transcript
@@ -48,11 +58,13 @@ public struct ConversationCardMeta: Codable, Sendable, Equatable {
     public var startedAt: UInt64?
 
     public init(title: String? = nil, summary: String? = nil, stage: String? = nil,
+                droppedReason: String? = nil,
                 provisionalTranscript: String? = nil, isProvisional: Bool = false,
                 updatedAt: UInt64 = 0, startedAt: UInt64? = nil) {
         self.title = title
         self.summary = summary
         self.stage = stage
+        self.droppedReason = droppedReason
         self.provisionalTranscript = provisionalTranscript
         self.isProvisional = isProvisional
         self.updatedAt = updatedAt
@@ -61,6 +73,7 @@ public struct ConversationCardMeta: Codable, Sendable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case title, summary, stage
+        case droppedReason = "dropped_reason"
         case provisionalTranscript = "provisional_transcript"
         case isProvisional = "is_provisional"
         case updatedAt = "updated_at"
@@ -74,6 +87,7 @@ public struct ConversationCardMeta: Codable, Sendable, Equatable {
         title = try c.decodeIfPresent(String.self, forKey: .title)
         summary = try c.decodeIfPresent(String.self, forKey: .summary)
         stage = try c.decodeIfPresent(String.self, forKey: .stage)
+        droppedReason = try c.decodeIfPresent(String.self, forKey: .droppedReason)
         provisionalTranscript = try c.decodeIfPresent(String.self, forKey: .provisionalTranscript)
         isProvisional = try c.decodeIfPresent(Bool.self, forKey: .isProvisional) ?? false
         updatedAt = try c.decodeIfPresent(UInt64.self, forKey: .updatedAt) ?? 0
@@ -144,7 +158,8 @@ public enum ConversationCardStore {
                              baseDir: URL,
                              title: String? = nil,
                              summary: String? = nil,
-                             stage: String? = nil) -> Bool {
+                             stage: String? = nil,
+                             droppedReason: String? = nil) -> Bool {
         var card = load(captureId: captureId, baseDir: baseDir) ?? ConversationCardMeta()
         var changed = false
         var titleChanged = false, summaryChanged = false
@@ -153,6 +168,11 @@ public enum ConversationCardStore {
         if let t = title, !t.isEmpty, t != card.title { card.title = t; changed = true; titleChanged = true }
         if let s = summary, !s.isEmpty, s != card.summary { card.summary = s; changed = true; summaryChanged = true }
         if let st = stage, !st.isEmpty, st != card.stage { card.stage = st; changed = true }
+        // THE REASON A CAPTURE DIED, KEPT. Lore reports it once, on the poll that turns
+        // the stage terminal; the detail view opens long after that poller is gone.
+        if let d = droppedReason, !d.isEmpty, d != card.droppedReason {
+            card.droppedReason = d; changed = true
+        }
         let hasAuthoritative = (title.map { !$0.isEmpty } ?? false) || (summary.map { !$0.isEmpty } ?? false)
         if hasAuthoritative && card.isProvisional { card.isProvisional = false; changed = true }
         guard changed else { return false }

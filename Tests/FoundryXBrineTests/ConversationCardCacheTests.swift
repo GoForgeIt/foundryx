@@ -141,3 +141,66 @@ final class ConversationCardCacheTests: XCTestCase {
                        "no transcript cached on sight for an older conversation")
     }
 }
+
+// MARK: - the reason a voice note died outlives the poller that heard it
+
+/// THE DURABLE HALF OF "A FAILED TRANSCRIPTION SAYS WHY".
+///
+/// `CaptureStatusPoller` publishes Lore's terminal drop reason, and then stops: it is a
+/// live object bound to a card on screen. The detail view opens later, joins from the
+/// durable `card.json` tombstone, and had nothing to read — so `CaptureJourneyReading.detail`
+/// hardcoded `droppedReason: nil` and every failed voice note showed the generic
+/// "Transcription failed." while the specific reason was thrown away on every poll.
+final class ConversationCardDroppedReasonTests: XCTestCase {
+
+    private func tempDir(_ name: String) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cardreason-\(name)-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    func testTheDropReasonIsPersistedAndSurvivesAReload() throws {
+        let dir = try tempDir("persist")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertTrue(ConversationCardStore.merge(captureId: "cap-1", baseDir: dir,
+                                                  stage: "failed",
+                                                  droppedReason: "silent_no_transcript"))
+        let card = try XCTUnwrap(ConversationCardStore.load(captureId: "cap-1", baseDir: dir))
+        XCTAssertEqual(card.stage, "failed")
+        XCTAssertEqual(card.droppedReason, "silent_no_transcript",
+                       "the reason was not written to the tombstone the detail view reads")
+        // And it reaches the sentence, through the join the app actually uses.
+        let journey = CaptureJourney.build(.detail(
+            status: nil, brain: .foundryCloud, transfer: .none, cardStage: card.stage,
+            content: nil, hasTranscript: false, separatedSpeakers: 0, hasSummary: false,
+            synthesizingSummary: false, decisions: [], actions: .empty,
+            droppedReason: card.droppedReason))
+        XCTAssertEqual(journey.step(.transcript)?.detail, "No speech detected")
+    }
+
+    /// A repeat poll with the same reason must not churn the card (the merge is
+    /// change-gated, and a false "wrote" rebuilds the whole list).
+    func testARepeatedReasonDoesNotRewriteTheCard() throws {
+        let dir = try tempDir("idempotent")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertTrue(ConversationCardStore.merge(captureId: "cap-2", baseDir: dir,
+                                                  stage: "failed", droppedReason: "noise"))
+        XCTAssertFalse(ConversationCardStore.merge(captureId: "cap-2", baseDir: dir,
+                                                   stage: "failed", droppedReason: "noise"),
+                       "an unchanged poll rewrote the card")
+    }
+
+    /// A card written before this field existed still decodes, with no reason.
+    func testACardWrittenBeforeTheFieldExistedStillDecodes() throws {
+        let dir = try tempDir("legacy")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let capDir = dir.appendingPathComponent("cap-3", isDirectory: true)
+        try FileManager.default.createDirectory(at: capDir, withIntermediateDirectories: true)
+        try Data(#"{"title":"Old one","stage":"failed","updated_at":1}"#.utf8)
+            .write(to: capDir.appendingPathComponent("card.json"))
+        let card = try XCTUnwrap(ConversationCardStore.load(captureId: "cap-3", baseDir: dir))
+        XCTAssertEqual(card.title, "Old one")
+        XCTAssertNil(card.droppedReason)
+    }
+}

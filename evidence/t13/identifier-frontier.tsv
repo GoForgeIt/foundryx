@@ -88,6 +88,7 @@ coding-key	Sources/FoundryXKit/CaptureRetention.swift	speakers
 coding-key	Sources/FoundryXKit/CaptureRetention.swift	summary
 coding-key	Sources/FoundryXKit/CaptureRetention.swift	title
 coding-key	Sources/FoundryXKit/CaptureRetention.swift	transcript
+coding-key	Sources/FoundryXKit/ConversationCardCache.swift	droppedReason = "dropped_reason"
 coding-key	Sources/FoundryXKit/ConversationCardCache.swift	isProvisional = "is_provisional"
 coding-key	Sources/FoundryXKit/ConversationCardCache.swift	provisionalTranscript = "provisional_transcript"
 coding-key	Sources/FoundryXKit/ConversationCardCache.swift	stage

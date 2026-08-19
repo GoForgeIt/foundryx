@@ -522,9 +522,20 @@ public enum KilnLibraryCopy {
     /// does not proxy. So this says the work EXISTS and stops — it is deliberately not a
     /// disclosure control, because a control that opens onto nothing is worse than a
     /// sentence that admits the limit.
-    public static func subagentNote(_ n: ChatNode, parentIds: Set<String>) -> String? {
+    public static func subagentNote(_ n: ChatNode, parentIds: Set<String>,
+                                    destination: CaptureDestination) -> String? {
         guard parentIds.contains(n.id) else { return nil }
-        return "Has subagent work · open on your Mac to see it"
+        return subagentNoteText(destination: destination)
+    }
+
+    /// THE SENTENCE ITSELF, free of the node it is drawn beside — so the tier gate can
+    /// execute it without assembling a whole chat rail to ask what words it uses.
+    public static func subagentNoteText(destination: CaptureDestination) -> String {
+        switch destination {
+        case .phone:    return "Has subagent work · it can't be opened from this phone"
+        case .computer: return "Has subagent work · open on your Mac to see it"
+        case .vault:    return "Has subagent work · open it in your Vault to see it"
+        }
     }
 
     /// The label a pick-up BUTTON would carry.
@@ -563,10 +574,15 @@ public enum KilnLibraryCopy {
     public static let listTitle = "Chats"
 
     /// The reason string a reach failure carries, for the coverage line.
-    public static func reason(_ reach: MacReach) -> String {
+    public static func reason(_ reach: MacReach, destination: CaptureDestination) -> String {
         switch reach {
         case .reachable: return ""
-        case .noComputer: return "No computer is connected."
+        case .noComputer:
+            switch destination {
+            case .phone:    return "This phone is the only brain set up."
+            case .computer: return "No computer is connected."
+            case .vault:    return "No Vault is connected."
+            }
         case .unreachable(let line): return line
         }
     }
@@ -579,16 +595,30 @@ public enum KilnLibraryCopy {
     /// Code session concludes it was never imported. It is the same class as the empty-list
     /// trap the door answers 502/503 for, moved one layer out: the door refuses to say
     /// "nothing", so this must refuse to say "everything".
-    public static func reachLine(_ reach: MacReach) -> String? {
+    public static func reachLine(_ reach: MacReach,
+                                 destination: CaptureDestination) -> String? {
+        // THE PHONE TIER HAS NO SECOND PLACE, so there is no "chats there aren't listed"
+        // to write — the honest line is the positive one, and it is still a line rather
+        // than silence, because silence is what let a partial list read as a whole one.
+        guard let second = destination.secondPlace else {
+            switch reach {
+            case .reachable: return nil
+            case .noComputer, .unreachable:
+                return "These are the chats on this phone — the only place they live."
+            }
+        }
         switch reach {
         case .reachable:
             return nil
         case .noComputer:
-            return "These are the chats on this phone. No computer is connected, so the "
-                + "chats on your Mac aren't listed."
+            let absent = destination == .computer ? "No computer is connected"
+                                                  : "No Vault is connected"
+            return "These are the chats on this phone. \(absent), so the "
+                + "chats \(destination == .computer ? "on" : "in") \(second) aren't listed."
         case .unreachable(let detail):
             let tail = detail.trimmingCharacters(in: .whitespacesAndNewlines)
-            return "These are the chats on this phone. Your Mac isn't reachable, so the "
+            let subject = second.prefix(1).uppercased() + second.dropFirst()
+            return "These are the chats on this phone. \(subject) isn't reachable, so the "
                 + "chats there aren't listed." + (tail.isEmpty ? "" : " \(tail)")
         }
     }
@@ -598,21 +628,42 @@ public enum KilnLibraryCopy {
     /// `nil` is allowed ONLY for a complete list that is not being searched. While a search
     /// is running this MUST return a sentence — a result set with no stated scope is a
     /// partial answer wearing a complete one's clothes.
-    public static func coverageLine(_ coverage: ChatListCoverage, searching: Bool) -> String? {
+    public static func coverageLine(_ coverage: ChatListCoverage, searching: Bool,
+                                    destination: CaptureDestination) -> String? {
+        // On the phone tier the list is complete BY CONSTRUCTION — there is nowhere else
+        // to have searched — so the scope sentence says that, and never implies a second
+        // place was consulted or skipped.
+        guard let second = destination.secondPlace,
+              let possessive = destination.secondPlacePossessive else {
+            switch coverage {
+            case .complete:
+                return searching ? "Searched this phone — the only place your chats live." : nil
+            case .truncated(let shown, let total):
+                let head = searching ? "Searched this phone" : "Showing the newest chats"
+                return "\(head) — \(shown) of \(total), most recent first."
+            case .thisPhoneOnly(let reason):
+                let tail = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+                return "Searched this phone — the only place your chats live."
+                    + (tail.isEmpty ? "" : " \(tail)")
+            case .pending:
+                return searching ? "Still searching this phone…" : "Still reading this phone…"
+            }
+        }
         switch coverage {
         case .complete:
-            return searching ? "Searched this phone and your Mac." : nil
+            return searching ? "Searched this phone and \(second)." : nil
         case .truncated(let shown, let total):
-            let head = searching ? "Searched this phone and your Mac" : "Showing the newest chats"
-            return "\(head) — \(shown) of \(total) from your Mac, most recent first."
+            let head = searching ? "Searched this phone and \(second)"
+                                 : "Showing the newest chats"
+            return "\(head) — \(shown) of \(total) from \(second), most recent first."
         case .thisPhoneOnly(let reason):
             let tail = reason.trimmingCharacters(in: .whitespacesAndNewlines)
             return (searching
-                ? "Searched this phone only — your Mac's chats were not searched."
-                : "This phone's chats only — your Mac's chats aren't listed.")
+                ? "Searched this phone only — \(possessive) chats were not searched."
+                : "This phone's chats only — \(possessive) chats aren't listed.")
                 + (tail.isEmpty ? "" : " \(tail)")
         case .pending:
-            return searching ? "Still searching your Mac…" : "Still reading your Mac…"
+            return searching ? "Still searching \(second)…" : "Still reading \(second)…"
         }
     }
 

@@ -575,6 +575,10 @@ public enum KilnLibraryPresentation {
     /// re-apply free text to them without dropping content matches. See `matchesFilter`.
     public static func resolve(
         computerConnected: Bool,
+        /// WHICH BRAIN this account resolved to. Required, no default: the coverage and
+        /// reach sentences this builds name the second place out loud, and a default here
+        /// would name a Mac for a Vault owner.
+        destination: CaptureDestination,
         phoneRows: [LibraryChatRow] = [],
         lens: Lens = defaultLens,
         sort: Sort = defaultSort,
@@ -588,7 +592,8 @@ public enum KilnLibraryPresentation {
                 rows: phoneRows, org: KilnChatOrg.empty,
                 lens: lens, sort: sort, query: query, provenance: provenance,
                 preMatchedIds: Set(phoneRows.map(\.id)), macReach: reach,
-                coverage: .thisPhoneOnly(reason: KilnLibraryCopy.reason(reach)),
+                coverage: .thisPhoneOnly(
+                    reason: KilnLibraryCopy.reason(reach, destination: destination)),
                 nowMs: nowMs, totalRows: phoneRows.count))
         }
 
@@ -616,8 +621,9 @@ public enum KilnLibraryPresentation {
                 nowMs: nowMs, totalRows: loaded.page.total))
         } catch {
             let line = (error as? KilnLibraryError).map {
-                DoorFailureMessage.make(kilnLibraryFailure: $0).line
-            } ?? DoorFailureMessage.make(doorTransportFailure: error).line
+                DoorFailureMessage.make(kilnLibraryFailure: $0, destination: destination).line
+            } ?? DoorFailureMessage.make(doorTransportFailure: error,
+                                         destination: destination).line
             guard !phoneRows.isEmpty else { return .unreachable(line) }
             return phoneOnly(.unreachable(line))
         }
