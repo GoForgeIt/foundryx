@@ -58,10 +58,9 @@ private enum PocketDeleteConsentSteps {
             "something inside Solleva asks that recorder to forget a recording nobody chose",
         ]
         let thens = [
-            "a person's choice to remove it cannot even be recorded",
+            "a person's choice to remove it is recorded, and it carries what they were told",
             "the same is true when Solleva has simply never checked",
-            "a recording Solleva can prove it holds elsewhere CAN be chosen, so the bar is not "
-                + "just always-no",
+            "what they were told is not the same sentence in those two cases",
             "arming a recorder to clear itself cannot record a choice about that recording "
                 + "either",
             "a recording Solleva holds elsewhere can be cleared by an armed recorder",
@@ -458,33 +457,45 @@ private actor PocketDeleteConsentWorld {
 
         // MARK: the safety predicate is required, not remembered
 
-        case "a person's choice to remove it cannot even be recorded":
+        // NICK, 2026-08-18: *"we cannot hard block them from deleting."* These three used to
+        // assert the opposite, and they were right until the ruling. What replaced them is not a
+        // weaker claim — it is the same claim about a different thing. The manual path no longer
+        // refuses; what it may not do is compose a removal WITHOUT SAYING WHAT IT COSTS, and
+        // that is what these now hold, over a population, with the two cases required to differ.
+        case "a person's choice to remove it is recorded, and it carries what they were told":
             let file = try XCTUnwrap(unprovenFile)
             // ON THE RECORDER, ON THIS PHONE, AND NOTHING ANYWHERE ELSE. This is the reading a
             // recording has the moment it has been brought over and before the drain and
-            // finalize have put it anywhere that survives losing the phone.
-            XCTAssertNil(PocketDeleteConsent.ownerChoseThisRecording(file, provenSafeBy: Self.onlyHere),
-                         "a consent was minted for a recording Solleva cannot prove it holds "
-                             + "anywhere but this phone — the ruling's invariant is that "
-                             + "nothing leaves the recorder unless we can prove otherwise")
+            // finalize have put it anywhere that survives losing the phone — and on the
+            // phone-only tier it is the reading it has FOREVER.
+            let consent = PocketDeleteConsent.ownerChoseThisRecording(
+                file, statingThat: .ofRemoving(Self.onlyHere))
+            XCTAssertEqual(consent.file, file)
+            XCTAssertEqual(consent.provenance, .ownerChose)
+            XCTAssertEqual(consent.consequence, .thisPhoneWillHoldTheOnlyCopy,
+                           "the owner was not told that this leaves the only copy on a handset")
 
         case "the same is true when Solleva has simply never checked":
             let file = try XCTUnwrap(unprovenFile)
-            XCTAssertNil(PocketDeleteConsent.ownerChoseThisRecording(file,
-                                                                     provenSafeBy: .nothingAsked),
-                         "an UNASKED place authorised a deletion. unknown must never read as "
-                             + "yes on the one predicate a removal turns on")
-
-        case "a recording Solleva can prove it holds elsewhere CAN be chosen, so the bar is not just always-no":
-            // THE POSITIVE CONTROL. Without it, a factory hard-coded to return nil satisfies
-            // both assertions above and makes the affordance Step 6 ships impossible rather
-            // than safe.
-            let file = try XCTUnwrap(unprovenFile)
-            let consent = try XCTUnwrap(
-                PocketDeleteConsent.ownerChoseThisRecording(file, provenSafeBy: Self.provenSafe),
-                "POSITIVE CONTROL FAILED: no reading at all can authorise a removal, so the "
-                    + "two refusals above prove nothing about the predicate")
+            let consent = PocketDeleteConsent.ownerChoseThisRecording(
+                file, statingThat: .ofRemoving(.nothingAsked))
             XCTAssertEqual(consent.file, file)
+            XCTAssertEqual(consent.consequence, .nothingElseHoldsIt,
+                           "an UNASKED place was reported to the owner as a copy. unknown must "
+                               + "never read as yes in the sentence a deletion is stated with")
+
+        case "what they were told is not the same sentence in those two cases":
+            // THE PAIRED DISTINCTNESS, and it is what stops the two above being satisfied by a
+            // consequence hard-coded to one value. A factory that always states the same thing
+            // passes both assertions and tells every owner the same lie.
+            let onlyHere = PocketDeleteConsequence.ofRemoving(Self.onlyHere)
+            let neverAsked = PocketDeleteConsequence.ofRemoving(.nothingAsked)
+            let proven = PocketDeleteConsequence.ofRemoving(Self.provenSafe)
+            XCTAssertEqual(Set([onlyHere, neverAsked, proven]).count, 3,
+                           "three readings produced \(Set([onlyHere, neverAsked, proven]).count) "
+                               + "distinct sentences — the consequence is not being read off the "
+                               + "reading at all")
+            XCTAssertEqual(Set([onlyHere.sentence, neverAsked.sentence, proven.sentence]).count, 3)
 
         case "arming a recorder to clear itself cannot record a choice about that recording either":
             let file = try XCTUnwrap(unprovenFile)
@@ -504,8 +515,8 @@ private actor PocketDeleteConsentWorld {
 
         case "Solleva can tell the two paths apart afterwards":
             let file = try XCTUnwrap(unprovenFile)
-            let chose = try XCTUnwrap(
-                PocketDeleteConsent.ownerChoseThisRecording(file, provenSafeBy: Self.provenSafe))
+            let chose = PocketDeleteConsent.ownerChoseThisRecording(
+                file, statingThat: .ofRemoving(Self.provenSafe))
             let armed = try XCTUnwrap(
                 PocketDeleteConsent.ownerArmedThisRecorder(file, provenSafeBy: Self.provenSafe))
             XCTAssertNotEqual(chose.provenance, armed.provenance,
@@ -520,16 +531,17 @@ private actor PocketDeleteConsentWorld {
             let key = PocketRecorderFileKey(
                 identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: "peripheral"),
                 date: Self.day, timestamp: "20260328001919")
-            // THE SAFETY PREDICATE, HANDED OVER, because there is no other way to obtain one.
-            // This is the reading the shelf row was drawn from — the ONE answer to "is this
-            // safe" in this app — and the factory is failable so an unproven recording cannot
-            // produce a consent at all.
+            // THE CONSEQUENCE, HANDED OVER, because there is no other way to obtain one. After
+            // Nick's 2026-08-18 ruling the manual factory no longer asks whether the recording
+            // is safe — it asks what the owner was told. `PocketDeleteConsequence` has no empty
+            // case and the argument has no default, so a caller that has not decided what to
+            // say cannot call this at all.
             let safe = PocketRecordingPresence(
                 onRecorder: PocketPlaceReading(answer: .yes, observedAt: Date()),
                 onThisPhone: PocketPlaceReading(answer: .yes, observedAt: Date()),
                 safeElsewhere: PocketPlaceReading(answer: .yes, observedAt: Date()))
-            let consent = try XCTUnwrap(
-                PocketDeleteConsent.ownerChoseThisRecording(key, provenSafeBy: safe))
+            let consent = PocketDeleteConsent.ownerChoseThisRecording(
+                key, statingThat: .ofRemoving(safe))
             XCTAssertEqual(consent.file, key)
             XCTAssertEqual(consent.provenance, .ownerChose)
             // IT AUTHORISES THAT RECORDING AND NO OTHER. Consent is not a mode.

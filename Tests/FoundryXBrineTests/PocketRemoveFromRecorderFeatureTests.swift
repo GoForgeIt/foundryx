@@ -22,7 +22,7 @@ final class PocketRemoveFromRecorderFeatureTests: XCTestCase {
         let result = try await BrineFeatureRunner.run(
             "pocket-remove-from-the-recorder",
             registry: StepRegistry(PocketRemoveSteps.make(world)))
-        XCTAssertEqual(result.passed, 15)
+        XCTAssertEqual(result.passed, 17)
     }
 
     /// THE PREFIX COLLISION, MEASURED RATHER THAN ASSERTED. A matcher on `"MCU&D"` answers
@@ -58,6 +58,7 @@ private enum PocketRemoveSteps {
             "a shelf with one recording confirmed safe elsewhere and one that is not",
             "a recording Solleva has confirmed safe somewhere else",
             "a recorder whose shelf Solleva could not re-read",
+            "the three things taking a recording off a recorder can cost me",
         ]
         let whens = [
             "I ask Solleva to take it off the recorder",
@@ -68,8 +69,20 @@ private enum PocketRemoveSteps {
             "I ask Solleva to take a recording off it",
         ]
         let thens = [
-            "Solleva refuses and says it has not confirmed a copy anywhere else",
             "the recorder is never asked to remove anything",
+            "what I was told I would lose is that this leaves one copy, on my phone",
+            "what I was told I would lose is that nothing else holds it",
+            "a Vault was suggested to me and it did not stand in the way",
+            "each one of them is a different sentence",
+            "a Vault is offered only where this would leave no other copy",
+            "not one of them withholds the deletion",
+            "both of them offer to be taken off the recorder",
+            "a recording Solleva has never checked on offers it too",
+            "a recording the recorder is not holding offers nothing",
+            "automatic clearing would take only the confirmed one",
+            "it would not take a recording Solleva has never checked on",
+            "what I am asked names the recorder and says Solleva cannot get it back",
+            "what I am asked claims no copy anywhere",
             "Solleva asked that recorder to remove that one recording and no other",
             "the recorder's own shelf no longer lists it",
             "Solleva says it was removed from the recorder",
@@ -92,10 +105,7 @@ private enum PocketRemoveSteps {
             "on a phone with nowhere else to put a copy, automatic clearing is not offered at all",
             "none of them promises an amount of space nobody has measured",
             "the promise is still that Solleva never deletes anything you did not ask it to",
-            "only the confirmed recording offers to be taken off the recorder",
-            "a recording Solleva has never checked on offers nothing",
             "I am asked to confirm first",
-            "what I am asked names the recorder and says where the copy already is",
             "nothing is asked of the recorder until I confirm",
             "Solleva says it cannot act on that recording right now",
             "Solleva asked that recorder how full it is on the same trip",
@@ -137,6 +147,12 @@ private actor PocketRemoveWorld {
         safeElsewhere: PocketPlaceReading(answer: .yes, observedAt: armingInstant))
     /// Nobody asked anything. `unknown` is not `no`, and it is not a yes either.
     static let neverChecked = PocketRecordingPresence.nothingAsked
+    /// THE READING EVERY SHELF ROW ACTUALLY HAS BEFORE A CHECK COMPLETES: the recorder listed
+    /// it — that is why there is a row — and nothing else has been asked about it.
+    static let listedButUnasked = PocketRecordingPresence(
+        onRecorder: PocketPlaceReading(answer: .yes, observedAt: armingInstant),
+        onThisPhone: .neverAsked,
+        safeElsewhere: .neverAsked)
 
     private var stack: FakePocketBLEStack?
     private var secrets = InMemoryPocketSecretStore()
@@ -160,6 +176,12 @@ private actor PocketRemoveWorld {
     private var shelfReadings: [PocketRecordingPresence] = []
     private var confirmationAsked: String?
 
+    /// WHAT THE OWNER WAS TOLD THEY WERE LOSING, taken off the consent the SHIPPED path
+    /// composed — `PocketRemoveFromRecorder.consent`, not a copy of its rule written here. A
+    /// scenario that re-derived the consequence would pass against a production path that
+    /// derived a different one.
+    private var consequenceStated: PocketDeleteConsequence?
+
     // MARK: - Given
 
     func given(_ phrase: String) async throws {
@@ -167,6 +189,7 @@ private actor PocketRemoveWorld {
         commandsSeenByTheRecorder = []
         listingReplies = []
         composed = []
+        consequenceStated = nil
 
         switch phrase {
         case "a recorder holding a recording that Solleva has not confirmed anywhere else":
@@ -185,7 +208,13 @@ private actor PocketRemoveWorld {
             // ONE OF EACH, ON PURPOSE. A fixture where every row agrees cannot tell a working
             // gate from a deleted `if`: the assertion would pass whether the affordance were
             // offered to all of them or none.
-            shelfReadings = [Self.provenSafe, Self.onlyHere, Self.neverChecked]
+            // THE THIRD ROW IS LISTED-BUT-UNASKED, NOT `nothingAsked`. A shelf row exists
+            // because the recorder's own listing produced it, so `onRecorder` is `.yes` on every
+            // row a person can see; only the safety answer can be missing. Using
+            // `PocketRecordingPresence.nothingAsked` here would have made the row fail the
+            // affordance for the WRONG reason — the recorder's answer rather than the copy's —
+            // and the scenario would have passed while proving nothing about the ruling.
+            shelfReadings = [Self.provenSafe, Self.onlyHere, Self.listedButUnasked]
 
         case "a recording Solleva has confirmed safe somewhere else":
             try await stageRecorder(removal: .removesWhatItHolds)
@@ -239,7 +268,8 @@ private actor PocketRemoveWorld {
             try store.armAutoClear(first, at: Self.armingInstant)
             armedAt = Self.armingInstant
 
-        case "the sentences a person reads about taking recordings off a recorder":
+        case "the sentences a person reads about taking recordings off a recorder",
+             "the three things taking a recording off a recorder can cost me":
             break
 
         default:
@@ -319,7 +349,7 @@ private actor PocketRemoveWorld {
             // removal, and the next two checks are what hold that apart.
             guard let stack else { throw BrineStepError("no recorder was staged") }
             let before = stack.commandsWritten.count
-            confirmationAsked = PocketRemoveFromRecorderPresentation.confirmation(for: .myComputer)
+            confirmationAsked = PocketRemoveFromRecorderPresentation.confirmation(for: .justMyPhone)
             commandsSeenByTheRecorder = Array(stack.commandsWritten.dropFirst(before))
             composed = await PocketRecorderCommandLedger.shared.composed(since: try requireMark())
 
@@ -348,10 +378,35 @@ private actor PocketRemoveWorld {
         }
     }
 
+    /// The consequence the shipped consent carried, or a failure that says which one it was.
+    private func requireConsequence(_ expected: PocketDeleteConsequence) throws {
+        guard let stated = consequenceStated else {
+            throw BrineStepError("no consent was composed at all, so nothing was stated — the "
+                                    + "manual path is refusing rather than telling")
+        }
+        guard stated == expected else {
+            throw BrineStepError("Solleva stated \(stated.rawValue), not \(expected.rawValue)")
+        }
+        guard outcomes == [.removed(stillOnTheRecorder: shelfWhenStaged.count - 1)] else {
+            throw BrineStepError("Solleva stated \(stated.rawValue) and then answered "
+                                    + "\(outcomes) instead of removing it")
+        }
+    }
+
     private func remove(_ recording: PocketRecording,
                         presence: PocketRecordingPresence,
                         provenance: PocketDeleteConsent.Provenance) async -> PocketRemovalOutcome {
         guard let stack, let identifier else { return .notProvenSafe }
+        // THE SHIPPED DERIVATION, ASKED THE SAME QUESTION THE ERRAND IS ABOUT TO ASK IT. Same
+        // function, same arguments; this only reads what the errand's own consent will carry.
+        consequenceStated = PocketRemoveFromRecorder.consent(
+            for: PocketRecorderFileKey(
+                identity: RecordingDeviceIdentity(shape: .filePull,
+                                                  hardwareToken: identifier.uuidString),
+                date: recording.date,
+                timestamp: recording.timestamp),
+            presence: presence,
+            provenance: provenance)?.consequence
         return await PocketRemoveFromRecorder.run(
             peripheralIdentifier: identifier,
             advertisedName: stack.deviceName,
@@ -370,34 +425,135 @@ private actor PocketRemoveWorld {
     func then(_ phrase: String) async throws {
         switch phrase {
 
-        case "Solleva refuses and says it has not confirmed a copy anywhere else":
-            guard outcomes == [.notProvenSafe] else {
-                throw BrineStepError("Solleva answered \(outcomes) instead of refusing")
+        case "what I was told I would lose is that this leaves one copy, on my phone":
+            try requireConsequence(.thisPhoneWillHoldTheOnlyCopy)
+
+        case "what I was told I would lose is that nothing else holds it":
+            try requireConsequence(.nothingElseHoldsIt)
+
+        case "a Vault was suggested to me and it did not stand in the way":
+            guard let stated = consequenceStated else {
+                throw BrineStepError("no consequence was stated at all")
             }
-            guard PocketRemoveFromRecorderPresentation.message(for: .notProvenSafe)
-                == PocketRemoveFromRecorderPresentation.notProvenSafeLine else {
-                throw BrineStepError("the refusal does not say why")
+            guard stated.vaultSuggestion != nil else {
+                throw BrineStepError("\(stated.rawValue) suggested no Vault, and it is a "
+                                        + "consequence that leaves no confirmed copy")
+            }
+            // AND IT DID NOT STAND IN THE WAY. The suggestion is a sentence, so the removal it
+            // sits beside must have happened. Without this half, "a Vault is suggested" passes
+            // on a build that suggests a Vault INSTEAD of deleting — the exact shape of the
+            // defect Nick ruled against.
+            guard outcomes == [.removed(stillOnTheRecorder: shelfWhenStaged.count - 1)] else {
+                throw BrineStepError("the Vault was suggested and Solleva answered \(outcomes) "
+                                        + "— the suggestion got in the way")
             }
 
-        case "only the confirmed recording offers to be taken off the recorder":
+        case "each one of them is a different sentence":
+            // AN INDEPENDENTLY WRITTEN LIST, not one generated from the enum. A copy test
+            // derived from the same type shrinks with the type and stays green while the
+            // sentences it was written to hold disappear.
+            let required = [
+                "Solleva has confirmed a copy of this recording somewhere other than the "
+                    + "recorder.",
+                "This leaves one copy, on this iPhone.",
+                "Solleva doesn't hold a copy of this recording. Taking it off the recorder "
+                    + "ends it.",
+            ]
+            let shipped = PocketDeleteConsequence.allCases.map(\.sentence)
+            guard shipped == required else {
+                throw BrineStepError("the three consequences read \(shipped)")
+            }
+            guard Set(shipped).count == 3 else {
+                throw BrineStepError("one sentence is used for more than one consequence")
+            }
+
+        case "a Vault is offered only where this would leave no other copy":
+            let offering = PocketDeleteConsequence.allCases
+                .filter { $0.vaultSuggestion != nil }
+            guard offering == [.thisPhoneWillHoldTheOnlyCopy, .nothingElseHoldsIt] else {
+                throw BrineStepError("a Vault is suggested on \(offering.map(\.rawValue)) — it "
+                                        + "belongs where it is true and nowhere else")
+            }
+
+        case "not one of them withholds the deletion":
+            // THE POPULATION, and this is the criterion the whole ruling rests on. Every one of
+            // the three composes a consent, so no consequence can quietly become a gate.
+            let key = PocketRecorderFileKey(
+                identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: "any"),
+                date: Self.day, timestamp: "20260328001919")
+            for consequence in PocketDeleteConsequence.allCases {
+                let consent = PocketDeleteConsent.ownerChoseThisRecording(
+                    key, statingThat: consequence)
+                guard consent.consequence == consequence,
+                      consent.provenance == .ownerChose else {
+                    throw BrineStepError("\(consequence.rawValue) did not compose an owner "
+                                            + "consent carrying its own sentence")
+                }
+            }
+
+        case "both of them offer to be taken off the recorder":
             let offered = shelfReadings.map(PocketRemoveFromRecorderPresentation.isOffered(for:))
-            guard offered == [true, false, false] else {
+            guard offered == [true, true, true] else {
                 throw BrineStepError("the affordance was offered as \(offered) over readings "
-                                        + "[safe elsewhere, only here, never checked] — it must "
-                                        + "be offered on the first and no other")
+                                        + "[safe elsewhere, only here, never checked] — the "
+                                        + "recorder is holding all three, so all three offer it")
             }
 
-        case "a recording Solleva has never checked on offers nothing":
-            // `unknown` IS NOT A YES, stated separately from the row above because it is the
-            // arm a two-valued predicate gets wrong.
+        case "a recording Solleva has never checked on offers it too":
+            // `unknown` about a copy elsewhere is not a reason to withhold the control. Held
+            // over every non-yes answer, because the arm a two-valued predicate gets wrong is
+            // the one nobody wrote a case for.
             for answer in PocketPresenceAnswer.allCases where answer != .yes {
                 let reading = PocketRecordingPresence(
                     onRecorder: PocketPlaceReading(answer: .yes, observedAt: Self.armingInstant),
                     onThisPhone: PocketPlaceReading(answer: .yes, observedAt: Self.armingInstant),
                     safeElsewhere: PocketPlaceReading(answer: answer, observedAt: nil))
-                guard !PocketRemoveFromRecorderPresentation.isOffered(for: reading) else {
-                    throw BrineStepError("the affordance is offered for a recording whose "
+                guard PocketRemoveFromRecorderPresentation.isOffered(for: reading) else {
+                    throw BrineStepError("the affordance is withheld from a recording whose "
                                             + "safety answer is \(answer.rawValue)")
+                }
+            }
+
+        case "a recording the recorder is not holding offers nothing":
+            // THE PAIRED EXISTENCE. Without it, "every recording offers removal" is satisfied by
+            // `isOffered` returning `true`, and the predicate could not fail.
+            for answer in PocketPresenceAnswer.allCases where answer != .yes {
+                let reading = PocketRecordingPresence(
+                    onRecorder: PocketPlaceReading(answer: answer, observedAt: nil),
+                    onThisPhone: PocketPlaceReading(answer: .yes, observedAt: Self.armingInstant),
+                    safeElsewhere: PocketPlaceReading(answer: .yes, observedAt: Self.armingInstant))
+                guard !PocketRemoveFromRecorderPresentation.isOffered(for: reading) else {
+                    throw BrineStepError("the affordance is offered for a recording the recorder "
+                                            + "answers \(answer.rawValue) about")
+                }
+            }
+
+        case "automatic clearing would take only the confirmed one":
+            let mayTake = shelfReadings.map(PocketRemoveFromRecorderPresentation.autoClearMayTake)
+            guard mayTake == [true, false, false] else {
+                throw BrineStepError("the armed clear would take \(mayTake) over readings "
+                                        + "[safe elsewhere, only here, never checked] — the "
+                                        + "manual ruling must not have moved this bar")
+            }
+
+        case "it would not take a recording Solleva has never checked on":
+            for answer in PocketPresenceAnswer.allCases where answer != .yes {
+                let reading = PocketRecordingPresence(
+                    onRecorder: PocketPlaceReading(answer: .yes, observedAt: Self.armingInstant),
+                    onThisPhone: PocketPlaceReading(answer: .yes, observedAt: Self.armingInstant),
+                    safeElsewhere: PocketPlaceReading(answer: answer, observedAt: nil))
+                guard !PocketRemoveFromRecorderPresentation.autoClearMayTake(reading) else {
+                    throw BrineStepError("the armed clear would take a recording whose safety "
+                                            + "answer is \(answer.rawValue)")
+                }
+                guard PocketDeleteConsent.ownerArmedThisRecorder(
+                    PocketRecorderFileKey(
+                        identity: RecordingDeviceIdentity(shape: .filePull,
+                                                          hardwareToken: "armed"),
+                        date: Self.day, timestamp: "20260328001919"),
+                    provenSafeBy: reading) == nil else {
+                    throw BrineStepError("the armed factory composed a consent for a recording "
+                                            + "whose safety answer is \(answer.rawValue)")
                 }
             }
 
@@ -407,14 +563,29 @@ private actor PocketRemoveWorld {
                                         + "confirmation this behaviour wrote has no call site")
             }
 
-        case "what I am asked names the recorder and says where the copy already is":
+        case "what I am asked names the recorder and says Solleva cannot get it back":
             let asked = confirmationAsked ?? ""
-            guard asked.contains("off the recorder"),
-                  asked.contains(PocketRemoveFromRecorderPresentation.keptLine(for: .myComputer))
-            else {
+            guard asked.contains("off the recorder"), asked.contains("can't get it back") else {
                 throw BrineStepError("the confirmation reads \"\(asked)\" — it must name the "
                                         + "recorder as what the recording is leaving AND say "
-                                        + "where the copy that makes this safe already is")
+                                        + "that this does not come back")
+            }
+
+        case "what I am asked claims no copy anywhere":
+            // THE DEFECT THIS EXISTS FOR, AND IT IS THE ONE THE RULING CREATED. This band used
+            // to append "Solleva has confirmed a copy on your computer." — safe to say only
+            // while the durability guard made a removal without one impossible. With that guard
+            // gone from the manual path, the same sentence over a recording nothing else holds
+            // would be the app talking the owner into the deletion. Held over EVERY brain,
+            // because the lie was tier-shaped.
+            for brain in BrainChoice.allCases {
+                let asked = PocketRemoveFromRecorderPresentation.confirmation(for: brain)
+                for claim in ["confirmed a copy", "copy on your computer", "copy in your Vault"]
+                where asked.contains(claim) {
+                    throw BrineStepError("the confirmation for \(brain.rawValue) reads "
+                                            + "\"\(asked)\" — it claims \"\(claim)\" about a "
+                                            + "recording it was never shown a reading for")
+                }
             }
 
         case "nothing is asked of the recorder until I confirm":

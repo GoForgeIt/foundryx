@@ -1,30 +1,45 @@
 Feature: Taking a recording off the recorder, on purpose
 
-  A recorder is the only place some recordings exist. So the rule is not "never remove anything"
-  and it is not "remove whatever is safe to remove" — it is that nothing leaves the recorder
-  unless Solleva can prove it already holds it somewhere else, and a person either chose that
-  recording or armed that recorder themselves.
+  A recorder is the only place some recordings exist, and it is also a thing that fills up. Those
+  two facts pull in opposite directions, and for a while this app only served the first: it
+  refused every removal it could not prove was safe. On a phone with no computer and no Vault it
+  could never prove that, so the control that reclaims space was never even drawn. A recorder
+  that is full and cannot be emptied is a recorder that cannot record — that is not the safe side
+  of the trade, it is a different loss, and it is the one nobody chose.
 
-  There are two ways in and there is no third. A person taps one recording, or a person turns on
-  automatic clearing for one recorder. Both read the SAME answer to "is this safe" — the one the
-  recorder page already draws — because two answers to that question is how a recording gets lost.
+  So the rule is: what I choose, I can always delete. What varies is what Solleva tells me I am
+  losing first — a copy is already elsewhere, or this leaves one copy on my phone, or nothing else
+  holds it at all. A Vault is suggested where that is a true and specific thing to say, and it
+  never stands in the way.
+
+  Clearing a recorder AUTOMATICALLY is the other way in, and it is not the same act. Nobody is
+  looking at it, so it keeps the older bar exactly: it takes nothing it cannot prove is already
+  somewhere else.
 
   A recorder can also say no. Asked to remove a recording it does not have, this firmware answers
   with a refusal rather than a shrug, and a refusal is reported as a refusal. Nothing here trusts
   the acknowledgement: after asking, Solleva reads the recorder's own shelf again on the same
   trip, and only a recording that is actually gone is reported as gone.
 
-  Scenario: A recording Solleva cannot prove it holds elsewhere is not taken off the recorder
+  Scenario: A recording Solleva cannot prove it holds elsewhere is still mine to delete
     Given a recorder holding a recording that Solleva has not confirmed anywhere else
     When I ask Solleva to take it off the recorder
-    Then Solleva refuses and says it has not confirmed a copy anywhere else
-    And the recorder is never asked to remove anything
+    Then Solleva asked that recorder to remove that one recording and no other
+    And what I was told I would lose is that this leaves one copy, on my phone
+    And a Vault was suggested to me and it did not stand in the way
 
-  Scenario: A recording Solleva has never checked on is not taken off the recorder either
+  Scenario: A recording Solleva has never checked on is mine to delete too
     Given a recorder holding a recording Solleva has never checked on
     When I ask Solleva to take it off the recorder
-    Then Solleva refuses and says it has not confirmed a copy anywhere else
-    And the recorder is never asked to remove anything
+    Then Solleva asked that recorder to remove that one recording and no other
+    And what I was told I would lose is that nothing else holds it
+    And a Vault was suggested to me and it did not stand in the way
+
+  Scenario: What I am told I am losing is different in each of the three cases
+    Given the three things taking a recording off a recorder can cost me
+    Then each one of them is a different sentence
+    And a Vault is offered only where this would leave no other copy
+    And not one of them withholds the deletion
 
   Scenario: A recording Solleva holds safely elsewhere is gone from the recorder's own shelf
     Given a recorder holding a recording Solleva has confirmed safe somewhere else
@@ -69,7 +84,7 @@ Feature: Taking a recording off the recorder, on purpose
     Then nothing that synced before I turned it on is cleared
     And the next recording to sync after that is cleared
 
-  Scenario: Automatic clearing meets the same bar a tap does
+  Scenario: Automatic clearing keeps the bar a tap no longer has to meet
     Given a recorder with automatic clearing turned on
     Then a recording Solleva cannot prove it holds elsewhere is still not cleared
     And a recording Solleva has never checked on is still not cleared
@@ -81,16 +96,23 @@ Feature: Taking a recording off the recorder, on purpose
     And none of them promises an amount of space nobody has measured
     And the promise is still that Solleva never deletes anything you did not ask it to
 
-  Scenario: The affordance exists only for a recording Solleva can prove it holds elsewhere
+  Scenario: Every recording the recorder is holding can be taken off it
     Given a shelf with one recording confirmed safe elsewhere and one that is not
-    Then only the confirmed recording offers to be taken off the recorder
-    And a recording Solleva has never checked on offers nothing
+    Then both of them offer to be taken off the recorder
+    And a recording Solleva has never checked on offers it too
+    And a recording the recorder is not holding offers nothing
 
-  Scenario: I am told what this does, and where the copy already is, before it happens
+  Scenario: Automatic clearing is offered on none of those it cannot prove
+    Given a shelf with one recording confirmed safe elsewhere and one that is not
+    Then automatic clearing would take only the confirmed one
+    And it would not take a recording Solleva has never checked on
+
+  Scenario: I am told this cannot be undone before it happens
     Given a recording Solleva has confirmed safe somewhere else
     When I choose to take it off the recorder
     Then I am asked to confirm first
-    And what I am asked names the recorder and says where the copy already is
+    And what I am asked names the recorder and says Solleva cannot get it back
+    And what I am asked claims no copy anywhere
     And nothing is asked of the recorder until I confirm
 
   Scenario: A tap that cannot be carried out says so rather than doing nothing

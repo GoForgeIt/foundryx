@@ -185,6 +185,7 @@ public enum PocketRecordingDetailPresentation {
         [placesHeading, sizeLabel, recorderNameLabel, closeAction,
          alreadyHereLine, notOnTheRecorderLine, tooBigLine]
             + PocketRecordingDetailAction.allCases.map(\.title)
+            + PocketDeleteConsequence.everyLine
     }
 
     // MARK: - Finding the one the finger landed on
@@ -238,13 +239,22 @@ public enum PocketRecordingDetailPresentation {
             actions.append(.bringItOver)
         }
 
-        // THE REMOVAL. Destructive, so it asks for POSITIVE answers on both sides: the recorder
-        // says it has this file, and the safety predicate every other destructive path in this
-        // app reads says a copy is proven somewhere else. `unknown` satisfies neither.
+        // THE REMOVAL. Destructive, and after Nick's 2026-08-18 ruling it asks for exactly one
+        // positive answer: the recorder says it has this file. What the shelf can prove about a
+        // copy elsewhere no longer withholds the control — it chooses the sentence stated beside
+        // it, which is `PocketDeleteConsequence` and which is on this page rather than buried in
+        // an alert, so the owner reads what it costs BEFORE reaching for the button.
         if let refusal = removalRefusal(for: presence, brain: brain) {
             notes.append(refusal)
         } else {
             actions.append(.removeFromRecorder)
+            let consequence = PocketDeleteConsequence.ofRemoving(presence)
+            notes.append(consequence.sentence)
+            // THE VAULT, WHERE IT IS TRUE AND NOWHERE ELSE. `nil` on the one consequence that
+            // says a copy already exists, because an upsell there is an advertisement rather
+            // than a fact — and it is a sentence, never a gate: the action above is already in
+            // `actions` by the time this line is composed.
+            if let suggestion = consequence.vaultSuggestion { notes.append(suggestion) }
         }
 
         return PocketRecordingDetailPage(
@@ -274,16 +284,21 @@ public enum PocketRecordingDetailPresentation {
 
     /// `nil` ⇒ the removal is offered. It reads `isOffered(for:)` rather than re-deriving the
     /// predicate, so this page and the shelf row cannot come to two different answers about
-    /// whether one recording is safe to take off a recorder.
+    /// whether one recording can be taken off a recorder.
+    ///
+    /// THERE IS EXACTLY ONE REASON LEFT, and Nick's 2026-08-18 ruling is why: *"we cannot hard
+    /// block them from deleting."* A recording the recorder is not holding cannot be taken off
+    /// it — that is a fact about the recorder, not a judgement about the owner. Everything the
+    /// shelf can or cannot prove about a copy elsewhere now decides the SENTENCE
+    /// (`PocketDeleteConsequence`), never the button.
+    ///
+    /// `brain` is no longer read. It stayed in the signature deliberately: the two sentences it
+    /// used to pick between were refusals, and deleting the parameter would let a later caller
+    /// quietly reintroduce a tier-shaped refusal without the diff showing a tier.
     public static func removalRefusal(for presence: PocketRecordingPresence,
                                       brain: BrainChoice) -> String? {
         if presence.onRecorder.answer != .yes { return notOnTheRecorderLine }
         if PocketRemoveFromRecorderPresentation.isOffered(for: presence) { return nil }
-        switch brain {
-        case .justMyPhone:
-            return PocketRemoveFromRecorderPresentation.nowhereElseLine
-        case .myComputer, .foundryCloud:
-            return PocketRemoveFromRecorderPresentation.notProvenSafeLine
-        }
+        return notOnTheRecorderLine
     }
 }
