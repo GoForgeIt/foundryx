@@ -103,6 +103,8 @@ private enum PocketRemoveSteps {
             "turning on automatic clearing says what synced is trusted to mean and where the "
                 + "copy went",
             "on a phone with nowhere else to put a copy, automatic clearing is not offered at all",
+            "every sentence a removal can state is in the population this promise is "
+                + "held over",
             "none of them promises an amount of space nobody has measured",
             "the promise is still that Solleva never deletes anything you did not ask it to",
             "I am asked to confirm first",
@@ -478,6 +480,26 @@ private actor PocketRemoveWorld {
             // hold a copy of this recording" for two more. A count is a categorical claim; over
             // an unasked place it is simply wrong, and being wrong toward caution is still wrong
             // when the app is the thing saying it.
+            // THE WHOLE MAP, WRITTEN OUT INDEPENDENTLY. A rule-shaped assertion ("a count needs
+            // both answers") is satisfied by a function that never states a count, and by one
+            // that states the WRONG count in a state no fixture happens to cover. Adversarial
+            // review on 2026-08-19 found exactly that: `(safeElsewhere: yes, onThisPhone: no)` —
+            // the STEADY STATE after the retention sweep deletes this phone's segments — was
+            // covered by no fixture in any of the three suites, and reordering one guard made it
+            // read "Solleva doesn't hold a copy of this recording" about a recording sitting in
+            // the owner's Vault, with a Vault upsell under it.
+            let expected: [PocketPresenceAnswer: [PocketPresenceAnswer: PocketDeleteConsequence]] = [
+                .yes: [.yes: .aCopyIsAlreadySomewhereElse,
+                       .no: .aCopyIsAlreadySomewhereElse,
+                       .unknown: .aCopyIsAlreadySomewhereElse],
+                .no: [.yes: .thisPhoneWillHoldTheOnlyCopy,
+                      .no: .nothingElseHoldsIt,
+                      .unknown: .nobodyHasCheckedWhereElseItIs],
+                .unknown: [.yes: .nobodyHasCheckedWhereElseItIs,
+                           .no: .nobodyHasCheckedWhereElseItIs,
+                           .unknown: .nobodyHasCheckedWhereElseItIs],
+            ]
+            var covered = 0
             for elsewhere in PocketPresenceAnswer.allCases {
                 for onPhone in PocketPresenceAnswer.allCases {
                     let reading = PocketRecordingPresence(
@@ -486,27 +508,31 @@ private actor PocketRemoveWorld {
                         onThisPhone: PocketPlaceReading(answer: onPhone, observedAt: nil),
                         safeElsewhere: PocketPlaceReading(answer: elsewhere, observedAt: nil))
                     let said = PocketDeleteConsequence.ofRemoving(reading)
-                    let counts = said == .thisPhoneWillHoldTheOnlyCopy
-                        || said == .nothingElseHoldsIt
-                    let bothAnswered = elsewhere != .unknown && onPhone != .unknown
-                    guard !counts || bothAnswered else {
+                    guard said == expected[elsewhere]?[onPhone] else {
                         throw BrineStepError(
                             "(elsewhere: \(elsewhere.rawValue), phone: \(onPhone.rawValue)) is "
-                                + "told \"\(said.sentence)\" — a count over a place nobody asked")
+                                + "told \"\(said.sentence)\"")
                     }
+                    // AND THE RULE, STATED SEPARATELY FROM THE MAP, so a wrong map cannot be
+                    // made green by editing the map: no categorical COUNT over an unasked place.
+                    let counts = said == .thisPhoneWillHoldTheOnlyCopy
+                        || said == .nothingElseHoldsIt
+                    guard !counts || (elsewhere != .unknown && onPhone != .unknown) else {
+                        throw BrineStepError(
+                            "(\(elsewhere.rawValue), \(onPhone.rawValue)) states a count over a "
+                                + "place nobody asked")
+                    }
+                    covered += 1
                 }
             }
-            // AND THE COUNTS ARE STILL REACHABLE, so the rule above is not satisfied by never
-            // stating one. Both fully-answered states must produce their own categorical
-            // sentence, or the fourth case has swallowed the two that matter most.
-            let bothSaidNo = PocketRecordingPresence(
-                onRecorder: PocketPlaceReading(answer: .yes, observedAt: Self.armingInstant),
-                onThisPhone: PocketPlaceReading(answer: .no, observedAt: Self.armingInstant),
-                safeElsewhere: PocketPlaceReading(answer: .no, observedAt: Self.armingInstant))
-            guard PocketDeleteConsequence.ofRemoving(bothSaidNo) == .nothingElseHoldsIt,
-                  PocketDeleteConsequence.ofRemoving(Self.onlyHere)
-                    == .thisPhoneWillHoldTheOnlyCopy else {
-                throw BrineStepError("a fully answered reading no longer states what it costs")
+            guard covered == 9 else {
+                throw BrineStepError("only \(covered) of the nine states were driven")
+            }
+            // AND ALL FOUR CONSEQUENCES ARE REACHED BY THE MAP, so none of them is a case the
+            // production function can no longer produce.
+            let reached = Set(expected.values.flatMap { $0.values })
+            guard reached == Set(PocketDeleteConsequence.allCases) else {
+                throw BrineStepError("the nine states reach only \(reached.count) consequences")
             }
 
         case "a Vault is offered only where this would leave no other copy":
@@ -516,6 +542,24 @@ private actor PocketRemoveWorld {
                                .nobodyHasCheckedWhereElseItIs] else {
                 throw BrineStepError("a Vault is suggested on \(offering.map(\.rawValue)) — it "
                                         + "belongs where it is true and nowhere else")
+            }
+            // AND IT IS A SUGGESTION, IN ITS OWN WORDS. Nick: *"we can definitely still suggest
+            // to them WITHOUT that suggestion getting in the way of their actual work."* Only
+            // the CASES carrying a suggestion were held until now, never the words — so the
+            // sentence could be rewritten into "Get a Vault before you remove this, otherwise it
+            // is gone for good" and stay green, which is the gate-shaped upsell the ruling
+            // exists to forbid. *(Adversarial review, 2026-08-19.)* Frozen independently here.
+            let suggestions = Set(PocketDeleteConsequence.allCases.compactMap(\.vaultSuggestion))
+            guard suggestions == ["A Vault would keep a copy of this for you."] else {
+                throw BrineStepError("the Vault is offered as \(suggestions)")
+            }
+            for gateWord in ["before you", "otherwise", "first", "you must", "can't remove",
+                             "won't remove", "until you"] {
+                for suggestion in suggestions where suggestion.lowercased().contains(gateWord) {
+                    throw BrineStepError(
+                        "the Vault suggestion says \"\(gateWord)\" — that is a precondition, and "
+                            + "a precondition is the suggestion getting in the way")
+                }
             }
 
         case "not one of them withholds the deletion":
@@ -538,8 +582,8 @@ private actor PocketRemoveWorld {
             let offered = shelfReadings.map(PocketRemoveFromRecorderPresentation.isOffered(for:))
             guard offered == [true, true, true] else {
                 throw BrineStepError("the affordance was offered as \(offered) over readings "
-                                        + "[safe elsewhere, only here, never checked] — the "
-                                        + "recorder is holding all three, so all three offer it")
+                                        + "[safe elsewhere, only here, listed-but-unasked] — "
+                                        + "the recorder is holding all three, so all three offer it")
             }
 
         case "a recording Solleva has never checked on offers it too":
@@ -575,8 +619,8 @@ private actor PocketRemoveWorld {
             let mayTake = shelfReadings.map(PocketRemoveFromRecorderPresentation.autoClearMayTake)
             guard mayTake == [true, false, false] else {
                 throw BrineStepError("the armed clear would take \(mayTake) over readings "
-                                        + "[safe elsewhere, only here, never checked] — the "
-                                        + "manual ruling must not have moved this bar")
+                                        + "[safe elsewhere, only here, listed-but-unasked] — "
+                                        + "the manual ruling must not have moved this bar")
             }
 
         case "it would not take a recording Solleva has never checked on":
@@ -629,14 +673,27 @@ private actor PocketRemoveWorld {
             // gone from the manual path, the same sentence over a recording nothing else holds
             // would be the app talking the owner into the deletion. Held over EVERY brain,
             // because the lie was tier-shaped.
+            // BY EQUALITY, NOT BY BLOCKLIST. This was three banned substrings, and adversarial
+            // review on 2026-08-19 walked straight through it with " Solleva already has this
+            // one safe." — a custody claim in none of the three spellings. A band that is
+            // rendered for all four consequences and is shown no reading at all may say exactly
+            // one thing, so the assertion is that it says exactly that thing.
+            let claimFreeLine = PocketRemoveFromRecorderPresentation.confirmationLine
             for brain in BrainChoice.allCases {
                 let asked = PocketRemoveFromRecorderPresentation.confirmation(for: brain)
-                for claim in ["confirmed a copy", "copy on your computer", "copy in your Vault"]
-                where asked.contains(claim) {
+                guard asked == claimFreeLine else {
                     throw BrineStepError("the confirmation for \(brain.rawValue) reads "
-                                            + "\"\(asked)\" — it claims \"\(claim)\" about a "
-                                            + "recording it was never shown a reading for")
+                                            + "\"\(asked)\" — this band is shown without any "
+                                            + "reading of where the recording is, so it may say "
+                                            + "only that the act cannot be undone")
                 }
+            }
+            // AND IT CARRIES NO CUSTODY WORD AT ALL, held over the one line above rather than
+            // over a list of spellings.
+            for custodyWord in ["copy", "safe", "confirmed", "computer", "Vault", "backed up"]
+            where claimFreeLine.contains(custodyWord) {
+                throw BrineStepError("the confirmation says \"\(custodyWord)\" — a custody claim "
+                                        + "about a recording it was never shown a reading for")
             }
 
         case "nothing is asked of the recorder until I confirm":
@@ -944,6 +1001,27 @@ private actor PocketRemoveWorld {
             guard PocketRemoveFromRecorderPresentation.autoClearUnavailableLine
                     .contains("this iPhone") else {
                 throw BrineStepError("the absence is stated without saying why")
+            }
+
+        case "every sentence a removal can state is in the population this promise is held over":
+            // M4/M6, MEASURED: `lines += PocketDeleteConsequence.everyLine` could be deleted, and
+            // `everyLine` itself could return `[]`, with the whole copy discipline over the four
+            // consequences quietly becoming a claim about nothing. The comment above that line
+            // says omitting them "would be a claim over the reassuring half"; until this step
+            // nothing checked. *(Adversarial review, 2026-08-19.)*
+            let population = PocketRemoveFromRecorderPresentation.everyLine
+            guard !PocketDeleteConsequence.everyLine.isEmpty else {
+                throw BrineStepError("PocketDeleteConsequence.everyLine is empty, so every claim "
+                                        + "held over it is held over nothing")
+            }
+            for line in PocketDeleteConsequence.everyLine where !population.contains(line) {
+                throw BrineStepError("\"\(line)\" is a sentence a removal states and it is not "
+                                        + "in the population this behaviour's copy is held over")
+            }
+            for line in PocketDeleteConsequence.everyLine
+            where !PocketRecordingDetailPresentation.everyLine.contains(line) {
+                throw BrineStepError("\"\(line)\" is rendered on the recording's own page and is "
+                                        + "not in that page's population either")
             }
 
         case "none of them promises an amount of space nobody has measured":

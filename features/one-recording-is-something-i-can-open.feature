@@ -59,6 +59,7 @@ Feature: A recording on a recorder is something I can open, inspect and choose
     Then the page says nothing else holds it, whichever brain is on
     And a Vault is suggested there, and the removal is still offered
     And a recording this phone is holding is told it would leave one copy, on this phone
+    And every one of them reaches the page it is about
 
   Scenario: The page about one recording is held to the same words as the page it opens from
     Given every body the recorder page is written in

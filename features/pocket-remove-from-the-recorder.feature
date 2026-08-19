@@ -93,6 +93,7 @@ Feature: Taking a recording off the recorder, on purpose
     Given the sentences a person reads about taking recordings off a recorder
     Then turning on automatic clearing says what synced is trusted to mean and where the copy went
     And on a phone with nowhere else to put a copy, automatic clearing is not offered at all
+    And every sentence a removal can state is in the population this promise is held over
     And none of them promises an amount of space nobody has measured
     And the promise is still that Solleva never deletes anything you did not ask it to
 

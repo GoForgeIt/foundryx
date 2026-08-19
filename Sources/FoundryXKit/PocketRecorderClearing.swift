@@ -197,10 +197,14 @@ public enum PocketRemoveFromRecorder {
         provenance: PocketDeleteConsent.Provenance,
         attachment: RecordingDeviceAttachment = RecordingDeviceAttachment()
     ) async -> PocketRemovalOutcome {
-        // BEFORE THE RADIO IS TOUCHED, and before a frame is composed. A recording whose safety
-        // Solleva cannot demonstrate costs no session, no battery and no command — and the
-        // census the promise is asserted over stays empty for it, which is what makes AC1 an
-        // assertion about behaviour rather than about a string.
+        // BEFORE THE RADIO IS TOUCHED, and before a frame is composed.
+        //
+        // WHAT THIS GUARD STILL DOES, now that one of the two paths refuses nothing. The ARMED
+        // path is unchanged: a recording it cannot prove is elsewhere costs no session, no
+        // battery and no command, and the census the promise is asserted over stays empty for
+        // it. The MANUAL path always obtains a consent, so what this decides for it is which
+        // sentence the consent carries — and it still refuses before the radio when the
+        // peripheral is not one this phone is paired with.
         guard let identity = try? PocketAuthenticatedIdentity(peripheralIdentifier: id.uuidString)
         else { return .unavailable(PocketRecorderCheckPresentation.notThisRecorderLine) }
         let key = PocketRecorderFileKey(identity: identity.recordingDeviceIdentity,
@@ -298,8 +302,9 @@ public enum PocketRemoveFromRecorder {
 /// "remove it from the recorder", which is the thing that actually happens.
 public enum PocketRemoveFromRecorderPresentation {
 
-    /// The affordance. It EXISTS ONLY for a recording whose safety the shelf can state — see
-    /// `isOffered(for:)`, which is the same predicate the consent factories read.
+    /// The affordance. It exists for every recording the recorder is holding — see
+    /// `isOffered(for:)`. It USED to read *"only for a recording whose safety the shelf can
+    /// state"*, and that doc outlived the ruling that made it true by one commit.
     public static let action = "Remove it from the recorder"
 
     /// WHILE IT IS HAPPENING, TO THIS ONE FILE. The page used to caption its spinner with
@@ -379,11 +384,15 @@ public enum PocketRemoveFromRecorderPresentation {
 
     public static let removedLine = "Removed from the recorder."
 
-    /// A phone-only brain has no second place to put a copy, so nothing can ever satisfy the
-    /// AUTOMATIC predicate. It no longer withholds the manual control — Nick, 2026-08-18 — and
-    /// this sentence is what the armed clear says about that tier, never what a tap is told.
-    public static let nowhereElseLine =
-        "There's nowhere other than this iPhone for a copy to go yet."
+    // `nowhereElseLine` USED TO BE HERE, AND IT IS GONE BECAUSE NOTHING RENDERED IT.
+    //
+    // It was the manual path's phone-only refusal. Nick's 2026-08-18 ruling deleted that
+    // refusal, and the first draft of this change kept the sentence with a new doc claiming the
+    // armed clear says it — WHICH IS FALSE: the armed clear renders `notProvenSafeLine` through
+    // `message(for:)`, and a grep over `Sources App Tests` found this constant referenced only
+    // by its own definition and by `everyLine`. This file deleted `keptLine` for exactly that
+    // reason — *"a sentence nothing renders is a sentence somebody re-renders"* — and then
+    // failed to apply it here. *(Adversarial review, 2026-08-19.)*
 
     // MARK: The owner-armed control
 
@@ -462,7 +471,7 @@ public enum PocketRemoveFromRecorderPresentation {
     public static var everyLine: [String] {
         var lines = [action, inProgressLine, confirmAction, cancelConfirmAction, notProvenSafeLine,
                      recorderRefusedLine, stillListedLine, cannotActOnThisNowLine,
-                     removedLine, nowhereElseLine, autoClearTitle, confirmationLine,
+                     removedLine, autoClearTitle, confirmationLine,
                      autoClearUnavailableLine, autoClearNotRetroactiveLine]
         // THE THREE CONSEQUENCES ARE PART OF THIS SURFACE'S VOICE. They are what a person reads
         // immediately before the one gesture here that cannot be undone, so a copy claim held

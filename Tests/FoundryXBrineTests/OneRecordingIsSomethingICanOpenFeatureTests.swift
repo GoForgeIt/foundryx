@@ -632,7 +632,13 @@ final class OneRecordingIsSomethingICanOpenFeatureTests: XCTestCase {
             // about this one recording. A tier-keyed answer is how a Vault owner came to be
             // told his notes were saved to a computer he does not have.
             defineStep("the page says nothing else holds it, whichever brain is on") { ctx, _, _ in
-                var seen: Set<String> = []
+                // IDENTICAL, NOT MERELY PRESENT — and this is the assertion the first draft of
+                // this step LOST. It collected every brain's notes into a set and then never
+                // read the set: the superseded version it replaced had held `seen.count == 2`,
+                // a load-bearing claim that the tier differentiated. Dropping the tier's role
+                // means the replacement must claim the opposite, out loud, or a tier-shaped
+                // sentence can come back with nothing to stop it. *(Review, 2026-08-19.)*
+                var perBrain: [BrainChoice: [String]] = [:]
                 for brain in BrainChoice.allCases {
                     let page = PocketRecordingDetailPresentation.page(
                         for: Self.recordings[0], presence: Self.onlyOnTheRecorder,
@@ -643,11 +649,17 @@ final class OneRecordingIsSomethingICanOpenFeatureTests: XCTestCase {
                             "\(brain.rawValue) is told \(page.notes) about a recording nothing "
                                 + "outside the recorder is holding")
                     }
-                    seen.formUnion(page.notes)
+                    perBrain[brain] = page.notes
                 }
-                // AND EVERY BRAIN WAS ASKED, so this is not one case standing for three.
                 guard BrainChoice.allCases.count >= 3 else {
                     throw BrineStepError("the population of brains has shrunk below three")
+                }
+                guard Set(perBrain.values.map { $0.joined(separator: "\u{1F} ") }).count == 1 else {
+                    throw BrineStepError(
+                        "the three brains are told \(perBrain) — what a removal costs is a fact "
+                            + "about THIS RECORDING, and a tier-keyed answer is how a Vault "
+                            + "owner came to be told his notes were on a computer he does not "
+                            + "have")
                 }
                 return ctx
             },
@@ -669,6 +681,47 @@ final class OneRecordingIsSomethingICanOpenFeatureTests: XCTestCase {
                 // Vault INSTEAD of deleting, which is the defect he ruled against.
                 guard page.offers(.removeFromRecorder) else {
                     throw BrineStepError("the Vault was suggested and the deletion withheld")
+                }
+                return ctx
+            },
+
+            defineStep("every one of them reaches the page it is about") { ctx, _, _ in
+                // THE POPULATION, ON THE SURFACE. Without this, only the two alarming sentences
+                // are ever asserted on a page, and `if consequence != .aCopyIsAlreadySomewhereElse`
+                // deletes the reassuring one with nothing noticing — measured as a surviving
+                // mutation on 2026-08-19.
+                let readings: [PocketDeleteConsequence: PocketRecordingPresence] = [
+                    .aCopyIsAlreadySomewhereElse: Self.provenElsewhere,
+                    .thisPhoneWillHoldTheOnlyCopy: PocketRecordingPresence(
+                        onRecorder: PocketPlaceReading(answer: .yes, observedAt: Self.listedAt),
+                        onThisPhone: PocketPlaceReading(answer: .yes, observedAt: Self.listedAt),
+                        safeElsewhere: PocketPlaceReading(answer: .no, observedAt: Self.listedAt)),
+                    .nothingElseHoldsIt: Self.onlyOnTheRecorder,
+                    .nobodyHasCheckedWhereElseItIs: PocketRecordingPresence(
+                        onRecorder: PocketPlaceReading(answer: .yes, observedAt: Self.listedAt),
+                        onThisPhone: .neverAsked,
+                        safeElsewhere: .neverAsked),
+                ]
+                guard Set(readings.keys) == Set(PocketDeleteConsequence.allCases) else {
+                    throw BrineStepError("a consequence has no reading that produces it")
+                }
+                for (consequence, presence) in readings {
+                    guard PocketDeleteConsequence.ofRemoving(presence) == consequence else {
+                        throw BrineStepError(
+                            "the reading chosen for \(consequence.rawValue) produces "
+                                + "\(PocketDeleteConsequence.ofRemoving(presence).rawValue)")
+                    }
+                    let page = PocketRecordingDetailPresentation.page(
+                        for: Self.recordings[0], presence: presence,
+                        brain: .justMyPhone, now: Self.now)
+                    guard page.offers(.removeFromRecorder) else {
+                        throw BrineStepError("\(consequence.rawValue) withholds the removal")
+                    }
+                    guard page.notes.contains(consequence.sentence) else {
+                        throw BrineStepError(
+                            "the page for \(consequence.rawValue) says \(page.notes) — a removal "
+                                + "is offered and what it costs is not on the page")
+                    }
                 }
                 return ctx
             },

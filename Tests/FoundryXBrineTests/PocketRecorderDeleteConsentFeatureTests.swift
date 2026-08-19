@@ -514,6 +514,14 @@ private actor PocketDeleteConsentWorld {
                 PocketDeleteConsent.ownerArmedThisRecorder(file, provenSafeBy: Self.provenSafe),
                 "POSITIVE CONTROL FAILED: the armed path can never authorise anything")
             XCTAssertEqual(armed.provenance, .ownerArmedThisRecorder)
+            // AND ITS CONSEQUENCE IS THE ONE ITS OWN GUARD PROVED. The armed factory only
+            // returns for `isDurableElsewhere`, so the only honest sentence it can carry is that
+            // a copy already exists — and until this line the doc said so while nothing checked,
+            // which meant the armed path could have filed a last-copy sentence against a
+            // deletion nobody watched. *(Adversarial review, 2026-08-19.)*
+            XCTAssertEqual(armed.consequence, .aCopyIsAlreadySomewhereElse,
+                           "the armed clear composed a consent stating \(armed.consequence) for "
+                               + "a recording its own guard proved is safe elsewhere")
 
         case "Solleva can tell the two paths apart afterwards":
             let file = try XCTUnwrap(unprovenFile)
@@ -583,6 +591,43 @@ private actor PocketDeleteConsentWorld {
                            "PocketDeleteConsent has an initialiser that is neither private nor "
                                + "counted — internal is enough to conjure consent from any "
                                + "file in this module")
+            // THE CONSEQUENCE HAS NO DEFAULT, AND THIS IS WHERE THAT IS OBSERVED.
+            //
+            // Nick's 2026-08-18 ruling removed the durability guard from the manual factory and
+            // put a required `consequence:` in its place. The whole of that substitution rests
+            // on the argument being UNSKIPPABLE — and a Swift default argument is invisible at
+            // runtime: it adds no declaration, no case, and no observable call. Every behavioural
+            // enumeration in this suite would stay green if somebody wrote
+            // `statingThat consequence: PocketDeleteConsequence = .aCopyIsAlreadySomewhereElse`,
+            // which restores the silent deletion this file exists to forbid — measured by
+            // adversarial review on 2026-08-19, which ran exactly that mutation and watched six
+            // tests pass.
+            //
+            // SPM HAS NO NEGATIVE-COMPILATION TARGET, so the criterion's compile-fail fixture is
+            // not buildable here. This is the recorded fallback: the type has no empty case (held
+            // below over `allCases`) AND the declaration carries no default (held here, over the
+            // type's own source, the same mechanism this step already uses for `private init`).
+            let manualFactory = Self.body(ofType: "PocketDeleteConsent", in: declaration)
+            XCTAssertEqual(Self.occurrences(of: "statingThat consequence: PocketDeleteConsequence",
+                                            in: manualFactory), 1,
+                           "the manual factory's consequence parameter is not spelled the way "
+                               + "this assertion looks for it, so the default check below is "
+                               + "measuring nothing")
+            XCTAssertEqual(
+                Self.occurrences(of: "consequence: PocketDeleteConsequence =", in: manualFactory), 0,
+                "the manual delete factory's consequence argument has a DEFAULT. A caller that "
+                    + "has not decided what to tell the owner now compiles, and composes a "
+                    + "removal that says nothing — which is the silent deletion the ruling "
+                    + "forbids, restored in one word that no behavioural test can see")
+            // AND NO EMPTY CASE FOR A HURRIED CALLER TO REACH FOR.
+            for empty in ["unspecified", "none", "unknown", "unset"] {
+                XCTAssertFalse(PocketDeleteConsequence.allCases.map(\.rawValue).contains(empty),
+                               "PocketDeleteConsequence gained a `.\(empty)` case — the shortest "
+                                   + "wrong call now has something to pass")
+            }
+            XCTAssertTrue(PocketDeleteConsequence.allCases.allSatisfy { !$0.sentence.isEmpty },
+                          "a consequence renders nothing, which is an empty case wearing a name")
+
             let factories = Self.occurrences(
                 of: "public static func", in: Self.body(ofType: "PocketDeleteConsent",
                                                         in: declaration))

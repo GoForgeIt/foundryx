@@ -310,8 +310,13 @@ public enum PocketRecordingDetailPresentation {
     /// quietly reintroduce a tier-shaped refusal without the diff showing a tier.
     public static func removalRefusal(for presence: PocketRecordingPresence,
                                       brain: BrainChoice) -> String? {
-        if presence.onRecorder.answer != .yes { return notOnTheRecorderLine }
-        if PocketRemoveFromRecorderPresentation.isOffered(for: presence) { return nil }
-        return notOnTheRecorderLine
+        // ONE READ, NOT TWO. The first draft kept a leading `onRecorder.answer != .yes` check
+        // in front of this call and a trailing `return notOnTheRecorderLine` behind it — and
+        // since `isOffered` IS `onRecorder.answer == .yes`, the leading check made the trailing
+        // line unreachable and the doc's claim that this defers to `isOffered` vacuous. Worse,
+        // if `isOffered` were ever tightened, the dead line would have told an owner "The
+        // recorder isn't holding this recording" about one it is. *(Review, 2026-08-19.)*
+        PocketRemoveFromRecorderPresentation.isOffered(for: presence)
+            ? nil : notOnTheRecorderLine
     }
 }
