@@ -39,6 +39,23 @@ public enum CaptureUploadRoute: Sendable, Equatable {
     /// POST, so it refuses to claim the target's address; it says the ACK is untraceable,
     /// which is the honest reading and the one that would have been shouted at 12:00Z.
     case unnamedHandler
+
+    /// DOES AN ACKNOWLEDGEMENT FROM THIS ROUTE MEAN THE BYTES REACHED A PLACE THAT IS NOT
+    /// THIS HANDSET?
+    ///
+    /// Naming the route in the LOG was only half the fix. The other half is that the WAL
+    /// acts on it. A route that sent nothing may not write the `.ack` marker and may not
+    /// advance the durable upload watermark, because the watermark is the resume point:
+    /// past it, nothing is ever re-sent. That is precisely how 22,358 segments of Omi
+    /// audio became unrecoverable rather than merely delayed — a backfill run minutes
+    /// later could not find them, because the phone had already written down that it was
+    /// done with them.
+    public var leftThisPhone: Bool {
+        switch self {
+        case .door, .named:                 return true
+        case .thisPhoneOnly, .unnamedHandler: return false
+        }
+    }
 }
 
 public enum CaptureStage: String, Sendable, Codable {
@@ -495,6 +512,37 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     public static func segName(_ seq: UInt64) -> String { String(format: "seg-%012llu.opus", seq) }
     private func ackURL(_ segURL: URL) -> URL { segURL.deletingPathExtension().appendingPathExtension("ack") }
 
+    /// A HOLD, which is what a route that sent nothing is entitled to write.
+    ///
+    /// `seg-N.ack` is a claim that another place has these bytes. On the phone-only tier
+    /// that claim was false and the whole system believed it. `seg-N.held` says the only
+    /// true thing: this handset has accounted for the segment, and nowhere else has.
+    ///
+    /// It is a SEPARATE FILENAME rather than a flag inside the `.ack` file on purpose.
+    /// Both `computeStatus` and `pendingSegmentURLs` ask this question on the hot path,
+    /// over every segment of captures that run to thousands, and the answer has to come
+    /// out of the one bulk directory enumeration those paths already do — reading each
+    /// marker's CONTENTS would reintroduce the per-file syscall storm that froze the main
+    /// thread for 2-9s in the bug_type-328 reports.
+    private func heldURL(_ segURL: URL) -> URL {
+        segURL.deletingPathExtension().appendingPathExtension("held")
+    }
+
+    /// Is this segment as accounted-for as THE CURRENT ROUTE is able to make it?
+    ///
+    /// A real `.ack` always counts: it is the stronger claim, and every `.ack` written
+    /// before holds existed was written by a WAL that really posted, so an install
+    /// upgrading into this code re-uploads nothing it already delivered.
+    ///
+    /// A `.held` counts only while the route still cannot post. The moment a destination
+    /// that really posts is resolved, every held segment is pending audio again and
+    /// drains for real — which is the automatic backfill the 54 lost captures never got.
+    private func accountedForByCurrentRoute(_ segURL: URL) -> Bool {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: ackURL(segURL).path) { return true }
+        return !route.leftThisPhone && fm.fileExists(atPath: heldURL(segURL).path)
+    }
+
     // MARK: sync (mark synced ONLY on the door's 200 ACK)
 
     /// Drain unsynced segments to the door, AT MOST `maxSegmentsPerSync` per pass (so a
@@ -553,10 +601,21 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
                 switch result {
                 case .success(let seq):
                     guard let job = jobs.first(where: { $0.seq == seq }) else { break }
+                    // WHAT THIS ROUTE IS ENTITLED TO WRITE DOWN.
+                    //
+                    // The upload "succeeded" — but on a route that never posts, so did a
+                    // closure that does nothing. Only a route that really sent the bytes
+                    // may write the `.ack` marker and move the durable resume point; the
+                    // rest write a HOLD, which keeps the segment findable by the drain the
+                    // moment a real destination resolves. Both count as progress, so the
+                    // phone-only tier's local finalize gate still fires with no door
+                    // anywhere — nothing about that tier regresses except its ability to
+                    // claim a place it never reached.
+                    let sent = route.leftThisPhone
                     do {
                         guard try performDurableMutation({
                             try Data().write(
-                                to: ackURL(job.url),
+                                to: sent ? ackURL(job.url) : heldURL(job.url),
                                 options: [.atomic])
                             return true
                         }) == true else {
@@ -564,7 +623,9 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
                                 "ACK rejected for stale account binding"
                             continue
                         }
-                        advanceWatermark(throughAcked: seq)                        // durable resume point moves forward
+                        if sent {
+                            advanceWatermark(throughAcked: seq)                   // durable resume point moves forward
+                        }
                         invalidateStatusCache()   // synced count/watermark changed → rescan next warm
                         uploaded += 1
                         log?.info(Self.ackLine(captureId: captureId, seq: seq, target: target,
@@ -894,10 +955,19 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
             current.insert(seq)
             // ACK: at/below the durable watermark counts as synced by definition;
             // otherwise stat the .ack marker once and remember it forever.
+            // A HOLD IS NOT A SYNC ON A ROUTE THAT CAN POST. `accountedForByCurrentRoute`
+            // is the same predicate the drain uses to pick pending segments, so the
+            // status a card shows and the work the drain has left can never disagree —
+            // a capture whose segments are merely held reads `savedOnPhone`, and every
+            // safety predicate built on `savedToComputer` stops being told otherwise.
             if Int64(seq) <= wm || seqAcked.contains(seq) {
                 syncedCount += 1
-            } else if FileManager.default.fileExists(atPath: ackURL(u).path) {
-                seqAcked.insert(seq)
+            } else if accountedForByCurrentRoute(u) {
+                // Memoise ONLY a real `.ack`: it can never un-happen, whereas a hold
+                // stops counting the moment this WAL is rebuilt on a route that posts.
+                if FileManager.default.fileExists(atPath: ackURL(u).path) {
+                    seqAcked.insert(seq)
+                }
                 syncedCount += 1
             }
             // Bytes: read each immutable segment's size exactly once, from the
@@ -966,7 +1036,7 @@ public final class CaptureWAL: ObservableObject, @unchecked Sendable {
     private func pendingSegmentURLs() -> [(UInt64, URL)] {
         let wm = uploadWatermark()
         return allSegmentURLs().filter {
-            Int64($0.0) > wm && !FileManager.default.fileExists(atPath: ackURL($0.1).path)
+            Int64($0.0) > wm && !accountedForByCurrentRoute($0.1)
         }
     }
 
