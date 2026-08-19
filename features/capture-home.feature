@@ -35,6 +35,7 @@ Feature: Finding and organizing conversations on the capture home
     Given the capture home on a phone-only install
     Then a "Record a conversation" card reads "Saved on this phone. It joins your full history when your computer connects."
     And on the computer tier the card reads "Saved on this phone. It joins your full history on your computer."
+    And on the cell tier the card reads "Saved on this phone. It joins your full history in your Vault."
 
   Scenario: Search all opens conversation search
     Given the capture home lists recent conversations under "Recent on this phone"

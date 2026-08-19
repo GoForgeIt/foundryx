@@ -595,10 +595,11 @@ public extension BrainChoice {
     ///
     /// It exists because the two-valued spelling of this question has already shipped a false
     /// sentence twice. `SyncStripCopy.allSaved` read a Bool and told a Vault owner with no
-    /// computer "All voice notes saved to computer"; `WaitingExperience.make(for:onDevice:)`
-    /// still reads one and tells the same owner his audio is transcribed "on your own Mac".
-    /// Both are the same crush: three brains, one bit, and the cell inheriting the computer's
-    /// words byte-identically.
+    /// computer "All voice notes saved to computer"; `WaitCopy.make(for:onDevice:)` read one
+    /// and told the same owner his audio was transcribed "on your own Mac" (now
+    /// `make(for:destination:)`, exhaustive over `CaptureDestination`). Both were the same
+    /// crush: three brains, one bit, and the cell inheriting the computer's words
+    /// byte-identically.
     ///
     /// `CaptureDestination` has no value that can name a place the user is not on, so a journey
     /// built through here cannot acquire the defect by being wired up carelessly.

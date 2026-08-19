@@ -29,6 +29,19 @@ struct PrivacyView: View {
                 row("Titles & summaries", "Made by local models on your computer.")
             }
 
+            // THE VAULT TIER, in full. This screen is the honest place for the whole
+            // story — including the operator-access sentence that must never be
+            // compressed into a spinner. Do NOT add "nobody at Solleva can read it":
+            // that claim is false at the operator layer and would be a worse lie than
+            // the one this section replaced (a Vault owner being told about a Mac).
+            Section("On “Solleva Cloud” (your Vault)") {
+                row("Your Vault", "A private machine provisioned for this account alone. We run it on your behalf.")
+                row("Voice notes", "Travel to your Vault over an encrypted direct connection — no relay in the path.")
+                row("Transcription", "Your Vault uses one cloud speech service to transcribe. Audio is sent for that purpose only.")
+                row("Titles & summaries", "Your Vault sends transcript text to one model service to write them — for that purpose only.")
+                row("Keeping it running", "Our operators can reach the machine to keep it healthy and updated.")
+            }
+
             Section("Always") {
                 row("Sign-in", "Your email identifies you; it is never linked to voice note content.")
                 row("Off means off", "Ambient off = zero live analysis. Deleting a voice note deletes it.")

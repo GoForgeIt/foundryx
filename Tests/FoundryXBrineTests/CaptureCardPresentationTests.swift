@@ -179,10 +179,14 @@ final class CaptureCardPresentationTests: XCTestCase {
 
     func testRecordCTACopy() {
         XCTAssertEqual(CaptureHomeCopy.recordTitle, "Make a voice note")
-        XCTAssertEqual(CaptureHomeCopy.recordSubtitle(local: true),
+        XCTAssertEqual(CaptureHomeCopy.recordSubtitle(destination: .phone),
                        "Saved on this phone. It joins your full history when your computer connects.")
-        XCTAssertEqual(CaptureHomeCopy.recordSubtitle(local: false),
+        XCTAssertEqual(CaptureHomeCopy.recordSubtitle(destination: .computer),
                        "Saved on this phone. It joins your full history on your computer.")
+        // The cell tier is a FIRST-CLASS destination: a Vault owner must never be told
+        // the history lives "on your computer".
+        XCTAssertEqual(CaptureHomeCopy.recordSubtitle(destination: .vault),
+                       "Saved on this phone. It joins your full history in your Vault.")
     }
 
     // "Recent on this phone · N conversations" headline + the Search all action.

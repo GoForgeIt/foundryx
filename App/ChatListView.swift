@@ -221,6 +221,9 @@ private actor LoadCapture {
 struct ChatListView: View {
     @ObservedObject var chats: ChatConversationStore
     let target: DoorTarget
+    /// WHICH BRAIN this door reaches — Mac or Vault — so the loading wait names the
+    /// owner's real place instead of hardcoding "your Mac".
+    let destination: CaptureDestination
     let log: DoorLog
     let accountBinding: CaptureAccountScope.AccountBinding
     let computerConnected: Bool
@@ -230,12 +233,13 @@ struct ChatListView: View {
     @State private var opened: LibraryChatRow?
 
     init(chats: ChatConversationStore,
-         target: DoorTarget, log: DoorLog,
+         target: DoorTarget, destination: CaptureDestination, log: DoorLog,
          accountBinding: CaptureAccountScope.AccountBinding,
          computerConnected: Bool,
          onDismiss: @escaping () -> Void) {
         self.chats = chats
         self.target = target
+        self.destination = destination
         self.log = log
         self.accountBinding = accountBinding
         self.computerConnected = computerConnected
@@ -267,7 +271,7 @@ struct ChatListView: View {
         .task { await store.load() }
         .sheet(item: $opened) { row in
             KilnConversationView(
-                row: row, target: target, log: log,
+                row: row, target: target, destination: destination, log: log,
                 accountBinding: accountBinding,
                 onDismiss: { opened = nil },
                 onPickedUp: { Task { await store.load() } })
@@ -280,7 +284,7 @@ struct ChatListView: View {
         case .idle, .loading:
             // A door fetch can outlast a spinner's welcome; the waiting experience says what
             // is happening and where the data is going.
-            WaitingExperienceView(model: WaitingExperienceModel(kind: .doorFetch, onDevice: false))
+            WaitingExperienceView(model: WaitingExperienceModel(kind: .doorFetch, destination: destination))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .grainBackground()
                 .accessibilityIdentifier("chat-list-loading")

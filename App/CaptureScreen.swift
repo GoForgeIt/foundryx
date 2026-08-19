@@ -397,7 +397,7 @@ struct CaptureScreen: View {
                 ConversationFacesView(
                     target: target, manager: manager, captureId: cid,
                     timeRange: "Tue, Jul 14 · 4:16 PM–4:28 PM · 12 min",
-                    place: "Office", conversationDate: Date(), local: true,
+                    place: "Office", conversationDate: Date(), destination: .phone,
                     brain: .justMyPhone)
             }
         }
@@ -572,7 +572,7 @@ struct CaptureScreen: View {
         VStack(alignment: .leading, spacing: GrainSpacing.x2) {
             GrainRecordCTA(
                 title: CaptureHomeCopy.recordTitle,
-                subtitle: CaptureHomeCopy.recordSubtitle(local: local),
+                subtitle: CaptureHomeCopy.recordSubtitle(destination: destination),
                 onRecord: { manager.startMicRecording() }
             )
             .accessibilityHidden(true)
@@ -871,7 +871,7 @@ struct CaptureScreen: View {
                 timeRange: hit.dateLabel,
                 place: nil,
                 conversationDate: nil,
-                local: false,
+                destination: destination,
                 brain: brain)
         } label: {
             VStack(alignment: .leading, spacing: GrainSpacing.x1) {
@@ -1052,6 +1052,7 @@ struct CaptureScreen: View {
             conversationDate: manager.conversationMeta(for: wal.captureId)
                 .map { Date(timeIntervalSince1970: TimeInterval($0.startedAt)) }
                 ?? wal.status.startedAt,
+            destination: destination,
             brain: brain
         )
         // THE ONE PLACE A TRANSCRIPT REPORTS ITSELF. Every route into a conversation's
@@ -1434,7 +1435,7 @@ struct CaptureScreen: View {
         // The honest "N of M segments …" count paired with the bar while syncing.
         let syncingText: String = {
             guard let progress = syncProgress else { return syncMessage ?? "" }
-            let model = WaitingExperienceModel(kind: .sync, onDevice: local, progress: progress)
+            let model = WaitingExperienceModel(kind: .sync, destination: destination, progress: progress)
             return model.statusLine(elapsed: 0)
         }()
         // Settled content: the pending detail if any work is still in flight, else the

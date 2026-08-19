@@ -132,13 +132,18 @@ private enum CaptureHomeSteps {
             defineStep("the capture home on a phone-only install") { ctx, _, _ in w.local = true; return ctx },
             defineCheck("a \"Record a conversation\" card reads \"Saved on this phone. It joins your full history when your computer connects.\"") { _, _, _ in
                 guard CaptureHomeCopy.recordTitle == "Make a voice note" else { throw BrineStepError("CTA title wrong") }
-                guard CaptureHomeCopy.recordSubtitle(local: true) == "Saved on this phone. It joins your full history when your computer connects." else {
-                    throw BrineStepError("phone-tier subtitle: \(CaptureHomeCopy.recordSubtitle(local: true))")
+                guard CaptureHomeCopy.recordSubtitle(destination: .phone) == "Saved on this phone. It joins your full history when your computer connects." else {
+                    throw BrineStepError("phone-tier subtitle: \(CaptureHomeCopy.recordSubtitle(destination: .phone))")
                 }
             },
             defineCheck("on the computer tier the card reads \"Saved on this phone. It joins your full history on your computer.\"") { _, _, _ in
-                guard CaptureHomeCopy.recordSubtitle(local: false) == "Saved on this phone. It joins your full history on your computer." else {
-                    throw BrineStepError("computer-tier subtitle: \(CaptureHomeCopy.recordSubtitle(local: false))")
+                guard CaptureHomeCopy.recordSubtitle(destination: .computer) == "Saved on this phone. It joins your full history on your computer." else {
+                    throw BrineStepError("computer-tier subtitle: \(CaptureHomeCopy.recordSubtitle(destination: .computer))")
+                }
+            },
+            defineCheck("on the cell tier the card reads \"Saved on this phone. It joins your full history in your Vault.\"") { _, _, _ in
+                guard CaptureHomeCopy.recordSubtitle(destination: .vault) == "Saved on this phone. It joins your full history in your Vault." else {
+                    throw BrineStepError("cell-tier subtitle: \(CaptureHomeCopy.recordSubtitle(destination: .vault))")
                 }
             },
 

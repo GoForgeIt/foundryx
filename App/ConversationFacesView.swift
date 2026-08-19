@@ -41,8 +41,12 @@ struct ConversationFacesView: View {
     /// When the conversation happened — decides recent (auto-load) vs older
     /// (load on demand) transcript fetching.
     let conversationDate: Date?
-    /// Phone-only tier → on-device stepper labels ("Saved on phone", etc.).
-    var local: Bool = false
+    /// WHERE THIS OWNER'S VOICE NOTES LAND — phone / computer / Vault. REQUIRED, with
+    /// no default: a default here is a decision about where a user's audio went, made
+    /// by whoever forgot to pass it. The predecessor (`var local: Bool = false`) was
+    /// exactly that — every production route left it defaulted, so the waits rendered
+    /// the Mac copy on all three tiers, including for a Vault owner with no Mac.
+    let destination: CaptureDestination
     /// WHICH BRAIN IS ON, for the safety predicate this page draws its "safe elsewhere" row
     /// from. REQUIRED, with no default, for the same reason `PocketCaptureDurability` makes it
     /// required: a default here is a decision about whether a recording is safe, made by
@@ -55,6 +59,8 @@ struct ConversationFacesView: View {
     /// "safe elsewhere: Yes" for a recording whose only copy is on this phone — the same
     /// predicate that arms the delete button.
     let brain: BrainChoice
+    /// DERIVED, never stored — the phone-only spelling some sub-flows still take.
+    private var local: Bool { destination == .phone }
     /// The semantic-search seam. No embedding index exists on the phone today,
     /// so the default is nil and the meaning toggle is ABSENT (never a dead
     /// control). Inject a real, available index and the toggle appears.
@@ -607,12 +613,14 @@ struct ConversationFacesView: View {
                 .foregroundStyle(GrainColor.ink)
                 .textSelection(.enabled)
         } else if content?.summarizing == true {
-            // The Mac's pipeline is authoritatively titling + summarizing — that wins
-            // over the local fallback so we don't relabel desktop processing (WS-C).
-            WaitingExperienceView(model: WaitingExperienceModel(kind: .title, onDevice: false), compact: true)
+            // The BRAIN's pipeline (Mac or Vault) is authoritatively titling +
+            // summarizing — that wins over the local fallback so we don't relabel
+            // remote processing (WS-C). Name the brain the app actually resolved to.
+            WaitingExperienceView(model: WaitingExperienceModel(kind: .title, destination: destination), compact: true)
         } else if summarizing {
-            // On-device titling + summary synth in flight (WS-C).
-            WaitingExperienceView(model: WaitingExperienceModel(kind: .title, onDevice: true), compact: true)
+            // On-device titling + summary synth in flight (WS-C) — the PHONE is doing
+            // this one, whatever the tier.
+            WaitingExperienceView(model: WaitingExperienceModel(kind: .title, destination: .phone), compact: true)
         } else if transcriptText != nil {
             Text("No summary yet. The transcript face has the full voice note.")
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
@@ -955,12 +963,13 @@ struct ConversationFacesView: View {
                 }
             }
         } else if loading {
-            // Door fetch over the encrypted relay to the user's Mac (WS-C honest wait).
-            WaitingExperienceView(model: WaitingExperienceModel(kind: .doorFetch, onDevice: local))
+            // Door fetch from the resolved brain (WS-C honest wait) — the copy names
+            // the place actually answering: Mac, Vault, or this phone's own storage.
+            WaitingExperienceView(model: WaitingExperienceModel(kind: .doorFetch, destination: destination))
         } else if didAttemptFetch, content?.found == false, loadError == nil {
             // Saved, but the transcript is still being produced (on-device STT / the
-            // Mac's pipeline) — name the wait honestly instead of a bare line.
-            WaitingExperienceView(model: WaitingExperienceModel(kind: .transcription, onDevice: local))
+            // brain's pipeline) — name the wait honestly instead of a bare line.
+            WaitingExperienceView(model: WaitingExperienceModel(kind: .transcription, destination: destination))
             GrainButton("Check again", variant: .tonal, size: .sm) { Task { await fetchFromDoor() } }
         } else {
             Text("Transcript not loaded")

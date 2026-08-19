@@ -114,16 +114,16 @@ struct WaitingExperienceProof: View {
     private var model: WaitingExperienceModel {
         switch kind {
         case .recap:
-            return WaitingExperienceModel(kind: .recap, onDevice: true,
+            return WaitingExperienceModel(kind: .recap, destination: .phone,
                                           stats: WaitingLibraryStats(conversationCount: 1284))
         case .title:
-            return WaitingExperienceModel(kind: .title, onDevice: true)
+            return WaitingExperienceModel(kind: .title, destination: .phone)
         case .transcription:
-            return WaitingExperienceModel(kind: .transcription, onDevice: true)
+            return WaitingExperienceModel(kind: .transcription, destination: .phone)
         case .doorFetch:
-            return WaitingExperienceModel(kind: .doorFetch, onDevice: false)
+            return WaitingExperienceModel(kind: .doorFetch, destination: .computer)
         case .sync:
-            return WaitingExperienceModel(kind: .sync, onDevice: false,
+            return WaitingExperienceModel(kind: .sync, destination: .computer,
                                           progress: .determinate(done: 214, total: 1210),
                                           stats: WaitingLibraryStats(conversationCount: 1284,
                                                                      segmentsOnComputer: 9021))
@@ -144,7 +144,7 @@ struct WaitingExperienceProof: View {
                         syncing: true,
                         progress: .determinate(done: 214, total: 1210),
                         syncingText: WaitingExperienceModel(
-                            kind: .sync, onDevice: false,
+                            kind: .sync, destination: .computer,
                             progress: .determinate(done: 214, total: 1210)).statusLine(elapsed: 0),
                         settledText: SyncStripCopy.allSaved(destination: .computer),
                         settledIsPending: false),
