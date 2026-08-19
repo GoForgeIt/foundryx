@@ -294,11 +294,11 @@
       "reached_from": [
         {
           "via": "pocket-bring-over-run",
-          "anchor": "_ = try await client.download(recording.request, ceilingBytes: maximumBytes) { chunk in"
+          "anchor": "_ = try await client.download(recording.request, ceilingBytes: maximumBytes,"
         }
       ],
       "verdict": "reachable",
-      "why": "INSTANCE 1, THE HEADLINE. A full protocol client, tested, with ZERO callers under `App/` while all eight Pocket feature files passed. It is reachable at this commit and this row is what keeps it that way. The anchor is the STREAMING form's signature line, because that is the one production calls: the whole-`Data` overload is a convenience the protocol unit tests use, and anchoring on it would let the streaming path be deleted without a red."
+      "why": "INSTANCE 1, THE HEADLINE. A full protocol client, tested, with ZERO callers under `App/` while all eight Pocket feature files passed. It is reachable at this commit and this row is what keeps it that way. The anchor is the STREAMING form's signature line, because that is the one production calls: the whole-`Data` overload is a convenience the protocol unit tests use, and anchoring on it would let the streaming path be deleted without a red. The call line carries the `announced:` progress seam since the transfer-queue work; the anchor moved with it."
     },
     {
       "id": "pocket-durable-sync-ordering",
@@ -704,7 +704,7 @@
         }
       ],
       "verdict": "reachable",
-      "why": "ITS CALL SITE MOVED AND THAT IS THE POINT OF THE MOVE \u2014 it was a bare `if` in a SwiftUI body, which is code `swift test` cannot compile and therefore cannot hold; it is now read by `PocketRecordingDetailPresentation.removalRefusal`, a value the whole 27-placement population is put through. the ruling's clause 'the affordance does not exist for a recording we have not brought over', as CODE. It reads the same predicate the consent factories read, so the button and the consent cannot disagree. It is enumerated because a destructive capability that is present, unreached and unenumerated is the worst row this register can hold — and for a while this one was present, reached by a bare `if` in a SwiftUI body, and enumerated nowhere."
+      "why": "ITS CALL SITE MOVED AND THAT IS THE POINT OF THE MOVE — it was a bare `if` in a SwiftUI body, which is code `swift test` cannot compile and therefore cannot hold; it is now read by `PocketRecordingDetailPresentation.removalRefusal`, a value the whole 27-placement population is put through. the ruling's clause 'the affordance does not exist for a recording we have not brought over', as CODE. It reads the same predicate the consent factories read, so the button and the consent cannot disagree. It is enumerated because a destructive capability that is present, unreached and unenumerated is the worst row this register can hold — and for a while this one was present, reached by a bare `if` in a SwiftUI body, and enumerated nowhere."
     },
     {
       "id": "pocket-remove-confirmation",
@@ -734,7 +734,7 @@
         }
       ],
       "verdict": "reachable",
-      "why": "the decision behind a row being something a person can press: what the opened page states, and which of the two actions that recording actually admits. It is enumerated because the thing it replaced \u2014 a bare `if` on `isOffered` inside a SwiftUI body \u2014 is the exact shape this register exists to make impossible to lose."
+      "why": "the decision behind a row being something a person can press: what the opened page states, and which of the two actions that recording actually admits. It is enumerated because the thing it replaced — a bare `if` on `isOffered` inside a SwiftUI body — is the exact shape this register exists to make impossible to lose."
     },
     {
       "id": "pocket-recording-located",
@@ -750,7 +750,7 @@
         }
       ],
       "verdict": "reachable",
-      "why": "TWO call sites on purpose \u2014 the page a row opens, and the transfer that page asks for \u2014 and they are the SAME resolution, so the recording that gets asked for is the one the page was describing. Pairing a row to a reading by array position is how a removal reaches a different recording than the one under the finger, and this firmware spells its timestamps two ways on one device."
+      "why": "TWO call sites on purpose — the page a row opens, and the transfer that page asks for — and they are the SAME resolution, so the recording that gets asked for is the one the page was describing. Pairing a row to a reading by array position is how a removal reaches a different recording than the one under the finger, and this firmware spells its timestamps two ways on one device."
     },
     {
       "id": "pocket-recording-detail-sheet",
@@ -845,13 +845,26 @@
       ],
       "verdict": "reachable",
       "why": "this line replaced `AmbientNotifier.requestAuthorizationIfNeeded()`, which raised the OS permission alert anonymously on every launch. Without the presenter iOS silently swallows a local notification while the app is foregrounded — exactly the situation during onboarding — so removing the launch prompt must NOT remove the launch install, and this row is what says so if somebody deletes the line."
+    },
+    {
+      "id": "pocket-transfer-queue-run",
+      "name": "PocketTransferQueue.run — the bring-over as a durable sequential job",
+      "declared_in": "Sources/FoundryXKit/PocketTransferJob.swift",
+      "declaration_anchor": "    public func run() async {",
+      "call_pattern": "PocketTransferQueue(",
+      "reached_from": [],
+      "tested_from": [
+        "Tests/FoundryXBrineTests/PocketTransferQueueFeatureTests.swift"
+      ],
+      "verdict": "unreachable",
+      "why": "OPENLY RED ON ARRIVAL, ON PURPOSE — the exact state `PocketDurableSync` shipped in silently, enumerated this time so it cannot be reported as shipped. The queue is the kit half of 'a bring-over outlives the page': one authenticated session drains N files (measured possible on fw 1.6), progress is denominated in the MCU&U& announcement, a stop discards the partial and suppresses re-offer, a lost recorder earns the 60/120/240/300 presence backoff, and every retry says it restarts from zero because the wire admits no offset. All of that is feature-proven and mutation-graded in PocketTransferQueueFeatureTests. What does NOT exist yet is the production caller: `App/DeviceScreen.swift` still owns its errand as a Task on a @StateObject with `.onDisappear { check.cancel() }`, and moving the page onto this queue is the surface half of the same track, in a file another change owns. The day a production `PocketTransferQueue(` appears this row goes red and demands promotion."
     }
   ],
   "_verdict_counts_are_equality": "Declared as exact counts, never bounds. A bound would let the unreachable roster grow by one without anybody moving this file, which is precisely how four capabilities reached `main` unreached.",
   "verdict_counts": {
     "reachable": 45,
     "undetermined": 1,
-    "unreachable": 9
+    "unreachable": 10
   },
   "_floor": "A register that lost its rows would be a silent full pass, so the population is asserted before its contents are.",
   "minimum_capabilities": 55,

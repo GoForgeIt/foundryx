@@ -534,6 +534,13 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
     private var lastEventWaiterID: UInt64 = 0
     private var generation: UInt64 = 1
     private var torndown = false
+    /// THE LINK DROPPED, REMEMBERED. `bleCentral(_:didDisconnect:)` fails every PARKED read at
+    /// once — and before this flag, a read that parked a moment AFTER the drop waited out the
+    /// full idle-gap deadline on a link everybody already knew was dead, and was then reported
+    /// as a STALL. A disconnect and a stall are different facts with different next moves (a
+    /// stall retries now; a drop backs off), so a dead link answers the next read immediately
+    /// and with its own name. Never cleared: this object is single-use by construction.
+    private var linkDropped = false
     /// DESIGN §3.7's ONE PIECE OF STATE. The recorder took a key and custody would not keep
     /// it, so the only copy of that key in the world is this one — in memory, in this object.
     /// It is held so `retryPendingCustody()` has something to retry; a screen whose only
@@ -1005,30 +1012,70 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
         peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
     }
 
+    /// The parked read's address, held so a task cancellation can find it. The parked
+    /// continuation used to have NO cancellation handler at all, which coupled every caller to
+    /// a fragile ordering: `Task.cancel()` alone could not wake a parked read — only a
+    /// `teardown()` could, and it woke it with `.disconnected`, so whether a stop was reported
+    /// as a stop or as a link drop depended on whether the read happened to be parked when the
+    /// stop arrived. Now the cancellation itself wakes the waiter, with its own name.
+    private final class ParkedReadHandle: @unchecked Sendable {
+        private let lock = NSLock()
+        private var id: UInt64?
+        func set(_ value: UInt64) { lock.withLock { id = value } }
+        func current() -> UInt64? { lock.withLock { id } }
+    }
+
     func nextTransportEvent(timeout: TimeInterval) async throws -> PocketTransportEvent {
-        try await withCheckedThrowingContinuation { continuation in
-            lock.lock()
-            if torndown {
+        let handle = ParkedReadHandle()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                if torndown {
+                    lock.unlock()
+                    continuation.resume(throwing: PocketTransportFailure.disconnected)
+                    return
+                }
+                if !pendingEvents.isEmpty {
+                    let next = pendingEvents.removeFirst()
+                    lock.unlock()
+                    continuation.resume(returning: next)
+                    return
+                }
+                // A DEAD LINK ANSWERS AT ONCE, after any already-arrived events are served.
+                // Parking here would be waiting the idle-gap deadline for a notification the
+                // radio has already said can never come — and then calling the silence a
+                // stall, which sends the retry policy down the wrong branch.
+                if linkDropped {
+                    lock.unlock()
+                    continuation.resume(throwing: PocketTransportFailure.disconnected)
+                    return
+                }
+                // A stop that arrived before the park: the cancellation handler below has
+                // already run and found nothing to fail, so the check must happen here, under
+                // the same lock the handler's `failEventWaiter` takes.
+                if Task.isCancelled {
+                    lock.unlock()
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                lastEventWaiterID &+= 1
+                let id = lastEventWaiterID
+                handle.set(id)
+                eventWaiters.append(EventWaiter(id: id, continuation: continuation))
                 lock.unlock()
-                continuation.resume(throwing: PocketTransportFailure.disconnected)
-                return
+                // THE TIMER NAMES ITS OWN WAIT. It still fires — cancelling a `DispatchWorkItem`
+                // would do as well — but when it does, it can only find the continuation this call
+                // parked. A timer whose wait was already answered finds nothing and returns, which
+                // is the difference between a bounded read and a fuse burning under the next one.
+                bleQueue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+                    self?.failEventWaiter(id, with: PocketTransportFailure.timeout)
+                }
             }
-            if !pendingEvents.isEmpty {
-                let next = pendingEvents.removeFirst()
-                lock.unlock()
-                continuation.resume(returning: next)
-                return
-            }
-            lastEventWaiterID &+= 1
-            let id = lastEventWaiterID
-            eventWaiters.append(EventWaiter(id: id, continuation: continuation))
-            lock.unlock()
-            // THE TIMER NAMES ITS OWN WAIT. It still fires — cancelling a `DispatchWorkItem`
-            // would do as well — but when it does, it can only find the continuation this call
-            // parked. A timer whose wait was already answered finds nothing and returns, which
-            // is the difference between a bounded read and a fuse burning under the next one.
-            bleQueue.asyncAfter(deadline: .now() + timeout) { [weak self] in
-                self?.failEventWaiter(id, with: PocketTransportFailure.timeout)
+        } onCancel: {
+            // Wakes ONLY the read this call parked, with cancellation's own name — never
+            // `.disconnected`, because the link did not drop; somebody stopped the work.
+            if let id = handle.current() {
+                self.failEventWaiter(id, with: CancellationError())
             }
         }
     }
@@ -1193,6 +1240,9 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
     public func bleCentral(_ central: BLECentral, didDisconnect peripheral: BLEPeripheral,
                            error: Error?) {
         guard lock.withLock({ self.peripheral?.identifier == peripheral.identifier }) else { return }
+        // Remembered as well as broadcast: a read that parks AFTER this instant must fail
+        // NOW and as a disconnect, not sit out the idle-gap deadline and be called a stall.
+        lock.withLock { linkDropped = true }
         for gate in [Gate.connected, .services, .characteristics] {
             fail(gate, with: RecordingDeviceAttachError.unreachable(.linkDroppedDuringSetup))
         }
