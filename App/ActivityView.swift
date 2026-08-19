@@ -106,7 +106,7 @@ struct ActivityView: View {
                 } else if recap.isComposing {
                     // The on-device model is writing this recap — name the wait honestly
                     // instead of a blank gap (WS-C). Recaps always run on-device.
-                    WaitingExperienceView(model: WaitingExperienceModel(kind: .recap, destination: destination))
+                    WaitingExperienceView(kind: .recap)
                 }
                 if days.isEmpty {
                     if recap.daily == nil && recap.weekly == nil { emptyState }

@@ -33,7 +33,7 @@ Feature: Finding and organizing conversations on the capture home
 
   Scenario: the record CTA describes where audio is saved
     Given the capture home on a phone-only install
-    Then a "Record a conversation" card reads "Saved on this phone. It joins your full history when your computer connects."
+    Then a "Record a conversation" card reads "Saved on this phone. This phone holds your full history."
     And on the computer tier the card reads "Saved on this phone. It joins your full history on your computer."
     And on the cell tier the card reads "Saved on this phone. It joins your full history in your Vault."
 

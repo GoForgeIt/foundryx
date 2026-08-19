@@ -47,6 +47,15 @@ public enum WaitKind: String, Sendable, CaseIterable, Equatable {
     /// Foundation-model titling of a conversation — on the phone, or by the brain's own
     /// pipeline (Mac / Vault) whose title arrives asynchronously.
     case title
+    /// Titling that THIS PHONE is doing, whatever the tier.
+    ///
+    /// IT IS A KIND, NOT AN ARGUMENT. The detail view has two titling waits: one for the
+    /// brain's pipeline (`.title`) and one for the on-device fallback synth, and the
+    /// second used to be spelled `WaitingExperienceModel(kind: .title, destination: .phone)`
+    /// — a hand-written place literal sitting in a view body, indistinguishable at a glance
+    /// from the tier bug beside it and impossible to tell apart from a mistake. The
+    /// MECHANISM is what differs, so the mechanism is what the type says.
+    case onDeviceTitle
     /// Speech-to-text of a capture — on-device Whisper on the phone tier; the brain's
     /// speech service elsewhere.
     case transcription
@@ -108,6 +117,14 @@ public struct WaitCopy: Equatable, Sendable {
                 return WaitCopy(
                     headline: "Summarizing on your iPhone",
                     privacyLine: "The recap is written by a model running entirely on your device — no voice note text is sent anywhere to summarize it.")
+            }
+        case .onDeviceTitle:
+            // ONE true sentence, three tiers: this work runs on the handset either way.
+            switch destination {
+            case .phone, .computer, .vault:
+                return WaitCopy(
+                    headline: "Naming this voice note",
+                    privacyLine: "A model on your iPhone is reading the transcript to write its title and summary.")
             }
         case .title:
             switch destination {
@@ -192,7 +209,7 @@ public enum WaitPhaseText {
             return [
                 (8, "Still summarizing — almost there."),
             ]
-        case .title:
+        case .title, .onDeviceTitle:
             return [
                 (10, "Still working on the title…"),
             ]
@@ -353,6 +370,11 @@ public struct WaitingTipDeck: Equatable, Sendable {
             switch destination {
             case .phone, .computer, .vault:
                 return ["This recap is drawn only from your own voice notes — the model is told never to invent details."]
+            }
+        case .onDeviceTitle:
+            switch destination {
+            case .phone, .computer, .vault:
+                return ["The title comes from the transcript itself — nothing is uploaded to name it."]
             }
         case .title:
             switch destination {

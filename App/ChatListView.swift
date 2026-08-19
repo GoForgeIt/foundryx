@@ -293,7 +293,7 @@ struct ChatListView: View {
         case .idle, .loading:
             // A door fetch can outlast a spinner's welcome; the waiting experience says what
             // is happening and where the data is going.
-            WaitingExperienceView(model: WaitingExperienceModel(kind: .doorFetch, destination: destination))
+            WaitingExperienceView(kind: .doorFetch)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .grainBackground()
                 .accessibilityIdentifier("chat-list-loading")

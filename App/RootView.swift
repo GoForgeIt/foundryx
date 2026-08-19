@@ -289,6 +289,9 @@ struct RootView: View {
 
     @ViewBuilder private func brainBody(_ dest: RootDestination,
                                         destination: CaptureDestination) -> some View {
+        // THE ONE WRITE OF THE TIER IN THE WHOLE APP (X3). Everything below reads it from
+        // the environment, so no view takes a destination argument it could be handed
+        // wrongly — and this value is derived from the kit mapping, never typed.
         Group {
             switch dest {
             case .signInGate:
@@ -382,6 +385,11 @@ struct RootView: View {
                     }
             }
         }
+        // THE ONE WRITE. Everything under here reads the tier from the environment, so no
+        // view takes a destination argument that could be handed the wrong value — and
+        // this value came from `RootDestination.captureDestinationOnScreen`, the mapping
+        // `RootDestinationDestinationTests` executes, never from a literal.
+        .environment(\.captureDestination, destination)
         // Vault setup is an explicitly opened sheet, never a launch-time gate over the
         // phone-only app. Background reconciliation updates Settings without presenting it.
         .sheet(isPresented: Binding(

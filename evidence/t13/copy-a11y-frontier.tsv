@@ -248,7 +248,6 @@ customer-facing-string	App/ConversationFacesView.swift	No summary yet. The trans
 customer-facing-string	App/ConversationFacesView.swift	Not now
 customer-facing-string	App/ConversationFacesView.swift	Nothing to summarize yet. The summary appears once the voice note is processed.
 customer-facing-string	App/ConversationFacesView.swift	Nothing you said surfaced as an action.
-customer-facing-string	App/ConversationFacesView.swift	On-device transcript, finishing on your computer.
 customer-facing-string	App/ConversationFacesView.swift	Processing receipt
 customer-facing-string	App/ConversationFacesView.swift	Relay answer
 customer-facing-string	App/ConversationFacesView.swift	Removes it from your phone, your computer, and your library.
@@ -339,7 +338,6 @@ customer-facing-string	App/SettingsScreen.swift	Welcome
 customer-facing-string	App/SettingsScreen.swift	Your voice
 customer-facing-string	App/SignInView.swift	
 customer-facing-string	App/SignInView.swift	Done
-customer-facing-string	App/SignInView.swift	End-to-end encrypted to your Mac · you choose what stays private
 customer-facing-string	App/SignInView.swift	F O U N D R Y X
 customer-facing-string	App/SignInView.swift	Make voice notes and remember. Your knowledge stays on your devices, under your keys.
 customer-facing-string	App/SignInView.swift	Remote access isn't configured in this build.

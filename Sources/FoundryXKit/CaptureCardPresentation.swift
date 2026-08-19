@@ -266,7 +266,13 @@ public enum CaptureHomeCopy {
     public static func recordSubtitle(destination: CaptureDestination) -> String {
         switch destination {
         case .phone:
-            return "Saved on this phone. It joins your full history when your computer connects."
+            // CAUGHT BY `CaptureDestinationFallbackTests`, 2026-08-19. This arm said "It
+            // joins your full history when your computer connects" — to the ONE tier that
+            // has no computer, in the very function whose own comment boasts that it was
+            // converted away from a Bool "because a Vault owner used to read 'on your
+            // computer'". The conversion gave `.vault` its words and left `.phone` naming a
+            // machine its owner does not have. On this tier the phone IS the full history.
+            return "Saved on this phone. This phone holds your full history."
         case .computer:
             return "Saved on this phone. It joins your full history on your computer."
         case .vault:

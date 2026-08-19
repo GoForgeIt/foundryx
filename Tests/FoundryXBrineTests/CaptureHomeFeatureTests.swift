@@ -131,9 +131,9 @@ private enum CaptureHomeSteps {
 
             // ── S4 record CTA copy per tier
             defineStep("the capture home on a phone-only install") { ctx, _, _ in w.destination = .phone; return ctx },
-            defineCheck("a \"Record a conversation\" card reads \"Saved on this phone. It joins your full history when your computer connects.\"") { _, _, _ in
+            defineCheck("a \"Record a conversation\" card reads \"Saved on this phone. This phone holds your full history.\"") { _, _, _ in
                 guard CaptureHomeCopy.recordTitle == "Make a voice note" else { throw BrineStepError("CTA title wrong") }
-                guard CaptureHomeCopy.recordSubtitle(destination: .phone) == "Saved on this phone. It joins your full history when your computer connects." else {
+                guard CaptureHomeCopy.recordSubtitle(destination: .phone) == "Saved on this phone. This phone holds your full history." else {
                     throw BrineStepError("phone-tier subtitle: \(CaptureHomeCopy.recordSubtitle(destination: .phone))")
                 }
             },

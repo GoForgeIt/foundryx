@@ -64,7 +64,7 @@ struct KilnConversationView: View {
         switch transcript {
         case .loading:
             WaitingExperienceView(
-                model: WaitingExperienceModel(kind: .doorFetch, destination: destination))
+                kind: .doorFetch)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .accessibilityIdentifier("kiln-transcript-loading")
 

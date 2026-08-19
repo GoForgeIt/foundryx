@@ -624,11 +624,11 @@ struct ConversationFacesView: View {
             // The BRAIN's pipeline (Mac or Vault) is authoritatively titling +
             // summarizing — that wins over the local fallback so we don't relabel
             // remote processing (WS-C). Name the brain the app actually resolved to.
-            WaitingExperienceView(model: WaitingExperienceModel(kind: .title, destination: destination), compact: true)
+            WaitingExperienceView(kind: .title, compact: true)
         } else if summarizing {
             // On-device titling + summary synth in flight (WS-C) — the PHONE is doing
             // this one, whatever the tier.
-            WaitingExperienceView(model: WaitingExperienceModel(kind: .title, destination: .phone), compact: true)
+            WaitingExperienceView(kind: .onDeviceTitle, compact: true)
         } else if transcriptText != nil {
             Text("No summary yet. The transcript face has the full voice note.")
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
@@ -898,7 +898,8 @@ struct ConversationFacesView: View {
             VStack(alignment: .leading, spacing: GrainSpacing.x3) {
                 searchBar
                 if showingProvisional {
-                    Text("On-device transcript, finishing on your computer.")
+                    Text(ConversationDetailCopy.provisionalTranscriptNote(
+                        destination: destination))
                         .grainTextStyle(.caption)
                         .foregroundStyle(GrainColor.textFaint)
                 }
@@ -973,18 +974,17 @@ struct ConversationFacesView: View {
         } else if loading {
             // Door fetch from the resolved brain (WS-C honest wait) — the copy names
             // the place actually answering: Mac, Vault, or this phone's own storage.
-            WaitingExperienceView(model: WaitingExperienceModel(kind: .doorFetch, destination: destination))
+            WaitingExperienceView(kind: .doorFetch)
         } else if didAttemptFetch, content?.found == false, loadError == nil {
             // Saved, but the transcript is still being produced (on-device STT / the
             // brain's pipeline) — name the wait honestly instead of a bare line.
-            WaitingExperienceView(model: WaitingExperienceModel(kind: .transcription, destination: destination))
+            WaitingExperienceView(kind: .transcription)
             GrainButton("Check again", variant: .tonal, size: .sm) { Task { await fetchFromDoor() } }
         } else {
             Text("Transcript not loaded")
                 .grainTextStyle(.title).foregroundStyle(GrainColor.ink)
-            Text(isOlder
-                 ? "This is an older voice note, so its transcript isn't stored on your phone. Load it from your computer."
-                 : "Load this voice note's transcript from your computer.")
+            Text(ConversationDetailCopy.loadTranscriptNote(isOlder: isOlder,
+                                                           destination: destination))
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             GrainButton("Load transcript", variant: .filled, size: .sm) { Task { await fetchFromDoor() } }
             if let loadError {
