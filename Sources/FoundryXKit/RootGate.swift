@@ -88,4 +88,23 @@ public extension RootDestination {
         case .signInGate:    return nil
         }
     }
+
+    /// THE SAME MAPPING, TOTAL, FOR THE ONE CALLER THAT IS ALREADY ON SCREEN.
+    ///
+    /// THIS EXISTS BECAUSE THE MAPPING ABOVE HAD NO PRODUCTION CALLER. It was written,
+    /// correct, and pinned by `SyncBarPresenterTests` — and `App/RootView.swift` named the
+    /// place with three hand-written literals anyway — `.computer`, `.vault`, `.phone`,
+    /// one per brain arm. A tested table nothing consults is decorative. `swift test` cannot
+    /// compile `App/`, so flipping any one of those literals compiled, shipped, and passed
+    /// every gate in this repository while an entire tier read another tier's words. The
+    /// only cure is that the App has nothing left to restate: it asks for the place, and
+    /// the answer is decided HERE, where a test can execute it.
+    ///
+    /// It is total because a view already on screen has to draw SOMETHING. `.signInGate`
+    /// never mounts the tabs, and if it somehow did it would take the phone's words — the
+    /// only tier that names no second place at all — rather than inventing a Mac or a
+    /// Vault for a user who has not even signed in.
+    var captureDestinationOnScreen: CaptureDestination {
+        captureDestination ?? .phone
+    }
 }
