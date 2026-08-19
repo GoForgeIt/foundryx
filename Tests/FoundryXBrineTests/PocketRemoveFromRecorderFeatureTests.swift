@@ -528,6 +528,35 @@ private actor PocketRemoveWorld {
             guard covered == 9 else {
                 throw BrineStepError("only \(covered) of the nine states were driven")
             }
+            // TWO DERIVATIONS, AND THEY MUST AGREE. The consent carries a consequence computed
+            // in `PocketRemoveFromRecorder.consent`; the page renders one computed in
+            // `PocketRecordingDetailPresentation.page`. Nothing read either against the other,
+            // so the sentence filed against a deletion and the sentence the owner saw could
+            // drift apart with the suite green. *(Adversarial review, 2026-08-19.)*
+            let anyKey = PocketRecorderFileKey(
+                identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: "agree"),
+                date: Self.day, timestamp: "20260328001919")
+            for elsewhere in PocketPresenceAnswer.allCases {
+                for onPhone in PocketPresenceAnswer.allCases {
+                    let reading = PocketRecordingPresence(
+                        onRecorder: PocketPlaceReading(answer: .yes,
+                                                       observedAt: Self.armingInstant),
+                        onThisPhone: PocketPlaceReading(answer: onPhone, observedAt: nil),
+                        safeElsewhere: PocketPlaceReading(answer: elsewhere, observedAt: nil))
+                    guard let filed = PocketRemoveFromRecorder.consent(
+                        for: anyKey, presence: reading, provenance: .ownerChose)?.consequence
+                    else { throw BrineStepError("the manual path composed no consent") }
+                    let page = PocketRecordingDetailPresentation.page(
+                        for: PocketRecording(date: Self.day, timestamp: "20260328001919",
+                                             sizeBytes: 4_000),
+                        presence: reading, brain: .justMyPhone, now: Self.armingInstant)
+                    guard page.notes.contains(filed.sentence) else {
+                        throw BrineStepError(
+                            "(\(elsewhere.rawValue), \(onPhone.rawValue)): the consent files "
+                                + "\(filed.rawValue) and the page shows \(page.notes)")
+                    }
+                }
+            }
             // AND ALL FOUR CONSEQUENCES ARE REACHED BY THE MAP, so none of them is a case the
             // production function can no longer produce.
             let reached = Set(expected.values.flatMap { $0.values })
@@ -616,6 +645,22 @@ private actor PocketRemoveWorld {
             }
 
         case "automatic clearing would take only the confirmed one":
+            // THE ARMED PATH'S REFUSAL SENTENCE, HELD. The step that carried the only assertion
+            // on `message(for: .notProvenSafe)` was deleted when the manual path stopped
+            // producing that outcome — and the SAME change reworded the sentence. Changed and
+            // unheld at once is how a refusal comes to say something about a path that can no
+            // longer reach it. *(Adversarial review, 2026-08-19.)*
+            guard PocketRemoveFromRecorderPresentation.message(for: .notProvenSafe)
+                == PocketRemoveFromRecorderPresentation.notProvenSafeLine else {
+                throw BrineStepError("the armed clear's refusal does not say why")
+            }
+            guard PocketRemoveFromRecorderPresentation.notProvenSafeLine
+                .contains("on its own") else {
+                throw BrineStepError(
+                    "the refusal reads \"\(PocketRemoveFromRecorderPresentation.notProvenSafeLine)\""
+                        + " — a manual tap can no longer produce it, so it must say that what is "
+                        + "declining is the clearing Solleva does unattended")
+            }
             let mayTake = shelfReadings.map(PocketRemoveFromRecorderPresentation.autoClearMayTake)
             guard mayTake == [true, false, false] else {
                 throw BrineStepError("the armed clear would take \(mayTake) over readings "
