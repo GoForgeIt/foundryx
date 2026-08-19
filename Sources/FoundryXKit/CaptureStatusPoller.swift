@@ -379,7 +379,11 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
         // timeline stays browsable (with a title + summary) offline + after pruning.
         if let baseDir {
             let wrote = ConversationCardStore.merge(captureId: captureId, baseDir: baseDir,
-                                                    title: resp.title, summary: resp.summary, stage: resp.stage)
+                                                    title: resp.title, summary: resp.summary,
+                                                    stage: resp.stage,
+                                                    // The reason outlives this poller: the
+                                                    // detail view opens long after it stops.
+                                                    droppedReason: resp.droppedReason)
             // Only signal a REAL change — repeat polls with unchanged content don't churn
             // the manager's memo/rebuild (mirrors merge's own change-gated event log).
             if wrote { onCardWritten?(captureId) }

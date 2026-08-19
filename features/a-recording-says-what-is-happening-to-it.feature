@@ -112,6 +112,18 @@ Feature: a recording says what is happening to it, and never invents a number
     Then the surfaced step is marked done
     And the surfaced step counts 2 items
 
+  Scenario: an item somebody else said still came out of this voice note
+    Given a transcribed recording whose only surfaced item was said by somebody else
+    Then the surfaced step is marked done
+    And the surfaced step counts 1 item
+    And the surfaced step does not say nothing was found
+
+  Scenario: a voice note that could not be transcribed says why
+    Given a recording the door failed to transcribe because no speech was detected
+    Then the transcript step is marked as failed
+    And the transcript step says no speech was detected
+    And no step leaves a person with only the word "failed"
+
   Scenario: the five ways a reading can end never share a sentence
     Given every way the surfaced step can end
     Then no two of them read the same

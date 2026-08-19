@@ -261,9 +261,14 @@ struct ConversationFacesView: View {
 
     /// WHETHER ANYTHING CAME OUT OF IT, joined in the kit from the gate's own decision log.
     private var ambientReading: AmbientReading {
+        // THE FACE, NOT A COUNT OF PART OF IT. This passed `actions.rows.count`, which
+        // excludes the "Heard from others" group — so a voice note whose only surfaced
+        // item was said by somebody else read "Solleva read this voice note and found
+        // nothing to act on" directly above that item. What counts as surfaced is now
+        // `ConversationActionsPresentation.surfaced`, decided in the kit.
         AmbientReading.reading(hasTranscript: transcriptText != nil,
                                decisions: decisions,
-                               surfaced: actions.rows.count)
+                               actions: actions)
     }
 
     /// THE JOURNEY. Every input is something this phone measured, and the join itself lives in
@@ -289,7 +294,12 @@ struct ConversationFacesView: View {
             hasSummary: summaryText != nil,
             synthesizingSummary: summarizing,
             decisions: decisions,
-            surfaced: actions.rows.count))
+            actions: actions,
+            // The door's terminal drop reason, read off the durable card tombstone the
+            // poller persists it to — so a failed voice note's transcript step says WHY
+            // instead of the generic line. This argument used to be a hardcoded nil
+            // inside the join, which made the tested failure sentence unreachable.
+            droppedReason: provisional?.droppedReason))
     }
 
     /// Re-take the name reading. Called whenever a transcript or a title could have changed; the
