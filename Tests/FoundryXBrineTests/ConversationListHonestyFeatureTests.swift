@@ -117,7 +117,7 @@ private enum ConversationListHonestySteps {
             defineStep("I look at its card in the list") { ctx, _, _ in
                 await MainActor.run {
                     w.endedStatusWord = CaptureCardPresentation.statusWord(progress: w.endedProgress ?? .recording,
-                                                                           droppedReason: nil, local: false)
+                                                                           droppedReason: nil, destination: .computer)
                 }
                 return ctx
             },

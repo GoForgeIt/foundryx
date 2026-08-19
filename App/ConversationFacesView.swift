@@ -52,15 +52,13 @@ struct ConversationFacesView: View {
     /// required: a default here is a decision about whether a recording is safe, made by
     /// whoever forgot to pass it.
     ///
-    /// IT IS NOT `local`. `local` decides which WORDS the stepper uses; this decides whether a
-    /// segment upload-ack is evidence of a copy anywhere other than this handset. On the
-    /// phone-only tier that ack is self-issued (`CaptureBackend` passes a closure that succeeds
-    /// by doing nothing), so reading `local` as though it were the brain would answer
+    /// IT IS NOT `destination`. The tier decides which WORDS a surface uses; this decides
+    /// whether a segment upload-ack is evidence of a copy anywhere other than this handset. On
+    /// the phone-only tier that ack is self-issued (`CaptureBackend` passes a closure that
+    /// succeeds by doing nothing), so reading the tier as though it were the brain would answer
     /// "safe elsewhere: Yes" for a recording whose only copy is on this phone — the same
     /// predicate that arms the delete button.
     let brain: BrainChoice
-    /// DERIVED, never stored — the phone-only spelling some sub-flows still take.
-    private var local: Bool { destination == .phone }
     /// The semantic-search seam. No embedding index exists on the phone today,
     /// so the default is nil and the meaning toggle is ABSENT (never a dead
     /// control). Inject a real, available index and the toggle appears.
@@ -261,9 +259,14 @@ struct ConversationFacesView: View {
 
     /// WHETHER ANYTHING CAME OUT OF IT, joined in the kit from the gate's own decision log.
     private var ambientReading: AmbientReading {
+        // THE FACE, NOT A COUNT OF PART OF IT. This passed `actions.rows.count`, which
+        // excludes the "Heard from others" group — so a voice note whose only surfaced
+        // item was said by somebody else read "Solleva read this voice note and found
+        // nothing to act on" directly above that item. What counts as surfaced is now
+        // `ConversationActionsPresentation.surfaced`, decided in the kit.
         AmbientReading.reading(hasTranscript: transcriptText != nil,
                                decisions: decisions,
-                               surfaced: actions.rows.count)
+                               actions: actions)
     }
 
     /// THE JOURNEY. Every input is something this phone measured, and the join itself lives in
@@ -289,7 +292,12 @@ struct ConversationFacesView: View {
             hasSummary: summaryText != nil,
             synthesizingSummary: summarizing,
             decisions: decisions,
-            surfaced: actions.rows.count))
+            actions: actions,
+            // The door's terminal drop reason, read off the durable card tombstone the
+            // poller persists it to — so a failed voice note's transcript step says WHY
+            // instead of the generic line. This argument used to be a hardcoded nil
+            // inside the join, which made the tested failure sentence unreachable.
+            droppedReason: provisional?.droppedReason))
     }
 
     /// Re-take the name reading. Called whenever a transcript or a title could have changed; the
@@ -616,11 +624,11 @@ struct ConversationFacesView: View {
             // The BRAIN's pipeline (Mac or Vault) is authoritatively titling +
             // summarizing — that wins over the local fallback so we don't relabel
             // remote processing (WS-C). Name the brain the app actually resolved to.
-            WaitingExperienceView(model: WaitingExperienceModel(kind: .title, destination: destination), compact: true)
+            WaitingExperienceView(kind: .title, compact: true)
         } else if summarizing {
             // On-device titling + summary synth in flight (WS-C) — the PHONE is doing
             // this one, whatever the tier.
-            WaitingExperienceView(model: WaitingExperienceModel(kind: .title, destination: .phone), compact: true)
+            WaitingExperienceView(kind: .onDeviceTitle, compact: true)
         } else if transcriptText != nil {
             Text("No summary yet. The transcript face has the full voice note.")
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textMuted)
@@ -813,7 +821,7 @@ struct ConversationFacesView: View {
     /// ActionFeedbackFlow (EXT1: one component across every action surface):
     /// continue-in-chat (linked), act-in-chat (prefill), refine, not-an-action.
     private func actionOptionsSheet(_ row: ConversationActionsPresentation.Row) -> some View {
-        ActionFeedbackFlow.sheet(row: row, captureId: captureId, local: local,
+        ActionFeedbackFlow.sheet(row: row, captureId: captureId, destination: destination,
                                  inOthersGroup: selectedFromOthers) {
             loadFaceData()
         }
@@ -890,7 +898,8 @@ struct ConversationFacesView: View {
             VStack(alignment: .leading, spacing: GrainSpacing.x3) {
                 searchBar
                 if showingProvisional {
-                    Text("On-device transcript, finishing on your computer.")
+                    Text(ConversationDetailCopy.provisionalTranscriptNote(
+                        destination: destination))
                         .grainTextStyle(.caption)
                         .foregroundStyle(GrainColor.textFaint)
                 }
@@ -965,18 +974,17 @@ struct ConversationFacesView: View {
         } else if loading {
             // Door fetch from the resolved brain (WS-C honest wait) — the copy names
             // the place actually answering: Mac, Vault, or this phone's own storage.
-            WaitingExperienceView(model: WaitingExperienceModel(kind: .doorFetch, destination: destination))
+            WaitingExperienceView(kind: .doorFetch)
         } else if didAttemptFetch, content?.found == false, loadError == nil {
             // Saved, but the transcript is still being produced (on-device STT / the
             // brain's pipeline) — name the wait honestly instead of a bare line.
-            WaitingExperienceView(model: WaitingExperienceModel(kind: .transcription, destination: destination))
+            WaitingExperienceView(kind: .transcription)
             GrainButton("Check again", variant: .tonal, size: .sm) { Task { await fetchFromDoor() } }
         } else {
             Text("Transcript not loaded")
                 .grainTextStyle(.title).foregroundStyle(GrainColor.ink)
-            Text(isOlder
-                 ? "This is an older voice note, so its transcript isn't stored on your phone. Load it from your computer."
-                 : "Load this voice note's transcript from your computer.")
+            Text(ConversationDetailCopy.loadTranscriptNote(isOlder: isOlder,
+                                                           destination: destination))
                 .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             GrainButton("Load transcript", variant: .filled, size: .sm) { Task { await fetchFromDoor() } }
             if let loadError {
@@ -1391,7 +1399,7 @@ struct ConversationFacesView: View {
             // at all, so a transport failure here means exactly one thing: the computer is
             // not reachable. (DoorFailureMessage, tested.)
             if cached == nil {
-                loadError = DoorFailureMessage.make(doorTransportFailure: error).line
+                loadError = DoorFailureMessage.make(doorTransportFailure: error, destination: destination).line
             }
         }
         loading = false

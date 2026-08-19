@@ -439,6 +439,59 @@ private enum CaptureJourneySteps {
                     throw BrineStepError("an unread recording was marked done")
                 }
             },
+            // B2 — WHAT COUNTS AS SURFACED. Driven through the REAL join the app uses, with
+            // the item filed under "Heard from others": the count the page was fed excluded
+            // that group, so this exact recording read "found nothing to act on" directly
+            // above the item it was showing.
+            defineStep("a transcribed recording whose only surfaced item was said by somebody else") { ctx, _, _ in
+                let row = ConversationActionsPresentation.Row(
+                    id: "surfaced-1", label: "Send Sarah the deck", meta: nil,
+                    kind: .surfaced, state: .open, utterance: "I'll send Sarah the deck")
+                let face = ConversationActionsPresentation(rows: [], othersRows: [row])
+                w.journey = CaptureJourney.build(.detail(
+                    status: nil, brain: .foundryCloud, transfer: .none, cardStage: "transcribed",
+                    content: nil, hasTranscript: true, separatedSpeakers: 0, hasSummary: false,
+                    synthesizingSummary: false, decisions: [decision(.candidate, reason: nil)],
+                    actions: face, droppedReason: nil))
+                return ctx
+            },
+            defineCheck("the surfaced step counts 1 item") { _, _, _ in
+                let figure = w.journey.step(.surfaced)?.figure
+                guard figure?.done == 1, figure?.line.contains("1 item") == true else {
+                    throw BrineStepError("wrong count: \(String(describing: figure?.line))")
+                }
+            },
+
+            // B3 — THE REASON, THROUGH THE JOIN. `detail` hardcoded a nil reason, so this
+            // sentence was unreachable from the App seam even though it was tested.
+            defineStep("a recording the door failed to transcribe because no speech was detected") { ctx, _, _ in
+                w.journey = CaptureJourney.build(.detail(
+                    status: nil, brain: .foundryCloud, transfer: .none, cardStage: "failed",
+                    content: nil, hasTranscript: false, separatedSpeakers: 0, hasSummary: false,
+                    synthesizingSummary: false, decisions: [],
+                    actions: ConversationActionsPresentation(rows: []),
+                    droppedReason: "silent_no_transcript"))
+                return ctx
+            },
+            defineCheck("the transcript step is marked as failed") { _, _, _ in
+                guard w.journey.step(.transcript)?.state == .failed else {
+                    throw BrineStepError("transcript step is \(String(describing: w.journey.step(.transcript)?.state))")
+                }
+            },
+            defineCheck("the transcript step says no speech was detected") { _, _, _ in
+                let detail = w.journey.step(.transcript)?.detail ?? ""
+                guard detail == "No speech detected" else {
+                    throw BrineStepError("wrong sentence: \"\(detail)\"")
+                }
+            },
+            defineCheck("no step leaves a person with only the word \"failed\"") { _, _, _ in
+                for step in w.journey.steps where step.state == .failed {
+                    let detail = step.detail ?? ""
+                    if detail.isEmpty || detail == "Transcription failed." {
+                        throw BrineStepError("the \(step.phase.rawValue) step failed with no reason: \"\(detail)\"")
+                    }
+                }
+            },
             defineCheck("the surfaced step counts 2 items") { _, _, _ in
                 let figure = w.journey.step(.surfaced)?.figure
                 guard figure?.done == 2, figure?.line.contains("2 items") == true else {

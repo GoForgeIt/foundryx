@@ -234,7 +234,7 @@ private enum MacChatSteps {
                 w.row = importedRow(resumed: true)
                 w.turns = []
                 w.unreachable = DoorFailureMessage.make(
-                    kilnLibraryFailure: KilnLibraryError.unreachable).line
+                    kilnLibraryFailure: KilnLibraryError.unreachable, destination: .computer).line
                 return ctx
             },
 

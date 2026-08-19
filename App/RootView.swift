@@ -270,7 +270,28 @@ struct RootView: View {
         return AnyView(bodyContent(dest))
     }
 
+    /// THE PLACE IS ASKED FOR, NEVER RESTATED.
+    ///
+    /// This function used to name the destination three times — `.computer` in the
+    /// computer arm, `.vault` in the cell arm, `.phone` in the phone arm — while
+    /// `RootDestination.captureDestination` sat in FoundryXKit, correct and pinned by
+    /// `SyncBarPresenterTests` — and with ZERO PRODUCTION CALL SITES. It was a tested
+    /// table nothing consulted. Because `swift test` cannot compile `App/`, flipping one
+    /// of those literals was a compiling, shipping, fully-green way to render one tier's
+    /// words to another tier's owner: exactly the defect the wait copy was fixed for.
+    ///
+    /// So the place is derived ONCE, here, from the kit's mapping, and handed to the arms.
+    /// There is no longer a per-tier literal to flip, and the mapping that decides it is
+    /// executed by `RootDestinationDestinationTests`.
     @ViewBuilder private func bodyContent(_ dest: RootDestination) -> some View {
+        brainBody(dest, destination: dest.captureDestinationOnScreen)
+    }
+
+    @ViewBuilder private func brainBody(_ dest: RootDestination,
+                                        destination: CaptureDestination) -> some View {
+        // THE ONE WRITE OF THE TIER IN THE WHOLE APP (X3). Everything below reads it from
+        // the environment, so no view takes a destination argument it could be handed
+        // wrongly — and this value is derived from the kit mapping, never typed.
         Group {
             switch dest {
             case .signInGate:
@@ -299,7 +320,7 @@ struct RootView: View {
             case .computerBrain:
                 if let target = remote.makeDoorTarget() {
                     MainTabs(target: target, remote: remote, brains: brains,
-                             destination: .computer,
+                             destination: destination,
                              vaultFunnel: vaultFunnel, accountDeletion: accountDeletion, showingAccount: $showingAccount,
                              showingOnboarding: $showingOnboarding,
                              onboardingSkipsWelcome: onboardingSkipsWelcome)
@@ -337,7 +358,7 @@ struct RootView: View {
                     config: cfg,
                     idToken: identityCoordinator.currentToken?.value) {
                     MainTabs(target: target, remote: remote, brains: brains,
-                             destination: .vault,
+                             destination: destination,
                              vaultFunnel: vaultFunnel, accountDeletion: accountDeletion,
                              showingAccount: $showingAccount,
                              showingOnboarding: $showingOnboarding,
@@ -354,7 +375,7 @@ struct RootView: View {
                 // The phone-only tier: whole without a brain (zero content egress).
                 MainTabs(target: DoorTarget(baseURL: URL(string: "http://127.0.0.1:1")!,
                                             bearer: "local"),
-                         remote: remote, brains: brains, destination: .phone,
+                         remote: remote, brains: brains, destination: destination,
                          vaultFunnel: vaultFunnel, accountDeletion: accountDeletion, showingAccount: $showingAccount,
                              showingOnboarding: $showingOnboarding,
                              onboardingSkipsWelcome: onboardingSkipsWelcome)
@@ -364,6 +385,11 @@ struct RootView: View {
                     }
             }
         }
+        // THE ONE WRITE. Everything under here reads the tier from the environment, so no
+        // view takes a destination argument that could be handed the wrong value — and
+        // this value came from `RootDestination.captureDestinationOnScreen`, the mapping
+        // `RootDestinationDestinationTests` executes, never from a literal.
+        .environment(\.captureDestination, destination)
         // Vault setup is an explicitly opened sheet, never a launch-time gate over the
         // phone-only app. Background reconciliation updates Settings without presenting it.
         .sheet(isPresented: Binding(

@@ -56,7 +56,7 @@ public enum CaptureLifecycleStage: String, Sendable, Equatable {
 ///   Recording → Saved on phone → Saved to computer → Transcribing… → Ready
 ///
 /// `failed` is the terminal-failure chip. Pure + unit-tested via `resolve`.
-public enum ConversationProgress: String, Sendable, Equatable {
+public enum ConversationProgress: String, Sendable, Equatable, CaseIterable {
     case recording          // mic live, frames arriving
     case savedOnPhone       // ≥1 segment durable on the phone, not all ACK'd yet
     case savedToComputer    // every segment ACK'd; door hasn't reported Lore progress yet
@@ -64,23 +64,37 @@ public enum ConversationProgress: String, Sendable, Equatable {
     case ready              // transcript/title available — openable
     case failed             // terminal transcription failure (retry affordance)
 
-    /// The calm chip label. In the phone-only tier (`local`) there is NO computer —
-    /// segments are durable ON THE PHONE — so the "saved to computer" / generic
-    /// "transcribing" vocabulary would be a lie; the labels stay on-device instead.
-    public func label(local: Bool) -> String {
+    /// The calm chip label, per tier.
+    ///
+    /// THIS TOOK `local: Bool` AND THAT BOOL SHIPPED A FALSE CHIP. One bit cannot answer
+    /// "which of three places", and `App/` derived it as `destination == .phone`, so
+    /// `.computer` and `.vault` were indistinguishable and a Vault owner's chip read
+    /// "Saved to computer". Worse, there was a `var label` convenience that defaulted the
+    /// bit to `false` — a DEFAULT THAT NAMED A COMPUTER, chosen by whoever forgot to pass
+    /// anything. Both are gone: the tier is required and the switch is exhaustive, so a
+    /// fourth brain fails to compile until it picks its own words.
+    ///
+    /// Where a label names NO place ("Transcribing…") two tiers may share it — a sentence
+    /// that names nowhere cannot name the wrong somewhere.
+    public func label(destination: CaptureDestination) -> String {
         switch self {
         case .recording: return "Taking a note"
         case .savedOnPhone: return "Saved on phone"
-        case .savedToComputer: return local ? "Saved on phone" : "Saved to computer"
-        case .transcribing: return local ? "Transcribing on this phone…" : "Transcribing…"
+        case .savedToComputer:
+            switch destination {
+            case .phone:    return "Saved on phone"
+            case .computer: return "Saved to computer"
+            case .vault:    return "Saved to your Vault"
+            }
+        case .transcribing:
+            switch destination {
+            case .phone:              return "Transcribing on this phone…"
+            case .computer, .vault:   return "Transcribing…"
+            }
         case .ready: return "Ready"
         case .failed: return "Transcription failed — retry"
         }
     }
-
-    /// The calm chip label (computer-brain default). Prefer `label(local:)` where the
-    /// brain mode is known.
-    public var label: String { label(local: false) }
 
     /// Whether the card should offer a retry affordance.
     public var needsRetry: Bool { self == .failed }
@@ -97,13 +111,23 @@ public enum ConversationProgress: String, Sendable, Equatable {
         case transcribing    // transcript being produced (STT + speakers + title)
         case ready           // openable — transcript/title available
 
-        /// Brand-honest label. In the phone-only tier there is no computer, so the
-        /// "saved" step stays on-device and transcription is "on this phone".
-        public func label(local: Bool) -> String {
+        /// Brand-honest label, per tier. Exhaustive over `CaptureDestination` for the
+        /// same reason the chip is: the Bool this replaced could not tell a Vault from a
+        /// Mac, so the stepper on a Vault owner's voice note said "Saved to computer".
+        public func label(destination: CaptureDestination) -> String {
             switch self {
             case .recorded: return "Captured"
-            case .saved: return local ? "Saved on phone" : "Saved to computer"
-            case .transcribing: return local ? "Transcribing on phone" : "Transcribing"
+            case .saved:
+                switch destination {
+                case .phone:    return "Saved on phone"
+                case .computer: return "Saved to computer"
+                case .vault:    return "Saved to your Vault"
+                }
+            case .transcribing:
+                switch destination {
+                case .phone:            return "Transcribing on phone"
+                case .computer, .vault: return "Transcribing"
+                }
             case .ready: return "Ready"
             }
         }
@@ -379,7 +403,11 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
         // timeline stays browsable (with a title + summary) offline + after pruning.
         if let baseDir {
             let wrote = ConversationCardStore.merge(captureId: captureId, baseDir: baseDir,
-                                                    title: resp.title, summary: resp.summary, stage: resp.stage)
+                                                    title: resp.title, summary: resp.summary,
+                                                    stage: resp.stage,
+                                                    // The reason outlives this poller: the
+                                                    // detail view opens long after it stops.
+                                                    droppedReason: resp.droppedReason)
             // Only signal a REAL change — repeat polls with unchanged content don't churn
             // the manager's memo/rebuild (mirrors merge's own change-gated event log).
             if wrote { onCardWritten?(captureId) }

@@ -313,14 +313,14 @@ final class DoorClientKilnLibraryTests: XCTestCase {
     /// empty. A stopped Kiln and a sleeping Mac are not the same problem and do not have the
     /// same fix.
     func testFailureCopyNamesTheRealStateAndNeverClaimsAnEmptyLibrary() {
-        let noSession = DoorFailureMessage.make(kilnLibraryFailure: .noSession)
-        let unreachable = DoorFailureMessage.make(kilnLibraryFailure: .unreachable)
+        let noSession = DoorFailureMessage.make(kilnLibraryFailure: .noSession, destination: .computer)
+        let unreachable = DoorFailureMessage.make(kilnLibraryFailure: .unreachable, destination: .computer)
         XCTAssertNotEqual(noSession, unreachable, "a stopped Kiln reads the same as a sleeping Mac")
         XCTAssertTrue(noSession.text.contains("Kiln"))
 
         for msg in [noSession, unreachable,
-                    DoorFailureMessage.make(kilnLibraryFailure: .http(500)),
-                    DoorFailureMessage.make(kilnLibraryFailure: .unauthorized)] {
+                    DoorFailureMessage.make(kilnLibraryFailure: .http(500), destination: .computer),
+                    DoorFailureMessage.make(kilnLibraryFailure: .unauthorized, destination: .computer)] {
             let line = msg.line.lowercased()
             for lie in ["no conversation", "empty", "nothing here"] {
                 XCTAssertFalse(line.contains(lie), "failure copy claims an empty library: \(msg.line)")
