@@ -92,7 +92,7 @@ private final class AppPlaceWorld: @unchecked Sendable {
             ChatConversationStore.Conversation(id: $0, title: "A chat I started here")
         })
         let state = await KilnLibraryPresentation.resolve(
-            computerConnected: doorTier, phoneRows: phone,
+            computerConnected: doorTier, destination: .computer, phoneRows: phone,
             lens: KilnLibraryPresentation.defaultMergedLens,
             nowMs: 1_754_400_000_000,
             load: { throw doorConnected ? KilnLibraryError.noSession : KilnLibraryError.unreachable })
@@ -249,7 +249,7 @@ private enum AppPlaceSteps {
                 guard rail.macReach != .reachable else {
                     throw BrineStepError("the restored list thinks the Mac was reachable")
                 }
-                guard let line = KilnLibraryCopy.reachLine(rail.macReach) else {
+                guard let line = KilnLibraryCopy.reachLine(rail.macReach, destination: .computer) else {
                     throw BrineStepError(
                         "the restored list says NOTHING about the Mac being missing, so this "
                             + "phone's chats read as all of them")

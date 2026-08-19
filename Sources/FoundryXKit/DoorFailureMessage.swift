@@ -20,7 +20,12 @@ public struct DoorFailureMessage: Equatable, Sendable {
     ///   - status: the live remote-session status — the authority on account/host state.
     ///   - underlying: the transport error's `localizedDescription`, used ONLY as a last
     ///     resort when the session status explains nothing.
-    public static func make(status: RemoteSession.Status, underlying: String?) -> DoorFailureMessage {
+    ///   - destination: WHICH BRAIN this account resolved to. It is required, and there is
+    ///     no default: these sentences send a person somewhere to fix something, and the
+    ///     Mac-only spellings below told a Vault owner to "Open Solleva on your Mac" — an
+    ///     instruction that looks actionable and cannot be acted on.
+    public static func make(status: RemoteSession.Status, underlying: String?,
+                            destination: CaptureDestination) -> DoorFailureMessage {
         switch status {
         case .deletionCleanupPending:
             // An account-state problem, never a transport one — saying "check your
@@ -48,18 +53,30 @@ public struct DoorFailureMessage: Equatable, Sendable {
             // network string if any path ever reaches it again.
             return DoorFailureMessage(
                 text: "You're signed out.",
-                action: "Sign in to reach your computer.")
+                action: destination.brainSubject.map { "Sign in to reach \($0)." })
         case .unconfigured:
             return DoorFailureMessage(
                 text: "Sign-in isn't available in this build.",
                 action: nil)
         case .noHost:
-            return DoorFailureMessage(
-                text: "No computer is set up for this account yet.",
-                action: "Open Solleva on your Mac and sign in with the same account.")
+            switch destination {
+            case .phone:
+                return DoorFailureMessage(
+                    text: "This phone is your only brain, so there is nothing to connect to.",
+                    action: nil)
+            case .computer:
+                return DoorFailureMessage(
+                    text: "No computer is set up for this account yet.",
+                    action: "Open Solleva on your Mac and sign in with the same account.")
+            case .vault:
+                return DoorFailureMessage(
+                    text: "No Vault is set up for this account yet.",
+                    action: "Set up your Vault in Settings, signed in with the same account.")
+            }
         case .resolving:
             return DoorFailureMessage(
-                text: "Still connecting to your computer…",
+                text: destination.brainSubject.map { "Still connecting to \($0)…" }
+                    ?? "Still getting ready…",
                 action: "This should only take a moment.")
         case .connected, .error:
             // The session believes a host is designated, so the failure is the TUNNEL or the
@@ -67,8 +84,11 @@ public struct DoorFailureMessage: Equatable, Sendable {
             // case that used to read as "Could not connect to the server": the relay resolved
             // the host fine and the dial failed because nothing was listening on the Mac end.
             return DoorFailureMessage(
-                text: "Your computer isn't connected right now.",
-                action: "Open Solleva on your Mac and make sure it's awake.")
+                text: destination.brainSubject.map { subject in
+                    let s = subject.prefix(1).uppercased() + subject.dropFirst()
+                    return "\(s) isn't connected right now."
+                } ?? "This phone's own storage didn't answer.",
+                action: destination.wakeAction)
         }
     }
 
@@ -78,10 +98,14 @@ public struct DoorFailureMessage: Equatable, Sendable {
     /// mean the desktop door is not reachable — the account and host questions are already
     /// settled by the time the user is looking at this screen. So this says the one true,
     /// actionable thing instead of forwarding a transport string.
-    public static func make(doorTransportFailure: Error) -> DoorFailureMessage {
+    public static func make(doorTransportFailure: Error,
+                            destination: CaptureDestination) -> DoorFailureMessage {
         DoorFailureMessage(
-            text: "Your computer isn't connected right now.",
-            action: "Open Solleva on your Mac and make sure it's awake.")
+            text: destination.brainSubject.map { subject in
+                let s = subject.prefix(1).uppercased() + subject.dropFirst()
+                return "\(s) isn't connected right now."
+            } ?? "This phone's own storage didn't answer.",
+            action: destination.wakeAction)
     }
 
     /// For a failed read of Kiln's SHARED conversation library.
@@ -93,21 +117,26 @@ public struct DoorFailureMessage: Equatable, Sendable {
     /// user reads: a stopped Kiln is a different, differently-fixable thing from a sleeping
     /// Mac. No status code, no NSError domain, and above all no "no conversations" ever
     /// appears in any of these.
-    public static func make(kilnLibraryFailure: KilnLibraryError) -> DoorFailureMessage {
+    public static func make(kilnLibraryFailure: KilnLibraryError,
+                            destination: CaptureDestination) -> DoorFailureMessage {
+        let subject = destination.brainSubject ?? "this phone"
+        let capitalised = subject.prefix(1).uppercased() + subject.dropFirst()
         switch kilnLibraryFailure {
         case .noSession:
-            // The door answered — so the Mac IS reachable. What is missing is Kiln itself.
+            // The door answered — so the brain IS reachable. What is missing is Kiln itself.
             return DoorFailureMessage(
-                text: "Kiln isn't running on your computer right now.",
-                action: "Open Solleva on your Mac and start Kiln.")
+                text: "Kiln isn't running on \(subject) right now.",
+                action: destination == .computer
+                    ? "Open Solleva on your Mac and start Kiln."
+                    : destination.wakeAction)
         case .unreachable, .http:
             return DoorFailureMessage(
-                text: "Your computer couldn't reach Kiln right now.",
-                action: "Open Solleva on your Mac and make sure it's awake.")
+                text: "\(capitalised) couldn't reach Kiln right now.",
+                action: destination.wakeAction)
         case .unauthorized:
             return DoorFailureMessage(
                 text: "You're signed out.",
-                action: "Sign in to reach your computer.")
+                action: destination.brainSubject.map { "Sign in to reach \($0)." })
         }
     }
 

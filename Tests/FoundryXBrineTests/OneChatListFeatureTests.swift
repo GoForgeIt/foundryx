@@ -158,7 +158,7 @@ private final class OneChatListWorld: @unchecked Sendable {
             PhoneChatSource.matching(phoneConversations, terms: terms))
         let asked = terms.joined(separator: " ")
         state = await KilnLibraryPresentation.resolve(
-            computerConnected: connected,
+            computerConnected: connected, destination: .computer,
             phoneRows: phone,
             lens: KilnLibraryPresentation.defaultMergedLens,
             query: query, provenance: provenance,
@@ -460,7 +460,7 @@ private enum OneChatListSteps {
             },
             defineCheck("the list says it searched this phone and my Mac") { _, _, _ in
                 let rail = try w.rail()
-                guard let line = KilnLibraryCopy.coverageLine(rail.coverage, searching: true) else {
+                guard let line = KilnLibraryCopy.coverageLine(rail.coverage, searching: true, destination: .computer) else {
                     throw BrineStepError(
                         "the list said NOTHING about what the search covered")
                 }
@@ -508,7 +508,7 @@ private enum OneChatListSteps {
                         "the list claims to hold everything (\(rail.coverage)) while the Mac "
                             + "has more than it fetched")
                 }
-                guard let line = KilnLibraryCopy.coverageLine(rail.coverage, searching: false) else {
+                guard let line = KilnLibraryCopy.coverageLine(rail.coverage, searching: false, destination: .computer) else {
                     throw BrineStepError("a truncated list said nothing about being truncated")
                 }
                 for n in [shown, total] where !line.contains("\(n)") {
@@ -521,13 +521,13 @@ private enum OneChatListSteps {
                 for coverage: ChatListCoverage in [
                     .complete, .truncated(shownFromMac: 2, totalOnMac: 9),
                     .thisPhoneOnly(reason: "nope"), .pending,
-                ] where KilnLibraryCopy.coverageLine(coverage, searching: true) == nil {
+                ] where KilnLibraryCopy.coverageLine(coverage, searching: true, destination: .computer) == nil {
                     throw BrineStepError(
                         "a search whose coverage is \(coverage) says nothing at all — a "
                             + "partial answer with no stated scope reads as a complete one")
                 }
                 let rail = try w.rail()
-                guard KilnLibraryCopy.coverageLine(rail.coverage, searching: true) != nil else {
+                guard KilnLibraryCopy.coverageLine(rail.coverage, searching: true, destination: .computer) != nil else {
                     throw BrineStepError("this search said nothing about what it covered")
                 }
                 let list = try w.source(OneChatListWorld.chatList)
@@ -603,7 +603,7 @@ private enum OneChatListSteps {
                     throw BrineStepError(
                         "the list thinks the Mac was fine: \(rail.macReach)")
                 }
-                guard let line = KilnLibraryCopy.reachLine(rail.macReach) else {
+                guard let line = KilnLibraryCopy.reachLine(rail.macReach, destination: .computer) else {
                     throw BrineStepError(
                         "the list shows this phone's chats and says nothing about the Mac")
                 }
@@ -620,11 +620,11 @@ private enum OneChatListSteps {
                 // The property, not the instance: a reachable Mac is the ONLY state allowed
                 // to render as silence.
                 for reach: MacReach in [.noComputer, .unreachable("something broke")]
-                where KilnLibraryCopy.reachLine(reach) == nil {
+                where KilnLibraryCopy.reachLine(reach, destination: .computer) == nil {
                     throw BrineStepError(
                         "\(reach) renders as silence, so a partial list reads as everything")
                 }
-                guard KilnLibraryCopy.reachLine(.reachable) == nil else {
+                guard KilnLibraryCopy.reachLine(.reachable, destination: .computer) == nil else {
                     throw BrineStepError(
                         "a reachable Mac also draws a warning, so the warning means nothing")
                 }
@@ -640,7 +640,7 @@ private enum OneChatListSteps {
                     throw BrineStepError(
                         "a search that never reached the Mac reports \(rail.coverage)")
                 }
-                guard let line = KilnLibraryCopy.coverageLine(rail.coverage, searching: true) else {
+                guard let line = KilnLibraryCopy.coverageLine(rail.coverage, searching: true, destination: .computer) else {
                     throw BrineStepError("nothing said the Mac was not searched")
                 }
                 guard line.localizedCaseInsensitiveContains("not searched")
@@ -659,7 +659,7 @@ private enum OneChatListSteps {
                 // and the surface renders them differently. That separation is the whole
                 // reason the door answers 503 instead of an empty array.
                 let empty = await KilnLibraryPresentation.resolve(
-                    computerConnected: true, phoneRows: [],
+                    computerConnected: true, destination: .computer, phoneRows: [],
                     nowMs: OneChatListWorld.nowMs,
                     load: { KilnLibraryPresentation.Load(
                         page: LibraryPage(chats: [], total: 0), org: KilnChatOrg.empty) })

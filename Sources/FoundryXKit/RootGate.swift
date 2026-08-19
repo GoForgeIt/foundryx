@@ -76,6 +76,56 @@ public enum CaptureDestination: String, Equatable, Sendable, CaseIterable {
     case vault
 }
 
+public extension CaptureDestination {
+
+    /// THE SECOND PLACE, NAMED ONCE FOR THE WHOLE PROGRAM.
+    ///
+    /// Every surface that has to say "the OTHER place your things live" used to write the
+    /// word "Mac" into its own sentence, because when they were written there was only one
+    /// other place. There are two now, and one tier has none at all — so the phrase is a
+    /// property of the tier, answered here, and `nil` is a real answer: on the phone tier
+    /// there is no second place, and a sentence about one must not be written.
+    var secondPlace: String? {
+        switch self {
+        case .phone:    return nil
+        case .computer: return "your Mac"
+        case .vault:    return "your Vault"
+        }
+    }
+
+    /// The possessive form — "your Mac's chats", "your Vault's chats".
+    var secondPlacePossessive: String? {
+        switch self {
+        case .phone:    return nil
+        case .computer: return "your Mac's"
+        case .vault:    return "your Vault's"
+        }
+    }
+
+    /// The second place as the SUBJECT of a connectivity sentence. The computer tier says
+    /// "your computer" here rather than "your Mac": the point is the machine answering,
+    /// not which one it is.
+    var brainSubject: String? {
+        switch self {
+        case .phone:    return nil
+        case .computer: return "your computer"
+        case .vault:    return "your Vault"
+        }
+    }
+
+    /// WHAT A PERSON CAN ACTUALLY DO when the second place is not answering. This is the
+    /// sentence that mattered most: a Vault owner was told "Open Solleva on your Mac and
+    /// make sure it's awake" — sent to go and fix a machine he does not own, which is
+    /// worse than saying nothing, because it looks like an instruction that should work.
+    var wakeAction: String? {
+        switch self {
+        case .phone:    return nil
+        case .computer: return "Open Solleva on your Mac and make sure it's awake."
+        case .vault:    return "Check your Vault in Settings — it may still be waking up."
+        }
+    }
+}
+
 public extension RootDestination {
     /// The destination this resolved brain actually writes to, or `nil` for a destination
     /// that is not running the app at all (the sign-in gate has nowhere to save anything,

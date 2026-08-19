@@ -1399,7 +1399,7 @@ struct ConversationFacesView: View {
             // at all, so a transport failure here means exactly one thing: the computer is
             // not reachable. (DoorFailureMessage, tested.)
             if cached == nil {
-                loadError = DoorFailureMessage.make(doorTransportFailure: error).line
+                loadError = DoorFailureMessage.make(doorTransportFailure: error, destination: destination).line
             }
         }
         loading = false
