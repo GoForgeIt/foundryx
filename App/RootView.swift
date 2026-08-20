@@ -509,7 +509,7 @@ struct RootView: View {
         // conversation is re-queued for the door drain (additive; Lore-confirmed
         // captures untouched).
         .onChange(of: brains.choice) { c in
-            if c == .myComputer {
+            if BrainSeeder.rearmsOnConnecting(c) {
                 let n = BrainSeeder.rearmForDoorSeed(baseDir: CaptureWAL.documentsCaptures())
                 if n > 0 { print("[brain-seed] re-queued \(n) local conversation(s) for the door") }
             }

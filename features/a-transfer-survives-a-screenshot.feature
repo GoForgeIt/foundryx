@@ -54,10 +54,18 @@ Feature: Bringing a recording over survives a screenshot and a pocket
     When I ask what that recorder is holding
     Then Solleva has given back every piece of time it asked for
 
-  Scenario: Leaving the page still stops the transfer and gives the time back
+  Scenario: Leaving the page leaves the transfer running
     Given a remembered recorder holding one recording
     And a transfer that is under way
     When I leave the page
+    Then the transfer is still under way
+    And Solleva is still holding the recorder open
+    And the transfer then finishes and Solleva keeps the recording
+
+  Scenario: Stopping the errand outright still stops the transfer and gives the time back
+    Given a remembered recorder holding one recording
+    And a transfer that is under way
+    When the errand is stopped outright
     Then the transfer is no longer under way
     And Solleva has given back every piece of time it asked for
 

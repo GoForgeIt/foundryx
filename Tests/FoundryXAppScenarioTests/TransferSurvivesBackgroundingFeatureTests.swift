@@ -52,7 +52,7 @@ final class TransferSurvivesBackgroundingFeatureTests: XCTestCase {
             registry: StepRegistry(SurvivesBackgroundingSteps.make(world)))
         // THE POPULATION IS PINNED. A runner that only asserts "nothing failed" is green once
         // the scenarios have been deleted.
-        XCTAssertEqual(result.passed, 8, "all eight scenarios must run and pass")
+        XCTAssertEqual(result.passed, 9, "all nine scenarios must run and pass")
     }
 }
 
@@ -71,6 +71,7 @@ private enum SurvivesBackgroundingSteps {
             "I put the phone away",
             "the transfer is allowed to finish",
             "I leave the page",
+            "the errand is stopped outright",
             "the system takes the time back",
             "I ask what that recorder is holding",
         ]
@@ -282,7 +283,17 @@ private final class SurvivesBackgroundingWorld {
         case "the transfer is allowed to finish":
             try await releaseTheRecorder()
 
+        // LEAVING THE PAGE IS `departed()`, NOT `cancel()`, AND THAT IS THE POINT OF THE STEP.
+        // The recorder page's `.onDisappear` calls exactly this, and what it does for a durable
+        // transfer is nothing — the bytes are the point, not the screen.
         case "I leave the page":
+            check.departed()
+            try await settleABeat()
+
+        // AND THE OTHER HALF, SO THE STOP IS STILL PROVEN. `cancel()` is what the scene policy
+        // reaches for when the system will not make room, and a transfer it stops must still
+        // stop and still give the time back.
+        case "the errand is stopped outright":
             check.cancel()
 
         case "the system takes the time back":

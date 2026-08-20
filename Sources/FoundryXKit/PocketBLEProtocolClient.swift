@@ -449,23 +449,35 @@ public actor PocketBLEClient {
     ///   3. nothing is accumulated at all past the preamble — each chunk goes to `sink` and is
     ///      released, so peak memory is one BLE notification regardless of file length.
     ///
+    /// - Parameter announced: THE PROGRESS SEAM, and the only honest denominator there is.
+    ///   Called exactly once, with the byte count the recorder itself announced in `MCU&U&`,
+    ///   after that count has passed the ceiling check and before any audio arrives. This
+    ///   number used to be read into a local at this very line and thrown away — so every
+    ///   caller that wanted to say "how much of this file is here" had only the LISTED size,
+    ///   which is a different number in a different unit from the same untrusted device
+    ///   (measured: listing 4 -> 19,770 bytes announced). A progress bar denominated in the
+    ///   listing is wrong by a varying factor; this callback is what makes it never necessary.
+    ///   The client stays un-chatty by construction: no timer, no polling — the caller counts
+    ///   delivered bytes in its own `sink`, which already sees every chunk.
     /// - Parameter sink: receives the payload in arrival order, starting at the MP3 sync word.
     ///   It may throw to abort (a disk that will not take the bytes); the throw propagates.
     /// - Returns: the number of bytes handed to `sink`.
     @discardableResult
     public func download(_ request: PocketRecordingRequest,
                          ceilingBytes: Int,
+                         announced: ((Int) -> Void)? = nil,
                          into sink: (Data) throws -> Void) async throws -> Int {
         guard validToken(request.date), validToken(request.timestamp) else {
             throw PocketProtocolError.malformedResponse
         }
         return try await protected(.download) {
             try await write("U&\(request.date)&\(request.timestamp)")
-            let announced = try await matchingValue(prefix: "MCU&U&", operation: .download)
-            guard let size = Int(announced), size > 0 else { throw PocketProtocolError.malformedResponse }
+            let announcedValue = try await matchingValue(prefix: "MCU&U&", operation: .download)
+            guard let size = Int(announcedValue), size > 0 else { throw PocketProtocolError.malformedResponse }
             // BOUND 1 — the recorder's own announcement, checked against the caller's ceiling
             // rather than against the size some earlier listing happened to report.
             guard size <= ceilingBytes else { throw PocketProtocolError.malformedResponse }
+            announced?(size)
 
             var preamble = Data()          // held ONLY until the sync word is located
             var synced = false

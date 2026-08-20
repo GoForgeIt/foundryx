@@ -70,8 +70,22 @@ final class BrainSelectionCompositionTests: XCTestCase {
                       "App/RootView.swift no longer makes the routing decision")
         XCTAssertTrue(rootView.contains("brain: brains.choice"),
                       "the router no longer routes on BrainStore.choice")
-        XCTAssertTrue(rootView.contains("cellPaired: cells.isPaired"),
-                      "the router no longer routes on the cell pairing")
+        // THIS LINE USED TO READ `XCTAssertTrue(rootView.contains("cellPaired: cells.isPaired"))`,
+        // AND THAT ASSERTION COULD NOT FAIL. `cellPaired: cells.isPaired && false)` still
+        // CONTAINS that substring, so the mutation that makes the paired-vault rung unreachable
+        // in the shipping app left the whole suite green — and `swift test` cannot compile
+        // `App/` to catch it any other way. Found by adversarial cross-vendor review, confirmed
+        // by reading both files. `BrainSelectionCallSiteRule` is the same question asked so that
+        // the answer can be no, and `BrainSelectionCallSiteRuleTests` proves it goes RED on that
+        // exact mutation and on the rest of its family.
+        let arming = BrainSelectionCallSiteRule.verdict(for: rootView)
+        guard case .ok = arming else {
+            return XCTFail("""
+            the router no longer routes on the cell pairing (verdict: \(arming)). That rung is \
+            what keeps a chosen-but-unresolved brain from falling all the way to the tier whose \
+            uploads are self-issued ACKs, so a neutralised argument here is silent data loss.
+            """)
+        }
 
         // The mechanism. `brains` is reached through a computed property over the
         // composition root, and `select()` publishes on BrainStore — not on the object

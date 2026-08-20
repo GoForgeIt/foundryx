@@ -149,12 +149,19 @@ final class FakePocketBLEStack: @unchecked Sendable {
         let lengths: [Int]?
         /// When `MCU&OFF` arrives after the final chunk. `nil` is a firmware that says nothing.
         let terminatorAfterSeconds: TimeInterval?
+        /// THE RECORDER LEAVES MID-TRANSFER after this many chunks: the link drops (a real
+        /// `didDisconnect`, not silence) and THE DEVICE STAYS AWAY — every later connect is
+        /// refused, which is what out-of-range looks like to a central that can still see
+        /// the address. `nil` is a recorder that stays.
+        let dropLinkAfterChunks: Int?
 
         init(gapsSeconds: [TimeInterval], lengths: [Int]? = nil,
-             terminatorAfterSeconds: TimeInterval? = nil) {
+             terminatorAfterSeconds: TimeInterval? = nil,
+             dropLinkAfterChunks: Int? = nil) {
             self.gapsSeconds = gapsSeconds
             self.lengths = lengths
             self.terminatorAfterSeconds = terminatorAfterSeconds
+            self.dropLinkAfterChunks = dropLinkAfterChunks
         }
 
         /// The frame observed three times out of three on fw 1.6, immediately after the last
@@ -441,12 +448,27 @@ final class FakePocketBLEStack: @unchecked Sendable {
     /// THE SAME DELIVERY, PUT ON THE CLOCK. A real radio hands notifications up milliseconds
     /// apart; the difference between that and a synchronous burst is the whole of the defect
     /// this fake previously could not express.
+    ///
+    /// AND PUT ON THE LINK. A transfer's notifications are scheduled the moment the command
+    /// arrives, but a real peripheral that disconnects mid-transfer SENDS NOTHING MORE — so a
+    /// delivery scheduled on a link that has since dropped is discarded, not delivered. Without
+    /// this, a stopped first transfer's remaining chunks arrived interleaved into the NEXT
+    /// session's download on the same characteristic — a radio physically incapable of that.
     fileprivate func deliver(after delay: TimeInterval, _ body: @escaping (BLEEventSink) -> Void) {
         lock.lock()
         let queue = self.queue
         let sink = self.sink
+        let epoch = linkEpoch
         lock.unlock()
         guard let queue, let sink else { return }
+        let gated: (BLEEventSink) -> Void = { [weak self] handed in
+            guard let self else { return }
+            self.lock.lock()
+            let stillSameLink = self.linkEpoch == epoch
+            self.lock.unlock()
+            guard stillSameLink else { return }
+            body(handed)
+        }
         // WHAT THE RECORDER SAID AND SOMEBODY HEARD. The sink is held WEAKLY, so this is a
         // true measurement rather than a bookkeeping flag: an event counted here was handed
         // to an object that was still alive to receive it, and an event this counter does not
@@ -454,13 +476,17 @@ final class FakePocketBLEStack: @unchecked Sendable {
         // I left the page" is a checkable claim instead of a reassurance.
         lock.lock(); handedToTransport += 1; lock.unlock()
         if delay <= 0 {
-            queue.async { body(sink) }
+            queue.async { gated(sink) }
         } else {
-            queue.asyncAfter(deadline: .now() + delay) { body(sink) }
+            queue.asyncAfter(deadline: .now() + delay) { gated(sink) }
         }
     }
 
     private var handedToTransport = 0
+
+    /// WHICH LINK a scheduled delivery belongs to. Bumped when a live connection drops, so
+    /// notifications staged for a link that no longer exists die with it — see `deliver`.
+    private var linkEpoch = 0
 
     /// How many radio events this recorder has handed to a LIVE transport.
     var notificationsHandedToTransport: Int {
@@ -502,6 +528,10 @@ final class FakePocketBLEStack: @unchecked Sendable {
         lock.lock()
         let wasConnected = connected
         connected = false
+        // The link is gone, and everything scheduled on it goes with it. The disconnect
+        // event itself is delivered below under the NEW epoch — a radio does report the
+        // drop; what it cannot do is keep notifying afterwards.
+        if wasConnected { linkEpoch += 1 }
         lock.unlock()
         guard wasConnected else { return }
         peripheral.forgetDiscoveredGraph()
@@ -706,6 +736,23 @@ final class FakePocketBLEStack: @unchecked Sendable {
             var index = 0
             var elapsed: TimeInterval = 0
             while offset < content.endIndex {
+                if let dropAfter = timing?.dropLinkAfterChunks, index >= dropAfter {
+                    // THE DEVICE LEAVES. No more audio, no terminator, and a real
+                    // `didDisconnect` a beat after the last chunk it did send — then the
+                    // recorder stays out of reach: reconnects are refused, exactly the
+                    // situation the presence backoff exists for.
+                    lock.lock()
+                    let queue = self.queue
+                    lock.unlock()
+                    queue?.asyncAfter(deadline: .now() + elapsed + 0.005) { [weak self] in
+                        guard let self else { return }
+                        self.lock.lock()
+                        self.storedReachability.refusesToConnect = true
+                        self.lock.unlock()
+                        self.cancelConnection()
+                    }
+                    return
+                }
                 let width = timing?.width(at: index, fallback: Self.notificationBytes)
                     ?? Self.notificationBytes
                 let end = content.index(offset, offsetBy: max(1, width),

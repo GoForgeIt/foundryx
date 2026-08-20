@@ -662,11 +662,19 @@ struct RecordingDevicePageView: View {
                     onClose: { inspecting = nil })
             }
         }
-        // LEAVING THE PAGE STOPS THE ERRAND. Without this the check or the transfer carried on
-        // with nobody watching it — a `CBCentralManager` still connected to the recorder, a
-        // Task still publishing into a screen that no longer existed, and `isChecking` stuck
-        // true, which the model's own busy guard then read as "already checking" forever.
-        .onDisappear { check.cancel() }
+        // LEAVING THE PAGE STOPS SOME ERRANDS AND NOT OTHERS, AND THIS BODY DOES NOT GET TO
+        // DECIDE WHICH.
+        //
+        // THIS USED TO READ `.onDisappear { check.cancel() }` — unconditional — which is the
+        // defect: a bring-over measured at 18-36 KB/s is exactly the errand a person walks away
+        // from, and walking away killed it. A check still stops (its answer has no page left to
+        // land on) and so does a removal (destructive work must not outlive the screen that
+        // authorised it); a transfer does not, because the bytes are the point.
+        //
+        // The rule is `PocketErrandDeparturePolicy`, in the kit, for the reason the scene-phase
+        // rule is: nothing in this repository can execute a SwiftUI modifier, so a rule written
+        // here is a rule nothing can hold.
+        .onDisappear { check.departed() }
         // A SCREENSHOT IS NOT A DEPARTURE, AND THIS VIEW DOES NOT GET TO DECIDE THAT.
         //
         // This used to read `if phase != .active { check.cancel() }`. iOS reports `.inactive`
@@ -1883,6 +1891,14 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// went on believing it was checking, so the next tap was refused by its own busy guard.
     private var attachment: RecordingDeviceAttachment?
     private var errand: Task<Void, Never>?
+    /// THE TRANSFER JOB, WHICH IS NOT THE PAGE'S AND NOT THIS MODEL'S EITHER.
+    ///
+    /// It is held so a genuine STOP — the system taking the background time back, or the owner
+    /// walking away from an errand that must not outlive the screen — can reach the radio the
+    /// queue opened. It is NOT held so a departure can kill it: `departed()` leaves a transfer
+    /// running, and the errand's tail keeps its own strong hold on everything the conversation
+    /// needs to land. `nil` whenever no transfer is in flight.
+    private var transfers: PocketTransferQueue?
     /// Which errand is running (`shelf` / `bring-over`), and the token that makes
     /// `errand.stop` fire EXACTLY ONCE — whether the errand finished or the owner left.
     private var runningErrandSubject: String?
@@ -2014,7 +2030,11 @@ final class PocketRecorderCheckModel: ObservableObject {
     ///   the one whose telemetry was thrown away. `RecordingDeviceAttachment` logs the exact
     ///   `RecordingDeviceUnreachableReason` a tap stopped on, and with `log: nil` every one of
     ///   those lines went nowhere; a required parameter is how that cannot recur by omission.
-    private static func makeAttachment(log: DoorLog) -> RecordingDeviceAttachment {
+    /// `nonisolated` because `PocketTransferQueue.AttachmentFactory` is `@Sendable` and the
+    /// queue builds a FRESH attachment per session from inside its own actor, off the main
+    /// actor. Nothing here touches main-actor state: the DEBUG door is already
+    /// `nonisolated(unsafe)` and the production branch is a constructor.
+    nonisolated private static func makeAttachment(log: DoorLog) -> RecordingDeviceAttachment {
         #if DEBUG
         if let factory = attachmentFactoryForScenarios { return factory() }
         #endif
@@ -2294,15 +2314,10 @@ final class PocketRecorderCheckModel: ObservableObject {
         }
     }
 
-    private static func token(for outcome: PocketBringOverOutcome) -> String {
-        switch outcome {
-        case .broughtOver:          return DoorLog.succeeded
-        case .alreadyHeld:          return "already-held"
-        case .transferIncomplete:   return "transfer-incomplete"
-        case .unreadableRecording:  return "unreadable"
-        case .recorderUnavailable:  return "recorder-unavailable"
-        }
-    }
+    // THE BRING-OVER'S TOKEN MAPPING USED TO BE HERE, over a `PocketBringOverOutcome`. The
+    // transfer is a queue now and what it ends on is a `PocketTransferPhase`, so the mapping
+    // moved to `PocketTransferFollowThrough` in the kit — where, unlike here, a test can
+    // execute it.
 
     /// EVERY OUTCOME OF A REMOVAL GETS ITS OWN TOKEN, and the three that are not a success are
     /// three DIFFERENT diagnoses: the owner had no proof, the recorder said no, or the recorder
@@ -2345,6 +2360,28 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// - Parameter outcome: the closed token the command record carries. It defaults to the
     ///   deliberate departure, and the scene path passes its own so a transfer that ran out of
     ///   background time can be told apart in the log from one the owner walked away from.
+    /// THE OWNER LEFT THE PAGE, AND WHAT THAT MEANS DEPENDS ON THE ERRAND.
+    ///
+    /// Wiring only: it asks `PocketErrandDeparturePolicy` and does what it says. The asymmetry
+    /// it implements — a check stops, a transfer does not — is the surface half of "a bring-over
+    /// is a durable queued job", and the reason it is not a comparison written in the
+    /// `.onDisappear` above is that `swift test` cannot compile `App/`.
+    func departed() {
+        // THE SECOND ARGUMENT IS A FACT, NOT A DECISION. `transfers` is non-nil exactly while a
+        // `PocketTransferQueue` is driving this errand, which is what tells a durable Bluetooth
+        // transfer apart from the fast sync that shares its subject token.
+        switch PocketErrandDeparturePolicy.decide(inFlight, isDurableJob: transfers != nil) {
+        case .stopTheErrand:
+            cancel()
+        case .leaveItRunning:
+            // NOTHING, AND THAT IS THE CHANGE. The queue owns its own radio and its own task;
+            // this model holds neither for a transfer, so there is nothing here to release and
+            // nothing to tear down. The errand's tail keeps its strong hold on the capture
+            // owner, so the conversation is adopted whether or not this page comes back.
+            return
+        }
+    }
+
     func cancel(outcome: String = "left-the-page") {
         // UNCHANGED, AND ON PURPOSE. A removal or a fast sync in flight is NOT stopped here —
         // it never was — and it must not have its background time taken away either, or
@@ -2361,6 +2398,15 @@ final class PocketRecorderCheckModel: ObservableObject {
         errand = nil
         attachment?.teardown()
         attachment = nil
+        // AND THE QUEUE, WHICH OWNS ITS OWN RADIO. Cancelling the Task above does not reach
+        // inside the actor — the per-file work is unstructured by construction — so a stop that
+        // did not say so here would leave a `CBCentralManager` connected and bytes landing for
+        // an errand this model has already declared over. `stopAll()` is the queue's own stop:
+        // it cancels the work, THEN tears the session down, and custody discards the partial.
+        if let transfers {
+            self.transfers = nil
+            Task { await transfers.stopAll() }
+        }
         isChecking = false
         isBringingOver = false
         finishErrand(outcome: outcome)
@@ -2473,46 +2519,79 @@ final class PocketRecorderCheckModel: ObservableObject {
         // THE ERRAND CARRIES THE RECORDING IT IS FOR. Not the offered pick and not an index —
         // the recorder's own name for the file the owner actually asked for, which is what
         // puts the spinner on their row instead of at the top of the page.
-        beginErrand(PocketErrandCommand.bringOverSubject,
-                    about: recording.date + "/" + recording.timestamp)
-        let attachment = Self.makeAttachment(log: DoorLog.shared)
-        self.attachment = attachment
+        // BUILT, NOT INTERPOLATED. `features/voice-notes-language.feature` scans this file's
+        // string LITERALS for retired words, and an interpolation carrying the identifier
+        // `recording` reads to that lexer as user-facing copy about a "recording". The token is
+        // the recorder's own name for the file either way.
+        let fileToken = recording.date + "/" + recording.timestamp
+        beginErrand(PocketErrandCommand.bringOverSubject, about: fileToken)
         let custody = self.custody
         let identity = Self.custodyIdentity(for: hardwareToken)
         let panel = detail
+        // THE TRANSFER IS A JOB, NOT A FIELD ON THIS SCREEN.
+        //
+        // THIS USED TO BE `PocketBringOver.run` — one file, one session, no retry, no progress
+        // and no stop — with the attachment parked on `self` so `cancel()` could kill it, which
+        // is precisely what leaving the page did. `PocketTransferQueue` owns its OWN attachment
+        // per session (a torn-down one is retired permanently, so reusing one is the flap
+        // shape), retries a lost recorder on the shipped 60/120/240/300 presence schedule, and
+        // reports progress denominated in the recorder's own `MCU&U&` announcement. Not one of
+        // those decisions is made here; this is the construction and the hand-off.
+        let queue = PocketTransferQueue(
+            peripheralIdentifier: identifier,
+            advertisedName: advertisedName,
+            custody: custody,
+            // THE OWNER'S OWN LIBRARY, ASKED FOR RATHER THAN GUESSED. The conversation must land
+            // in the directory this manager hydrates from; resolving it independently happens to
+            // agree today and is not guaranteed to.
+            destination: .init(baseDir: manager.captureLibraryRoot),
+            makeAttachment: { Self.makeAttachment(log: DoorLog.shared) })
+        self.transfers = queue
+        let reporter = PocketTransferProgressReporter()
         errand = Task { [weak self] in
-            let outcome = await PocketBringOver.run(peripheralIdentifier: identifier,
-                                                    advertisedName: advertisedName,
-                                                    recording: recording,
-                                                    custody: custody,
-                                                    attachment: attachment,
-                                                    // THE OWNER'S OWN LIBRARY, ASKED FOR RATHER
-                                                    // THAN GUESSED. The conversation must land in
-                                                    // the directory this manager hydrates from;
-                                                    // resolving it independently happens to
-                                                    // agree today and is not guaranteed to.
-                                                    destination: .init(
-                                                        baseDir: manager.captureLibraryRoot))
-            guard let self, !Task.isCancelled else { return }
-            self.errand = nil
-            self.attachment = nil
-            self.bringOverMessage = PocketBringOverPresentation.message(for: outcome)
-            // THE HAND-OFF. From here it is the ordinary drain and the ordinary finalize — the
-            // same two an Omi or phone-mic conversation runs, with nothing Pocket-shaped in
-            // either of them.
-            if let captureID = outcome.captureID {
+            // EVERY PHASE THIS SCREEN IS ENTITLED TO SEE, and no more. The sink is called
+            // synchronously on the radio path — roughly a reading per BLE notification — so the
+            // coalescing rule decides what is worth a `@Published` write, in the kit, where it
+            // can be executed.
+            await queue.observePhases { [weak self] _, phase in
+                guard reporter.admit(phase) else { return }
+                Task { @MainActor in
+                    self?.bringOverMessage = PocketTransferQueuePresentation.line(for: phase)
+                }
+            }
+            await queue.enqueue([recording])
+            await queue.run()
+            // WHAT THE QUEUE ENDED UP SAYING ABOUT THIS ONE RECORDING. A queue that lost its
+            // item cannot have finished it, and reporting silence there would be the inert-tap
+            // shape every other exit on this page was written to refuse.
+            let phase = await queue.snapshot.first?.phase
+                ?? .failed(PocketBringOverPresentation.transferIncompleteLine)
+            let follow = PocketTransferFollowThrough.decide(phase)
+
+            // THE DURABLE HALF, AND IT IS OUTSIDE `guard let self` ON PURPOSE. This is the
+            // hand-off that makes the recording exist for the running app: without it the
+            // conversation is a complete, correct capture directory nothing knows about —
+            // `loadExisting()` runs once, at construction — and it sits un-uploaded until the
+            // next launch. It used to sit BEHIND `guard let self, !Task.isCancelled`, so
+            // leaving the page mid-transfer lost the conversation even when every byte landed.
+            if let captureID = follow.adoptCaptureID {
                 manager.adoptCompletedCapture(captureId: captureID)
                 // CUSTODY MOVED, AND THAT IS WHAT INVALIDATES THE SHELF. The command is
                 // recorded first and the read model recomputed second, so the record of what
                 // happened cannot be lost to whatever the recompute does next.
-                // BUILT, NOT INTERPOLATED. `features/voice-notes-language.feature` scans this
-                // file's string LITERALS for retired words, and an interpolation carrying the
-                // identifier `recording` reads to that lexer as user-facing copy about a
-                // "recording". The token is the recorder's own name for the file either way.
-                let fileToken = recording.date + "/" + recording.timestamp
                 DoorLog.shared.command(PocketErrandCommand.custodyCommit,
                                        subject: fileToken,
                                        outcome: DoorLog.succeeded)
+            }
+
+            // THE PAGE HALF. Skipped when there is no page — which is not a failure, it is the
+            // whole point of the errand outliving one.
+            guard let self else { return }
+            self.errand = nil
+            self.attachment = nil
+            self.transfers = nil
+            self.bringOverMessage = follow.line
+            if follow.custodyMoved {
                 // THE SYNC INSTANT, RECORDED BEFORE ANYTHING READS IT. The armed control's
                 // candidate set is exactly this map, and its whole job is to answer "did this
                 // land after the owner armed this recorder".
@@ -2527,7 +2606,7 @@ final class PocketRecorderCheckModel: ObservableObject {
             // the rebuild, the page would offer a "Bring it over" button over a shelf that
             // still names the file it has just finished bringing over.
             self.isBringingOver = false
-            self.finishErrand(outcome: Self.token(for: outcome))
+            self.finishErrand(outcome: follow.outcomeToken ?? "transfer-incomplete")
             // THE ARMED PATH, AND IT RUNS ONLY AFTER THE RADIO IS FREE. It clears nothing on
             // its own beyond the one recording the owner just pulled over, and only if that
             // recording's own shelf reading now says Solleva holds it somewhere else.

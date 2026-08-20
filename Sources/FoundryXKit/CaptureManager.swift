@@ -5626,7 +5626,8 @@ public final class CaptureManager: ObservableObject {
     nonisolated static func deleteLocalAudioOnDisk(_ captureId: String, baseDir: URL) {
         let dir = baseDir.appendingPathComponent(captureId, isDirectory: true)
         let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
-        for f in files where f.pathExtension == "opus" || f.pathExtension == "ack" {
+        for f in files where f.pathExtension == "opus" || f.pathExtension == "ack"
+            || f.pathExtension == "held" {
             try? FileManager.default.removeItem(at: f)
         }
         // Segment files vanished underneath any (possibly not-yet-hydrated) WAL — drop its

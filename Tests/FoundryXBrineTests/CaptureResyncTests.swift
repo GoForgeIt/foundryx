@@ -63,7 +63,8 @@ final class CaptureResyncTests: XCTestCase {
 
         let rec = SeqRecorder()
         let wal = CaptureWAL(captureId: id, target: target(), baseDir: dir,
-                             upload: { seq, _ in try rec.send(seq) })
+                             upload: { seq, _ in try rec.send(seq) },
+                             route: .named("a desktop door, stood in for by this harness"))
         XCTAssertEqual(wal.snapshot().pendingSegments, 10, "every segment starts pending")
 
         // The door's /segments answer: it already durably stores 0…5, 7 and 8.
@@ -90,7 +91,8 @@ final class CaptureResyncTests: XCTestCase {
         let id = "omi-resync-idempotent"
         try seedSegments(dir: dir, captureId: id, n: 5, ackedThrough: 2)   // 0…2 already ACK'd
 
-        let wal = CaptureWAL(captureId: id, target: target(), baseDir: dir, upload: { _, _ in })
+        let wal = CaptureWAL(captureId: id, target: target(), baseDir: dir, upload: { _, _ in },
+                             route: .named("a desktop door, stood in for by this harness"))
         XCTAssertEqual(wal.uploadWatermark(), 2)
 
         // 0…2 already ACK'd (not re-counted), 3 is new, 99 isn't on this phone.
@@ -107,7 +109,8 @@ final class CaptureResyncTests: XCTestCase {
         let dir = try tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let id = "omi-resync-empty"
         try seedSegments(dir: dir, captureId: id, n: 3, ackedThrough: -1)
-        let wal = CaptureWAL(captureId: id, target: target(), baseDir: dir, upload: { _, _ in })
+        let wal = CaptureWAL(captureId: id, target: target(), baseDir: dir, upload: { _, _ in },
+                             route: .named("a desktop door, stood in for by this harness"))
         XCTAssertEqual(wal.bulkMarkSynced([]), 0)
         XCTAssertEqual(wal.snapshot().pendingSegments, 3, "an empty door answer changes nothing")
     }
