@@ -298,18 +298,22 @@ private final class RecorderPageWorld {
         // it, this is red and the hostless suite is not.
         case "that recorder's page says how full it is and when that was read":
             let page = try recorderPage()
-            guard let space = page.readings.first(where: { $0.label == "Free space" }) else {
+            guard let space = page.readings.first(where: { $0.label == "Storage" }) else {
                 throw BrineStepError(
                     "the recorder's page renders no free-space reading at all — it renders "
                         + "\(page.readings.map(\.label))")
             }
-            // 61,032 KB reported, 12,000 used ⇒ 49,032 free. Both numbers came off the
-            // recorder over the radio seam; only the subtraction happened here.
-            guard space.value == "47.9 MB free of 59.6 MB" else {
+            // 12,000 of 61,032 is 19% — a RATIO, and the ratio is all of this frame that can
+            // be defended. This assertion used to read "47.9 MB free of 59.6 MB". `MCU&SPA`
+            // states its two figures in a unit nobody has resolved: on Nick's own 64 GB
+            // recorder they are five digits, and rendering them as kilobytes put "225 KB free
+            // of 57.6 MB" on his screen. Both numbers still came off the recorder over the
+            // radio seam; only the division happened here, and division cancels the unit.
+            guard space.value == "19% full" else {
                 throw BrineStepError(
-                    "the page says free space is \(space.value ?? "(nothing)") — the recorder "
-                        + "reported \(FakePocketBLEStack.usedKilobytes) KB used of "
-                        + "\(FakePocketBLEStack.capacityKilobytes) KB")
+                    "the page says storage is \(space.value ?? "(nothing)") — the recorder "
+                        + "reported \(FakePocketBLEStack.usedKilobytes) used of "
+                        + "\(FakePocketBLEStack.capacityKilobytes)")
             }
             guard let ago = space.observedAgo, ago.hasPrefix("read ") else {
                 throw BrineStepError(

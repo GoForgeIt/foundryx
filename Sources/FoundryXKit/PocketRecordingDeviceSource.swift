@@ -30,11 +30,13 @@ public enum PocketRecordingDeviceBridge {
     public static func storageReading(client: PocketBLEClient,
                                       now: Date = Date()) async -> RecordingDeviceReading? {
         guard let storage = try? await client.storage() else { return nil }
-        return RecordingDeviceReading(
-            value: RecordingDeviceReadingPresentation.freeSpace(
-                usedKilobytes: storage.usedKilobytes,
-                capacityKilobytes: storage.capacityKilobytes),
-            observedAt: now)
+        // A RATIO, NOT AN AMOUNT. `PocketStorage`'s two fields are still SPELLED kilobytes by
+        // the wire decoder, and that spelling is exactly the unresolved assumption this reading
+        // stopped depending on: `used / total` renders the same whatever those five digits
+        // count. A recorder that answers no capacity renders nothing rather than "0% full".
+        guard let fullness = RecordingDeviceReadingPresentation.storageFullness(
+            used: storage.usedKilobytes, total: storage.capacityKilobytes) else { return nil }
+        return RecordingDeviceReading(value: fullness, observedAt: now)
     }
 
     /// The protocol this bridge speaks, as an identifier education and any other
@@ -147,10 +149,21 @@ public enum RecordingDeviceLinkState: String, Equatable, Sendable {
 public struct StoredFileManifestItem: Equatable, Sendable {
     public let id: String
     public let title: String
-    public let sizeBytes: Int
+    /// HOW BIG THIS RECORDING IS, WITH ITS PROVENANCE ATTACHED.
+    ///
+    /// IT USED TO BE `sizeBytes: Int`, AND THE `Int` IS WHAT MADE THE DEFECT POSSIBLE. The
+    /// listing's fifth field, the byte count a recorder announces and the length of a file on
+    /// this phone are three different numbers that all fit an `Int`, and a row handed the
+    /// first one printed it with exactly the confidence of the third: "4 KB" for a recording
+    /// that turned out to be 19,770 bytes. `PocketRecordingExtent` cannot be constructed from
+    /// a listing WITH a number in it, so the row cannot print one.
+    public let extent: PocketRecordingExtent
     public let presence: PocketRecordingPresence
-    public init(id: String, title: String, sizeBytes: Int, presence: PocketRecordingPresence) {
-        self.id = id; self.title = title; self.sizeBytes = sizeBytes; self.presence = presence
+    public init(id: String,
+                title: String,
+                extent: PocketRecordingExtent,
+                presence: PocketRecordingPresence) {
+        self.id = id; self.title = title; self.extent = extent; self.presence = presence
     }
 }
 
@@ -166,12 +179,23 @@ public struct StoredFileManifestRowPresentation: Equatable, Sendable {
     /// under the finger.
     public let id: String
     public let title: String
-    /// HOW BIG THE RECORDING IS, in the recorder's own unit.
+    /// HOW LONG THE RECORDING IS — or `nil`, WHICH IS THE ORDINARY ANSWER, and which a view
+    /// must render as SILENCE rather than as a dash, a zero or the word "unknown".
     ///
-    /// THIS FIELD USED TO BE `duration` AND USED TO HOLD "44 min". See
-    /// `PocketMeasuredFigures` — no recorder has ever told this app how long a recording is,
-    /// and the divisor that manufactured the minutes came from a firmware nobody here runs.
-    public let size: String
+    /// THIS FIELD HAS NOW BEEN WRONG TWICE AND IS EMPTY THE THIRD TIME ON PURPOSE. It was
+    /// `duration` holding "44 min" — the listing number divided by an unmeasured 4,000 B/s. It
+    /// was then `size` holding "4 KB" — the same listing number, relabelled as kilobytes. On
+    /// 2026-08-18 the recording behind that "4 KB" came off the device and was 19,770 bytes.
+    /// Neither reading of the listing survives (`PocketRecordingExtent`), so a row that has
+    /// only a listing says NOTHING about extent, and a row whose real byte count is known says
+    /// how long it is.
+    public let extentLine: String?
+    /// THE EXTENT ITSELF, carried beside the rendered line for the reason `presence` is: a
+    /// caller that has to restate this shelf — the recorder page does, after a transfer moves
+    /// custody — must restate the SAME reading, not re-derive one. Re-deriving an extent from
+    /// the rendered string is how a row and the page behind it come to two answers about one
+    /// recording, and one of those answers is a magnitude.
+    public let extent: PocketRecordingExtent
     /// The one-line summary. `Solleva hasn't checked this iPhone` is the sentence the old
     /// two-valued label had no way to say.
     public let presenceLabel: String
@@ -221,12 +245,13 @@ public enum StoredFileDevicePresentation {
         StoredFileManifestPresentation(rows: items.map {
             // BOTH SIDES OF THIS ROW ARE LOAD-BEARING, and they came from different steps.
             // `id` is the recorder's own `<date>/<timestamp>`, which a removal has to carry to
-            // the wire verbatim. `size` is the recorder's own kilobytes — it replaced a
-            // `duration` that divided them by an unmeasured 4,000 bytes/second, which is the
-            // fabricated figure `PocketMeasuredFigures` exists to keep off every row.
+            // the wire verbatim. `extentLine` is nil unless somebody actually measured this
+            // recording — see `PocketRecordingExtent` for the two files that disproved every
+            // reading of the listing number this app had shipped.
             .init(id: $0.id,
                   title: $0.title,
-                  size: extent(sizeBytes: $0.sizeBytes),
+                  extentLine: PocketRecordingExtentPresentation.line($0.extent),
+                  extent: $0.extent,
                   presenceLabel: PocketPresencePresentation.label($0.presence),
                   places: PocketPresencePresentation.lines($0.presence, now: now),
                   presenceBlock: PocketPresencePresentation.block($0.presence, now: now),
@@ -261,45 +286,20 @@ public enum StoredFileDevicePresentation {
             showsLiveActivity: false)
     }
 
-    /// HOW BIG ONE RECORDING IS — the single string a shelf row prints about its extent.
-    ///
-    /// IT ASKS `PocketMeasuredFigures` FIRST, on every row, and that is the wiring rather than
-    /// a formality. The register is where the reason lives: no Pocket has ever told this app
-    /// how long a recording lasts, so re-admitting a duration is a one-line change THERE,
-    /// beside the paragraph explaining why it was withheld and what would settle it — and
-    /// never a quiet edit in a view.
-    ///
-    /// What the recorder DOES state is kilobytes, in `MCU&F&<date>&<stamp>&<KB>`, recorded
-    /// verbatim on 2026-08-16 against `PKT01_BLUE_26079bc5` on firmware 1.6. So kilobytes are
-    /// what a row prints, through the same formatter the free-space reading uses — one unit
-    /// vocabulary on the page, not two.
-    ///
-    /// AND THE DIVIDE IS LOSSLESS. `PocketBLEClient` stores a listed file as `KB * 1024`
-    /// (`PocketBLEProtocolClient.swift:316`), so `/ 1_024` hands back the recorder's own
-    /// integer unchanged. This row is a rendering of the wire, not a conversion of it.
-    public static func extent(sizeBytes: Int) -> String {
-        guard PocketMeasuredFigures.shelfRowMayStateDuration else {
-            return RecordingDeviceReadingPresentation.size(kilobytes: max(0, sizeBytes) / 1_024)
-        }
-        return durationFromUnmeasuredBitrate(sizeBytes: sizeBytes)
-    }
-
-    /// The old row string, kept ONLY as what `extent` would print if the duration figure were
-    /// ever measured and re-admitted. It divides by 4,000 bytes/second — a constant that came
-    /// from a third-party decode of firmware 1.3.3 and from a fixture this repo encoded itself
-    /// to match that belief. Nothing has ever measured it against a recorder.
-    ///
-    /// NOT `public`. A caller that reaches past `extent` is a caller that has bypassed the
-    /// register, which is exactly how "44 min" got onto the page in the first place.
-    static func durationFromUnmeasuredBitrate(sizeBytes: Int) -> String {
-        let seconds = max(0, sizeBytes) / 4_000
-        if seconds >= 3_600 {
-            let hours = seconds / 3_600, minutes = seconds % 3_600 / 60
-            return minutes == 0 ? "\(hours) hr" : "\(hours) hr \(minutes) min"
-        }
-        if seconds >= 60 { return "\(seconds / 60) min" }
-        return "\(seconds) sec"
-    }
+    // `extent(sizeBytes:)` AND `durationFromUnmeasuredBitrate(sizeBytes:)` USED TO LIVE HERE,
+    // AND THEY ARE DELETED RATHER THAN GUARDED.
+    //
+    // Between them they were the entire mechanism by which the listing number became a
+    // magnitude on a page: one divided it by 1,024 and stamped "KB" on it, the other divided
+    // it by 4,000 and stamped "min" on it, and the register chose which. Both readings of the
+    // listing have now been measured and disproved (`PocketRecordingExtent`), so there is no
+    // third rendering to switch to — the number itself is what cannot be printed.
+    //
+    // A DELETED FUNCTION IS A STRONGER GUARD THAN A FLAG. While `extent(sizeBytes:)` existed,
+    // any caller with an `Int` could have a size string for the asking, and the two times this
+    // surface printed an invented magnitude were both exactly that. The renderer that remains
+    // — `PocketRecordingExtentPresentation.line` — takes a `PocketRecordingExtent`, and there
+    // is no way to build the measured case of that type out of a listing.
 }
 
 public struct StoredFileLiveEffectCounts: Equatable, Sendable {

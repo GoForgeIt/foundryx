@@ -1083,16 +1083,22 @@ struct RecordingDevicePageView: View {
                                 .grainTextStyle(.body)
                                 .foregroundStyle(GrainColor.ink)
                             Spacer(minLength: GrainSpacing.x2)
-                            // THE RECORDER'S OWN KILOBYTES. This used to be `row.duration`,
-                            // which divided them by an unmeasured 4,000 bytes/second and
-                            // printed "44 min" on all nineteen of Nick's rows. Step 3 renamed
-                            // the field precisely so this merge could not put the invented
-                            // minutes back.
-                            Text(row.size)
-                                .grainTextStyle(.caption)
-                                .fontWeight(.semibold)
-                                .foregroundStyle(GrainColor.textMuted)
-                                .fixedSize()
+                            // HOW LONG IT RUNS, OR NOTHING AT ALL, AND NOTHING IS THE
+                            // ORDINARY CASE. This slot has been wrong twice: `row.duration`
+                            // printed "44 min" on all nineteen of Nick's rows by dividing the
+                            // listing number by an unmeasured 4,000 B/s, and `row.size` then
+                            // printed "4 KB" for a recording that turned out to be 19,770
+                            // bytes. `extentLine` is nil unless somebody actually measured
+                            // this recording, and nil draws NOTHING — no dash, no zero, no
+                            // "unknown", because those are the absence with a magnitude
+                            // painted over it.
+                            if let extent = row.extentLine {
+                                Text(extent)
+                                    .grainTextStyle(.caption)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(GrainColor.textMuted)
+                                    .fixedSize()
+                            }
                         }
 
                         // WHERE THIS RECORDING IS, ON EVERY ROW, IN THREE PLACES — AND ONCE
@@ -1879,6 +1885,12 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// a shelf that was read and is holding nothing, and keeping them distinct is what stops
     /// the Forget confirmation reassuring a person about a recorder Solleva never spoke to.
     @Published private(set) var presences: [PocketRecordingPresence]?
+    /// HOW BIG EACH LISTED RECORDING ACTUALLY IS, keyed `<date>/<timestamp>`, for the ones
+    /// this phone is holding and can therefore measure. A key that is absent is a recording
+    /// whose only number is the listing's, and the listing's unit was measured and disproved
+    /// on 2026-08-18 — so its row states no magnitude at all. It is NOT derived from
+    /// `PocketRecording.sizeBytes`: that is exactly the substitution being removed.
+    private var shelfExtents: [String: PocketRecordingExtent] = [:]
     /// When the recorder last answered a listing. `nil` means it never has on this screen, and
     /// a stale or absent reading changes the reset's primary action, never its enabled state.
     @Published private(set) var shelfObservedAt: Date?
@@ -2198,7 +2210,14 @@ final class PocketRecorderCheckModel: ObservableObject {
                 // is the shape the delete ruling forbids — so the panel it built is STATED, not
                 // recomputed. `rebuildShelf` exists for the other case: custody moved after the
                 // session closed and nothing but this phone's disk can know it.
-                await self.stateShelf(panel, identity: identity, presences: panel.manifest.rows.map(\.presence))
+                // THE EXTENTS THE CHECK RESOLVED ARE STATED TOO, for the same reason and off
+                // the same rows: the check asked custody how big each held file is, inside the
+                // session, and re-asking here would be a second answer.
+                await self.stateShelf(
+                    panel, identity: identity,
+                    presences: panel.manifest.rows.map(\.presence),
+                    extents: Dictionary(panel.manifest.rows.map { ($0.id, $0.extent) },
+                                        uniquingKeysWith: { first, _ in first }))
             }
             // BUSY UNTIL THE SHELF IS ACTUALLY RESTATED, and this order is load-bearing. The
             // shipped code dropped `isChecking` and THEN awaited the offer, so for one
@@ -2258,10 +2277,16 @@ final class PocketRecorderCheckModel: ObservableObject {
                                                             custody: custody,
                                                             durability: durability,
                                                             askedAt: Date())
+        // AND HOW BIG THEY ACTUALLY ARE, from the same authority in the same pass — a file
+        // this phone is holding can state its length; one that has never been fetched cannot.
+        let extents = await PocketRecordingExtentReader.extents(shelfRecordings,
+                                                                identity: identity,
+                                                                custody: custody)
         await stateShelf(panel, identity: identity,
                          presences: shelfRecordings.map {
                              resolved["\($0.date)/\($0.timestamp)"] ?? .nothingAsked
-                         })
+                         },
+                         extents: extents)
     }
 
     /// THE ONE PLACE THE PAGE'S SHELF STATE IS PUBLISHED. Every field that describes the shelf
@@ -2269,7 +2294,12 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// where the row says one thing and the reset's cost says another.
     private func stateShelf(_ panel: StoredFileDeviceDetailPresentation,
                             identity: RecordingDeviceIdentity,
-                            presences: [PocketRecordingPresence]) async {
+                            presences: [PocketRecordingPresence],
+                            // NO DEFAULT. `[:]` would let a future caller blank every row's
+                            // length without saying so, and a blanked row is indistinguishable
+                            // from the correct rendering for a recording nobody has measured —
+                            // so the mistake would look exactly like the intended behaviour.
+                            extents: [String: PocketRecordingExtent]) async {
         shelfRebuildCountForTests += 1
         var byID: [String: PocketRecordingPresence] = [:]
         for (recording, presence) in zip(shelfRecordings, presences) {
@@ -2279,8 +2309,10 @@ final class PocketRecorderCheckModel: ObservableObject {
             // `recording` reads to that lexer as user-facing copy about a "recording".
             byID[recording.date + "/" + recording.timestamp] = presence
         }
+        shelfExtents = extents
         detail = panel.withManifest(PocketInventoryReader.manifest(shelfRecordings,
-                                                                   presences: byID))
+                                                                   presences: byID,
+                                                                   extents: extents))
         // THE SHELF WAS ANSWERED. Both facts come from the one reading: the cost of a reset,
         // and how old that cost is. A check that did NOT reach the recorder leaves both alone,
         // so a stale number is never redrawn as a fresh one.
@@ -2595,10 +2627,12 @@ final class PocketRecorderCheckModel: ObservableObject {
                                                                     among: shelfRecordings,
                                                                     presences: presences)
         else { return nil }
-        return PocketRecordingDetailPresentation.page(for: found.recording,
-                                                      presence: found.presence,
-                                                      brain: brain,
-                                                      now: now)
+        return PocketRecordingDetailPresentation.page(
+            for: found.recording,
+            presence: found.presence,
+            brain: brain,
+            extent: shelfExtents[id] ?? .listedUnitUnresolved,
+            now: now)
     }
 
     /// THE OWNER'S STOP, AND IT IS THE FIRST ONE THIS PAGE HAS EVER HAD.

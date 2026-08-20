@@ -19,7 +19,7 @@ Feature: Checking a remembered recorder reads what is actually on it
     Given a remembered recorder FoundryX holds the key for, holding two recordings
     When I check that recorder now
     Then the check reports the recorder's battery and firmware
-    And it lists both recordings newest first with a duration for each
+    And it lists both recordings newest first, stating no length nobody measured
     And every listed recording says it is only on the recorder
     And the panel offers one bring-over action and repeats the deletion promise
 

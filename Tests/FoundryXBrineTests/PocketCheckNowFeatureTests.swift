@@ -29,7 +29,7 @@ private enum PocketCheckNowSteps {
         let whens = ["I check that recorder now"]
         let thens = [
             "the check reports the recorder's battery and firmware",
-            "it lists both recordings newest first with a duration for each",
+            "it lists both recordings newest first, stating no length nobody measured",
             "every listed recording says it is only on the recorder",
             "the panel offers one bring-over action and repeats the deletion promise",
             "one key handshake was issued and the listing commands followed it on that same session",
@@ -179,18 +179,17 @@ private actor PocketCheckNowWorld {
             XCTAssertEqual(detail.firmware, "1.6")
             XCTAssertEqual(detail.linkLabel, RecordingDeviceLinkState.connected.label)
 
-        case "it lists both recordings newest first with a duration for each":
+        case "it lists both recordings newest first, stating no length nobody measured":
             let detail = try requireDetail()
             XCTAssertEqual(detail.manifest.rows.map(\.title),
                            ["2026-03-28 · 00:19", "2026-03-27 · 09:15"],
                            "the recorder's own reported instants are not listed newest first")
-            // THE RECORDER'S OWN NUMBER. `MCU&F&<date>&<stamp>&<KB>` states kilobytes; a
-            // duration was never stated by anything (`PocketMeasuredFigures`).
-            // EXACTLY WHAT CAME OFF THE WIRE. `MCU&F&…&<KB>` is kilobytes, the client stores it
-            // as `KB * 1024`, so the row's divide-by-1024 returns the recorder's own integer
-            // with nothing lost. A duration was never stated by anything
-            // (`PocketMeasuredFigures`).
-            XCTAssertEqual(detail.manifest.rows.map(\.size), ["469 KB", "94 KB"])
+            // NOTHING, AND THAT IS THE POINT. These two rows came out of a LISTING and were
+            // never fetched. This assertion used to read `["469 KB", "94 KB"]` — the listing's
+            // fifth field relabelled kilobytes — and on 2026-08-18 a listing of 4 turned out
+            // to be 19,770 real bytes and a listing of 46 to be 185,078. The unit is off by a
+            // varying factor, so it is not a unit, and no magnitude may come out of it.
+            XCTAssertEqual(detail.manifest.rows.map(\.extentLine), [nil, nil])
 
         case "every listed recording says it is only on the recorder":
             let detail = try requireDetail()

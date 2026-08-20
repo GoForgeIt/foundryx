@@ -96,7 +96,7 @@ private actor ReadingsWorld {
                     RecordingDeviceReading(value: "84%",
                                            observedAt: now.addingTimeInterval(-20 * 60)),
                 RecordingDeviceCapabilityKey.freeSpace.rawValue:
-                    RecordingDeviceReading(value: "5.7 GB free of 7.6 GB",
+                    RecordingDeviceReading(value: "25% full",
                                            observedAt: now.addingTimeInterval(-20 * 60)),
             ])
 
@@ -162,9 +162,9 @@ private actor ReadingsWorld {
             // PAIRED EXISTENCE. The prohibition two steps down passes vacuously on a blank
             // pane, so something real has to render first.
             let battery = try requireLine("Battery", on: page)
-            let space = try requireLine("Free space", on: page)
+            let space = try requireLine("Storage", on: page)
             XCTAssertEqual(battery.value, "84%")
-            XCTAssertEqual(space.value, "5.7 GB free of 7.6 GB")
+            XCTAssertEqual(space.value, "25% full")
             // AC2: EVERY rendered reading carries its age. Not "the two I remembered to
             // check" — every line on the page that shows a value at all.
             for line in page.readings where line.value != nil {
@@ -219,13 +219,17 @@ private actor ReadingsWorld {
 
         case "how full it is is a number, and the number came off the recorder":
             let stored = try requireRecord().readings
-            // 8,000,000 KB reported, 2,000,000 KB used ⇒ 6,000,000 KB free. Both numbers are
-            // the recorder's own; nothing here is a capacity this app decided a Pocket has.
+            // A RATIO, AND BOTH SIDES OF IT ARE THE RECORDER'S OWN. It answered 2,000,000
+            // used of 8,000,000, so it is a quarter full. THIS USED TO READ "5.7 GB free of
+            // 7.6 GB" — an amount, in a unit nobody has resolved. `MCU&SPA` states five-digit
+            // figures for a 64 GB recorder, so rendering them as kilobytes put "225 KB free of
+            // 57.6 MB" on Nick's screen. The ratio survives not knowing the unit; the amount
+            // does not.
             XCTAssertEqual(stored[RecordingDeviceCapabilityKey.freeSpace.rawValue]?.value,
-                           "5.7 GB free of 7.6 GB")
+                           "25% full")
             XCTAssertEqual(observation?.readings[
                 RecordingDeviceCapabilityKey.freeSpace.rawValue]?.value,
-                "5.7 GB free of 7.6 GB",
+                "25% full",
                 "the free-space number was invented downstream of the recorder's answer")
 
         case "the battery still shows the hour-old number, and still says it is an hour old":

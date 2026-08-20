@@ -13,7 +13,8 @@ Feature: A recording on a recorder is something I can open, inspect and choose
   Both are the same missing thing: there is nowhere in this app that is ABOUT one recording on a
   recorder. These scenarios are that place. A row is something you press, it opens a page that
   states what is actually known about that recording — its three places with their ages, its
-  size, its date, the recorder's own name for it — and it offers the actions that recording
+  date, the recorder's own name for it, and how long it runs ONCE ANYBODY HAS MEASURED IT —
+  and it offers the actions that recording
   really admits, and says why about the ones it does not.
 
   Nick's ruling is untouched and is the reason the second action is gated at all: a recording
@@ -30,7 +31,7 @@ Feature: A recording on a recorder is something I can open, inspect and choose
   Scenario: The page about one recording states what is known about that recording
     Given a recording the recorder listed an hour ago, which Solleva has not brought over
     Then the page about it names all three places, each with its own age
-    And it states the size and the date the recorder itself reported
+    And it states no length for a recording nobody has measured, and says why
     And it names the recording the way the recorder names it
     And it never states where the recording is twice
     And it never states one fact twice, one band apart

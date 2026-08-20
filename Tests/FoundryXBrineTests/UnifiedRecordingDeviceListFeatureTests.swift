@@ -858,7 +858,7 @@ private final class UnifiedDeviceListWorld {
         case "the page lists what this recorder can be asked — its battery, its free space "
              + "and its firmware":
             let page = try requirePage()
-            XCTAssertEqual(page.readings.map(\.label), ["Battery", "Free space", "Firmware"],
+            XCTAssertEqual(page.readings.map(\.label), ["Battery", "Storage", "Firmware"],
                            "the readings strip is not the shipped reading order")
             // NOBODY HAS CHECKED THIS RECORDER, so all three state that — with no number, no
             // dash, no zero, and the action that would go and ask.
