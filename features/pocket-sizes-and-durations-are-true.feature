@@ -43,6 +43,11 @@ Feature: A recorder's sizes and lengths are true, or they are absent
     Then the held recording's row states the length its real bytes imply
     And the row for the one nobody fetched still states nothing
 
+  Scenario: The sentence a recording states when nobody has measured it belongs to that page's population
+    Given the sentences a recording's extent can state
+    Then there is at least one, so this is not a claim about an empty set
+    And every one of them is in the population the recording's page holds its copy over
+
   Scenario: The recorder says how full it is, and states no amount nobody can defend
     Given the recorder's own answer about its storage
     Then the line says how full it is

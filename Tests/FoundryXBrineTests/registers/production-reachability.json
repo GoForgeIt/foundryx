@@ -988,6 +988,6 @@
     "unreachable": 10
   },
   "_floor": "A register that lost its rows would be a silent full pass, so the population is asserted before its contents are.",
-  "minimum_capabilities": 56,
+  "minimum_capabilities": 63,
   "minimum_entry_points": 1
 }

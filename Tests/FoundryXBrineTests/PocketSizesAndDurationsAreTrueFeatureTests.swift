@@ -24,7 +24,7 @@ final class PocketSizesAndDurationsAreTrueFeatureTests: XCTestCase {
         let result = try await BrineFeatureRunner.run(
             "pocket-sizes-and-durations-are-true",
             registry: StepRegistry(SizesAndDurationsSteps.make(world)))
-        XCTAssertEqual(result.passed, 5)
+        XCTAssertEqual(result.passed, 6)
     }
 
     // MARK: - The malformed input that used to become a confident answer
@@ -65,6 +65,7 @@ private enum SizesAndDurationsSteps {
             "the two recordings that actually came off the recorder",
             "the recorder's own answer about its storage",
             "this phone is holding the bytes of one listed recording and not the other",
+            "the sentences a recording's extent can state",
         ]
         let whens = [
             "I look at the row each of them draws",
@@ -84,6 +85,8 @@ private enum SizesAndDurationsSteps {
             "the same fullness counted in another unit reads exactly the same",
             "the held recording's row states the length its real bytes imply",
             "the row for the one nobody fetched still states nothing",
+            "there is at least one, so this is not a claim about an empty set",
+            "every one of them is in the population the recording's page holds its copy over",
         ]
         var steps = givens.map { phrase in
             defineStep(phrase) { context, _, _ in try await world.given(phrase); return context }
@@ -150,6 +153,9 @@ private actor SizesAndDurationsWorld {
     private var pages: [PocketRecordingDetailPage] = []
     private var measuredRows: [StoredFileManifestRowPresentation] = []
     private var storageLine: String?
+    /// The sentences an extent can state, held so the scenario can assert the set is non-empty
+    /// BEFORE asserting anything about its members.
+    private var extentLines: [String] = []
 
     // MARK: - The custody half: a real store, a real file, real bytes on a real disk
 
@@ -219,6 +225,9 @@ private actor SizesAndDurationsWorld {
         case "the recorder's own answer about its storage":
             storageLine = RecordingDeviceReadingPresentation.storageFullness(
                 used: Self.storageUsed, total: Self.storageTotal)
+
+        case "the sentences a recording's extent can state":
+            extentLines = PocketRecordingExtentPresentation.everyLine
 
         default:
             throw BrineStepError("unknown given: \(phrase)")
@@ -490,6 +499,34 @@ private actor SizesAndDurationsWorld {
             guard RecordingDeviceReadingPresentation.storageFullness(used: 0, total: 0) == nil else {
                 throw BrineStepError(
                     "a recorder with no stated capacity is rendered as a percentage anyway")
+            }
+
+        case "there is at least one, so this is not a claim about an empty set":
+            guard !extentLines.isEmpty else {
+                throw BrineStepError(
+                    "PocketRecordingExtentPresentation.everyLine is empty, so the claim below "
+                    + "is held over nothing and would pass however the page was built")
+            }
+
+        case "every one of them is in the population the recording's page holds its copy over":
+            // THE UNPROTECTED HALF OF A MERGE CONFLICT. `PocketRecordingDetailPresentation`
+            // .everyLine is the WHOLE population this page's copy claims are held over, and on
+            // 2026-08-20 two branches each appended a different family to it — the delete
+            // consequences and these extent sentences — so git could not merge that line and a
+            // human chose. Choosing either side alone compiles and reads plausibly.
+            //
+            // Dropping the delete half is caught: PocketRemoveFromRecorderFeatureTests requires
+            // every consequence to be in this same population. Dropping THIS half was caught by
+            // nothing — the extent scenarios above check what the page RENDERS, and a sentence
+            // can render perfectly while being absent from the population a later prohibition
+            // sweeps. That is a gate that stops asking and looks exactly like a pass.
+            // *(Adversarial review, 2026-08-20.)*
+            let population = PocketRecordingDetailPresentation.everyLine
+            for line in extentLines where !population.contains(line) {
+                throw BrineStepError(
+                    "\"\(line)\" is a sentence the recording's page can state about its extent "
+                    + "and it is not in that page's population, so every claim held over that "
+                    + "population silently skips it")
             }
 
         default:
