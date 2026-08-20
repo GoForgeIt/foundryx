@@ -1320,28 +1320,75 @@ struct RecordingDevicePageView: View {
     /// should be one that finishes. There is no recording pill, no Live Activity and no live
     /// state touched anywhere below: the file existed on the recorder before this phone was
     /// involved, and `features/pocket-durable-sync.feature` holds that boundary.
+    /// WIRING ONLY — WHICH CONTROLS EXIST IS DECIDED IN THE KIT.
+    ///
+    /// `PocketTransferControlsPresentation.controls(transferInFlight:backlogCount:)` owns the
+    /// rule and the titles, because `swift test` cannot compile this file: a control that
+    /// existed only as a `Button` here would be a control no test in this repository can see,
+    /// which is exactly how a queue with a `stop` API shipped with no way for an owner to stop
+    /// it. Every branch below dispatches on a case of `PocketTransferControl.Act`, so a fifth
+    /// behaviour cannot be invented here without adding a case in the kit first.
+    @ViewBuilder
+    private var transferControls: some View {
+        ForEach(PocketTransferControlsPresentation.controls(
+            transferInFlight: check.transferInFlight,
+            backlogCount: check.backlogCount,
+            otherErrandRunning:
+                !PocketErrandProgressPresentation.admitsANewErrand(check.inFlight)),
+            id: \.act) { control in
+            Button {
+                switch control.act {
+                case .stopEverything:
+                    check.stopTransfer()
+                case .bringEverythingOver:
+                    check.bringEverythingOver(hardwareToken: input.identity.hardwareToken,
+                                              advertisedName: input.displayName,
+                                              into: manager)
+                case .bringOneOver:
+                    check.bringOver(hardwareToken: input.identity.hardwareToken,
+                                    advertisedName: input.displayName,
+                                    into: manager)
+                }
+            } label: {
+                Text(control.title).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.grain(control.act == .stopEverything ? .destructive : .outlined))
+            // TAKEN FROM THE CONTROL, NOT DECIDED HERE. This used to spell the rule itself —
+            // `control.act != .stopEverything && !admitsANewErrand(...)` — and an adversarial
+            // review showed the scenario that claims to hold it could not see it at all:
+            // `.disabled(true)` here left every kit assertion green. The rule now lives in
+            // `PocketTransferControlsPresentation`, where the suite executes it.
+            .disabled(!control.isEnabled)
+            .padding(.top, GrainSpacing.x2)
+        }
+        if check.transferInFlight {
+            Text(PocketTransferControlsPresentation.stopConsequenceLine)
+                .grainTextStyle(.caption)
+                .foregroundStyle(GrainColor.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, GrainSpacing.x2)
+        }
+    }
+
     @ViewBuilder
     private var bringOver: some View {
-        if check.offeredRecording != nil {
-            Button {
-                check.bringOver(hardwareToken: input.identity.hardwareToken,
-                                advertisedName: input.displayName,
-                                into: manager)
-            } label: {
-                Text(PocketBringOverPresentation.actionTitle).frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.grain(.outlined))
-            // THE CONTROL AND THE SENTENCE UNDER IT NOW COME FROM THE SAME RULE.
-            //
-            // This read `.disabled(check.isBringingOver || check.isChecking)` — two of the
-            // three busy flags — so during a REMOVAL it stayed live directly above a band
-            // whose own words are "It can only do one at a time". A tap there began a second
-            // errand, which overwrites `inFlight` and with it the identity of the errand
-            // already running: the removal's row stopped spinning, this one's started, and the
-            // single `finishErrand` that followed wrote one `errand.stop` under the wrong
-            // subject and the wrong `about=`.
-            .disabled(!PocketErrandProgressPresentation.admitsANewErrand(check.inFlight))
+        // THE CONTROLS ARE NOT NESTED UNDER `offeredRecording != nil` ANY MORE, and an
+        // adversarial review is why. A transfer can be started from an individual recording's
+        // own page, which does not require an offered pick, and a check that fails clears the
+        // offer while a transfer keeps running — in both cases the Stop was the control that
+        // vanished, on a page where something was still moving. The controls rule already
+        // decides for itself what to offer when the backlog is zero, so gating it a second time
+        // out here could only ever subtract a control the rule had granted.
+        //
+        // THE CONTROL AND THE SENTENCE UNDER IT COME FROM THE SAME RULE, and that rule is now
+        // IN THE KIT — see `transferControls`. The busy guard this used to spell here
+        // (`.disabled(check.isBringingOver || check.isChecking)`, two of the three flags, so a
+        // REMOVAL left it live above a band reading "It can only do one at a time") moved with
+        // it, and so did the exception the stop needs.
+        transferControls
             .padding(.top, GrainSpacing.x3)
+
+        if check.offeredRecording != nil {
 
             // THE THIRD SURFACE, AND IT WAS THE ONE NICK WAS ACTUALLY LOOKING AT.
             //
@@ -1845,6 +1892,26 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// is also the correct default for a recorder nobody ever armed.
     @Published private(set) var autoClearArmed = false
 
+    /// IS A DURABLE TRANSFER RUNNING RIGHT NOW — the one fact that decides whether this page
+    /// offers a Stop.
+    ///
+    /// IT IS NOT `isBringingOver`. That flag is true for the whole errand INCLUDING the shelf
+    /// re-read that follows the drain, when the queue is already gone and there is nothing left
+    /// to stop; a Stop button held by it would outlive the thing it stops, and a tap on it would
+    /// be the inert control this page has shipped twice. This tracks the QUEUE'S existence,
+    /// which is exactly the window in which `stopAll()` has an effect.
+    @Published private(set) var transferInFlight = false
+
+    /// HOW MANY RECORDINGS THE RECORDER HOLDS THAT THIS PHONE DOES NOT.
+    ///
+    /// The count the "Bring all N over" title states, and the count that decides whether that
+    /// control is offered at all. Recomputed only when the shelf is — it costs one custody stat
+    /// per listed recording, so a SwiftUI body that derived it would pay that on every
+    /// invalidation, which is the `rebuildVisibleCaptures` idiom this file already follows.
+    /// Zero until a check has run, which is also the honest answer for a recorder nobody has
+    /// asked yet.
+    @Published private(set) var backlogCount = 0
+
     /// WHICH RECORDINGS THIS PHONE HAS PULLED OVER SINCE THIS SCREEN OPENED, and when.
     ///
     /// THIS IS WHAT MAKES THE ARMED CONTROL NON-RETROACTIVE STRUCTURALLY RATHER THAN BY
@@ -2075,6 +2142,12 @@ final class PocketRecorderCheckModel: ObservableObject {
         shelfRecordings = []
         presences = nil
         shelfObservedAt = nil
+        // THE COUNT GOES WITH THE SHELF IT WAS COUNTED FROM. It is derived from
+        // `shelfRecordings`, which has just been emptied, so leaving it would put the PREVIOUS
+        // listing's number on a "Bring all N over" title for the length of the check — a number
+        // about a shelf that is no longer there, which is the shape every invented figure on
+        // this surface has had.
+        backlogCount = 0
         beginErrand(PocketErrandCommand.shelfSubject)
         // A FRESH ATTACHMENT PER CHECK. An attachment's `teardown()` retires its own link and
         // generation, so reusing one is a session that can never come back up. NAMED, rather
@@ -2202,6 +2275,15 @@ final class PocketRecorderCheckModel: ObservableObject {
         // so a stale number is never redrawn as a fresh one.
         self.presences = presences
         self.shelfObservedAt = Date()
+        // HOW MANY "Bring all N over" WOULD ACTUALLY TAKE, COUNTED BY THE FUNCTION THAT WILL
+        // TAKE THEM. `derivedBacklog` and not `presences.onThisPhone`, even though both come
+        // from custody: the title states a number and the tap enqueues a set, and two
+        // resolutions of "does this phone hold it" is exactly how a number and a set come to
+        // disagree — which would put an invented count on a button. One authority, asked once,
+        // in the one place the shelf read model is stated.
+        self.backlogCount = await PocketTransferQueue.derivedBacklog(from: shelfRecordings,
+                                                                     custody: custody,
+                                                                     identity: identity).count
         // THE NEXT ONE, not the same one forever. `offered(_:)` is ordering only, and
         // ordering is stable — so bringing a file over and re-reading the shelf re-elected
         // the same winner, and a person with a backlog could bring over exactly one
@@ -2405,6 +2487,7 @@ final class PocketRecorderCheckModel: ObservableObject {
         // it cancels the work, THEN tears the session down, and custody discards the partial.
         if let transfers {
             self.transfers = nil
+            self.transferInFlight = false
             Task { await transfers.stopAll() }
         }
         isChecking = false
@@ -2507,9 +2590,89 @@ final class PocketRecorderCheckModel: ObservableObject {
                                                       now: now)
     }
 
+    /// THE OWNER'S STOP, AND IT IS THE FIRST ONE THIS PAGE HAS EVER HAD.
+    ///
+    /// `PocketTransferQueue.stop(_:)` and `stopAll()` shipped with the queue, and `stopAll()`'s
+    /// only caller was `cancel()` — lifecycle handling, not a button — so after the
+    /// page-survival fix landed a transfer had NO owner-reachable exit at all. Nick's
+    /// requirement is the opposite: *"only a stop button should stop the pull, or disconnecting
+    /// or losing connection to the device"*.
+    ///
+    /// IT STOPS EVERYTHING rather than the current item. The page offers one button beside one
+    /// progress band, and a stop that halted the current recording while the queue moved on to
+    /// the next would be a button whose visible effect is a recorder that keeps transferring.
+    /// `stopAll()` also clears the intent, without which the derived queue immediately re-offers
+    /// itself — the un-pressing-button shape the suppression set exists for.
+    ///
+    /// SILENT WHEN THERE IS NOTHING TO STOP, because the control is not offered then:
+    /// `PocketTransferControlsPresentation.controls` returns a stop ONLY while a transfer is in
+    /// flight, and that negative half is asserted in the kit.
+    /// THE LOCAL BINDING IS LOAD-BEARING AND IT IS NOT STYLE. `cancel()` spells this same call
+    /// `await transfers.stopAll()`, and the production reachability register proves a caller by
+    /// matching a VERBATIM anchor line: a row that could not tell the owner's control from
+    /// lifecycle teardown would stay green if this button were deleted tomorrow, which is the
+    /// exact defect — a capability with an API and no way for a person to reach it — that this
+    /// method exists to close. Two callers, two spellings, one anchored to each.
+    func stopTransfer() {
+        guard let queue = transfers else { return }
+        Task { await queue.stopAll() }
+    }
+
+    /// EMPTY THE RECORDER — ONE TAP, ONE SESSION, EVERY RECORDING THIS PHONE DOES NOT HOLD.
+    ///
+    /// THE GAP THIS CLOSES. `PocketTransferQueue` was built to drain N recordings over one
+    /// authenticated session, and production only ever handed it `[recording]` — a one-element
+    /// array. `PocketTransferQueue.derivedBacklog(from:custody:identity:)` computes exactly the
+    /// set this needs, in the kit, and had ZERO callers anywhere, tests included. So the
+    /// one-session advantage — the entire reason the queue exists — was never exercised on the
+    /// real path, and each extra file still cost another tap and another full handshake.
+    ///
+    /// STRICTLY SEQUENTIAL, because the hardware allows ONE authenticated BLE session at a time.
+    /// The queue already guarantees that; this only supplies the population.
+    ///
+    /// The backlog is computed BEFORE the errand begins, because it stats custody once per
+    /// listed recording, and a page that marked itself busy first would be busy for a read that
+    /// may return nothing to do.
+    func bringEverythingOver(hardwareToken: String, advertisedName: String,
+                             into manager: CaptureManager) {
+        guard PocketErrandProgressPresentation.admitsANewErrand(inFlight) else { return }
+        let shelf = shelfRecordings
+        let custody = self.custody
+        let identity = Self.custodyIdentity(for: hardwareToken)
+        Task { [weak self] in
+            let backlog = await PocketTransferQueue.derivedBacklog(from: shelf,
+                                                                   custody: custody,
+                                                                   identity: identity)
+            guard let self else { return }
+            // THE TAP THAT FOUND NOTHING TO DO STILL ANSWERS.
+            //
+            // The count on the button comes from the last shelf statement and custody can move
+            // under it — an import finishing, another leg landing the same file — so by the
+            // time this derivation runs the backlog can genuinely be empty. Returning here in
+            // silence would be a live "Bring all 12 over" that consumes a tap, stats the whole
+            // shelf and shows nothing: the inert control this page has already shipped twice.
+            guard !backlog.isEmpty else {
+                self.bringOverMessage = PocketTransferControlsPresentation.nothingLeftToBringLine
+                return
+            }
+            self.bringOver(recordings: backlog, hardwareToken: hardwareToken,
+                           advertisedName: advertisedName, into: manager)
+        }
+    }
+
     private func bringOver(recording: PocketRecording, hardwareToken: String,
                            advertisedName: String, into manager: CaptureManager) {
+        bringOver(recordings: [recording], hardwareToken: hardwareToken,
+                  advertisedName: advertisedName, into: manager)
+    }
+
+    /// - Parameter recordings: THE WHOLE QUEUE, and never a one-element array by accident. The
+    ///   first is what the errand is NAMED for — the command log carries one subject — and every
+    ///   one of them is enqueued.
+    private func bringOver(recordings: [PocketRecording], hardwareToken: String,
+                           advertisedName: String, into manager: CaptureManager) {
         guard PocketErrandProgressPresentation.admitsANewErrand(inFlight) else { return }
+        guard let recording = recordings.first else { return }
         guard let identifier = UUID(uuidString: hardwareToken) else {
             bringOverMessage = PocketRecorderCheckPresentation.notThisRecorderLine
             return
@@ -2547,6 +2710,7 @@ final class PocketRecorderCheckModel: ObservableObject {
             destination: .init(baseDir: manager.captureLibraryRoot),
             makeAttachment: { Self.makeAttachment(log: DoorLog.shared) })
         self.transfers = queue
+        self.transferInFlight = true
         let reporter = PocketTransferProgressReporter()
         errand = Task { [weak self] in
             // EVERY PHASE THIS SCREEN IS ENTITLED TO SEE, and no more. The sink is called
@@ -2559,14 +2723,22 @@ final class PocketRecorderCheckModel: ObservableObject {
                     self?.bringOverMessage = PocketTransferQueuePresentation.line(for: phase)
                 }
             }
-            await queue.enqueue([recording])
+            // THE WHOLE QUEUE, AND THIS IS THE LINE THAT USED TO READ `[recording]`. A
+            // one-element array is what made `PocketTransferQueue`'s one-session drain
+            // theoretical: the machinery could empty a recorder and production never asked it
+            // to.
+            await queue.enqueue(recordings)
             await queue.run()
-            // WHAT THE QUEUE ENDED UP SAYING ABOUT THIS ONE RECORDING. A queue that lost its
-            // item cannot have finished it, and reporting silence there would be the inert-tap
-            // shape every other exit on this page was written to refuse.
-            let phase = await queue.snapshot.first?.phase
-                ?? .failed(PocketBringOverPresentation.transferIncompleteLine)
-            let follow = PocketTransferFollowThrough.decide(phase)
+            // WHAT THE QUEUE ENDED UP SAYING ABOUT EVERY RECORDING IN IT.
+            //
+            // THIS READ `snapshot.first?.phase`, which was correct only while production could
+            // not enqueue more than one. Deciding from `.first` over a real backlog adopts ONE
+            // conversation and silently drops the rest — the invisible-recording defect
+            // `PocketTransferFollowThrough` exists to prevent, reintroduced by the very batch
+            // it was written for. A queue that lost its items cannot have finished them, and
+            // `decide(batch:)` reports that as an incomplete transfer rather than as an empty
+            // success, which is the inert-tap shape every other exit on this page refuses.
+            let follow = PocketTransferFollowThrough.decide(batch: await queue.snapshot)
 
             // THE DURABLE HALF, AND IT IS OUTSIDE `guard let self` ON PURPOSE. This is the
             // hand-off that makes the recording exist for the running app: without it the
@@ -2574,13 +2746,21 @@ final class PocketRecorderCheckModel: ObservableObject {
             // `loadExisting()` runs once, at construction — and it sits un-uploaded until the
             // next launch. It used to sit BEHIND `guard let self, !Task.isCancelled`, so
             // leaving the page mid-transfer lost the conversation even when every byte landed.
-            if let captureID = follow.adoptCaptureID {
-                manager.adoptCompletedCapture(captureId: captureID)
+            // EVERY CONVERSATION, NOT THE FIRST ONE. Each id the drain produced is handed over
+            // and each is recorded under ITS OWN file token — a batch that logged one subject
+            // for twelve commits would be a command stream that cannot say which recording
+            // landed.
+            // EVERY CONVERSATION, NOT THE FIRST ONE — AND EACH PAIRED WITH ITS OWN FILE BY THE
+            // TYPE RATHER THAN BY THIS LOOP'S INDEX. Two parallel arrays zipped here is how a
+            // capture gets logged against a different recording's name; `Batch.Landed` carries
+            // both facts in one value so the misalignment is unrepresentable.
+            for landed in follow.landed {
+                manager.adoptCompletedCapture(captureId: landed.captureID)
                 // CUSTODY MOVED, AND THAT IS WHAT INVALIDATES THE SHELF. The command is
                 // recorded first and the read model recomputed second, so the record of what
                 // happened cannot be lost to whatever the recompute does next.
                 DoorLog.shared.command(PocketErrandCommand.custodyCommit,
-                                       subject: fileToken,
+                                       subject: landed.token,
                                        outcome: DoorLog.succeeded)
             }
 
@@ -2590,12 +2770,16 @@ final class PocketRecorderCheckModel: ObservableObject {
             self.errand = nil
             self.attachment = nil
             self.transfers = nil
+            self.transferInFlight = false
             self.bringOverMessage = follow.line
-            if follow.custodyMoved {
+            if !follow.landed.isEmpty {
                 // THE SYNC INSTANT, RECORDED BEFORE ANYTHING READS IT. The armed control's
                 // candidate set is exactly this map, and its whole job is to answer "did this
-                // land after the owner armed this recorder".
-                self.syncedThisSession[fileToken] = Date()
+                // land after the owner armed this recorder". ONE ENTRY PER RECORDING THAT
+                // MOVED: a batch that wrote only the first item's token would make every other
+                // recording it brought over invisible to the owner-armed clear forever.
+                let landedAt = Date()
+                for landed in follow.landed { self.syncedThisSession[landed.token] = landedAt }
                 // THE EVIDENCE IS RE-TAKEN BEFORE THE SHELF IS RE-READ. Without this the row
                 // for the recording that just landed is resolved against a snapshot taken
                 // before it existed.

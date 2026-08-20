@@ -646,8 +646,18 @@ final class DeviceCompositionRootGateTests: XCTestCase {
                       "nothing in App/ hands the brought-over conversation to the capture "
                           + "owner, so the recording is a directory on disk that the running "
                           + "app does not know exists and will not upload until relaunch")
-        XCTAssertTrue(screen.contains("follow.adoptCaptureID"),
-                      "the hand-off does not read the capture the bring-over actually produced")
+        // IT USED TO READ `follow.adoptCaptureID` — SINGULAR — and that spelling was correct
+        // only while production could not enqueue more than one recording. The queue now drains
+        // the whole backlog, so the hand-off iterates `follow.landed`, whose elements pair a
+        // capture id with the recorder's own name for the file it came from. The pairing is the
+        // point: two parallel arrays zipped at the call site is how a capture gets adopted and
+        // then logged against a DIFFERENT recording's token.
+        XCTAssertTrue(screen.contains("follow.landed"),
+                      "the hand-off does not read the captures the bring-over actually produced")
+        XCTAssertTrue(screen.contains("landed.captureID") && screen.contains("landed.token"),
+                      "the hand-off has stopped reading the capture and the file it came from "
+                          + "as ONE value, which is how a conversation gets recorded under "
+                          + "another recording's name")
 
         // AND IT HAPPENS WHETHER OR NOT THE PAGE IS STILL THERE.
         //

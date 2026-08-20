@@ -369,12 +369,15 @@
       "reached_from": [
         {
           "via": "device-screen",
-          "anchor": "manager.adoptCompletedCapture(captureId: captureID)",
-          "sites": 2
+          "anchor": "                manager.adoptCompletedCapture(captureId: landed.captureID)"
+        },
+        {
+          "via": "device-screen",
+          "anchor": "                manager.adoptCompletedCapture(captureId: captureID)"
         }
       ],
       "verdict": "reachable",
-      "why": "THE ROW THAT WOULD HAVE CAUGHT THIS DEFECT CLASS AGAIN. `CaptureManager` hydrates its library ONCE, in `loadExisting()`, at construction — so a conversation created while the app is already open is invisible and un-uploaded until the next launch unless something hands it over. Every scenario about the import can be green without this call, which is precisely the shape `PocketBLEClient.download` shipped in. It takes a capture id and NOTHING else: it cannot tell which producer wrote the capture, so the background-restoration spool and `BrainSeeder` are served by the same verb. TWO SITES SINCE 2026-08-16, DECLARED RATHER THAN WIDENED BY ACCIDENT. The recorder page now has a second way to bring a recording over — the same errand over the recorder's own WiFi (`PocketFastSyncErrand`) — and it hands the capture over by exactly this call, because a fast-synced recording is not a second kind of recording. This gate caught the new site on the run that added it (declared 1, carries 2), which is the register working: the number moves in a diff somebody has to write, not silently."
+      "why": "THE ROW THAT WOULD HAVE CAUGHT THIS DEFECT CLASS AGAIN. `CaptureManager` hydrates its library ONCE, in `loadExisting()`, at construction — so a conversation created while the app is already open is invisible and un-uploaded until the next launch unless something hands it over. Every scenario about the import can be green without this call, which is precisely the shape `PocketBLEClient.download` shipped in. It takes a capture id and NOTHING else: it cannot tell which producer wrote the capture, so the background-restoration spool and `BrainSeeder` are served by the same verb. TWO SITES SINCE 2026-08-16, DECLARED RATHER THAN WIDENED BY ACCIDENT. The recorder page now has a second way to bring a recording over — the same errand over the recorder's own WiFi (`PocketFastSyncErrand`) — and it hands the capture over by exactly this call, because a fast-synced recording is not a second kind of recording. This gate caught the new site on the run that added it (declared 1, carries 2), which is the register working: the number moves in a diff somebody has to write, not silently. TWO SITES, NOW DECLARED SEPARATELY RATHER THAN AS ONE LITERAL WITH A COUNT OF 2. The durable-queue site adopts from `Batch.Landed`, which pairs a capture id with the recorder's own name for the file it came from, so it spells `landed.captureID`; the fast-sync site still spells `captureID`. A single shared anchor with `sites: 2` could not have told the two apart, which is the same weakness an adversarial review found in the stop row: one site could be deleted and the other would satisfy the count. Each is anchored to its own line."
     },
     {
       "id": "opus-frame-packer",
@@ -851,18 +854,18 @@
       "name": "PocketTransferQueue.run — the bring-over as a durable sequential job",
       "declared_in": "Sources/FoundryXKit/PocketTransferJob.swift",
       "declaration_anchor": "    public func run() async {",
-      "call_pattern": "PocketTransferQueue(",
+      "call_pattern": "await queue.run()",
       "reached_from": [
         {
           "via": "device-screen",
-          "anchor": "        let queue = PocketTransferQueue("
+          "anchor": "            await queue.run()"
         }
       ],
       "tested_from": [
         "Tests/FoundryXBrineTests/PocketTransferQueueFeatureTests.swift"
       ],
       "verdict": "reachable",
-      "why": "PROMOTED. It arrived openly RED — the exact state `PocketDurableSync` shipped in silently, enumerated so it could not be reported as shipped — and the production caller it was waiting for now exists: `PocketRecorderCheckModel.bringOver` builds the queue, hands it the recording the owner tapped, and drains it. The page's `.onDisappear` no longer cancels a transfer (`PocketErrandDeparturePolicy`), the capture hand-off no longer sits behind `guard let self`, and the errand's closing token comes from `PocketTransferFollowThrough` rather than from a branch in `App/`. What the queue itself does — one session for N files, MCU&U&-denominated progress, a stop that keeps nothing, the 60/120/240/300 presence backoff — is proven in PocketTransferQueueFeatureTests; the wiring is proven in PocketTransferHandoffFeatureTests."
+      "why": "PROMOTED, AND RE-ANCHORED ON THE INVOCATION. Its evidence anchor used to match `let queue = PocketTransferQueue(` — the CONSTRUCTION — so deleting `await queue.run()` alone would have left this row green with nothing draining. It now anchors on the call. It arrived openly RED — the exact state `PocketDurableSync` shipped in silently, enumerated so it could not be reported as shipped — and the production caller it was waiting for now exists: `PocketRecorderCheckModel.bringOver` builds the queue, hands it the recording the owner tapped, and drains it. The page's `.onDisappear` no longer cancels a transfer (`PocketErrandDeparturePolicy`), the capture hand-off no longer sits behind `guard let self`, and the errand's closing token comes from `PocketTransferFollowThrough` rather than from a branch in `App/`. What the queue itself does — one session for N files, MCU&U&-denominated progress, a stop that keeps nothing, the 60/120/240/300 presence backoff — is proven in PocketTransferQueueFeatureTests; the wiring is proven in PocketTransferHandoffFeatureTests."
     },
     {
       "id": "pocket-bring-over-single-session-wrapper",
@@ -873,11 +876,95 @@
       "reached_from": [],
       "verdict": "unreachable",
       "why": "AN HONEST RED, DECLARED IN THE COMMIT THAT CREATED IT rather than discovered later. `run(...)` opens one authenticated session, pulls one file and closes it. That was the recorder page's only transfer until the page moved onto `PocketTransferQueue`, which opens a session and drains N items through `bringOver(on:)` — the same per-file leg `run` wraps — with retries, progress and a stop `run` cannot express. So `run` now has tests and no production caller, which is precisely the shape this register exists to publish rather than let sit. It is kept, not deleted, because `PocketBringOverFeatureTests` and `PocketRecorderDeleteConsentFeatureTests` drive the whole one-file leg INCLUDING the session through it; the next track that touches this file should either route those suites through the queue and delete it, or give the fast-sync leg a reason to call it."
+    },
+    {
+      "id": "pocket-transfer-queue-stop",
+      "name": "PocketTransferQueue.stopAll — the owner's stop, reachable from a control",
+      "declared_in": "Sources/FoundryXKit/PocketTransferJob.swift",
+      "declaration_anchor": "    public func stopAll() {",
+      "call_pattern": "await queue.stopAll()",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "        Task { await queue.stopAll() }"
+        }
+      ],
+      "tested_from": [
+        "Tests/FoundryXBrineTests/OwnerCanStopAndEmptyFeatureTests.swift"
+      ],
+      "verdict": "reachable",
+      "why": "THE ROW THAT WOULD HAVE CAUGHT THE GAP. `stop(_:)` had no production caller of any kind and `stopAll()` had exactly one — inside `PocketRecorderCheckModel.cancel()`, which is lifecycle handling and not a button — so a pull had no owner-reachable exit at all, while four OTHER screens in this app shipped Stop buttons. The anchor above is `stopTransfer()`, the handler behind the control `PocketTransferControlsPresentation.controls` returns while a transfer is in flight. THE ANCHOR IS THE CONTROL'S OWN HANDLER AND NOT `cancel()`: both spell the same call, so a row anchored loosely would have been green for the entire life of the defect. Which controls exist is held in the kit by OwnerCanStopAndEmptyFeatureTests, including the negative half — no stop when nothing is running. AND THE ROW BELOW IS WHY THIS ONE IS NOT ENOUGH: an adversarial review changed the view's `.stopEverything` switch arm to `break` and this row stayed green, because it proves only that `stopTransfer()` CONTAINS the call. `pocket-transfer-stop-control-dispatch` anchors the button's own line."
+    },
+    {
+      "id": "pocket-transfer-derived-backlog",
+      "name": "PocketTransferQueue.derivedBacklog — the whole backlog, enqueued in one session",
+      "declared_in": "Sources/FoundryXKit/PocketTransferJob.swift",
+      "declaration_anchor": "    public static func derivedBacklog(from recordings: [PocketRecording],",
+      "call_pattern": "PocketTransferQueue.derivedBacklog(",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "            let backlog = await PocketTransferQueue.derivedBacklog(from: shelf,"
+        }
+      ],
+      "tested_from": [
+        "Tests/FoundryXBrineTests/OwnerCanStopAndEmptyFeatureTests.swift"
+      ],
+      "verdict": "reachable",
+      "why": "IT HAD ZERO CALLERS ANYWHERE, tests included — dead code in `Sources/` computing exactly the set the queue was built to drain, while the single production `enqueue` site passed `[recording]`, a one-element array. So `PocketTransferQueue`'s one-session advantage, the entire reason it exists, was never exercised on the real path and every extra recording still cost another tap and another full handshake. The anchor is `bringEverythingOver`, behind the `Bring all N over` control; the same function also counts what that control's title states, so the number on the button and the set the tap enqueues cannot disagree. AND IT IS NOT ENOUGH ON ITS OWN: the same review changed the view's `.bringEverythingOver` switch arm to `break`, and changed `recordings: backlog` to `recordings: [backlog[0]]`, and this row stayed green both times. `pocket-transfer-empty-control-dispatch` anchors the button's line and `pocket-transfer-batch-enqueue` anchors the whole result reaching the queue."
+    },
+    {
+      "id": "pocket-transfer-stop-control-dispatch",
+      "name": "The Stop control dispatches to stopTransfer — the button, not the method",
+      "declared_in": "App/DeviceScreen.swift",
+      "declaration_anchor": "    func stopTransfer() {",
+      "call_pattern": "check.stopTransfer()",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "                    check.stopTransfer()"
+        }
+      ],
+      "tested_from": [],
+      "verdict": "reachable",
+      "why": "THE ROW THAT EXISTS BECAUSE THE OTHER ONE COULD BE FOOLED. `pocket-transfer-queue-stop` proves `stopTransfer()` contains `await queue.stopAll()`. It does NOT prove the Stop button reaches `stopTransfer()` — an adversarial cross-vendor review on 2026-08-20 replaced the view's `.stopEverything` switch arm with `break` and every kit assertion and every register row stayed green, while the owner tapped Stop and nothing happened. That is the same defect one layer out: a capability with an API and no owner-reachable path. This row anchors the DISPATCH. `tested_from` is empty and that is honest: no test target contains this line, because `swift test` cannot compile `App/` — the register IS the observer here, which is exactly what it is for."
+    },
+    {
+      "id": "pocket-transfer-empty-control-dispatch",
+      "name": "The Bring-all control dispatches to bringEverythingOver",
+      "declared_in": "App/DeviceScreen.swift",
+      "declaration_anchor": "    func bringEverythingOver(hardwareToken: String, advertisedName: String,",
+      "call_pattern": "check.bringEverythingOver(",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "                    check.bringEverythingOver(hardwareToken: input.identity.hardwareToken,"
+        }
+      ],
+      "tested_from": [],
+      "verdict": "reachable",
+      "why": "THE SAME HOLE ON THE OTHER CONTROL, found the same way: replacing the view's `.bringEverythingOver` switch arm with `break` left `pocket-transfer-derived-backlog` green while the button did nothing. This row anchors the dispatch. `tested_from` is empty for the same honest reason as the stop control's: `swift test` cannot compile `App/`."
+    },
+    {
+      "id": "pocket-transfer-batch-enqueue",
+      "name": "The WHOLE derived backlog reaches the queue, not a slice of it",
+      "declared_in": "Sources/FoundryXKit/PocketTransferJob.swift",
+      "declaration_anchor": "    public func enqueue(_ recordings: [PocketRecording]) {",
+      "call_pattern": "recordings: backlog,",
+      "reached_from": [
+        {
+          "via": "device-screen",
+          "anchor": "            self.bringOver(recordings: backlog, hardwareToken: hardwareToken,"
+        }
+      ],
+      "tested_from": [],
+      "verdict": "reachable",
+      "why": "THE DEFECT THIS TRACK EXISTS FOR, IN ITS SUBTLEST FORM. `pocket-transfer-derived-backlog` proves `derivedBacklog` is CALLED; it cannot see what happens to the result. An adversarial review changed `recordings: backlog` to `recordings: [backlog[0]]` and every gate stayed green while `Bring all 12 over` transferred one recording and closed the session — which is the shipped `enqueue([recording])` defect wearing the new API. The anchor is the whole array reaching the transfer. `tested_from` is empty because `swift test` cannot compile `App/`."
     }
   ],
   "_verdict_counts_are_equality": "Declared as exact counts, never bounds. A bound would let the unreachable roster grow by one without anybody moving this file, which is precisely how four capabilities reached `main` unreached.",
   "verdict_counts": {
-    "reachable": 46,
+    "reachable": 51,
     "undetermined": 1,
     "unreachable": 10
   },
