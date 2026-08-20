@@ -28,8 +28,10 @@ struct ActivityView: View {
     /// Absent handlers render the entry without a link — honestly, not broken.
     var onOpenConversation: ((String) -> Void)? = nil
     var onOpenChat: ((String) -> Void)? = nil
-    /// Phone-only tier (gates the options sheet's act-in-chat, EXT1).
-    var local: Bool = false
+    /// WHERE THIS OWNER'S VOICE NOTES LAND — phone / computer / Vault. Required (no
+    /// default) so the recap wait's rotating facts are true for the tier actually in
+    /// use; `local` (EXT1's act-in-chat gate) is derived from it.
+    let destination: CaptureDestination
 
     /// The living conversation recaps (prototype "13 Activity"). Rebuilds the DAILY
     /// recap on the conversation-finished event; refreshes weekly on demand. Lives
@@ -79,12 +81,12 @@ struct ActivityView: View {
          recapComposer: RecapComposer? = makeSystemRecapComposer(),
          onOpenConversation: ((String) -> Void)? = nil,
          onOpenChat: ((String) -> Void)? = nil,
-         local: Bool = false) {
+         destination: CaptureDestination) {
         self.decisionLogURL = decisionLogURL
         self.synthesizer = synthesizer
         self.onOpenConversation = onOpenConversation
         self.onOpenChat = onOpenChat
-        self.local = local
+        self.destination = destination
         let provider = recapPoolProvider ?? { recapPool }
         _recap = StateObject(wrappedValue:
             ActivityRecapModel(poolProvider: provider, composer: recapComposer,
@@ -104,7 +106,7 @@ struct ActivityView: View {
                 } else if recap.isComposing {
                     // The on-device model is writing this recap — name the wait honestly
                     // instead of a blank gap (WS-C). Recaps always run on-device.
-                    WaitingExperienceView(model: WaitingExperienceModel(kind: .recap, onDevice: true))
+                    WaitingExperienceView(kind: .recap)
                 }
                 if days.isEmpty {
                     if recap.daily == nil && recap.weekly == nil { emptyState }
@@ -128,7 +130,7 @@ struct ActivityView: View {
         // EXT1: the SAME action options sheet the detail's Actions face opens.
         .sheet(item: $actionSelection) { sel in
             ActionFeedbackFlow.sheet(row: sel.row, captureId: sel.captureId,
-                                     local: local) { reload() }
+                                     destination: destination) { reload() }
         }
         .onAppear { reload() }
         // Build both recaps on appear; the model then rebuilds the DAILY recap live

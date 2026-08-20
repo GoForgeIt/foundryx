@@ -442,14 +442,34 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
         public var discovery: TimeInterval
         public var control: TimeInterval
 
+        /// THE LONGEST SILENCE A TRANSFER MAY CONTAIN — NOT THE LONGEST A TRANSFER MAY BE.
+        ///
+        /// A download is the one operation in this app that is not a round trip. It is one
+        /// announcement and then hundreds of audio notifications, and at the 21-36 KB/s
+        /// measured on `PKT01_BLUE_26079bc5` (fw 1.6, 2026-08-18) the owner's largest recording
+        /// is TENS OF MINUTES on the wire. So there is deliberately no bound on the transfer as
+        /// a whole: any such number is wrong for somebody, and a person watching a long file
+        /// come over would be told it failed while it was still arriving.
+        ///
+        /// What IS bounded is the gap between one notification and the next, which is what
+        /// "the recorder stopped talking" actually looks like — there is no frame for it on
+        /// this wire. Measured gap distribution across three complete transfers: p50 2.5 ms,
+        /// p90 25.0 ms, largest seen anywhere 116.4 ms. 25 seconds is the reference
+        /// implementation's own tolerance for the same silence — pocket-libre waits 5.0 s per
+        /// chunk and gives up after five consecutive stalls (`commands.py:263-286`) — and it is
+        /// ~215x the worst gap this device has ever shown.
+        public var downloadIdleGap: TimeInterval
+
         public init(powerOn: TimeInterval = 3,
                     connect: TimeInterval = 10,
                     discovery: TimeInterval = 10,
-                    control: TimeInterval = 8) {
+                    control: TimeInterval = 8,
+                    downloadIdleGap: TimeInterval = 25) {
             self.powerOn = powerOn
             self.connect = connect
             self.discovery = discovery
             self.control = control
+            self.downloadIdleGap = downloadIdleGap
         }
     }
 
@@ -496,9 +516,31 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
     private var controlCharacteristic: BLECharacteristic?
     private var audioCharacteristic: BLECharacteristic?
     private var pendingEvents: [PocketTransportEvent] = []
-    private var eventWaiters: [CheckedContinuation<PocketTransportEvent, Error>] = []
+    /// ONE PARKED READ, AND THE TIMER THAT IS ALLOWED TO KILL IT — AND ONLY IT.
+    ///
+    /// The `id` is the whole point. Every `nextTransportEvent` arms a timeout timer, and that
+    /// timer used to fail `eventWaiters.removeFirst()` with no idea which wait it belonged to.
+    /// A wait that was satisfied normally still left its timer running, so every event this
+    /// link ever delivered planted a bomb that went off `timeout` seconds later on WHOEVER was
+    /// waiting then. Round trips never noticed — nothing is parked between them. A download is
+    /// the first operation that keeps a read parked continuously for many seconds, so the first
+    /// bomb to mature during one killed it, at a fixed wall-clock instant, no matter how fast
+    /// the radio was going.
+    private struct EventWaiter {
+        let id: UInt64
+        let continuation: CheckedContinuation<PocketTransportEvent, Error>
+    }
+    private var eventWaiters: [EventWaiter] = []
+    private var lastEventWaiterID: UInt64 = 0
     private var generation: UInt64 = 1
     private var torndown = false
+    /// THE LINK DROPPED, REMEMBERED. `bleCentral(_:didDisconnect:)` fails every PARKED read at
+    /// once — and before this flag, a read that parked a moment AFTER the drop waited out the
+    /// full idle-gap deadline on a link everybody already knew was dead, and was then reported
+    /// as a STALL. A disconnect and a stall are different facts with different next moves (a
+    /// stall retries now; a drop backs off), so a dead link answers the next read immediately
+    /// and with its own name. Never cleared: this object is single-use by construction.
+    private var linkDropped = false
     /// DESIGN §3.7's ONE PIECE OF STATE. The recorder took a key and custody would not keep
     /// it, so the only copy of that key in the world is this one — in memory, in this object.
     /// It is held so `retryPendingCustody()` has something to retry; a screen whose only
@@ -838,7 +880,9 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
             }
         }
 
-        let transport = PocketSeamTransport(link: self, timeout: deadlines.control)
+        let transport = PocketSeamTransport(link: self,
+                                            control: deadlines.control,
+                                            audioChunk: deadlines.downloadIdleGap)
         guard let client = try? await PocketBLEClient.connect(transport: transport) else {
             return .blocked(.unreachable(.protocolNegotiationFailed))
         }
@@ -968,34 +1012,94 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
         peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
     }
 
+    /// The parked read's address, held so a task cancellation can find it. The parked
+    /// continuation used to have NO cancellation handler at all, which coupled every caller to
+    /// a fragile ordering: `Task.cancel()` alone could not wake a parked read — only a
+    /// `teardown()` could, and it woke it with `.disconnected`, so whether a stop was reported
+    /// as a stop or as a link drop depended on whether the read happened to be parked when the
+    /// stop arrived. Now the cancellation itself wakes the waiter, with its own name.
+    private final class ParkedReadHandle: @unchecked Sendable {
+        private let lock = NSLock()
+        private var id: UInt64?
+        func set(_ value: UInt64) { lock.withLock { id = value } }
+        func current() -> UInt64? { lock.withLock { id } }
+    }
+
     func nextTransportEvent(timeout: TimeInterval) async throws -> PocketTransportEvent {
-        try await withCheckedThrowingContinuation { continuation in
-            lock.lock()
-            if torndown {
+        let handle = ParkedReadHandle()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                if torndown {
+                    lock.unlock()
+                    continuation.resume(throwing: PocketTransportFailure.disconnected)
+                    return
+                }
+                if !pendingEvents.isEmpty {
+                    let next = pendingEvents.removeFirst()
+                    lock.unlock()
+                    continuation.resume(returning: next)
+                    return
+                }
+                // A DEAD LINK ANSWERS AT ONCE, after any already-arrived events are served.
+                // Parking here would be waiting the idle-gap deadline for a notification the
+                // radio has already said can never come — and then calling the silence a
+                // stall, which sends the retry policy down the wrong branch.
+                if linkDropped {
+                    lock.unlock()
+                    continuation.resume(throwing: PocketTransportFailure.disconnected)
+                    return
+                }
+                // A stop that arrived before the park: the cancellation handler below has
+                // already run and found nothing to fail, so the check must happen here, under
+                // the same lock the handler's `failEventWaiter` takes.
+                if Task.isCancelled {
+                    lock.unlock()
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                lastEventWaiterID &+= 1
+                let id = lastEventWaiterID
+                handle.set(id)
+                eventWaiters.append(EventWaiter(id: id, continuation: continuation))
                 lock.unlock()
-                continuation.resume(throwing: PocketTransportFailure.disconnected)
-                return
+                // THE TIMER NAMES ITS OWN WAIT. It still fires — cancelling a `DispatchWorkItem`
+                // would do as well — but when it does, it can only find the continuation this call
+                // parked. A timer whose wait was already answered finds nothing and returns, which
+                // is the difference between a bounded read and a fuse burning under the next one.
+                bleQueue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+                    self?.failEventWaiter(id, with: PocketTransportFailure.timeout)
+                }
             }
-            if !pendingEvents.isEmpty {
-                let next = pendingEvents.removeFirst()
-                lock.unlock()
-                continuation.resume(returning: next)
-                return
-            }
-            eventWaiters.append(continuation)
-            lock.unlock()
-            bleQueue.asyncAfter(deadline: .now() + timeout) { [weak self] in
-                self?.failOldestEventWaiter(with: PocketTransportFailure.timeout)
+        } onCancel: {
+            // Wakes ONLY the read this call parked, with cancellation's own name — never
+            // `.disconnected`, because the link did not drop; somebody stopped the work.
+            if let id = handle.current() {
+                self.failEventWaiter(id, with: CancellationError())
             }
         }
     }
 
-    private func failOldestEventWaiter(with error: Error) {
+    private func failEventWaiter(_ id: UInt64, with error: Error) {
         lock.lock()
-        guard !eventWaiters.isEmpty else { lock.unlock(); return }
-        let waiter = eventWaiters.removeFirst()
+        guard let index = eventWaiters.firstIndex(where: { $0.id == id }) else {
+            lock.unlock(); return
+        }
+        let waiter = eventWaiters.remove(at: index)
         lock.unlock()
-        waiter.resume(throwing: error)
+        waiter.continuation.resume(throwing: error)
+    }
+
+    /// THE LINK DROPPED, so nothing parked on it can ever be answered. Unlike a timeout this
+    /// is a fact about every wait at once, so it fails all of them rather than the oldest —
+    /// which is also what stops a second parked read from sitting there until its own deadline
+    /// after the radio has already gone.
+    private func failAllEventWaiters(with error: Error) {
+        lock.lock()
+        let parked = eventWaiters
+        eventWaiters.removeAll()
+        lock.unlock()
+        for waiter in parked { waiter.continuation.resume(throwing: error) }
     }
 
     // MARK: - Teardown
@@ -1039,7 +1143,7 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
             }
         }
         for waiter in pendingEventWaiters {
-            waiter.resume(throwing: PocketTransportFailure.disconnected)
+            waiter.continuation.resume(throwing: PocketTransportFailure.disconnected)
         }
         if let peripheral, let central {
             central.stopScan()
@@ -1136,10 +1240,13 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
     public func bleCentral(_ central: BLECentral, didDisconnect peripheral: BLEPeripheral,
                            error: Error?) {
         guard lock.withLock({ self.peripheral?.identifier == peripheral.identifier }) else { return }
+        // Remembered as well as broadcast: a read that parks AFTER this instant must fail
+        // NOW and as a disconnect, not sit out the idle-gap deadline and be called a stall.
+        lock.withLock { linkDropped = true }
         for gate in [Gate.connected, .services, .characteristics] {
             fail(gate, with: RecordingDeviceAttachError.unreachable(.linkDroppedDuringSetup))
         }
-        failOldestEventWaiter(with: PocketTransportFailure.disconnected)
+        failAllEventWaiters(with: PocketTransportFailure.disconnected)
     }
 
     public func blePeripheral(_ peripheral: BLEPeripheral, didDiscoverServices error: Error?) {
@@ -1213,7 +1320,7 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
         }
         let waiter = eventWaiters.removeFirst()
         lock.unlock()
-        waiter.resume(returning: event)
+        waiter.continuation.resume(returning: event)
     }
 
     // MARK: - Characteristic tokens
@@ -1242,11 +1349,19 @@ public final class RecordingDeviceAttachment: BLEEventSink, @unchecked Sendable 
 /// making any CoreBluetooth object pretend to be.
 final class PocketSeamTransport: PocketBLETransport, @unchecked Sendable {
     private let link: RecordingDeviceAttachment
-    private let timeout: TimeInterval
+    private let control: TimeInterval
+    private let audioChunk: TimeInterval
 
-    init(link: RecordingDeviceAttachment, timeout: TimeInterval) {
+    /// TWO BUDGETS, BECAUSE THERE ARE TWO KINDS OF WAIT. This used to take one `timeout` and
+    /// hand it to every read, which made the deadline for the next instalment of a transfer the
+    /// same number as the deadline for an answer to a command — so a download could not outlive
+    /// a command's round-trip budget however healthy the radio was.
+    init(link: RecordingDeviceAttachment,
+         control: TimeInterval,
+         audioChunk: TimeInterval) {
         self.link = link
-        self.timeout = timeout
+        self.control = control
+        self.audioChunk = audioChunk
     }
 
     func availableCharacteristics() async throws -> Set<String> { link.availableTokens() }
@@ -1259,7 +1374,13 @@ final class PocketSeamTransport: PocketBLETransport, @unchecked Sendable {
     /// advances its own generation when it tears down, and stops delivering at the same
     /// moment, so a frame from a retired session cannot reach a live client.
     func nextEvent(generation: UInt64) async throws -> PocketTransportEvent {
-        try await link.nextTransportEvent(timeout: timeout)
+        try await nextEvent(generation: generation, waitingFor: .control)
+    }
+
+    func nextEvent(generation: UInt64, waitingFor: PocketTransportWait) async throws
+        -> PocketTransportEvent {
+        try await link.nextTransportEvent(
+            timeout: waitingFor == .audioChunk ? audioChunk : control)
     }
 
     func close() async { link.teardown() }

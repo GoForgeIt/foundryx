@@ -14,6 +14,9 @@ import UIKit
 struct ChatScreen: View {
     /// The resolved remote door target (relay tunnel + id_token bearer).
     let target: DoorTarget
+    /// WHICH BRAIN this door reaches — Mac or Vault. Required so every wait rendered
+    /// beneath this screen names the owner's real place (a Vault owner has no Mac).
+    let destination: CaptureDestination
     /// The durable conversation list — owned by MainTabs so it survives tab switches.
     @ObservedObject var store: ChatConversationStore
     /// Identity generation that created this chat surface. Every streamed completion
@@ -44,11 +47,13 @@ struct ChatScreen: View {
     @Binding var showingChatList: Bool
 
     init(target: DoorTarget,
+         destination: CaptureDestination,
          store: ChatConversationStore,
          accountBinding: CaptureAccountScope.AccountBinding,
          log: DoorLog,
          showingChatList: Binding<Bool> = .constant(false)) {
         self.target = target
+        self.destination = destination
         self.store = store
         self.accountBinding = accountBinding
         self.log = log
@@ -152,7 +157,8 @@ struct ChatScreen: View {
             // question, and the list says so rather than pretending its half is the whole.
             ChatListView(
                 chats: store,
-                target: target, log: log, accountBinding: accountBinding,
+                target: target, destination: destination, log: log,
+                accountBinding: accountBinding,
                 computerConnected: true,
                 onDismiss: { showingChatList = false })
         }

@@ -46,16 +46,23 @@ final class ChatListStore: ObservableObject {
     private let log: DoorLog?
     private let accountBinding: CaptureAccountScope.AccountBinding
     private let computerConnected: Bool
+    /// WHICH BRAIN this store is reading — it decides the WORDS of the reach and coverage
+    /// lines, which name the second place out loud. `computerConnected` beside it is a
+    /// CAPABILITY question ("did it answer") and names no place; the two are different
+    /// questions and were briefly the same Bool.
+    private let destination: CaptureDestination
 
     init(chats: ChatConversationStore,
          target: DoorTarget, log: DoorLog?,
          accountBinding: CaptureAccountScope.AccountBinding,
-         computerConnected: Bool) {
+         computerConnected: Bool,
+         destination: CaptureDestination) {
         self.chats = chats
         self.target = target
         self.log = log
         self.accountBinding = accountBinding
         self.computerConnected = computerConnected
+        self.destination = destination
     }
 
     var isLoading: Bool { if case .loading = state { return true }; return false }
@@ -88,6 +95,7 @@ final class ChatListStore: ObservableObject {
 
         let resolved = await KilnLibraryPresentation.resolve(
             computerConnected: computerConnected,
+            destination: destination,
             phoneRows: phone,
             lens: lens, sort: sort, query: query, provenance: provenance,
             nowMs: Date().timeIntervalSince1970 * 1000,
@@ -146,7 +154,8 @@ final class ChatListStore: ObservableObject {
         let pending = freeText != loadedFreeText
         let coverage: ChatListCoverage = {
             if !macReach.isReachable {
-                return .thisPhoneOnly(reason: KilnLibraryCopy.reason(macReach))
+                return .thisPhoneOnly(reason: KilnLibraryCopy.reason(macReach,
+                                                                     destination: destination))
             }
             if pending { return .pending }
             return ChatListCoverage.make(shownFromMac: macRows.count, totalOnMac: totalOnMac)
@@ -221,6 +230,9 @@ private actor LoadCapture {
 struct ChatListView: View {
     @ObservedObject var chats: ChatConversationStore
     let target: DoorTarget
+    /// WHICH BRAIN this door reaches — Mac or Vault — so the loading wait names the
+    /// owner's real place instead of hardcoding "your Mac".
+    let destination: CaptureDestination
     let log: DoorLog
     let accountBinding: CaptureAccountScope.AccountBinding
     let computerConnected: Bool
@@ -230,19 +242,20 @@ struct ChatListView: View {
     @State private var opened: LibraryChatRow?
 
     init(chats: ChatConversationStore,
-         target: DoorTarget, log: DoorLog,
+         target: DoorTarget, destination: CaptureDestination, log: DoorLog,
          accountBinding: CaptureAccountScope.AccountBinding,
          computerConnected: Bool,
          onDismiss: @escaping () -> Void) {
         self.chats = chats
         self.target = target
+        self.destination = destination
         self.log = log
         self.accountBinding = accountBinding
         self.computerConnected = computerConnected
         self.onDismiss = onDismiss
         _store = StateObject(wrappedValue: ChatListStore(
             chats: chats, target: target, log: log, accountBinding: accountBinding,
-            computerConnected: computerConnected))
+            computerConnected: computerConnected, destination: destination))
     }
 
     var body: some View {
@@ -267,7 +280,7 @@ struct ChatListView: View {
         .task { await store.load() }
         .sheet(item: $opened) { row in
             KilnConversationView(
-                row: row, target: target, log: log,
+                row: row, target: target, destination: destination, log: log,
                 accountBinding: accountBinding,
                 onDismiss: { opened = nil },
                 onPickedUp: { Task { await store.load() } })
@@ -280,7 +293,7 @@ struct ChatListView: View {
         case .idle, .loading:
             // A door fetch can outlast a spinner's welcome; the waiting experience says what
             // is happening and where the data is going.
-            WaitingExperienceView(model: WaitingExperienceModel(kind: .doorFetch, onDevice: false))
+            WaitingExperienceView(kind: .doorFetch)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .grainBackground()
                 .accessibilityIdentifier("chat-list-loading")
@@ -441,7 +454,7 @@ struct ChatListView: View {
                     }
                     // Honest about the limit: the phone can SAY there is subagent work but
                     // cannot open it (`/sessions/:id/children` is not proxied by the door).
-                    if let note = KilnLibraryCopy.subagentNote(node, parentIds: rail.parentIds) {
+                    if let note = KilnLibraryCopy.subagentNote(node, parentIds: rail.parentIds, destination: destination) {
                         GrainChip(note, systemImage: "arrow.triangle.branch")
                             .accessibilityIdentifier("kiln-subagent-note")
                     }
@@ -459,14 +472,14 @@ struct ChatListView: View {
     @ViewBuilder
     private func honesty(_ rail: KilnLibraryPresentation.Rail) -> some View {
         VStack(alignment: .leading, spacing: GrainSpacing.x1) {
-            if let line = KilnLibraryCopy.reachLine(rail.macReach) {
+            if let line = KilnLibraryCopy.reachLine(rail.macReach, destination: destination) {
                 Text(line)
                     .grainTextStyle(.caption)
                     .foregroundStyle(GrainColor.amber)
                     .accessibilityIdentifier("chat-list-reach-notice")
             }
             if let line = KilnLibraryCopy.coverageLine(
-                rail.coverage, searching: rail.filtering || store.searchPending) {
+                rail.coverage, searching: rail.filtering || store.searchPending, destination: destination) {
                 Text(line)
                     .grainTextStyle(.caption)
                     .foregroundStyle(GrainColor.textFaint)

@@ -50,7 +50,8 @@ final class ATestRunDoesNotShipIntoTheProductionLogTests: XCTestCase {
             FoundryXDiagShipping.looksLikeATestProcess(
                 environment: ["HOME": "/var/mobile", "TMPDIR": "/private/var/tmp"],
                 linkedTestFramework: false,
-                executablePath: "/private/var/containers/Bundle/Application/ABC/FoundryX.app/FoundryX"),
+                executablePath: "/private/var/containers/Bundle/Application/ABC/FoundryX.app/FoundryX",
+                isSimulator: false),
             "a shipping app on a handset is being read as a test process, so nothing it logs "
                 + "would ever reach the relay")
     }
@@ -62,7 +63,8 @@ final class ATestRunDoesNotShipIntoTheProductionLogTests: XCTestCase {
             FoundryXDiagShipping.looksLikeATestProcess(
                 environment: [:],
                 linkedTestFramework: true,
-                executablePath: "/Users/x/Library/Developer/CoreSimulator/Devices/A/FoundryX.app/FoundryX"))
+                executablePath: "/Users/x/Library/Developer/CoreSimulator/Devices/A/FoundryX.app/FoundryX",
+                isSimulator: true))
     }
 
     /// The same lane, seen from the environment instead — xcodebuild sets these for every
@@ -73,7 +75,8 @@ final class ATestRunDoesNotShipIntoTheProductionLogTests: XCTestCase {
                 FoundryXDiagShipping.looksLikeATestProcess(
                     environment: [key: "/tmp/whatever"],
                     linkedTestFramework: false,
-                    executablePath: "/Applications/FoundryX.app/FoundryX"),
+                    executablePath: "/Applications/FoundryX.app/FoundryX",
+                    isSimulator: false),
                 "\(key) present is a test host, and it was not recognised")
         }
     }
@@ -84,11 +87,62 @@ final class ATestRunDoesNotShipIntoTheProductionLogTests: XCTestCase {
             FoundryXDiagShipping.looksLikeATestProcess(
                 environment: [:],
                 linkedTestFramework: false,
-                executablePath: ".build/debug/FoundryXPackageTests.xctest/Contents/MacOS/FoundryXPackageTests"))
+                executablePath: ".build/debug/FoundryXPackageTests.xctest/Contents/MacOS/FoundryXPackageTests",
+                isSimulator: false))
         XCTAssertTrue(
             FoundryXDiagShipping.looksLikeATestProcess(
                 environment: [:], linkedTestFramework: false,
-                executablePath: "/usr/bin/xctest"))
+                executablePath: "/usr/bin/xctest", isSimulator: false))
+    }
+
+    /// THE XCUITEST LANE, WHICH NOTHING HERE COULD SEE.
+    ///
+    /// `UITests/` holds twenty-six suites and every one of them launches `XCUIApplication()` —
+    /// the SHIPPING app, in its own process, in a simulator. That process is not the test
+    /// runner: it does not link XCTest, it gets none of the XCTest environment (the runner
+    /// does), and its `argv[0]` is `FoundryX.app/FoundryX`. Every signal this predicate had
+    /// therefore answered NO, and the app went on doing what it does on a phone —
+    /// `App/FoundryXApp.swift` wires `PerfSink` and `App/RootView.swift` wires `DoorLog.shared`
+    /// at `RemoteConfig.fromBundle()`, whose `GatewayHTTPURL` is
+    /// `https://gateway.goforgeit.com` in `App/Info.plist` for EVERY configuration. So
+    /// `phase_uiproof` posted into the live relay, and the fix that stopped the app-hosted
+    /// suite did not touch it.
+    ///
+    /// THE ENVELOPE MEASURED ON 2026-08-18 IS THE EVIDENCE. `device=arm64 battery=-1`:
+    /// `device` is `uname().machine`, which in a simulator is the HOST architecture rather than
+    /// an `iPhone15,2`, and a simulator has no battery to report. Those two fields are the
+    /// fingerprint of a machine that is nobody's handset.
+    ///
+    /// SO THE FACT IS THE SIMULATOR, NOT A LAUNCH ARGUMENT. `targetEnvironment(simulator)` is
+    /// decided by the compiler, cannot be spoofed, and cannot be forgotten — whereas making
+    /// twenty-six suites each set a launch environment key is the registry-that-rots this file
+    /// already refuses elsewhere, and this project has shipped auth-bypass launch arguments
+    /// into Release before.
+    func testTheAppLaunchedByAUITestRunnerIsNotMistakenForAHandset() {
+        XCTAssertTrue(
+            FoundryXDiagShipping.looksLikeATestProcess(
+                environment: ["HOME": "/Users/x/Library/Developer/CoreSimulator/Devices/A/data"],
+                linkedTestFramework: false,
+                executablePath: "/Users/x/Library/Developer/CoreSimulator/Devices/A/data/Containers/Bundle/Application/B/FoundryX.app/FoundryX",
+                isSimulator: true),
+            "the app under an XCUITest is read as a real handset, so every `perf …` and "
+                + "`cmd errand.*` line a `phase_uiproof` run writes is POSTed to the production "
+                + "relay's /diag/log — the same instrument, the same `device=arm64 battery=-1` "
+                + "envelope, and the same defect the app-hosted lane was fixed for")
+    }
+
+    /// AND THE OTHER DIRECTION, WHICH IS THE ONE THAT COSTS MORE IF IT IS WRONG. A shipping app
+    /// on real hardware is not a simulator and is not a test, and it must still ship — that log
+    /// is how a recorder that stopped mid-transfer is diagnosed at all.
+    func testARealHandsetIsStillNotASimulator() {
+        XCTAssertFalse(
+            FoundryXDiagShipping.looksLikeATestProcess(
+                environment: ["HOME": "/var/mobile"],
+                linkedTestFramework: false,
+                executablePath: "/private/var/containers/Bundle/Application/ABC/FoundryX.app/FoundryX",
+                isSimulator: false),
+            "a phone in somebody's pocket is being withheld, which blinds the only instrument "
+                + "this project has for the recorder")
     }
 
     // MARK: - The device log: recorded here, withheld from the relay
@@ -158,11 +212,20 @@ final class ATestRunDoesNotShipIntoTheProductionLogTests: XCTestCase {
 
     /// EVERY DIAGNOSTIC SENDER GOES THROUGH THE ONE PLACE THAT CAN REFUSE.
     ///
-    /// A rule stated in three files is a rule that holds in two of them after the next edit.
-    /// This is the gate that catches the fourth sender, and the one that catches somebody
-    /// putting `URLSession.shared.dataTask` back beside the choke point.
+    /// A rule stated in four files is a rule that holds in three of them after the next edit.
+    ///
+    /// THE LIST IS FOUR NOW, AND THAT IS THE POINT. This gate was written over a hardcoded
+    /// three and its own comment said it was "the gate that catches the fourth sender" — which
+    /// it could not, because it iterates a list somebody has to remember to add to. The fourth
+    /// sender was already in the tree when that was written: `PerfSink`
+    /// (`Sources/FoundryXKit/PerfTelemetry.swift`) POSTs perf lines to the SAME
+    /// `gatewayHTTPURL/diag/log`, wired in `App/FoundryXApp.swift`'s `init` — which runs inside
+    /// the app-hosted scenario bundle exactly as it runs on a phone. `cmd errand.*` stopped
+    /// shipping from the simulator suite and `perf …` did not. The population is DERIVED
+    /// below; this list is only what the derivation must not shrink to.
     func testEveryDiagnosticSenderRoutesThroughTheChokePoint() throws {
-        let senders = ["DoorLog.swift", "DeletionRecorder.swift", "RemoteSession.swift"]
+        let senders = ["DoorLog.swift", "DeletionRecorder.swift", "RemoteSession.swift",
+                       "PerfTelemetry.swift"]
         for name in senders {
             let path = AppSourceTree.repoRoot
                 .appendingPathComponent("Sources/FoundryXKit/\(name)")
@@ -181,5 +244,110 @@ final class ATestRunDoesNotShipIntoTheProductionLogTests: XCTestCase {
             XCTAssertFalse(code.contains("URLSession.shared.data("),
                            "\(name) reaches the network directly, bypassing the choke point")
         }
+    }
+
+    /// THE GATE THAT CAN ACTUALLY CATCH THE NEXT SENDER, because its population is READ OFF
+    /// THE TREE rather than typed above.
+    ///
+    /// Every file in the kit that reaches `URLSession` at all must be one of exactly three
+    /// things: the choke point itself, a NAMED non-diagnostic client, or a diagnostic sender
+    /// that goes through the choke point. A new file that POSTs anywhere fails here until
+    /// somebody says which of the three it is — which is the check that was missing when
+    /// `PerfSink` sat outside the guard while a gate one screen up claimed to cover it.
+    ///
+    /// THE EXCEPTIONS ARE NAMED AND THEIR JUSTIFICATION IS ASSERTED, not asserted by being on
+    /// a list: each must NOT mention the diagnostics endpoint. An allowlist entry that quietly
+    /// became a diagnostic sender is the same defect wearing the exception's clothes.
+    ///
+    /// ITS LIMIT, STATED RATHER THAN IMPLIED. It watches the FIRE-AND-FORGET shapes —
+    /// `dataTask(…)`, `URLSession.shared.data(…)`, `upload(…)` — which is what every diagnostic
+    /// sender in this kit is, because a diagnostic that blocked on its own answer would be a
+    /// diagnostic that changed the thing it measures. It deliberately does NOT watch
+    /// `session.data(for:)`, which has twenty-three call sites here and is the ordinary shape
+    /// of an API client (`DoorClient`, `AccountClient`, `UsageSink`'s bearer-gated door
+    /// wire). Covering those would need an allowlist longer than the population it guards, and
+    /// a fifteen-name allowlist is a registry that rots, not a gate. A diagnostic sender that
+    /// awaits its own POST would slip past this and is the case to add a check for, in the
+    /// shape of whatever it turns out to be.
+    func testNothingInTheKitReachesTheNetworkOutsideTheChokePoint() throws {
+        /// Clients of the ACCOUNT and HOST-REGISTRY APIs. They are request/response calls whose
+        /// answers the app cannot work without — nothing about them is a diagnostic, and
+        /// withholding them under test would break the suites that drive them.
+        let nonDiagnosticClients = ["FoundryAuth.swift", "HostResolver.swift"]
+
+        let kit = AppSourceTree.repoRoot
+            .appendingPathComponent("Sources/FoundryXKit", isDirectory: true)
+        let files = try FileManager.default
+            .contentsOfDirectory(at: kit, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "swift" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        XCTAssertGreaterThan(files.count, 50,
+                             "the kit was not enumerated, so this gate is about nothing")
+
+        var reachTheNetwork: [String] = []
+        for file in files {
+            let code = AppSourceTree.code(of: try String(contentsOf: file, encoding: .utf8))
+            guard code.contains("dataTask(") || code.contains("URLSession.shared.data(")
+                    || code.contains(".upload(for:") || code.contains("URLSession.shared.upload(")
+            else { continue }
+            reachTheNetwork.append(file.lastPathComponent)
+        }
+        // Non-vacuity: the choke point itself must be in the population, or the scan found
+        // nothing and every claim below is about an empty set.
+        XCTAssertTrue(reachTheNetwork.contains("FoundryXDiagShipping.swift"),
+                      "the scan did not even find the choke point, so it found nothing: "
+                          + "\(reachTheNetwork)")
+
+        let unexplained = reachTheNetwork.filter {
+            $0 != "FoundryXDiagShipping.swift" && !nonDiagnosticClients.contains($0)
+        }
+        XCTAssertEqual(unexplained, [],
+                       "these kit files reach the network without going through the one place "
+                           + "that can refuse a diagnostic batch, and without being a named "
+                           + "non-diagnostic client: \(unexplained). A diagnostic sender here "
+                           + "ships the test suite's own lines into the production relay")
+
+        for name in nonDiagnosticClients {
+            let raw = try String(
+                contentsOf: kit.appendingPathComponent(name), encoding: .utf8)
+            XCTAssertFalse(raw.contains("diag/log"),
+                           "\(name) is exempted from the choke point as a non-diagnostic "
+                               + "client, and it now names the diagnostics endpoint")
+        }
+    }
+
+    /// THE FOURTH SENDER, BEHAVIOURALLY. `perf …` lines carry the same `build=` / `install=`
+    /// identity `cmd errand.*` lines do and go to the same endpoint, so a suite that stopped
+    /// shipping one and went on shipping the other has not stopped polluting the instrument.
+    func testAPerfLineIsWithheldRatherThanPosted() {
+        let sink = PerfSink(endpoint: Self.sink,
+                            ctx: PerfContext(build: "1", installId: "1a255475"))
+        let before = (shipped: FoundryXDiagShipping.shipped,
+                      withheld: FoundryXDiagShipping.withheld)
+
+        sink.emit("perf build=1 dev=1a255475 span=cold-launch ms=820", flush: true)
+
+        let after = (shipped: FoundryXDiagShipping.shipped,
+                     withheld: FoundryXDiagShipping.withheld)
+        XCTAssertEqual(after.shipped - before.shipped, 0,
+                       "a test run POSTed a perf batch to \(Self.sink). `App/FoundryXApp.swift` "
+                           + "wires this endpoint from the same RemoteConfig DoorLog uses, and "
+                           + "its init runs inside the app-hosted scenario bundle")
+        XCTAssertEqual(after.withheld - before.withheld, 1,
+                       "no batch was withheld either — the flush never ran, so this test proves "
+                           + "nothing about the guard")
+    }
+
+    /// AND A HANDSET STILL SHIPS ITS PERF LINES. The refusal is about the harness, never about
+    /// the endpoint: `PerfSink` is how a cold-launch regression is seen across the fleet.
+    func testAPerfSinkWithNoEndpointDoesNotReachTheChokePointAtAll() {
+        let sink = PerfSink(endpoint: nil,
+                            ctx: PerfContext(build: "1", installId: "1a255475"))
+        let before = FoundryXDiagShipping.withheld
+
+        sink.emit("perf build=1 dev=1a255475 span=cold-launch ms=820", flush: true)
+
+        XCTAssertEqual(FoundryXDiagShipping.withheld - before, 0,
+                       "a sink with nowhere to send built a request anyway")
     }
 }

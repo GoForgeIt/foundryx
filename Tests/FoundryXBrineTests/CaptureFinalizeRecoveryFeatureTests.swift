@@ -181,7 +181,7 @@ private enum CaptureFinalizeRecoverySteps {
                     return CaptureCardPresentation.make(
                         status: status, meta: nil, card: nil, pollerStage: .stored,
                         pollerTitle: nil, pollerSummary: nil, droppedReason: nil,
-                        hasCachedTranscript: false, local: false, categoryName: nil,
+                        hasCachedTranscript: false, destination: .computer, categoryName: nil,
                         categoryAutoFiled: false, waveform: []).statusWord
                 }
                 guard actual == expected else { throw BrineStepError("card says '\(actual)'") }

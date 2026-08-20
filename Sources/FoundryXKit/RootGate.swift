@@ -49,6 +49,22 @@ public enum RootGate {
         }
         if brain == .myComputer, hostResolved { return .computerBrain }
         if brain == .foundryCloud, cellPaired { return .cellBrain }
+        // A CHOSEN BRAIN THAT DID NOT RESOLVE IS NOT A REASON TO STOP SENDING AUDIO
+        // ANYWHERE.
+        //
+        // This gate had no rung between "my computer" and "nothing ever leaves the
+        // phone". An owner who chose the computer brain and walked off his LAN fell all
+        // the way to the tier whose uploads are self-issued ACKs — while a vault sat
+        // paired, reachable, and holding that same phone's other recordings. That is the
+        // divergence: recordings brought over in the app reached the vault; ambient
+        // recordings made in the same window reached nowhere and were written down as
+        // done. The vault was never consulted because it was not the CHOSEN brain.
+        //
+        // The degrade is deliberately scoped to a brain that ASKED for a destination.
+        // `.justMyPhone` is a promise of zero content egress, and a paired vault must
+        // never override it — this rung is for a choice that failed to resolve, never
+        // for a choice that was honoured.
+        if brain != .justMyPhone, cellPaired { return .cellBrain }
         return .phoneBrain
     }
 }
@@ -76,6 +92,56 @@ public enum CaptureDestination: String, Equatable, Sendable, CaseIterable {
     case vault
 }
 
+public extension CaptureDestination {
+
+    /// THE SECOND PLACE, NAMED ONCE FOR THE WHOLE PROGRAM.
+    ///
+    /// Every surface that has to say "the OTHER place your things live" used to write the
+    /// word "Mac" into its own sentence, because when they were written there was only one
+    /// other place. There are two now, and one tier has none at all — so the phrase is a
+    /// property of the tier, answered here, and `nil` is a real answer: on the phone tier
+    /// there is no second place, and a sentence about one must not be written.
+    var secondPlace: String? {
+        switch self {
+        case .phone:    return nil
+        case .computer: return "your Mac"
+        case .vault:    return "your Vault"
+        }
+    }
+
+    /// The possessive form — "your Mac's chats", "your Vault's chats".
+    var secondPlacePossessive: String? {
+        switch self {
+        case .phone:    return nil
+        case .computer: return "your Mac's"
+        case .vault:    return "your Vault's"
+        }
+    }
+
+    /// The second place as the SUBJECT of a connectivity sentence. The computer tier says
+    /// "your computer" here rather than "your Mac": the point is the machine answering,
+    /// not which one it is.
+    var brainSubject: String? {
+        switch self {
+        case .phone:    return nil
+        case .computer: return "your computer"
+        case .vault:    return "your Vault"
+        }
+    }
+
+    /// WHAT A PERSON CAN ACTUALLY DO when the second place is not answering. This is the
+    /// sentence that mattered most: a Vault owner was told "Open Solleva on your Mac and
+    /// make sure it's awake" — sent to go and fix a machine he does not own, which is
+    /// worse than saying nothing, because it looks like an instruction that should work.
+    var wakeAction: String? {
+        switch self {
+        case .phone:    return nil
+        case .computer: return "Open Solleva on your Mac and make sure it's awake."
+        case .vault:    return "Check your Vault in Settings — it may still be waking up."
+        }
+    }
+}
+
 public extension RootDestination {
     /// The destination this resolved brain actually writes to, or `nil` for a destination
     /// that is not running the app at all (the sign-in gate has nowhere to save anything,
@@ -87,5 +153,24 @@ public extension RootDestination {
         case .phoneBrain:    return .phone
         case .signInGate:    return nil
         }
+    }
+
+    /// THE SAME MAPPING, TOTAL, FOR THE ONE CALLER THAT IS ALREADY ON SCREEN.
+    ///
+    /// THIS EXISTS BECAUSE THE MAPPING ABOVE HAD NO PRODUCTION CALLER. It was written,
+    /// correct, and pinned by `SyncBarPresenterTests` — and `App/RootView.swift` named the
+    /// place with three hand-written literals anyway — `.computer`, `.vault`, `.phone`,
+    /// one per brain arm. A tested table nothing consults is decorative. `swift test` cannot
+    /// compile `App/`, so flipping any one of those literals compiled, shipped, and passed
+    /// every gate in this repository while an entire tier read another tier's words. The
+    /// only cure is that the App has nothing left to restate: it asks for the place, and
+    /// the answer is decided HERE, where a test can execute it.
+    ///
+    /// It is total because a view already on screen has to draw SOMETHING. `.signInGate`
+    /// never mounts the tabs, and if it somehow did it would take the phone's words — the
+    /// only tier that names no second place at all — rather than inventing a Mac or a
+    /// Vault for a user who has not even signed in.
+    var captureDestinationOnScreen: CaptureDestination {
+        captureDestination ?? .phone
     }
 }

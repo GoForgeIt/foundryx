@@ -83,14 +83,14 @@ private final class KilnLibraryWorld: @unchecked Sendable {
         let org = self.org
         let fail = failure
         state = await KilnLibraryPresentation.resolve(
-            computerConnected: connected, lens: lens, sort: sort, query: query,
+            computerConnected: connected, destination: .computer, lens: lens, sort: sort, query: query,
             nowMs: Self.now,
             load: {
                 if let fail { throw fail }
                 return KilnLibraryPresentation.Load(page: page, org: org)
             })
         stateIfUnreachable = await KilnLibraryPresentation.resolve(
-            computerConnected: connected, lens: lens, sort: sort, query: query,
+            computerConnected: connected, destination: .computer, lens: lens, sort: sort, query: query,
             nowMs: Self.now,
             load: { throw KilnLibraryError.unreachable })
     }
@@ -520,7 +520,7 @@ private enum KilnLibrarySteps {
                     throw BrineStepError("no row was recognised as having spawned anything")
                 }
                 let n = try w.node("spawner-1")
-                guard let note = KilnLibraryCopy.subagentNote(n, parentIds: rail.parentIds) else {
+                guard let note = KilnLibraryCopy.subagentNote(n, parentIds: rail.parentIds, destination: .computer) else {
                     throw BrineStepError("the spawning conversation said nothing about the work underneath it")
                 }
                 guard note.contains("subagent") else {
@@ -528,7 +528,7 @@ private enum KilnLibrarySteps {
                 }
                 // And it is not said about everything — that would make it noise, not a fact.
                 guard KilnLibraryCopy.subagentNote(
-                    kilnNode(id: "nobody", rail: rail) ?? n, parentIds: []) == nil else {
+                    kilnNode(id: "nobody", rail: rail) ?? n, parentIds: [], destination: .computer) == nil else {
                     throw BrineStepError("a row with no children still claimed to have subagent work")
                 }
             },

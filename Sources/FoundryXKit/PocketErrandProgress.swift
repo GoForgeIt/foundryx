@@ -37,6 +37,15 @@ public struct PocketErrandInFlight: Sendable, Equatable {
         self.subject = subject
         self.recordingId = recordingId
     }
+
+    /// WHETHER THIS ERRAND IS ABOUT ONE RECORDING rather than about the recorder itself.
+    ///
+    /// A fact about the errand, not a second rule: `progress(_:for:)` folds a whole-recorder
+    /// errand into `.elsewhere`, which is right for a ROW (an action taken while the shelf is
+    /// being replaced would be taken against a listing on its way out) and wrong for the band
+    /// above the list — the panel's headline already says "Checking the recorder…" while a
+    /// check runs, and a band repeating it underneath is the same fact twice on one screen.
+    public var isAboutOneRecording: Bool { recordingId != nil }
 }
 
 /// WHAT ONE RECORDING'S SURFACE SHOWS WHILE AN ERRAND IS IN FLIGHT.
@@ -96,6 +105,60 @@ public enum PocketErrandProgressPresentation {
             return .thisRecording(thisRecordingLine(subject: inFlight.subject))
         }
         return .elsewhere(anotherRecordingLine(subject: inFlight.subject))
+    }
+
+    /// WHAT THE BAND ABOVE THE LIST SHOWS — the same question, minus the one answer the panel's
+    /// headline already owns.
+    ///
+    /// THE BAND IS THE THIRD SURFACE and it was the last one left on a global Bool. Its spinner
+    /// read `if check.isBringingOver`, which is true for ANY transfer, under a button that
+    /// offers exactly one file (`PocketBringOver.offered`'s pick) — so asking for a different
+    /// recording from that recording's own page made this band say "Bringing this recording
+    /// over…" beneath a button about a file nothing was happening to. That is Nick's "not just
+    /// at the top", in the place he was looking.
+    ///
+    /// WHY IT IS NOT JUST `progress(_:for:)`. A whole-recorder errand folds into `.elsewhere`,
+    /// which is right for a ROW — while the shelf is being replaced an action would be taken
+    /// against a listing on its way out — and wrong here: this band sits DIRECTLY BENEATH a
+    /// headline that already says "Checking the recorder…" while a check runs, and repeating it
+    /// is the same fact twice on one screen. So a check is `.idle` to this surface and to no
+    /// other, which is a rule, so it lives here rather than as a second condition in a SwiftUI
+    /// body that nothing in this repository can execute.
+    public static func bandProgress(_ inFlight: PocketErrandInFlight?,
+                                    for fileToken: String) -> PocketErrandProgress {
+        guard inFlight?.isAboutOneRecording == true else { return .idle }
+        return progress(inFlight, for: fileToken)
+    }
+
+    /// MAY A NEW ERRAND START? ONE RADIO, ONE ERRAND — asked once, here, by every control that
+    /// offers one and every entry point that would begin one.
+    ///
+    /// WHAT WAS IN THE TREE BEFORE THIS, MEASURED IN THE SOURCE. Five functions on the recorder
+    /// page's model begin an errand and each decided admission for itself, from the three
+    /// published busy flags, ORed by hand — and they did not agree. `run` (the shelf check) and
+    /// the bring-over funnel guarded `!isChecking, !isBringingOver` and said NOTHING about a
+    /// removal; the two removal paths and the fast sync guarded all three. The band above the
+    /// list disabled its button on two of the three as well. So while a removal ran, that band
+    /// drew its own sentence — "Solleva is taking another recording off this recorder. It can
+    /// only do one at a time." — underneath a "Bring it over" button that was still live, and
+    /// the tap was taken.
+    ///
+    /// WHY IT IS PART OF "WHICH RECORDING IS THIS ERRAND ABOUT" AND NOT A SEPARATE BUG. The
+    /// page records which recording an errand is for in exactly one place — the `inFlight` this
+    /// function is asked about — and a second errand OVERWRITES it. The removal's row stops
+    /// spinning mid-removal, the transfer's row starts, and the one `finishErrand` that follows
+    /// writes a single `errand.stop` carrying the wrong subject and the wrong `about=`. The
+    /// live log is then left holding a start that never stopped and a stop that never started,
+    /// for two different recordings — which is precisely the pairing `about=` was added to make
+    /// readable.
+    ///
+    /// WHY `inFlight` AND NOT THE FLAGS. It is the one piece of state cleared on EVERY path an
+    /// errand can end by: `finishErrand` clears it OUTSIDE the token guard, deliberately, so a
+    /// cancel that raced the finish cannot leave it set. The flags are not — `cancel()` clears
+    /// `isChecking` and `isBringingOver` and leaves `isRemoving` exactly as it found it — so an
+    /// admission asked of the flags can be answered by a flag no path ever puts down.
+    public static func admitsANewErrand(_ inFlight: PocketErrandInFlight?) -> Bool {
+        inFlight == nil
     }
 
     /// What is happening TO THIS RECORDING, named after the errand rather than after a generic

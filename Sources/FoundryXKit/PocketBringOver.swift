@@ -490,12 +490,12 @@ public enum PocketBringOver {
         let result = await attachment.withAuthenticatedSession(
             peripheralIdentifier: id, advertisedName: advertisedName
         ) { client, identity in
-            await pull(client: client, identity: identity, advertisedName: advertisedName,
-                       recording: recording, custody: custody, destination: destination)
+            await bringOver(on: client, identity: identity, advertisedName: advertisedName,
+                            recording: recording, custody: custody, destination: destination)
         }
         switch result {
-        case .ran(let outcome):
-            return outcome
+        case .ran(let attempt):
+            return attempt.outcome
         case .unavailable(let attach):
             // THE ATTACH SEAM'S OWN SENTENCE, never a raw error. This panel is a read on a
             // recorder the account already remembers, so the same mapping the check earns is
@@ -553,12 +553,31 @@ public enum PocketBringOver {
                                   destination: destination)
     }
 
-    private static func pull(client: PocketBLEClient,
-                             identity: PocketAuthenticatedIdentity,
-                             advertisedName: String,
-                             recording: PocketRecording,
-                             custody: any PocketRecorderFileCustody,
-                             destination: Destination) async -> PocketBringOverOutcome {
+    /// ONE ITEM, ON A SESSION SOMEBODY ELSE IS HOLDING OPEN — the per-file half of a queue.
+    ///
+    /// This is `run`'s body with the session removed, made public so `PocketTransferQueue` can
+    /// pull file after file inside ONE `withAuthenticatedSession`. Measured support: two
+    /// downloads came over one authenticated session with no re-auth on `PKT01_BLUE_26079bc5`
+    /// (fw 1.6, 2026-08-18), which is what the `MCU&OFF` drain unblocked — before it, the
+    /// second command on a session always died on `.malformedResponse`.
+    ///
+    /// - Parameter progress: `(delivered, announced)` after every chunk lands on disk, plus
+    ///   one `(0, announced)` the moment the recorder states the total. The denominator is the
+    ///   `MCU&U&` announcement and NEVER `recording.sizeBytes` — the listing is a different
+    ///   unit (measured: listing 4 -> 19,770 announced bytes), and a bar denominated in it
+    ///   reads wrong by a varying factor. Before the announcement there is nothing honest to
+    ///   report, and this callback honestly reports nothing.
+    /// - Returns: the outcome AND, when the transfer was cut short, WHICH WAY it was cut —
+    ///   a stall, a link drop and an owner's stop are three different next moves for a queue,
+    ///   and `PocketBringOverOutcome.transferIncomplete` alone folds them into one sentence.
+    public static func bringOver(on client: PocketBLEClient,
+                                 identity: PocketAuthenticatedIdentity,
+                                 advertisedName: String,
+                                 recording: PocketRecording,
+                                 custody: any PocketRecorderFileCustody,
+                                 destination: Destination,
+                                 progress: (@Sendable (Int, Int) -> Void)? = nil)
+        async -> PocketBringOverAttempt {
         let deviceIdentity = identity.recordingDeviceIdentity
         let key = PocketRecorderFileKey(identity: deviceIdentity,
                                         date: recording.date,
@@ -572,26 +591,34 @@ public enum PocketBringOver {
         // the file is here — so it simply runs the import again off the held file.
         if let held = await custody.heldFile(key) {
             if let existing = await custody.conversation(for: key) {
-                return .alreadyHeld(captureID: existing)
+                return .init(outcome: .alreadyHeld(captureID: existing), interruption: nil)
             }
-            return await conversation(from: held, key: key, bytes: nil,
-                                      deviceIdentity: deviceIdentity,
-                                      advertisedName: advertisedName,
-                                      recording: recording, custody: custody,
-                                      destination: destination)
+            return .init(outcome: await conversation(
+                from: held, key: key, bytes: nil,
+                deviceIdentity: deviceIdentity,
+                advertisedName: advertisedName,
+                recording: recording, custody: custody,
+                destination: destination), interruption: nil)
         }
 
         let writer: any PocketRecorderFileWriting
         do { writer = try await custody.beginKeeping(key) }
-        catch { return .transferIncomplete }
+        catch { return .init(outcome: .transferIncomplete, interruption: nil) }
 
         let bytes: Int
         do {
             // STREAMED STRAIGHT TO DISK. The radio hands over one notification at a time and
             // each one goes to the file; nothing accumulates, so a two-hour recording costs the
             // same memory as a two-second one.
-            _ = try await client.download(recording.request, ceilingBytes: maximumBytes) { chunk in
+            let meter = PocketTransferMeter()
+            _ = try await client.download(recording.request, ceilingBytes: maximumBytes,
+                                          announced: { total in
+                meter.announce(total)
+                progress?(0, total)
+            }) { chunk in
                 try writer.write(chunk)
+                let reading = meter.deliver(chunk.count)
+                progress?(reading.delivered, reading.announced)
             }
             bytes = try writer.commit()
         } catch let error as PocketProtocolError {
@@ -601,36 +628,52 @@ public enum PocketBringOver {
                 // THE RECORDER ANSWERED AND THIS BUILD COULD NOT USE THE ANSWER: no `0xFF 0xF3`
                 // sync anywhere, a size it did not state or exceeded, or a firmware without the
                 // command.
-                return .unreadableRecording
-            case .timeout, .stall, .disconnected, .transportFailure, .cancelled:
+                return .init(outcome: .unreadableRecording, interruption: nil)
+            case .timeout, .stall:
                 // IT STOPPED ARRIVING. There is no error frame for this on the wire — the
                 // recorder simply goes quiet — so silence past the deadline IS the evidence.
-                return .transferIncomplete
+                // The link itself is up; that is a different fact from `.disconnected` below,
+                // and the queue's retry policy turns on the difference.
+                return .init(outcome: .transferIncomplete, interruption: .stalled)
+            case .disconnected:
+                // THE DEVICE LEFT. Out of range, powered off, or claimed by another phone —
+                // the same silence from here, and the one case backoff is for.
+                return .init(outcome: .transferIncomplete, interruption: .linkDropped)
+            case .transportFailure:
+                return .init(outcome: .transferIncomplete, interruption: .transport)
+            case .cancelled:
+                // SOMEBODY STOPPED IT. Not a failure of the recorder and never reported as
+                // one; custody has already discarded the partial.
+                return .init(outcome: .transferIncomplete, interruption: .stopped)
             case .unauthenticated, .busy, .malformedSecret, .authenticationRejected,
                  .unsupportedProtocol:
-                return .recorderUnavailable(PocketRecorderCheckPresentation.keyUnusableLine)
+                return .init(outcome: .recorderUnavailable(
+                    PocketRecorderCheckPresentation.keyUnusableLine), interruption: nil)
             case .deletionNobodyChose:
                 // UNREACHABLE FROM HERE AND NAMED ANYWAY. A bring-over composes no deletion —
                 // that is the invariant `features/pocket-recorder-delete-consent.feature`
                 // holds. If one ever appears on this path the gate refuses it, and the owner
                 // is told the recording did not come over rather than being told a story about
                 // their recorder: nothing was taken from it, which is the whole point.
-                return .transferIncomplete
+                return .init(outcome: .transferIncomplete, interruption: nil)
             }
         } catch {
             // THE BYTES ARRIVED AND THIS PHONE COULD NOT PROVE IT IS HOLDING THEM. Custody has
             // already removed whatever it wrote, so "nothing was kept" is a fact rather than a
             // hope, and the recorder still has the only copy — which it always did.
             writer.abandon()
-            return .transferIncomplete
+            return .init(outcome: .transferIncomplete, interruption: nil)
         }
 
-        guard let held = await custody.heldFile(key) else { return .transferIncomplete }
-        return await conversation(from: held, key: key, bytes: bytes,
-                                  deviceIdentity: deviceIdentity,
-                                  advertisedName: advertisedName,
-                                  recording: recording, custody: custody,
-                                  destination: destination)
+        guard let held = await custody.heldFile(key) else {
+            return .init(outcome: .transferIncomplete, interruption: nil)
+        }
+        return .init(outcome: await conversation(
+            from: held, key: key, bytes: bytes,
+            deviceIdentity: deviceIdentity,
+            advertisedName: advertisedName,
+            recording: recording, custody: custody,
+            destination: destination), interruption: nil)
     }
 
     /// THE HAND-OFF, AND THE END OF THIS FILE'S JOB. Past `PocketCaptureImport` the recording is

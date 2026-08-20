@@ -25,7 +25,7 @@ private final class CaptureHomeWorld: @unchecked Sendable {
     var meta: ConversationMeta?
     var progress: ConversationProgress = .savedOnPhone
     var droppedReason: String?
-    var local = false
+    var destination: CaptureDestination = .computer
     var cardTitle = ""
     var cardSummary: String?
     var cardStatus = ""
@@ -56,7 +56,7 @@ private final class CaptureHomeWorld: @unchecked Sendable {
         let start = Date(timeIntervalSince1970: 1_700_000_000)
         cardTitle = CaptureCardPresentation.title(card: card, pollerTitle: nil, start: start)
         cardSummary = CaptureCardPresentation.summary(card: card, pollerTitle: nil, pollerSummary: nil)
-        cardStatus = CaptureCardPresentation.statusWord(progress: progress, droppedReason: droppedReason, local: local)
+        cardStatus = CaptureCardPresentation.statusWord(progress: progress, droppedReason: droppedReason, destination: destination)
         cardMeta = CaptureCardPresentation.timeRangeString(meta: meta, fallback: start)
     }
 }
@@ -68,7 +68,7 @@ private enum CaptureHomeSteps {
             defineStep("a conversation titled \"Launch deck and relay numbers\" with a summary, still syncing after a transport error") { ctx, _, _ in
                 w.card = ConversationCardMeta(title: "Launch deck and relay numbers", summary: "Ship dates and the relay port plan.")
                 w.meta = ConversationMeta(startedAt: 1_700_000_000, endedAt: 1_700_000_120)
-                w.progress = .savedOnPhone; w.droppedReason = "NSURLErrorDomain -1004 Could not connect to the server."; w.local = false
+                w.progress = .savedOnPhone; w.droppedReason = "NSURLErrorDomain -1004 Could not connect to the server."; w.destination = .computer
                 return ctx
             },
             defineStep("its card is presented") { ctx, _, _ in w.presentCard(); return ctx },
@@ -99,7 +99,7 @@ private enum CaptureHomeSteps {
             // ── S2 syncing reads Waiting for computer
             defineStep("a conversation with segments still waiting to reach the computer") { ctx, _, _ in
                 w.card = ConversationCardMeta(title: "Standup"); w.meta = nil
-                w.progress = .savedOnPhone; w.droppedReason = nil; w.local = false
+                w.progress = .savedOnPhone; w.droppedReason = nil; w.destination = .computer
                 return ctx
             },
             defineCheck("its status word is \"Waiting for computer\"") { _, _, _ in
@@ -108,14 +108,15 @@ private enum CaptureHomeSteps {
             defineCheck("a sync error changes nothing the user sees") { _, _, _ in
                 // The same state WITH a transport error attached still reads the same word.
                 let withError = CaptureCardPresentation.statusWord(progress: .savedOnPhone,
-                                                                   droppedReason: "Could not connect to the server", local: false)
+                                                                   droppedReason: "Could not connect to the server",
+                                                                   destination: .computer)
                 guard withError == "Waiting for computer" else { throw BrineStepError("a sync error changed the status word to \(withError)") }
             },
 
             // ── S3 title falls back to first words, never a filename/id
             defineStep("a conversation with no title yet whose transcript begins \"we should move the launch to Friday because\"") { ctx, _, _ in
                 w.card = ConversationCardMeta(provisionalTranscript: "we should move the launch to Friday because", isProvisional: true)
-                w.meta = nil; w.progress = .recording; w.droppedReason = nil; w.local = true
+                w.meta = nil; w.progress = .recording; w.droppedReason = nil; w.destination = .phone
                 return ctx
             },
             defineCheck("the card's title begins with the first words spoken") { _, _, _ in
@@ -129,16 +130,21 @@ private enum CaptureHomeSteps {
             },
 
             // ── S4 record CTA copy per tier
-            defineStep("the capture home on a phone-only install") { ctx, _, _ in w.local = true; return ctx },
-            defineCheck("a \"Record a conversation\" card reads \"Saved on this phone. It joins your full history when your computer connects.\"") { _, _, _ in
+            defineStep("the capture home on a phone-only install") { ctx, _, _ in w.destination = .phone; return ctx },
+            defineCheck("a \"Record a conversation\" card reads \"Saved on this phone. This phone holds your full history.\"") { _, _, _ in
                 guard CaptureHomeCopy.recordTitle == "Make a voice note" else { throw BrineStepError("CTA title wrong") }
-                guard CaptureHomeCopy.recordSubtitle(local: true) == "Saved on this phone. It joins your full history when your computer connects." else {
-                    throw BrineStepError("phone-tier subtitle: \(CaptureHomeCopy.recordSubtitle(local: true))")
+                guard CaptureHomeCopy.recordSubtitle(destination: .phone) == "Saved on this phone. This phone holds your full history." else {
+                    throw BrineStepError("phone-tier subtitle: \(CaptureHomeCopy.recordSubtitle(destination: .phone))")
                 }
             },
             defineCheck("on the computer tier the card reads \"Saved on this phone. It joins your full history on your computer.\"") { _, _, _ in
-                guard CaptureHomeCopy.recordSubtitle(local: false) == "Saved on this phone. It joins your full history on your computer." else {
-                    throw BrineStepError("computer-tier subtitle: \(CaptureHomeCopy.recordSubtitle(local: false))")
+                guard CaptureHomeCopy.recordSubtitle(destination: .computer) == "Saved on this phone. It joins your full history on your computer." else {
+                    throw BrineStepError("computer-tier subtitle: \(CaptureHomeCopy.recordSubtitle(destination: .computer))")
+                }
+            },
+            defineCheck("on the cell tier the card reads \"Saved on this phone. It joins your full history in your Vault.\"") { _, _, _ in
+                guard CaptureHomeCopy.recordSubtitle(destination: .vault) == "Saved on this phone. It joins your full history in your Vault." else {
+                    throw BrineStepError("cell-tier subtitle: \(CaptureHomeCopy.recordSubtitle(destination: .vault))")
                 }
             },
 

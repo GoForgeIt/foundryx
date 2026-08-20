@@ -195,6 +195,22 @@ public struct ConversationActionsPresentation: Equatable, Sendable {
     public let othersRows: [Row]
     public var isEmpty: Bool { rows.isEmpty && othersRows.isEmpty }
 
+    /// EVERYTHING THIS FACE IS ACTUALLY RENDERING — the main list AND the collapsed
+    /// "Heard from others" group.
+    ///
+    /// IT EXISTS BECAUSE `rows.count` WAS BEING PASSED AS "how many items came out of
+    /// this voice note". `othersRows` is not a lesser list; it is the same surfaced
+    /// items, filed under a heading, and it is on the screen. A capture whose only
+    /// surfaced item was uttered by someone else therefore reported ZERO, and
+    /// `AmbientReading.reading` answered `.readAndFoundNothing` — "Solleva read this
+    /// voice note and found nothing to act on" — rendered directly above an Actions face
+    /// listing that very item under "Heard from others". One screen, two contradictory
+    /// claims, both from this presentation.
+    ///
+    /// INVARIANT: `surfaced == 0` if and only if `isEmpty`. Anything that can put a row
+    /// on this face has to be counted here, or the sentence above it goes false again.
+    public var surfaced: Int { rows.count + othersRows.count }
+
     public init(rows: [Row], othersRows: [Row] = []) {
         self.rows = rows
         self.othersRows = othersRows

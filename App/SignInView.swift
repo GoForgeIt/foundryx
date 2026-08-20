@@ -60,7 +60,11 @@ struct SignInView: View {
                     .padding(.top, GrainSpacing.x2)
 
                     Spacer()
-                    Text("End-to-end encrypted to your Mac · you choose what stays private")
+                    // X5: this screen runs BEFORE a brain is resolved, so there is no
+                    // place to name — and naming one was false for a Vault owner, false
+                    // for a phone-only owner, and false for every new user who has not
+                    // chosen yet, which is everyone who sees it.
+                    Text(SignInCustodyLine.text(destination: nil))
                         .grainTextStyle(.caption)
                         .foregroundStyle(GrainColor.textFaint)
                         .padding(.bottom, GrainSpacing.x3)

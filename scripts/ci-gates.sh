@@ -49,6 +49,52 @@ FAILED=""
 have() { for p in "${PHASES[@]}"; do [ "$p" = "$1" ] && return 0; done; return 1; }
 fail() { echo "GATE FAIL — $1"; FAILED="$FAILED $1"; }
 
+# ------------------------------------------------------- A FAILED LANE MUST SAY WHY IT FAILED
+# `grep -E "Failing tests|error:.*XCTAssert"` matched the HEADER of xcodebuild's summary and
+# nothing beneath it. xcodebuild prints the failing test NAMES on the following lines, so a
+# failure whose only evidence is that name printed as an EMPTY list — the header, alone.
+#
+# An empty failing-tests section beside passing counts is exactly what a HOST KILL looks like,
+# and this machine hosts the CI runner alongside local gate lanes. On 2026-08-18 run
+# 32184231460 went red having printed one line, "Failing tests:". The actual cause —
+#
+#     "failureText" : "Test crashed with signal kill."
+#     EveryStateHasAWayOutFeatureTests/testEveryCeremonyStateOffersTheExitsThatStateNeeds()
+#
+# a jetsam SIGKILL with the host's swap at 54.4 of 55.3 GB under three concurrent local Xcode
+# lanes, was recoverable only from the .xcresult on the runner, and only until the next run
+# overwrote it (the log was gone within the hour). Application code cannot raise SIGKILL: a
+# real defect arrives as an XCTAssert, a SIGABRT or a SIGSEGV, and every one of those writes a
+# reason. So the distinction is always available — it was merely never printed.
+#
+# A gate that cannot tell "our code broke" from "the host killed us" gets argued with instead
+# of fixed, and that argument has now been had twice in one day. This prints the authoritative
+# reason out of the .xcresult (whose path xcodebuild itself reports), and, when the process
+# died without ever asserting, the machine state that decides which of the two it was.
+#
+# It changes NO verdict. Every caller still fails, under the name it always used — a kill is
+# still red, because a lane that could not run has not proven anything.
+report_test_failure() {
+  local out="$1"
+  sed -n '/^Failing tests:/,/^\*\* TEST FAILED \*\*/p' "$out" | head -30
+  grep -aE '^\[failed\]|error:.*XCTAssert' "$out" | head -20
+  local xcr
+  xcr=$(grep -aA3 'Test session results, code coverage, and logs:' "$out" \
+        | grep -ao '/.*\.xcresult' | tail -1)
+  if [ -n "$xcr" ] && [ -d "$xcr" ]; then
+    xcrun xcresulttool get test-results summary --path "$xcr" 2>/dev/null \
+      | grep -aE '"failureText"|"testIdentifierString"|"failedTests"|"passedTests"' | head -20
+  fi
+  if grep -aq 'Restarting after unexpected exit, crash, or test timeout' "$out"; then
+    echo "  THE TEST PROCESS DIED WITHOUT AN ASSERTION. Application code cannot raise SIGKILL,"
+    echo "  so if the reason above is a signal kill this is the HOST reclaiming memory, not a"
+    echo "  red test — re-run it on a quiet machine before believing it. Machine state now:"
+    echo "    swap: $(sysctl -n vm.swapusage)"
+    echo "    load: $(uptime)"
+    echo "    concurrent xcodebuild/xctest: $(pgrep -f 'xcodebuild|xctest' | wc -l | tr -d ' ')"
+  fi
+}
+
 # ---------------------------------------------------------------- B1: unknown phase = ERROR
 # An unrecognised phase name used to be a SILENT FULL PASS: the dispatch loop at the bottom
 # iterates the KNOWN phases and asks `have` about each, so `ci-gates.sh complie` matched
@@ -753,7 +799,7 @@ phase_appscenarios() {
   if ! xcodebuild test -project FoundryX.xcodeproj -scheme FoundryXAppScenarios \
        -configuration Debug -destination "id=$udid" -derivedDataPath "$DD" \
        CODE_SIGNING_ALLOWED=NO >"$out" 2>&1; then
-    grep -aE '^\[failed\]|Failing tests|error:.*XCTAssert' "$out" | head -20
+    report_test_failure "$out"
     fail "appscenarios-suite"
     return
   fi
@@ -873,7 +919,7 @@ phase_iosbrine() {
     total=$(grep -Eo 'Executed [0-9]+ tests' "$out" | grep -Eo '[0-9]+' | sort -n | tail -1)
     echo "  iosbrine: executed ${total:-?} tests on the iOS runtime, 0 failures — PASSED"
   else
-    grep -E "Failing tests|error:.*XCTAssert" "$out" | head -20
+    report_test_failure "$out"
     fail "iosbrine-suite"
   fi
 

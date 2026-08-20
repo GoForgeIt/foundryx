@@ -160,12 +160,9 @@ struct CaptureScreen: View {
     /// `false`, so the saved-to line below told a Vault owner with no computer that his
     /// voice notes were saved to a computer.
     let destination: CaptureDestination
-    /// Phone-only tier: labels stay on-device ("Saved on phone", not "…to computer").
-    /// DERIVED, so it can never disagree with `destination` again.
-    private var local: Bool { destination == .phone }
     /// Open the devices page in Settings — where the recorder status icon goes.
     let onOpenDevices: () -> Void
-    /// WHICH BRAIN IS ON. Carried, not derived from `local`: see `ConversationFacesView.brain`.
+    /// WHICH BRAIN IS ON. Carried, never derived from the tier: see `ConversationFacesView.brain`.
     /// It reaches the safety predicate a recording's "safe elsewhere" row is drawn from.
     let brain: BrainChoice
     /// The transcript to REOPEN, from the durable place the shell restored
@@ -397,7 +394,7 @@ struct CaptureScreen: View {
                 ConversationFacesView(
                     target: target, manager: manager, captureId: cid,
                     timeRange: "Tue, Jul 14 · 4:16 PM–4:28 PM · 12 min",
-                    place: "Office", conversationDate: Date(), local: true,
+                    place: "Office", conversationDate: Date(), destination: .phone,
                     brain: .justMyPhone)
             }
         }
@@ -424,7 +421,10 @@ struct CaptureScreen: View {
             // Reach the computer's whole library (phone-only tier → notConnected note).
             remoteState = .searching
             let localTarget = target
-            let connected = !local
+            // A SECOND PLACE EXISTS TO SEARCH — a capability question, not a copy one, so
+            // it is asked of the tier directly rather than through a bit that also used to
+            // decide which words the cards said.
+            let connected = destination != .phone
             let rs = await FullHistorySearch.remoteState(
                 query: q, localIds: Set(ids), computerConnected: connected,
                 search: { try await DoorClient(target: localTarget).searchConversations(query: $0) })
@@ -572,7 +572,7 @@ struct CaptureScreen: View {
         VStack(alignment: .leading, spacing: GrainSpacing.x2) {
             GrainRecordCTA(
                 title: CaptureHomeCopy.recordTitle,
-                subtitle: CaptureHomeCopy.recordSubtitle(local: local),
+                subtitle: CaptureHomeCopy.recordSubtitle(destination: destination),
                 onRecord: { manager.startMicRecording() }
             )
             .accessibilityHidden(true)
@@ -871,7 +871,7 @@ struct CaptureScreen: View {
                 timeRange: hit.dateLabel,
                 place: nil,
                 conversationDate: nil,
-                local: false,
+                destination: destination,
                 brain: brain)
         } label: {
             VStack(alignment: .leading, spacing: GrainSpacing.x1) {
@@ -1002,7 +1002,7 @@ struct CaptureScreen: View {
                 hasCachedTranscript: manager.hasCachedTranscript(wal.captureId),
                 // Cache RECENT (~14d) transcripts on sight (no-op for older / already-cached).
                 onSight: { manager.ensureRecentTranscriptCached(wal.captureId) },
-                local: local,
+                destination: destination,
                 categoryName: categories.category(for: wal.captureId)?.name,
                 categoryAutoFiled: categories.acceptsAutoSuggestion(for: wal.captureId),
                 loadWaveform: { [weak manager] in
@@ -1052,6 +1052,7 @@ struct CaptureScreen: View {
             conversationDate: manager.conversationMeta(for: wal.captureId)
                 .map { Date(timeIntervalSince1970: TimeInterval($0.startedAt)) }
                 ?? wal.status.startedAt,
+            destination: destination,
             brain: brain
         )
         // THE ONE PLACE A TRANSCRIPT REPORTS ITSELF. Every route into a conversation's
@@ -1434,7 +1435,7 @@ struct CaptureScreen: View {
         // The honest "N of M segments …" count paired with the bar while syncing.
         let syncingText: String = {
             guard let progress = syncProgress else { return syncMessage ?? "" }
-            let model = WaitingExperienceModel(kind: .sync, onDevice: local, progress: progress)
+            let model = WaitingExperienceModel(kind: .sync, destination: destination, progress: progress)
             return model.statusLine(elapsed: 0)
         }()
         // Settled content: the pending detail if any work is still in flight, else the
@@ -1518,8 +1519,10 @@ private struct CaptureCard: View {
     let hasCachedTranscript: Bool
     /// Cache this conversation's transcript on sight if it's recent (~14d) + uncached.
     let onSight: () -> Void
-    /// Phone-only tier: on-device labels (no "computer").
-    var local: Bool = false
+    /// WHERE THIS ACCOUNT ACTUALLY SAVES. It replaces `var local: Bool = false`, which
+    /// was both a crush (`.computer` and `.vault` are the same `false`) AND a default that
+    /// silently named a computer for any call site that forgot to pass one.
+    let destination: CaptureDestination
     /// The category it's filed under (inline pill beside the title; nil = unfiled).
     var categoryName: String?
     /// Whether the on-device model filed it (renders as "<category>, auto").
@@ -1552,7 +1555,7 @@ private struct CaptureCard: View {
             pollerSummary: poller.summary,
             droppedReason: poller.droppedReason,
             hasCachedTranscript: hasCachedTranscript,
-            local: local,
+            destination: destination,
             categoryName: categoryName,
             categoryAutoFiled: categoryAutoFiled,
             waveform: waveform,
@@ -1578,10 +1581,12 @@ private struct CaptureCard: View {
                 onTap: nil
             )
             if canRecover || recoveryInProgress {
-                Button(CaptureCardPresentation.manualRecoveryActionTitle) { onRecover?() }
+                Button(CaptureCardPresentation.manualRecoveryActionTitle(
+                    destination: destination)) { onRecover?() }
                     .disabled(recoveryInProgress)
                     .grainTextStyle(.body)
-                    .accessibilityHint("Retries sending this voice note's audio to your computer")
+                    .accessibilityHint(CaptureCardPresentation.manualRecoveryHint(
+                        destination: destination))
             }
         }
         // Drive the door→Lore status poll while the card is on screen; stop when it

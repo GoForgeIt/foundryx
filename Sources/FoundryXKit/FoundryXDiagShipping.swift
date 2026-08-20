@@ -8,6 +8,15 @@
 // unreachable address the suites point capture at. The app-hosted scenario suite was shipping
 // its own errands into the production diagnostic sink.
 //
+// AND THE SECOND LANE, FOUND BY READING THE SAME ENVELOPE AGAIN. `device=arm64 battery=-1` is
+// a SIMULATOR — `device` is `uname().machine`, which reports the host architecture there rather
+// than an `iPhone15,2`, and no simulator has a battery. `UITests/` holds twenty-six suites and
+// every one launches `XCUIApplication()`: the shipping app, in its own process, which does NOT
+// link XCTest and does NOT get the XCTest environment (the runner does). So `phase_uiproof` was
+// never covered by "is a test bundle driving this process", and it posts `perf …` lines from
+// `App/FoundryXApp.swift`'s wiring and `cmd errand.*` lines from `App/RootView.swift`'s to the
+// production gateway baked into `App/Info.plist` for every configuration.
+//
 // WHY THAT IS WORSE THAN NOISE. This log is the instrument this project diagnoses the recorder
 // with, and the pollution is CONVINCING: the lines are well-formed, they carry the same
 // vocabulary a real errand carries, and they arrive while somebody is watching for a real
@@ -42,20 +51,44 @@ public enum FoundryXDiagShipping {
 
     /// THE DECISION, TAKEN FROM WHAT A TEST PROCESS ACTUALLY LOOKS LIKE.
     ///
-    /// Pure, and taking its three facts as parameters, so both answers can be asserted. The
-    /// half that matters is the FALSE one: a guard that cannot say "this is a real handset"
-    /// would blind the only instrument this project has, which is a worse defect than the one
-    /// it is here to fix.
+    /// Pure, and taking its facts as parameters, so both answers can be asserted. The half that
+    /// matters is the FALSE one: a guard that cannot say "this is a real handset" would blind
+    /// the only instrument this project has, which is a worse defect than the one it is here to
+    /// fix.
     ///
     /// - Parameter linkedTestFramework: whether XCTest is loaded in this process. This is the
     ///   signal that survives everything else — an app-hosted bundle injected into the shipping
     ///   app has XCTest loaded and the app's own argv.
     /// - Parameter executablePath: `argv[0]`. Catches the swiftpm hostless runner, whose
     ///   executable is `…/FoundryXPackageTests.xctest/Contents/MacOS/FoundryXPackageTests`.
+    /// - Parameter isSimulator: THE LANE THE THREE ABOVE CANNOT SEE. `UITests/` holds
+    ///   twenty-six suites and each launches `XCUIApplication()` — the SHIPPING app, in its own
+    ///   process. That process does not link XCTest, gets none of the XCTest environment (the
+    ///   RUNNER does), and its `argv[0]` is `FoundryX.app/FoundryX`, so every other signal here
+    ///   answers no while the app does exactly what it does on a phone: `App/FoundryXApp.swift`
+    ///   wires `PerfSink` and `App/RootView.swift` wires `DoorLog.shared` at
+    ///   `RemoteConfig.fromBundle()`, whose `GatewayHTTPURL` is the production gateway in
+    ///   `App/Info.plist` for EVERY configuration. `phase_uiproof` therefore posted into the
+    ///   live relay after the app-hosted lane was fixed.
+    ///
+    ///   AND THE MEASURED ENVELOPE SAYS SIMULATOR, NOT XCTEST: `device=arm64 battery=-1`.
+    ///   `device` is `uname().machine`, which in a simulator is the HOST architecture rather
+    ///   than an `iPhone15,2`, and a simulator has no battery. A simulator is nobody's handset,
+    ///   which is the whole predicate this function is trying to express.
+    ///
+    ///   IT IS A COMPILE-TIME FACT AND NOT A LAUNCH ARGUMENT ON PURPOSE. Making twenty-six
+    ///   suites each set an environment key is a registry somebody has to remember to add to —
+    ///   the shape this file's own choke-point gate refuses — and this project has shipped
+    ///   auth-bypass launch arguments into Release before. What it costs: a developer running
+    ///   the app in a simulator by hand loses the RELAY leg. They keep `DoorLog.entries`, the
+    ///   Xcode console and `Copy logs`, and the recorder this log exists to diagnose is real
+    ///   hardware a simulator cannot reach at all.
     public static func looksLikeATestProcess(environment: [String: String],
                                             linkedTestFramework: Bool,
-                                            executablePath: String) -> Bool {
+                                            executablePath: String,
+                                            isSimulator: Bool) -> Bool {
         if linkedTestFramework { return true }
+        if isSimulator { return true }
         for key in testEnvironmentKeys where environment[key] != nil { return true }
         let executable = (executablePath as NSString).lastPathComponent
         if executable == "xctest" { return true }
@@ -70,7 +103,18 @@ public enum FoundryXDiagShipping {
     public static let underTest: Bool = looksLikeATestProcess(
         environment: ProcessInfo.processInfo.environment,
         linkedTestFramework: NSClassFromString("XCTestCase") != nil,
-        executablePath: ProcessInfo.processInfo.arguments.first ?? "")
+        executablePath: ProcessInfo.processInfo.arguments.first ?? "",
+        isSimulator: isSimulatorBuild)
+
+    /// WHETHER THIS BINARY IS RUNNING IN A SIMULATOR. A compile-time fact, so nothing can spoof
+    /// it and no launch argument has to be remembered.
+    public static let isSimulatorBuild: Bool = {
+        #if targetEnvironment(simulator)
+        return true
+        #else
+        return false
+        #endif
+    }()
 
     // MARK: - The one leg off this machine
 

@@ -17,6 +17,9 @@ import Grain
 struct KilnConversationView: View {
     let row: LibraryChatRow
     let target: DoorTarget
+    /// WHICH BRAIN holds this chat — Mac or Vault — so the loading wait names the
+    /// owner's real place instead of hardcoding "your Mac".
+    let destination: CaptureDestination
     let log: DoorLog
     let accountBinding: CaptureAccountScope.AccountBinding
     var onDismiss: () -> Void
@@ -61,7 +64,7 @@ struct KilnConversationView: View {
         switch transcript {
         case .loading:
             WaitingExperienceView(
-                model: WaitingExperienceModel(kind: .doorFetch, onDevice: false))
+                kind: .doorFetch)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .accessibilityIdentifier("kiln-transcript-loading")
 
@@ -278,8 +281,8 @@ struct KilnConversationView: View {
     /// cost hours chasing a phantom connectivity bug on a phone whose network was fine.
     private func failureLine(_ error: Error) -> String {
         if let e = error as? KilnLibraryError {
-            return DoorFailureMessage.make(kilnLibraryFailure: e).line
+            return DoorFailureMessage.make(kilnLibraryFailure: e, destination: destination).line
         }
-        return DoorFailureMessage.make(doorTransportFailure: error).line
+        return DoorFailureMessage.make(doorTransportFailure: error, destination: destination).line
     }
 }
