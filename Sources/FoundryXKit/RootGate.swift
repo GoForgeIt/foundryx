@@ -49,6 +49,22 @@ public enum RootGate {
         }
         if brain == .myComputer, hostResolved { return .computerBrain }
         if brain == .foundryCloud, cellPaired { return .cellBrain }
+        // A CHOSEN BRAIN THAT DID NOT RESOLVE IS NOT A REASON TO STOP SENDING AUDIO
+        // ANYWHERE.
+        //
+        // This gate had no rung between "my computer" and "nothing ever leaves the
+        // phone". An owner who chose the computer brain and walked off his LAN fell all
+        // the way to the tier whose uploads are self-issued ACKs — while a vault sat
+        // paired, reachable, and holding that same phone's other recordings. That is the
+        // divergence: recordings brought over in the app reached the vault; ambient
+        // recordings made in the same window reached nowhere and were written down as
+        // done. The vault was never consulted because it was not the CHOSEN brain.
+        //
+        // The degrade is deliberately scoped to a brain that ASKED for a destination.
+        // `.justMyPhone` is a promise of zero content egress, and a paired vault must
+        // never override it — this rung is for a choice that failed to resolve, never
+        // for a choice that was honoured.
+        if brain != .justMyPhone, cellPaired { return .cellBrain }
         return .phoneBrain
     }
 }
