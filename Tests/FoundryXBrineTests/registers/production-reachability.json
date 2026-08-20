@@ -896,7 +896,7 @@
   ],
   "_verdict_counts_are_equality": "Declared as exact counts, never bounds. A bound would let the unreachable roster grow by one without anybody moving this file, which is precisely how four capabilities reached `main` unreached.",
   "verdict_counts": {
-    "reachable": 46,
+    "reachable": 47,
     "undetermined": 1,
     "unreachable": 10
   },

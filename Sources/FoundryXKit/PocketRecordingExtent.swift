@@ -62,8 +62,20 @@ public enum PocketRecordingExtent: Equatable, Hashable, Sendable {
     case bytes(Int)
 
     /// The byte count, when there is one. `nil` is the whole point of the other case.
+    ///
+    /// A NON-POSITIVE PAYLOAD IS NOT A MEASUREMENT, AND IT USED TO BECOME ONE. `.bytes(_:)` is
+    /// public and takes any `Int`, and this accessor CLAMPED with `max(0, n)` — so
+    /// `.bytes(-1)` reported `isMeasured == true` with a byte count of `0`, and the row printed
+    /// **"0 sec" as a measured fact**. That is precisely the failure this whole file exists to
+    /// remove, re-entering through the one place nobody was reading: a clamp turns malformed
+    /// input into a confident answer, which is worse than the absence it replaced.
+    ///
+    /// So a non-positive count is `nil` — the SAME answer as `.listedUnitUnresolved`, which
+    /// makes the surface say nothing rather than say zero. Found by an adversarial cross-vendor
+    /// review of this file on 2026-08-20; the assertion that holds it is
+    /// `PocketSizesAndDurationsAreTrueFeatureTests.testANonPositiveByteCountIsNotAMeasurement`.
     public var byteCount: Int? {
-        if case .bytes(let n) = self { return max(0, n) }
+        if case .bytes(let n) = self, n > 0 { return n }
         return nil
     }
 

@@ -25,9 +25,21 @@ final class CaptureJourneyTests: XCTestCase {
         XCTAssertEqual(JourneyFigure.size(bytes: 0), "0 bytes")
     }
 
-    func testMegabytesAndGigabytesUseTheSharedFormatter() {
-        XCTAssertEqual(JourneyFigure.size(bytes: 5_242_880),
-                       RecordingDeviceReadingPresentation.size(kilobytes: 5_120))
+    /// IT USED TO ASSERT EQUALITY WITH `RecordingDeviceReadingPresentation.size(kilobytes:)`,
+    /// AND THAT WAS THE WEAKER OF THE TWO TESTS — a delegate-equality assertion passes when
+    /// BOTH sides are wrong, which is exactly the failure mode of a unit nobody measured. That
+    /// helper has since been deleted along with the storage line it served (the recorder's
+    /// `MCU&SPA&…` frame states its numbers in an unresolved unit), so the sharing this test
+    /// was named for no longer exists and may not be re-created. The ANSWERS are named instead.
+    func testMegabytesAndGigabytesAreNamedRatherThanDelegated() {
+        // 5,242,880 B = 5,120 KB = 5.0 MB — the MB rung.
+        XCTAssertEqual(JourneyFigure.size(bytes: 5_242_880), "5.0 MB")
+        // 1,048,576 KB is the first byte count on the GB rung.
+        XCTAssertEqual(JourneyFigure.size(bytes: 1_048_576 * 1_024), "1.0 GB")
+        // THE RUNG BELOW EACH THRESHOLD, so a formatter that promoted everything one step — or
+        // never promoted at all — fails rather than passing half the population.
+        XCTAssertEqual(JourneyFigure.size(bytes: 1_048_575), "1023 KB")
+        XCTAssertEqual(JourneyFigure.size(bytes: 1_048_576 * 1_024 - 1_024), "1024.0 MB")
     }
 
     // MARK: - the percentage cannot round itself to done

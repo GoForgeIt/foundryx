@@ -169,13 +169,30 @@ public struct JourneyFigure: Sendable, Equatable {
 
     /// BYTES, RENDERED AS BYTES.
     ///
-    /// `RecordingDeviceReadingPresentation.size(kilobytes:)` takes KILOBYTES, and handing it a
-    /// byte count is exactly the defect that put "19,770 KB" where 19 KB belonged. Below a
-    /// kilobyte it says bytes rather than rounding a real 800-byte figure to a fictional 0 KB.
+    /// A journey figure counts THIS PHONE'S OWN BYTES — a transfer's progress against a length
+    /// the recorder announced or the disk reported. That is a measured magnitude, so KB/MB/GB
+    /// are honest here in a way they are not for anything derived from the recorder's listing.
+    /// Below a kilobyte it says bytes rather than rounding a real 800-byte figure to a
+    /// fictional 0 KB.
+    ///
+    /// IT USED TO DELEGATE TO `RecordingDeviceReadingPresentation.size(kilobytes:)` AND MAY NOT
+    /// AGAIN. That helper was deleted with the storage line it served: `MCU&SPA&058767&058992`
+    /// states used and total in a unit nobody has resolved, and the same kilobyte assumption in
+    /// the listing parser has been measured and disproved. Borrowing a RECORDER-readings
+    /// vocabulary to render a PHONE-side byte count is how a disproved unit gets re-admitted
+    /// through a call site nobody is reading. `String(format:)` without a locale is POSIX, so
+    /// the decimal separator cannot drift with the handset's region.
     public static func size(bytes: Int) -> String {
         let bytes = max(0, bytes)
         if bytes < 1_024 { return "\(bytes) bytes" }
-        return RecordingDeviceReadingPresentation.size(kilobytes: bytes / 1_024)
+        let kilobytes = bytes / 1_024
+        if kilobytes >= 1_048_576 {
+            return String(format: "%.1f GB", Double(kilobytes) / 1_048_576)
+        }
+        if kilobytes >= 1_024 {
+            return String(format: "%.1f MB", Double(kilobytes) / 1_024)
+        }
+        return "\(kilobytes) KB"
     }
 }
 

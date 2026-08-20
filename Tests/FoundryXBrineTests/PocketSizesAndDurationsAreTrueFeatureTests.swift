@@ -26,6 +26,36 @@ final class PocketSizesAndDurationsAreTrueFeatureTests: XCTestCase {
             registry: StepRegistry(SizesAndDurationsSteps.make(world)))
         XCTAssertEqual(result.passed, 5)
     }
+
+    // MARK: - The malformed input that used to become a confident answer
+
+    /// A NON-POSITIVE BYTE COUNT MUST RENDER AS SILENCE, NOT AS "0 sec".
+    ///
+    /// FOUND BY AN ADVERSARIAL CROSS-VENDOR REVIEW, 2026-08-20, and it was live: `.bytes(_:)`
+    /// is public and takes any `Int`, and `byteCount` CLAMPED with `max(0, n)`. So
+    /// `.bytes(-1)` answered `isMeasured == true` with a count of `0`, and
+    /// `PocketRecordingExtentPresentation.line` printed **"0 sec"** — the fourth invented
+    /// magnitude on this surface, arriving through the one accessor written to prevent them.
+    ///
+    /// THE MUTATION THAT MAKES THIS RED: restore `return max(0, n)` in
+    /// `PocketRecordingExtent.byteCount`. All three assertions below fail together.
+    ///
+    /// THE ANTI-VACUITY HALF is the last line: a `byteCount` that returned `nil` for
+    /// EVERYTHING would satisfy the three prohibitions above it, and the measured pair off real
+    /// hardware asserts the honest case still speaks.
+    func testANonPositiveByteCountIsNotAMeasurement() {
+        for malformed in [PocketRecordingExtent.bytes(-1), .bytes(0), .bytes(Int.min)] {
+            XCTAssertFalse(malformed.isMeasured,
+                           "\(malformed) is not a measurement and may not claim to be one")
+            XCTAssertNil(malformed.byteCount)
+            XCTAssertNil(PocketRecordingExtentPresentation.line(malformed),
+                         "\(malformed) must render as silence — a clamp to zero is how "
+                         + "\"0 sec\" got onto a row the first time")
+        }
+        // ANTI-VACUITY: the real measured pair off `PKT01_BLUE_26079bc5` still states a length.
+        XCTAssertEqual(PocketRecordingExtentPresentation.line(.bytes(19_770)), "5 sec")
+        XCTAssertEqual(PocketRecordingExtentPresentation.line(.bytes(185_078)), "46 sec")
+    }
 }
 
 private enum SizesAndDurationsSteps {
