@@ -116,6 +116,12 @@ Feature: Taking a recording off the recorder, on purpose
     And what I am asked claims no copy anywhere
     And nothing is asked of the recorder until I confirm
 
+  Scenario: What I am about to lose is in the confirmation, not only under the button
+    Given every recording the recorder is holding, whatever Solleva knows about each
+    Then each one's confirmation says what taking it off would cost
+    And no two of them are asked to confirm the same thing
+    And each confirmation still says the act cannot be undone
+
   Scenario: A tap that cannot be carried out says so rather than doing nothing
     Given a recorder whose shelf Solleva could not re-read
     When I ask Solleva to take a recording off it

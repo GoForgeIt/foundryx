@@ -106,6 +106,26 @@ public enum PocketDeleteConsequence: String, Sendable, Equatable, CaseIterable {
     /// consequence is true — never a gate, never a disabled button, and never on a screen where
     /// the recording is already safe. `nil` is the answer for the case where a copy already
     /// exists: a Vault upsell there would be an advertisement rather than a fact.
+    ///
+    /// A REVIEW ASKED FOR `.nobodyHasCheckedWhereElseItIs` TO BE DROPPED FROM THIS LIST, AND IT
+    /// WAS TRIED AND REVERTED. The argument (cross-vendor, 2026-08-20) was that the suggestion's
+    /// premise is "this will be the only copy", which under an unasked `safeElsewhere` has not
+    /// been established — so the sentence would rest on a fact the app has, one line above, just
+    /// said it does not have.
+    ///
+    /// IT DOES NOT REST ON THAT FACT. Read the sentence: *"A Vault would keep a copy of this for
+    /// you."* It is a statement about what a Vault DOES, not a claim about where this recording
+    /// currently is — and it is true in all four states. The reason `.aCopyIsAlreadySomewhereElse`
+    /// gets `nil` is RELEVANCE, not falsity: an upsell beside a recording that is already safe is
+    /// an advertisement. Beside a recording whose custody nobody has checked, the same sentence
+    /// is both true and useful, and Nick's ruling is explicit that the suggestion should be
+    /// there: *"we can definitely still suggest to them."*
+    ///
+    /// The change was made, and two scenarios that encode the shipped rule went RED and refused
+    /// it — `A recording Solleva has never checked on is mine to delete too` and `What I am told
+    /// I am losing is different in each of the three cases`. Recorded here rather than left as a
+    /// silent revert, so the next reviewer to notice the asymmetry finds the reasoning instead
+    /// of re-litigating it.
     public var vaultSuggestion: String? {
         switch self {
         case .aCopyIsAlreadySomewhereElse:

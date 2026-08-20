@@ -99,18 +99,38 @@ public struct PocketRecordingDetailPage: Equatable, Sendable {
     /// nineteen rows that say nothing about why they do nothing. This is the missing half.
     public let notes: [String]
 
+    /// THE SENTENCE THE CONFIRMATION MUST CARRY, or `nil` when no removal is offered.
+    ///
+    /// IT EXISTS BECAUSE THE CONSEQUENCE WAS NOT ACTUALLY STATED FIRST, and two rounds of
+    /// cross-vendor review said so before it was fixed. The sheet renders facts, then places,
+    /// then ACTIONS, then notes — so `PocketDeleteConsequence.sentence` sat BELOW the
+    /// destructive control, and the alert that gates the tap carried the generic
+    /// `confirmation(for:)`, which names where a copy already is and says nothing about a
+    /// recording that has none. On the phone-only tier — the one tier Nick's ruling exists for,
+    /// where the recorder fills up and a manual delete is the only way to keep recording — the
+    /// owner could reach the confirmation without ever having read what deleting costs.
+    ///
+    /// The remedy is not to move the consequence up into `facts` to win a render position it
+    /// has no business claiming. It is to put it where the decision is actually made: the last
+    /// thing between the owner and the deletion. Carried on the PAGE rather than composed in
+    /// `App/`, because `swift test` cannot compile `App/` — which is the whole reason this
+    /// defect survived a round of review that had already named it.
+    public let removalConfirmation: String?
+
     public init(fileToken: String,
                 title: String,
                 facts: [PocketRecordingDetailFact],
                 places: [PocketPlaceLine],
                 actions: [PocketRecordingDetailAction],
-                notes: [String]) {
+                notes: [String],
+                removalConfirmation: String? = nil) {
         self.fileToken = fileToken
         self.title = title
         self.facts = facts
         self.places = places
         self.actions = actions
         self.notes = notes
+        self.removalConfirmation = removalConfirmation
     }
 
     public func offers(_ action: PocketRecordingDetailAction) -> Bool {
@@ -257,12 +277,19 @@ public enum PocketRecordingDetailPresentation {
         // `swift test` cannot compile in the first place. Carried, named, and not papered over
         // by moving a consequence into `facts` to win a render position it has no business
         // claiming.
+        var removalConfirmation: String?
         if let refusal = removalRefusal(for: presence, brain: brain) {
             notes.append(refusal)
         } else {
             actions.append(.removeFromRecorder)
             let consequence = PocketDeleteConsequence.ofRemoving(presence)
             notes.append(consequence.sentence)
+            // THE SAME SENTENCE, AT THE MOMENT OF THE DECISION. Not a second wording of it: a
+            // confirmation that paraphrased the note would be two answers to "what does this
+            // cost", and the whole reason this value exists is that the note alone was read
+            // AFTER the button rather than before it.
+            removalConfirmation = PocketRemoveFromRecorderPresentation.confirmationLine
+                + " " + consequence.sentence
             // THE VAULT, WHERE IT IS TRUE AND NOWHERE ELSE. `nil` on the one consequence that
             // says a copy already exists, because an upsell there is an advertisement rather
             // than a fact — and it is a sentence, never a gate: the action above is already in
@@ -283,7 +310,8 @@ public enum PocketRecordingDetailPresentation {
             ],
             places: PocketPresencePresentation.lines(presence, now: now),
             actions: actions,
-            notes: notes)
+            notes: notes,
+            removalConfirmation: removalConfirmation)
     }
 
     /// `nil` ⇒ the bring-over is offered.

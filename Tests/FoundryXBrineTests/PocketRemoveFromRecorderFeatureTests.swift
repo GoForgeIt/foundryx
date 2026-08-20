@@ -22,7 +22,7 @@ final class PocketRemoveFromRecorderFeatureTests: XCTestCase {
         let result = try await BrineFeatureRunner.run(
             "pocket-remove-from-the-recorder",
             registry: StepRegistry(PocketRemoveSteps.make(world)))
-        XCTAssertEqual(result.passed, 17)
+        XCTAssertEqual(result.passed, 18)
     }
 
     /// THE PREFIX COLLISION, MEASURED RATHER THAN ASSERTED. A matcher on `"MCU&D"` answers
@@ -59,6 +59,7 @@ private enum PocketRemoveSteps {
             "a recording Solleva has confirmed safe somewhere else",
             "a recorder whose shelf Solleva could not re-read",
             "the three things taking a recording off a recorder can cost me",
+            "every recording the recorder is holding, whatever Solleva knows about each",
         ]
         let whens = [
             "I ask Solleva to take it off the recorder",
@@ -83,6 +84,9 @@ private enum PocketRemoveSteps {
             "it would not take a recording Solleva has never checked on",
             "what I am asked names the recorder and says the act cannot be undone",
             "what I am asked claims no copy anywhere",
+            "each one's confirmation says what taking it off would cost",
+            "no two of them are asked to confirm the same thing",
+            "each confirmation still says the act cannot be undone",
             "Solleva asked that recorder to remove that one recording and no other",
             "the recorder's own shelf no longer lists it",
             "Solleva says it was removed from the recorder",
@@ -129,7 +133,45 @@ private enum PocketRemoveSteps {
 private actor PocketRemoveWorld {
 
     private static let secret = "0123456789abcdef"
-    private static let day = "2026-03-28"
+    static let day = "2026-03-28"
+
+    /// THE DETAIL PAGE EACH OF THOSE FOUR READINGS PRODUCES, built through the SHIPPED page
+    /// builder — `PocketRecordingDetailPresentation.page` — and not composed by hand. A fixture
+    /// that constructed `PocketRecordingDetailPage` itself would assert about a value this test
+    /// wrote, which is the shape of a guard that cannot fail.
+    static func everyPageTheRecorderIsHolding() throws
+        -> [(PocketRecordingPresence, PocketRecordingDetailPage)] {
+        let recording = PocketRecording(date: day, timestamp: "20260328001919", sizeBytes: 0)
+        return everyPresenceTheRecorderIsHolding.map { presence in
+            (presence, PocketRecordingDetailPresentation.page(for: recording,
+                                                              presence: presence,
+                                                              brain: .justMyPhone,
+                                                              now: Date()))
+        }
+    }
+
+    /// FOUR READINGS, ALL OF THEM ON THE RECORDER — one per consequence, chosen so the
+    /// population the manual-delete criterion walks reaches every case rather than whichever
+    /// one a test author remembered. `onRecorder` is `.yes` throughout because a recording the
+    /// recorder is not holding cannot be taken off it, and that is the ONE reason left for the
+    /// control to be absent.
+    static var everyPresenceTheRecorderIsHolding: [PocketRecordingPresence] {
+        let asked = Date(timeIntervalSince1970: 1_774_000_000)
+        func reading(_ answer: PocketPresenceAnswer) -> PocketPlaceReading {
+            PocketPlaceReading(answer: answer, observedAt: asked)
+        }
+        let onRecorder = reading(.yes)
+        return [
+            // a copy is already somewhere else
+            .init(onRecorder: onRecorder, onThisPhone: reading(.yes), safeElsewhere: reading(.yes)),
+            // this phone will hold the only copy
+            .init(onRecorder: onRecorder, onThisPhone: reading(.yes), safeElsewhere: reading(.no)),
+            // nothing else holds it
+            .init(onRecorder: onRecorder, onThisPhone: reading(.no), safeElsewhere: reading(.no)),
+            // nobody has checked where else it is
+            .init(onRecorder: onRecorder, onThisPhone: .neverAsked, safeElsewhere: .neverAsked),
+        ]
+    }
     /// The instant every date in this suite is measured against. Fixed, so "synced before you
     /// armed it" is a fact the scenario states rather than a race it runs.
     private static let armingInstant = Date(timeIntervalSince1970: 1_800_000_000)
@@ -194,6 +236,11 @@ private actor PocketRemoveWorld {
         consequenceStated = nil
 
         switch phrase {
+        case "every recording the recorder is holding, whatever Solleva knows about each":
+            // NO STATE TO SET. The population is a static fixture built through the shipped page
+            // builder, so this scenario cannot pass by having been handed a shelf that happens
+            // to suit it.
+            break
         case "a recorder holding a recording that Solleva has not confirmed anywhere else":
             try await stageRecorder(removal: .removesWhatItHolds)
             presence = Self.onlyHere
@@ -591,20 +638,83 @@ private actor PocketRemoveWorld {
                 }
             }
 
+        case "each one's confirmation says what taking it off would cost":
+            // THE DEFECT THIS SCENARIO EXISTS FOR, NAMED TWICE BY CROSS-VENDOR REVIEW BEFORE IT
+            // WAS FIXED. The sheet renders facts, places, ACTIONS, then notes — so the
+            // consequence sat BELOW the destructive control, and the alert that gates the tap
+            // carried only "…can't be undone", which is true of all four consequences and
+            // specific to none. On the phone-only tier, the one tier the ruling exists for, an
+            // owner could reach the confirmation without ever having read what deleting costs.
+            for (presence, page) in try Self.everyPageTheRecorderIsHolding() {
+                let consequence = PocketDeleteConsequence.ofRemoving(presence)
+                guard let confirmation = page.removalConfirmation else {
+                    throw BrineStepError("a page offering a removal carried no confirmation at "
+                                            + "all for \(consequence.rawValue)")
+                }
+                guard confirmation.contains(consequence.sentence) else {
+                    throw BrineStepError("the confirmation for \(consequence.rawValue) does not "
+                                            + "carry its own consequence: " + confirmation)
+                }
+            }
+        case "no two of them are asked to confirm the same thing":
+            // ANTI-VACUITY. A confirmation that was the SAME sentence for every recording would
+            // satisfy the check above — it contains a consequence sentence for exactly one of
+            // them and the loop would fail — but a confirmation built by concatenating a
+            // constant with a constant would not. Four readings, four distinct confirmations.
+            let confirmations = try Self.everyPageTheRecorderIsHolding()
+                .compactMap { $0.1.removalConfirmation }
+            guard Set(confirmations).count == confirmations.count,
+                  confirmations.count == PocketDeleteConsequence.allCases.count else {
+                throw BrineStepError("the confirmations are not one per consequence: "
+                                        + String(describing: confirmations))
+            }
+        case "each confirmation still says the act cannot be undone":
+            // THE HALF THAT MUST NOT BE LOST. Irreversibility is true of all four and was the
+            // only thing the old alert said; adding the consequence must not drop it.
+            for (_, page) in try Self.everyPageTheRecorderIsHolding() {
+                guard page.removalConfirmation?
+                    .contains(PocketRemoveFromRecorderPresentation.confirmationLine) == true else {
+                    throw BrineStepError("a confirmation stopped saying the act cannot be undone")
+                }
+            }
         case "not one of them withholds the deletion":
             // THE POPULATION, and this is the criterion the whole ruling rests on. Every one of
-            // the three composes a consent, so no consequence can quietly become a gate.
+            // the four composes a consent, so no consequence can quietly become a gate.
+            //
+            // IT USED TO CALL `PocketDeleteConsent.ownerChoseThisRecording` DIRECTLY, and a
+            // cross-vendor review on 2026-08-20 showed that guard could not fail for what its
+            // own name claims: mutating the production entry point to
+            // `case .ownerChose: return nil` withholds EVERY real manual removal, and this
+            // scenario stayed green because it never went through that entry point. It goes
+            // through it now — `PocketRemoveFromRecorder.consent` is the one function the
+            // errand actually calls — and the direct factory is asserted underneath it, so a
+            // consent that appears without carrying its own sentence is still caught.
             let key = PocketRecorderFileKey(
                 identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: "any"),
                 date: Self.day, timestamp: "20260328001919")
-            for consequence in PocketDeleteConsequence.allCases {
-                let consent = PocketDeleteConsent.ownerChoseThisRecording(
-                    key, statingThat: consequence)
+            for presence in Self.everyPresenceTheRecorderIsHolding {
+                let consequence = PocketDeleteConsequence.ofRemoving(presence)
+                guard let consent = PocketRemoveFromRecorder.consent(
+                    for: key, presence: presence, provenance: .ownerChose) else {
+                    throw BrineStepError("THE PRODUCTION PATH WITHHELD A MANUAL DELETE for a "
+                                            + "recording whose consequence is "
+                                            + "\(consequence.rawValue) — the ruling is that we "
+                                            + "cannot hard block them from deleting")
+                }
                 guard consent.consequence == consequence,
                       consent.provenance == .ownerChose else {
                     throw BrineStepError("\(consequence.rawValue) did not compose an owner "
                                             + "consent carrying its own sentence")
                 }
+            }
+            // ANTI-VACUITY: the loop above says nothing if the population it walks is empty or
+            // collapses onto one consequence. All four must be reachable from a real reading.
+            let reached = Set(Self.everyPresenceTheRecorderIsHolding
+                .map { PocketDeleteConsequence.ofRemoving($0) })
+            guard reached.count == PocketDeleteConsequence.allCases.count else {
+                throw BrineStepError("the readings walked above reach only \(reached.count) of "
+                                        + "\(PocketDeleteConsequence.allCases.count) "
+                                        + "consequences, so the population is not the criterion")
             }
 
         case "both of them offer to be taken off the recorder":
