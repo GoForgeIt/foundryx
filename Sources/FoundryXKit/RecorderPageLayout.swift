@@ -45,8 +45,9 @@ public enum RecorderPageBand: String, CaseIterable, Sendable, Hashable {
     case actions
     /// The shelf's title, and what a check is doing or could not do.
     case shelfHeadline
-    /// Everything a person can DO with what the recorder is holding: bring one over, sync
-    /// fast, and what the recorder answered when it was asked to remove something.
+    /// Everything a person can DO with what the recorder is holding: bring one over, and what
+    /// the recorder answered when it was asked to remove something. What it contains is
+    /// enumerated by `RecorderShelfControl`, for the reason that type carries.
     case shelfControls
     /// The cost of starting the recorder over, and the button that does it.
     case resetGate
@@ -54,6 +55,27 @@ public enum RecorderPageBand: String, CaseIterable, Sendable, Hashable {
     case autoClear
     /// THE LIST. As long as the recorder is full, and therefore last.
     case shelfRows
+}
+
+/// ONE CONTROL INSIDE THE SHELF-CONTROLS BAND, ENUMERATED FOR THE SAME REASON THE BANDS ARE.
+///
+/// `RecorderPageBand` made the ORDER of the page readable to a test that cannot compile `App/`.
+/// It did not make the CONTENTS of any band readable, and `shelfControls` was three statements
+/// in a `VStack` — which is how a control could be added or removed with nothing outside `App/`
+/// able to see it either way.
+///
+/// WHY THIS TYPE EXISTS NOW, AND IT IS NOT BOOKKEEPING. Fast sync is being removed from the
+/// page, and "the fast-sync button is gone" is an ABSENCE — satisfied by a page with no controls
+/// at all, or by a rename, or by a `VStack` somebody emptied. The same objection
+/// `PocketRecorderDeleteGate` raises against asserting a verb cannot exist applies here. So the
+/// removal is expressed as a POPULATION instead: these are the controls, there is at least one
+/// of them, every one is drawn, and fast sync is not among them. That cannot be satisfied by
+/// deleting code.
+public enum RecorderShelfControl: String, CaseIterable, Sendable, Hashable {
+    /// Take one recording off the recorder and keep it here.
+    case bringOver
+    /// What the recorder answered when it was last asked to remove something.
+    case removalReport
 }
 
 public enum RecorderPageLayout {
@@ -104,5 +126,31 @@ public enum RecorderPageLayout {
     /// out is a band whose content ships nowhere, which is the other way a control disappears.
     public static var bandsNotLaidOut: [RecorderPageBand] {
         RecorderPageBand.allCases.filter { !order.contains($0) }
+    }
+
+    /// THE ORDER THE SHELF-CONTROLS BAND DRAWS ITS CONTROLS IN.
+    ///
+    /// `bringOver` is first because it is the only one of the two a person can act on; the
+    /// removal report states what already happened. Fast sync sat between them until
+    /// 2026-08-20 and is gone — see `RecorderShelfControl` for why its removal is written as a
+    /// population rather than an absence.
+    public static let shelfControlOrder: [RecorderShelfControl] = [
+        .bringOver,
+        .removalReport,
+    ]
+
+    /// A shelf control this type names and the band never draws — the same defect as
+    /// `bandsNotLaidOut`, one level down. Empty is the passing state, which is why the rule it
+    /// serves is paired with the existence check below.
+    public static var shelfControlsNotLaidOut: [RecorderShelfControl] {
+        RecorderShelfControl.allCases.filter { !shelfControlOrder.contains($0) }
+    }
+
+    /// WHAT STOPS THE RULE ABOVE PASSING ON AN EMPTY BAND. `shelfControlsNotLaidOut` is empty
+    /// both when every control is drawn and when there are no controls at all, and those are
+    /// opposite outcomes. A band that offers a person nothing is the defect this whole file
+    /// exists about, so the population must be non-empty for the layout to be well-formed.
+    public static var shelfBandOffersNothing: Bool {
+        shelfControlOrder.isEmpty
     }
 }

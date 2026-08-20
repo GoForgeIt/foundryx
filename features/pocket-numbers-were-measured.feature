@@ -21,11 +21,6 @@ Feature: Every number Solleva prints about a recorder was measured on a recorder
     Then no row states a size or a length drawn from the listing
     And a row whose real byte count is known does state how long it runs
 
-  Scenario: Fast sync is offered as what it does, never as a speed nobody timed
-    Given the words Solleva uses to offer fast sync
-    Then none of them claim it is faster
-    And they say what it actually does instead
-
   Scenario: A figure whose only support is a planning guess is refused
     Given the figures Solleva can print about a recorder
     Then every figure resting on a planning guess is withheld

@@ -237,20 +237,30 @@ public enum PocketMeasuredFigures {
 
         PocketFigure(
             id: Id.fastSyncSpeed,
-            renderedBy: "PocketFastSyncPresentation.setup",
-            describes: "how much quicker fast sync is",
+            renderedBy: "(nothing — no surface prints a rate)",
+            describes: "how fast a recording comes over Bluetooth",
             support: .planningGuess(
                 because: """
-                    Never timed, on either leg. BLE throughput was not measured at the \
-                    2026-08-16 bench — no file was transferred and no MTU, connection interval \
-                    or PHY was recorded — and the WiFi transfer was never performed at all, \
-                    because the HTTP endpoint the device serves files from is recorded as \
-                    UNCONFIRMED by pocket-libre upstream. The "~150x" figure behind the words \
-                    is a flagged guess and always was.
+                    Never timed. BLE throughput was not measured at the 2026-08-16 bench — no \
+                    file was transferred and no MTU, connection interval or PHY was recorded — \
+                    and the "~150x" figure this row used to carry was arithmetic over it. THE \
+                    WIFI HALF OF THIS QUESTION IS CLOSED AND THE ANSWER WAS NO: on 2026-08-20 \
+                    six joins established that the recorder's access point drops a client about \
+                    eight seconds after the WPA2 handshake, including one run that issued the \
+                    file selection and the begin-transfer over Bluetooth with the phone still \
+                    attached. Fast sync is removed; Bluetooth carries every recording. THAT \
+                    MAKES THIS FIGURE LOAD-BEARING RATHER THAN COSMETIC. Pocket audio is 32 \
+                    kbps CBR — exactly 4,000 bytes per second of wall-clock recording — so a \
+                    link that drains slower than 4,000 B/s can never catch up with a recorder \
+                    that is still being used, and continuous background pull is not a design \
+                    that can work. Nobody has established which side of that line this link is \
+                    on.
                     """,
                 closedBy: """
-                    Time one identical recording over each leg on the same recorder and record \
-                    bytes against elapsed seconds for both. E-WIFI-ENDPOINT closes first.
+                    Time two recordings of different lengths over Bluetooth on one recorder and \
+                    record bytes against elapsed seconds, so the result is a RATE rather than \
+                    one point dominated by connection setup. Record MTU, connection interval \
+                    and PHY beside it — those explain the number and say whether it is tunable.
                     """)),
 
         PocketFigure(

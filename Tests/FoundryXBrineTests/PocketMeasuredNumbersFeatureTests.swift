@@ -20,7 +20,8 @@ final class PocketMeasuredNumbersFeatureTests: XCTestCase {
         let result = try await BrineFeatureRunner.run(
             "pocket-numbers-were-measured",
             registry: StepRegistry(MeasuredNumbersSteps.make(world)))
-        XCTAssertEqual(result.passed, 5)
+        XCTAssertEqual(result.passed, 4,
+                       "the fast-sync scenario went with the feature on 2026-08-20; four remain")
     }
 }
 
@@ -29,7 +30,6 @@ private enum MeasuredNumbersSteps {
         let givens = [
             "the figures Solleva can print about a recorder",
             "a recorder that lists two recordings whose real sizes were measured later",
-            "the words Solleva uses to offer fast sync",
             "the bench sitting held on the recorder",
         ]
         let whens = [
@@ -41,8 +41,6 @@ private enum MeasuredNumbersSteps {
             "at least one figure is printed",
             "no row states a size or a length drawn from the listing",
             "a row whose real byte count is known does state how long it runs",
-            "none of them claim it is faster",
-            "they say what it actually does instead",
             "every figure resting on a planning guess is withheld",
             "each withheld figure says why nobody has measured it yet",
             "the recorder's answer about its network credentials is recorded exactly as it came back",
@@ -80,7 +78,6 @@ private actor MeasuredNumbersWorld {
 
     private var figures: [PocketFigure] = []
     private var manifest: StoredFileManifestPresentation?
-    private var fastSyncCopy: [String] = []
     private var artifacts: [String: String] = [:]
 
     // MARK: - Where the evidence lives
@@ -113,9 +110,6 @@ private actor MeasuredNumbersWorld {
 
         case "a recorder that lists two recordings whose real sizes were measured later":
             figures = PocketMeasuredFigures.all
-
-        case "the words Solleva uses to offer fast sync":
-            fastSyncCopy = PocketFastSyncPresentation.everyLine
 
         case "the bench sitting held on the recorder":
             artifacts[PocketMeasuredFigures.verbProbeArtifact] =
@@ -254,32 +248,6 @@ private actor MeasuredNumbersWorld {
                 throw BrineStepError(
                     "rows with real byte counts state \(measured.rows.map(\.extentLine)) "
                     + "rather than the lengths 4,000 bytes/second implies")
-            }
-
-        case "none of them claim it is faster":
-            guard !fastSyncCopy.isEmpty else {
-                throw BrineStepError("the fast-sync family enumerates no copy at all")
-            }
-            // COMPARATIVES, NOT THE WORD "FAST". "Fast sync" is the feature's NAME; "much
-            // faster" is an unmeasured claim about a leg nobody has ever timed.
-            let claims = ["faster", "quicker", "speedier", "fastest", "times as fast", "150"]
-            for line in fastSyncCopy {
-                let lowered = line.lowercased()
-                if let claim = claims.first(where: { lowered.contains($0) }) {
-                    throw BrineStepError(
-                        "fast-sync copy claims \"\(claim)\" in \"\(line)\" — the transfer has "
-                        + "never been performed and neither leg has ever been timed")
-                }
-            }
-
-        case "they say what it actually does instead":
-            let joined = fastSyncCopy.joined(separator: " ").lowercased()
-            guard joined.contains("wifi") || joined.contains("wi-fi") else {
-                throw BrineStepError("fast-sync copy never says it uses the recorder's WiFi")
-            }
-            guard joined.contains("leaves its normal network")
-                    || joined.contains("normal wifi") else {
-                throw BrineStepError("fast-sync copy never says the phone leaves its network")
             }
 
         case "every figure resting on a planning guess is withheld":

@@ -728,7 +728,6 @@ private actor PocketDeleteConsentWorld {
                 // this gate CANNOT SEE — which is how the mint consent's "Solleva never deletes
                 // anything from the recorder" survived on six of the eleven branches.
                 + PocketRemoveFromRecorderPresentation.everyLine
-                + PocketFastSyncPresentation.everyLine
                 + PocketRecorderClockPresentation.everyLine
                 + [PocketRecorderCustodyPromise.text]
             XCTAssertFalse(everyLine.isEmpty)

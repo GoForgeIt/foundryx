@@ -248,12 +248,31 @@ public struct PocketAccessPointReadback: Sendable {
     /// and only handed out once the same value has PROVED the recorder is holding our key.
     ///
     /// This is the only way a password leaves this type, and it leaves as a `PocketAccessPoint`
-    /// bound for `PocketSoftAPJoining` — not as a `String` a log line could take. `nil` is the
-    /// same "not proven" that `provesPossession` returns false for, so no caller can join a
-    /// network on a recorder it did not recognise.
+    /// — not as a `String` a log line could take. `nil` is the same "not proven" that
+    /// `provesPossession` returns false for, so no caller can join a network on a recorder it
+    /// did not recognise.
+    ///
+    /// ITS DESTINATION IS GONE AND THE WRAPPER IS KEPT ANYWAY. `PocketSoftAPJoining` went with
+    /// the fast-sync stack on 2026-08-20. What survives is the RULE, which was never really
+    /// about joining: a recorder-reported password may not be handed out as a bare `String`,
+    /// and may not be handed out at all until that same value has proved the recorder is ours.
+    /// That rule outlives the one caller that used to consume it.
     public func credentials(provenBy key: String) -> PocketAccessPoint? {
         guard let password = matchingField(for: key) else { return nil }
         return PocketAccessPoint(ssid: ssid, password: password)
+    }
+
+    /// A RECORDER'S OWN ANSWER TO `APP&WIFI`, AS A VALUE RATHER THAN TWO STRINGS.
+    ///
+    /// It was declared in `PocketFastSync.swift` and moved here when that file was deleted,
+    /// because this type — its only remaining user — is where the rule it serves lives.
+    public struct PocketAccessPoint: Sendable, Equatable {
+        public let ssid: String
+        public let password: String
+        public init(ssid: String, password: String) {
+            self.ssid = ssid
+            self.password = password
+        }
     }
 
     /// Position-agnostic, exactly as `parse` promised: no hardware session recorded WHICH field
