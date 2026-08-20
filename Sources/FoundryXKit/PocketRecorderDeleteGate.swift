@@ -91,14 +91,29 @@ public enum PocketRecorderWire {
 /// Solleva can prove it already holds this recording somewhere else is a question with exactly
 /// one answer in this app — the Presence row's `PocketRecordingPresence.isDurableElsewhere`,
 /// resolved once by `PocketShelfReadModel.presences` and drawn on the shelf. This type does not
-/// recompute it (two answers to "is this safe" is how a recording gets lost) but it will not
-/// come into existence without being SHOWN it. The factories are failable and return nil for
-/// any reading that does not say yes, which includes every reading nobody asked for.
+/// recompute it (two answers to "is this safe" is how a recording gets lost).
 ///
-/// WHY FAILABLE RATHER THAN A CHECK AT THE CALL SITE. Nick's ruling is *"nothing is ever
-/// removed from the recorder unless we can prove we already hold it somewhere else."* A call
-/// site that must remember to check is a rule that holds until somebody forgets; a factory that
-/// cannot return a value is a rule that holds because the alternative does not compile.
+/// THE TWO PATHS NO LONGER SHARE ONE BAR, AND NICK RULED THE SPLIT. On 2026-08-18:
+///
+///   *"We need to allow people to be able to delete a recording off of the pocket … we cannot
+///    hard block them from deleting. But we can definitely still suggest to them without that
+///    suggestion getting in the way of their actual work that a Vault would be more secure."*
+///
+/// So PATH 1 — the owner looked at this recording and chose it — is NO LONGER FAILABLE ON
+/// DURABILITY. It gains a `PocketDeleteConsequence` instead, which has no empty case and no
+/// default, so a call site that has not decided what to tell the owner does not compile. THIS IS
+/// THE REMOVAL OF ONE TERM, NOT THE REMOVAL OF THE GATE: consent still names one recording, is
+/// still unobtainable by omission, and is still the only way a delete frame is admitted.
+///
+/// PATH 2 — the owner-armed automatic clear — IS UNTOUCHED and stays failable on
+/// `isDurableElsewhere`. An unattended delete the owner does not witness is a different act from
+/// one they chose while reading what it costs, and the 2026-08-16 ruling stands for it,
+/// unweakened: *"never retroactive to recordings whose safety we cannot currently demonstrate."*
+///
+/// WHY THE SPLIT IS THE SAFE DIRECTION. A recorder that is 99% full and cannot be emptied is a
+/// recorder that cannot record — refusing every manual delete is not the safe side of the trade,
+/// it is a different loss, and it is the one the owner did not choose. The automatic path has no
+/// such defence: nobody is looking at it.
 public struct PocketDeleteConsent: Sendable, Equatable {
 
     /// WHICH OF THE RULING'S TWO PATHS AUTHORISED THIS, kept because they are genuinely
@@ -117,35 +132,52 @@ public struct PocketDeleteConsent: Sendable, Equatable {
     public let file: PocketRecorderFileKey
     /// Which path authorised it.
     public let provenance: Provenance
+    /// WHAT THE OWNER WAS TOLD THEY WERE LOSING. Carried on the consent rather than left at the
+    /// surface, because a removal and the sentence stated before it are one act: a path that
+    /// could compose the first without the second is exactly the silent deletion the ruling
+    /// forbids. On PATH 2 nobody is reading anything, and the predicate that authorised it is
+    /// the reason its value is always `.aCopyIsAlreadySomewhereElse`.
+    public let consequence: PocketDeleteConsequence
 
-    /// PATH 1. The owner was shown this recording, was told it would be removed from the
-    /// recorder, and chose it — AND the shelf's own reading says we already hold it elsewhere.
+    /// PATH 1. The owner was shown this recording, was told what removing it costs, and chose it.
     ///
-    /// - Parameter provenSafeBy: the reading the row was drawn from. nil is returned unless it
-    ///   says yes, so `unknown` — a place nobody asked about — can never authorise a removal.
+    /// NOT FAILABLE ON DURABILITY, by Nick's 2026-08-18 ruling. The shelf's reading no longer
+    /// decides whether this is allowed; it decides only which of the three frozen consequences
+    /// is stated first, and that is `consequence`'s job.
+    ///
+    /// - Parameter consequence: what the owner is told they are losing. NO DEFAULT, and
+    ///   `PocketDeleteConsequence` has no empty case — so a caller that has not decided what to
+    ///   say has nothing to pass and does not compile. That is the detector for this change, and
+    ///   it has to be a compile-time one: a runtime enumeration of composed removals cannot
+    ///   observe an argument the source never wrote.
     public static func ownerChoseThisRecording(
         _ file: PocketRecorderFileKey,
-        provenSafeBy presence: PocketRecordingPresence
-    ) -> PocketDeleteConsent? {
-        guard presence.isDurableElsewhere else { return nil }
-        return PocketDeleteConsent(file: file, provenance: .ownerChose)
+        statingThat consequence: PocketDeleteConsequence
+    ) -> PocketDeleteConsent {
+        PocketDeleteConsent(file: file, provenance: .ownerChose, consequence: consequence)
     }
 
     /// PATH 2. The owner turned on this recorder's automatic clear, and this recording has since
-    /// synced. The SAME predicate, deliberately — an armed control is a standing choice, not a
-    /// lower bar, and the ruling says so: *"never retroactive to recordings whose safety we
-    /// cannot currently demonstrate."*
+    /// synced. STILL FAILABLE, and deliberately: an armed control fires while nobody is looking,
+    /// so it keeps the 2026-08-16 bar — *"never retroactive to recordings whose safety we cannot
+    /// currently demonstrate."* Nick's 2026-08-18 ruling is about a person who chose; this path
+    /// has no person in it.
     public static func ownerArmedThisRecorder(
         _ file: PocketRecorderFileKey,
         provenSafeBy presence: PocketRecordingPresence
     ) -> PocketDeleteConsent? {
         guard presence.isDurableElsewhere else { return nil }
-        return PocketDeleteConsent(file: file, provenance: .ownerArmedThisRecorder)
+        return PocketDeleteConsent(file: file,
+                                   provenance: .ownerArmedThisRecorder,
+                                   consequence: .aCopyIsAlreadySomewhereElse)
     }
 
-    private init(file: PocketRecorderFileKey, provenance: Provenance) {
+    private init(file: PocketRecorderFileKey,
+                 provenance: Provenance,
+                 consequence: PocketDeleteConsequence) {
         self.file = file
         self.provenance = provenance
+        self.consequence = consequence
     }
 
     /// Whether this consent authorises the frame about to be composed. Both the day and the

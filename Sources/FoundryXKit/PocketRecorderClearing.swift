@@ -133,7 +133,13 @@ public struct PocketAutoClear: Equatable, Sendable, Codable {
     public func decision(syncedAt: Date, presence: PocketRecordingPresence) -> Decision {
         guard let armedAt else { return .thisRecorderIsNotArmed }
         guard syncedAt >= armedAt else { return .itSyncedBeforeYouArmedThisRecorder }
-        guard presence.isDurableElsewhere else { return .notProvenSafe }
+        // THE 2026-08-16 BAR, AND IT IS THIS PATH'S ALONE NOW. Read through the automatic
+        // path's own name so a future ruling about the manual affordance cannot move it by
+        // touching one shared expression — which is how the manual control came to be withheld
+        // on the tier that needed it most.
+        guard PocketRemoveFromRecorderPresentation.autoClearMayTake(presence) else {
+            return .notProvenSafe
+        }
         return .clears
     }
 }
@@ -191,10 +197,14 @@ public enum PocketRemoveFromRecorder {
         provenance: PocketDeleteConsent.Provenance,
         attachment: RecordingDeviceAttachment = RecordingDeviceAttachment()
     ) async -> PocketRemovalOutcome {
-        // BEFORE THE RADIO IS TOUCHED, and before a frame is composed. A recording whose safety
-        // Solleva cannot demonstrate costs no session, no battery and no command — and the
-        // census the promise is asserted over stays empty for it, which is what makes AC1 an
-        // assertion about behaviour rather than about a string.
+        // BEFORE THE RADIO IS TOUCHED, and before a frame is composed.
+        //
+        // WHAT THIS GUARD STILL DOES, now that one of the two paths refuses nothing. The ARMED
+        // path is unchanged: a recording it cannot prove is elsewhere costs no session, no
+        // battery and no command, and the census the promise is asserted over stays empty for
+        // it. The MANUAL path always obtains a consent, so what this decides for it is which
+        // sentence the consent carries — and it still refuses before the radio when the
+        // peripheral is not one this phone is paired with.
         guard let identity = try? PocketAuthenticatedIdentity(peripheralIdentifier: id.uuidString)
         else { return .unavailable(PocketRecorderCheckPresentation.notThisRecorderLine) }
         let key = PocketRecorderFileKey(identity: identity.recordingDeviceIdentity,
@@ -242,16 +252,23 @@ public enum PocketRemoveFromRecorder {
         }
     }
 
-    /// THE RULING'S TWO PATHS, AND THE ONE PREDICATE THEY BOTH READ. Both factories are
-    /// failable on `isDurableElsewhere`, so this function cannot return a consent for a
-    /// recording whose safety the shelf did not state — including the `unknown` a place nobody
-    /// asked about honestly reports.
+    /// THE RULING'S TWO PATHS, AND THEY NO LONGER READ THE SAME PREDICATE.
+    ///
+    /// PATH 1 always returns a consent — Nick, 2026-08-18: *"we cannot hard block them from
+    /// deleting."* The shelf's reading still does work here, but a different job: it picks which
+    /// of the three frozen consequences the owner is told, through
+    /// `PocketDeleteConsequence.ofRemoving`, which reads the presence and recomputes nothing.
+    ///
+    /// PATH 2 is unchanged and still failable on `isDurableElsewhere`, so an unattended clear
+    /// cannot touch a recording whose safety the shelf did not state — including the `unknown` a
+    /// place nobody asked about honestly reports.
     static func consent(for key: PocketRecorderFileKey,
                         presence: PocketRecordingPresence,
                         provenance: PocketDeleteConsent.Provenance) -> PocketDeleteConsent? {
         switch provenance {
         case .ownerChose:
-            return PocketDeleteConsent.ownerChoseThisRecording(key, provenSafeBy: presence)
+            return PocketDeleteConsent.ownerChoseThisRecording(
+                key, statingThat: .ofRemoving(presence))
         case .ownerArmedThisRecorder:
             return PocketDeleteConsent.ownerArmedThisRecorder(key, provenSafeBy: presence)
         }
@@ -285,8 +302,9 @@ public enum PocketRemoveFromRecorder {
 /// "remove it from the recorder", which is the thing that actually happens.
 public enum PocketRemoveFromRecorderPresentation {
 
-    /// The affordance. It EXISTS ONLY for a recording whose safety the shelf can state — see
-    /// `isOffered(for:)`, which is the same predicate the consent factories read.
+    /// The affordance. It exists for every recording the recorder is holding — see
+    /// `isOffered(for:)`. It USED to read *"only for a recording whose safety the shelf can
+    /// state"*, and that doc outlived the ruling that made it true by one commit.
     public static let action = "Remove it from the recorder"
 
     /// WHILE IT IS HAPPENING, TO THIS ONE FILE. The page used to caption its spinner with
@@ -302,23 +320,37 @@ public enum PocketRemoveFromRecorderPresentation {
     public static let confirmAction = "Take it off the recorder"
     public static let cancelConfirmAction = "Keep it on the recorder"
 
-    /// The confirmation. It names the recorder as the place the recording is leaving, and it
-    /// says where the copy that makes this safe already is.
-    public static func confirmation(for brain: BrainChoice) -> String {
-        "This takes the recording off the recorder. "
-            + PocketRemoveFromRecorderPresentation.keptLine(for: brain)
-    }
+    /// THE CONFIRMATION, AND IT SAYS THE ONE THING TRUE OF EVERY REMOVAL.
+    ///
+    /// WHAT IT USED TO SAY, AND WHY THAT BECAME A LIE. It appended `keptLine(for:)` — *"Solleva
+    /// has confirmed a copy on your computer."* — which was safe to say only while the durability
+    /// guard made a removal impossible without one. Nick's 2026-08-18 ruling removed that guard
+    /// from the manual path, so the same sentence would now be printed over a recording nothing
+    /// else holds. A confirmation dialog that asserts a copy that does not exist is worse than no
+    /// dialog: it is the app talking the owner into the deletion.
+    ///
+    /// WHERE THE CUSTODY STATEMENT WENT. To `PocketDeleteConsequence`, one band above, on the
+    /// page — where it is resolved from THIS recording's own reading rather than from the tier.
+    /// This band states irreversibility, which is true of all three consequences, and states it
+    /// once. `keptLine(for:)` is deleted rather than kept-and-unused: a sentence nothing renders
+    /// is a sentence somebody re-renders.
+    ///
+    /// The parameter stays so the surface that calls this does not have to change while the
+    /// two tracks that own that file are in flight; nothing about the brain belongs in this
+    /// sentence any more, and a brain-shaped custody claim is exactly what was removed.
+    public static func confirmation(for brain: BrainChoice) -> String { confirmationLine }
 
-    /// WHERE THE COPY THAT MAKES THIS SAFE ALREADY IS, in the terms of the brain that is on.
-    /// The phone-only tier can never satisfy the predicate at all, and says so rather than
-    /// borrowing a sentence about a destination it does not have.
-    public static func keptLine(for brain: BrainChoice) -> String {
-        switch brain {
-        case .justMyPhone:  return nowhereElseLine
-        case .myComputer:   return "Solleva has confirmed a copy on your computer."
-        case .foundryCloud: return "Solleva has confirmed a copy in your Vault."
-        }
-    }
+    /// The confirmation's words, as a constant, so the population below and every assertion
+    /// about it read the same string the alert reads.
+    ///
+    /// IT SAYS THE ACT CANNOT BE UNDONE, NOT THAT THE RECORDING IS GONE. The first wording was
+    /// *"…and Solleva can't get it back"*, which reads as "the recording cannot be recovered" —
+    /// false for a recording a Vault is already holding, and this band is shown for all four
+    /// consequences. What is irreversible is the removal FROM THE RECORDER; whether anything is
+    /// lost is the consequence's sentence, and it is a different sentence on purpose.
+    /// *(Cross-vendor adversarial review, 2026-08-19.)*
+    public static let confirmationLine =
+        "Taking a recording off the recorder can't be undone."
 
     /// THE TAP THAT COULD NOT BE CARRIED OUT, AND IT SAYS SO.
     ///
@@ -331,10 +363,15 @@ public enum PocketRemoveFromRecorderPresentation {
     public static let cannotActOnThisNowLine =
         "Solleva can't act on that recording right now. Check the recorder again first."
 
-    /// The refusal, and it names WHY rather than greying something out.
+    /// THE REFUSAL — AND AFTER 2026-08-18 IT BELONGS TO THE AUTOMATIC PATH ALONE.
+    ///
+    /// A manual removal can no longer produce it: `PocketDeleteConsent.ownerChoseThisRecording`
+    /// refuses nothing. It is what the ARMED clear says when it declines to take a recording
+    /// nobody has proven is anywhere else, which is the bar the ruling deliberately left in place
+    /// for a delete no person is watching.
     public static let notProvenSafeLine =
-        "Solleva hasn't confirmed a copy of this anywhere else yet, so it won't take it off the "
-        + "recorder."
+        "Solleva hasn't confirmed a copy of this anywhere else yet, so it won't clear it off the "
+        + "recorder on its own."
 
     /// The recorder said no. Its own answer, not an inference from silence.
     public static let recorderRefusedLine =
@@ -347,10 +384,15 @@ public enum PocketRemoveFromRecorderPresentation {
 
     public static let removedLine = "Removed from the recorder."
 
-    /// A phone-only brain has no second place to put a copy, so nothing can ever satisfy the
-    /// predicate — and the honest surface is one that does not offer the control at all.
-    public static let nowhereElseLine =
-        "There's nowhere other than this iPhone for a copy to go yet."
+    // `nowhereElseLine` USED TO BE HERE, AND IT IS GONE BECAUSE NOTHING RENDERED IT.
+    //
+    // It was the manual path's phone-only refusal. Nick's 2026-08-18 ruling deleted that
+    // refusal, and the first draft of this change kept the sentence with a new doc claiming the
+    // armed clear says it — WHICH IS FALSE: the armed clear renders `notProvenSafeLine` through
+    // `message(for:)`, and a grep over `Sources App Tests` found this constant referenced only
+    // by its own definition and by `everyLine`. This file deleted `keptLine` for exactly that
+    // reason — *"a sentence nothing renders is a sentence somebody re-renders"* — and then
+    // failed to apply it here. *(Adversarial review, 2026-08-19.)*
 
     // MARK: The owner-armed control
 
@@ -382,11 +424,34 @@ public enum PocketRemoveFromRecorderPresentation {
         "This applies to recordings that sync from now on. Anything already here stays until "
         + "you choose it."
 
-    /// WHETHER THE AFFORDANCE EXISTS AT ALL. The ruling: *"The affordance does not exist for a
-    /// recording we have not brought over."* This reads the Step 5 predicate — the same one the
-    /// consent factories read — so a row that offers the action and a consent that refuses it
-    /// cannot disagree.
+    /// WHETHER THE AFFORDANCE EXISTS AT ALL — AND IT NOW EXISTS WHENEVER THE RECORDER HAS THE
+    /// RECORDING.
+    ///
+    /// WHAT THIS USED TO BE, AND WHY IT WAS THE DEFECT RATHER THAN THE GUARD. It was
+    /// `presence.isDurableElsewhere`, matching the 2026-08-16 ruling *"the affordance does not
+    /// exist for a recording we have not brought over."* On Nick's own recorder that predicate is
+    /// false for all nineteen recordings and, on the phone-only tier, false FOREVER — so the one
+    /// control that reclaims space was not drawn on the one tier most likely to need it. Nick,
+    /// 2026-08-18: *"we cannot hard block them from deleting."*
+    ///
+    /// SO THE AFFORDANCE IS BACK AND THE PROOF MOVED, IT DID NOT VANISH. What the shelf can prove
+    /// now decides the SENTENCE (`PocketDeleteConsequence.ofRemoving`), not the button. A row that
+    /// offers this and a consent that refuses it still cannot disagree, because PATH 1's factory
+    /// refuses nothing.
+    ///
+    /// IT IS STILL A PREDICATE AND NOT `true`. A recording the recorder is not holding cannot be
+    /// taken off it, and a shelf that has not answered has not said it is there.
     public static func isOffered(for presence: PocketRecordingPresence) -> Bool {
+        presence.onRecorder.answer == .yes
+    }
+
+    /// WHETHER THE UNATTENDED PATH MAY TOUCH THIS RECORDING. The 2026-08-16 predicate, kept
+    /// under its own name because it still governs exactly one thing: the armed clear.
+    ///
+    /// It is a SEPARATE function from `isOffered(for:)` on purpose. They used to be one
+    /// expression, and one ruling about the manual path silently moved the automatic one with it.
+    /// Two names is what makes a future relaxation of one of them visible.
+    public static func autoClearMayTake(_ presence: PocketRecordingPresence) -> Bool {
         presence.isDurableElsewhere
     }
 
@@ -406,11 +471,15 @@ public enum PocketRemoveFromRecorderPresentation {
     public static var everyLine: [String] {
         var lines = [action, inProgressLine, confirmAction, cancelConfirmAction, notProvenSafeLine,
                      recorderRefusedLine, stillListedLine, cannotActOnThisNowLine,
-                     removedLine, nowhereElseLine, autoClearTitle,
+                     removedLine, autoClearTitle, confirmationLine,
                      autoClearUnavailableLine, autoClearNotRetroactiveLine]
+        // THE THREE CONSEQUENCES ARE PART OF THIS SURFACE'S VOICE. They are what a person reads
+        // immediately before the one gesture here that cannot be undone, so a copy claim held
+        // over "every line this behaviour renders" that omitted them would be a claim over the
+        // reassuring half.
+        lines += PocketDeleteConsequence.everyLine
         for brain in BrainChoice.allCases {
             lines.append(confirmation(for: brain))
-            lines.append(keptLine(for: brain))
             if let explanation = autoClearExplanation(for: brain) { lines.append(explanation) }
         }
         return lines

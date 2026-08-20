@@ -99,18 +99,38 @@ public struct PocketRecordingDetailPage: Equatable, Sendable {
     /// nineteen rows that say nothing about why they do nothing. This is the missing half.
     public let notes: [String]
 
+    /// THE SENTENCE THE CONFIRMATION MUST CARRY, or `nil` when no removal is offered.
+    ///
+    /// IT EXISTS BECAUSE THE CONSEQUENCE WAS NOT ACTUALLY STATED FIRST, and two rounds of
+    /// cross-vendor review said so before it was fixed. The sheet renders facts, then places,
+    /// then ACTIONS, then notes — so `PocketDeleteConsequence.sentence` sat BELOW the
+    /// destructive control, and the alert that gates the tap carried the generic
+    /// `confirmation(for:)`, which names where a copy already is and says nothing about a
+    /// recording that has none. On the phone-only tier — the one tier Nick's ruling exists for,
+    /// where the recorder fills up and a manual delete is the only way to keep recording — the
+    /// owner could reach the confirmation without ever having read what deleting costs.
+    ///
+    /// The remedy is not to move the consequence up into `facts` to win a render position it
+    /// has no business claiming. It is to put it where the decision is actually made: the last
+    /// thing between the owner and the deletion. Carried on the PAGE rather than composed in
+    /// `App/`, because `swift test` cannot compile `App/` — which is the whole reason this
+    /// defect survived a round of review that had already named it.
+    public let removalConfirmation: String?
+
     public init(fileToken: String,
                 title: String,
                 facts: [PocketRecordingDetailFact],
                 places: [PocketPlaceLine],
                 actions: [PocketRecordingDetailAction],
-                notes: [String]) {
+                notes: [String],
+                removalConfirmation: String? = nil) {
         self.fileToken = fileToken
         self.title = title
         self.facts = facts
         self.places = places
         self.actions = actions
         self.notes = notes
+        self.removalConfirmation = removalConfirmation
     }
 
     public func offers(_ action: PocketRecordingDetailAction) -> Bool {
@@ -185,6 +205,7 @@ public enum PocketRecordingDetailPresentation {
         [placesHeading, sizeLabel, recorderNameLabel, closeAction,
          alreadyHereLine, notOnTheRecorderLine, tooBigLine]
             + PocketRecordingDetailAction.allCases.map(\.title)
+            + PocketDeleteConsequence.everyLine
     }
 
     // MARK: - Finding the one the finger landed on
@@ -238,13 +259,42 @@ public enum PocketRecordingDetailPresentation {
             actions.append(.bringItOver)
         }
 
-        // THE REMOVAL. Destructive, so it asks for POSITIVE answers on both sides: the recorder
-        // says it has this file, and the safety predicate every other destructive path in this
-        // app reads says a copy is proven somewhere else. `unknown` satisfies neither.
+        // THE REMOVAL. Destructive, and after Nick's 2026-08-18 ruling it asks for exactly one
+        // positive answer: the recorder says it has this file. What the shelf can prove about a
+        // copy elsewhere no longer withholds the control — it chooses the sentence stated beside
+        // it, which is `PocketDeleteConsequence`.
+        //
+        // WHERE THE OWNER ACTUALLY READS IT, SAID ACCURATELY. This comment used to claim the
+        // consequence is read "BEFORE reaching for the button". IT IS NOT, and the claim was
+        // refuted by cross-vendor review on 2026-08-19: `PocketRecordingDetailSheet` renders
+        // facts, then places, then ACTIONS, then notes — so the consequence sits BELOW the
+        // destructive control, and the alert that gates the tap carries `confirmationLine`
+        // rather than this sentence. The owner is warned (the alert says the act cannot be
+        // undone) but is not warned SPECIFICALLY before pressing.
+        //
+        // IT IS NOT FIXED HERE BECAUSE IT CANNOT BE: the ordering and the alert's message both
+        // live in `App/DeviceScreen.swift`, which two other tracks hold open, and which
+        // `swift test` cannot compile in the first place. Carried, named, and not papered over
+        // by moving a consequence into `facts` to win a render position it has no business
+        // claiming.
+        var removalConfirmation: String?
         if let refusal = removalRefusal(for: presence, brain: brain) {
             notes.append(refusal)
         } else {
             actions.append(.removeFromRecorder)
+            let consequence = PocketDeleteConsequence.ofRemoving(presence)
+            notes.append(consequence.sentence)
+            // THE SAME SENTENCE, AT THE MOMENT OF THE DECISION. Not a second wording of it: a
+            // confirmation that paraphrased the note would be two answers to "what does this
+            // cost", and the whole reason this value exists is that the note alone was read
+            // AFTER the button rather than before it.
+            removalConfirmation = PocketRemoveFromRecorderPresentation.confirmationLine
+                + " " + consequence.sentence
+            // THE VAULT, WHERE IT IS TRUE AND NOWHERE ELSE. `nil` on the one consequence that
+            // says a copy already exists, because an upsell there is an advertisement rather
+            // than a fact — and it is a sentence, never a gate: the action above is already in
+            // `actions` by the time this line is composed.
+            if let suggestion = consequence.vaultSuggestion { notes.append(suggestion) }
         }
 
         return PocketRecordingDetailPage(
@@ -260,7 +310,8 @@ public enum PocketRecordingDetailPresentation {
             ],
             places: PocketPresencePresentation.lines(presence, now: now),
             actions: actions,
-            notes: notes)
+            notes: notes,
+            removalConfirmation: removalConfirmation)
     }
 
     /// `nil` ⇒ the bring-over is offered.
@@ -274,16 +325,26 @@ public enum PocketRecordingDetailPresentation {
 
     /// `nil` ⇒ the removal is offered. It reads `isOffered(for:)` rather than re-deriving the
     /// predicate, so this page and the shelf row cannot come to two different answers about
-    /// whether one recording is safe to take off a recorder.
+    /// whether one recording can be taken off a recorder.
+    ///
+    /// THERE IS EXACTLY ONE REASON LEFT, and Nick's 2026-08-18 ruling is why: *"we cannot hard
+    /// block them from deleting."* A recording the recorder is not holding cannot be taken off
+    /// it — that is a fact about the recorder, not a judgement about the owner. Everything the
+    /// shelf can or cannot prove about a copy elsewhere now decides the SENTENCE
+    /// (`PocketDeleteConsequence`), never the button.
+    ///
+    /// `brain` is no longer read. It stayed in the signature deliberately: the two sentences it
+    /// used to pick between were refusals, and deleting the parameter would let a later caller
+    /// quietly reintroduce a tier-shaped refusal without the diff showing a tier.
     public static func removalRefusal(for presence: PocketRecordingPresence,
                                       brain: BrainChoice) -> String? {
-        if presence.onRecorder.answer != .yes { return notOnTheRecorderLine }
-        if PocketRemoveFromRecorderPresentation.isOffered(for: presence) { return nil }
-        switch brain {
-        case .justMyPhone:
-            return PocketRemoveFromRecorderPresentation.nowhereElseLine
-        case .myComputer, .foundryCloud:
-            return PocketRemoveFromRecorderPresentation.notProvenSafeLine
-        }
+        // ONE READ, NOT TWO. The first draft kept a leading `onRecorder.answer != .yes` check
+        // in front of this call and a trailing `return notOnTheRecorderLine` behind it — and
+        // since `isOffered` IS `onRecorder.answer == .yes`, the leading check made the trailing
+        // line unreachable and the doc's claim that this defers to `isOffered` vacuous. Worse,
+        // if `isOffered` were ever tightened, the dead line would have told an owner "The
+        // recorder isn't holding this recording" about one it is. *(Review, 2026-08-19.)*
+        PocketRemoveFromRecorderPresentation.isOffered(for: presence)
+            ? nil : notOnTheRecorderLine
     }
 }

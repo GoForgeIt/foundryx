@@ -1700,7 +1700,18 @@ struct PocketRecordingDetailSheet: View {
                 }
             }
         } message: {
-            Text(PocketRemoveFromRecorderPresentation.confirmation(for: brain))
+            // THE CONSEQUENCE, AT THE MOMENT OF THE DECISION — and it is READ, not composed.
+            //
+            // This used to render `confirmation(for:)`, which states only that the act cannot
+            // be undone. Two rounds of cross-vendor review pointed out the same thing: the
+            // sheet renders facts, places, ACTIONS, then notes, so `PocketDeleteConsequence`'s
+            // sentence sits BELOW the destructive control and the alert said nothing about what
+            // this particular recording would cost. On the phone-only tier — the one tier Nick's
+            // ruling exists for — an owner could reach the confirmation without ever having read
+            // it. The page now carries the sentence, composed in the kit where `swift test` can
+            // execute the rule, and this is the wiring.
+            Text(page?.removalConfirmation
+                 ?? PocketRemoveFromRecorderPresentation.confirmation(for: brain))
         }
     }
 

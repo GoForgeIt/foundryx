@@ -35,10 +35,10 @@ Feature: A recording on a recorder is something I can open, inspect and choose
     And it never states where the recording is twice
     And it never states one fact twice, one band apart
 
-  Scenario: A recording Solleva cannot prove it holds elsewhere is not offered removal
+  Scenario: A recording Solleva cannot prove it holds elsewhere is still offered removal
     Given a recording the recorder listed an hour ago, which Solleva has not brought over
-    Then the page about it does not offer to take it off the recorder
-    And it says why, instead of showing nothing
+    Then the page about it offers to take it off the recorder
+    And it says what that would cost, instead of showing nothing
     And a recording Solleva has proved it holds elsewhere IS offered that action
     And over every way one recording can be placed, the page and the shelf row agree
 
@@ -54,11 +54,12 @@ Feature: A recording on a recorder is something I can open, inspect and choose
     And a recording bigger than Solleva can carry says that instead of offering the tap
     And the ceiling it is measured against is the one the transfer itself refuses on
 
-  Scenario: The reason a removal is withheld names the missing place, not a missing confirmation
+  Scenario: What a removal would cost is named from where the recording is, not from the tier
     Given a recording the recorder listed an hour ago, which Solleva has not brought over
-    Then a phone-only brain is told there is nowhere else for a copy to go
-    And a brain with somewhere to put a copy is told the copy is not confirmed yet
-    And every brain is answered, so neither sentence is a default for a case nobody listed
+    Then the page says nothing else holds it, whichever brain is on
+    And a Vault is suggested there, and the removal is still offered
+    And a recording this phone is holding is told it would leave one copy, on this phone
+    And every one of them reaches the page it is about
 
   Scenario: The page about one recording is held to the same words as the page it opens from
     Given every body the recorder page is written in

@@ -703,11 +703,11 @@
       "reached_from": [
         {
           "via": "pocket-recording-detail-page",
-          "anchor": "        if PocketRemoveFromRecorderPresentation.isOffered(for: presence) { return nil }"
+          "anchor": "        PocketRemoveFromRecorderPresentation.isOffered(for: presence)"
         }
       ],
       "verdict": "reachable",
-      "why": "ITS CALL SITE MOVED AND THAT IS THE POINT OF THE MOVE — it was a bare `if` in a SwiftUI body, which is code `swift test` cannot compile and therefore cannot hold; it is now read by `PocketRecordingDetailPresentation.removalRefusal`, a value the whole 27-placement population is put through. the ruling's clause 'the affordance does not exist for a recording we have not brought over', as CODE. It reads the same predicate the consent factories read, so the button and the consent cannot disagree. It is enumerated because a destructive capability that is present, unreached and unenumerated is the worst row this register can hold — and for a while this one was present, reached by a bare `if` in a SwiftUI body, and enumerated nowhere."
+      "why": "ITS CALL SITE MOVED AND THAT IS THE POINT OF THE MOVE — it was a bare `if` in a SwiftUI body, which is code `swift test` cannot compile and therefore cannot hold; it is now read by `PocketRecordingDetailPresentation.removalRefusal`, a value the whole 27-placement population is put through. the ruling's clause 'the affordance does not exist for a recording we have not brought over', as CODE. It reads the same predicate the consent factories read, so the button and the consent cannot disagree. It is enumerated because a destructive capability that is present, unreached and unenumerated is the worst row this register can hold — and for a while this one was present, reached by a bare `if` in a SwiftUI body, and enumerated nowhere. ANCHOR MOVED 2026-08-20, AND THE MOVE IS THE POINT OF THE ROW. The call site used to be `if …isOffered(for: presence) { return nil }` — a guard in front of a tier-shaped refusal. Nick's 2026-08-18 ruling removed the refusal, so `removalRefusal(for:brain:)` is now a single expression deferring to the same predicate, and everything the shelf can or cannot prove about a copy elsewhere decides the SENTENCE (`PocketDeleteConsequence`) rather than the button. The capability is the same and it is still reached; only its spelling changed, and this gate is what made that a line somebody had to write."
     },
     {
       "id": "pocket-remove-confirmation",
@@ -718,11 +718,11 @@
       "reached_from": [
         {
           "via": "device-screen",
-          "anchor": "            Text(PocketRemoveFromRecorderPresentation.confirmation(for: brain))"
+          "anchor": "                 ?? PocketRemoveFromRecorderPresentation.confirmation(for: brain))"
         }
       ],
       "verdict": "reachable",
-      "why": "it was written to guard the one gesture that cannot be undone and had NO call site anywhere in the app, while Forget — which destroys a key and no audio — sat behind an alert. A written-but-unreachable confirmation is worse than none, because the copy gates count it as shipped."
+      "why": "it was written to guard the one gesture that cannot be undone and had NO call site anywhere in the app, while Forget — which destroys a key and no audio — sat behind an alert. A written-but-unreachable confirmation is worse than none, because the copy gates count it as shipped. ANCHOR MOVED 2026-08-20 AND THE ROW IS NOW THE FALLBACK'S. The alert used to render `confirmation(for:)` alone, which states only that the act cannot be undone — true of all four consequences and specific to none — so on the phone-only tier an owner could reach the confirmation without ever reading what deleting THIS recording costs. Cross-vendor review named it twice. The alert now reads `page.removalConfirmation`, composed in the kit by `PocketRecordingDetailPresentation.page` from the same `PocketDeleteConsequence` the note carries, and held by the scenario `What I am about to lose is in the confirmation, not only under the button`. `confirmation(for:)` remains as the fallback for a page that has not resolved, which is what this row now anchors — and it is still reached."
     },
     {
       "id": "pocket-recording-detail-page",
