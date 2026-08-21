@@ -82,20 +82,37 @@ final class GrainDisabledButtonLegibilityTests: XCTestCase {
         }
     }
 
-    /// THE EXACT P7 CONTROL. `App/DeviceScreen.swift`'s fast-sync button is
-    /// `.buttonStyle(.grain(.outlined))` gated by `.disabled(… || !fastSyncCanRun)`, and
-    /// `fastSyncCanRun` is false on every phone today because
-    /// `PocketFastSyncEndpoint.measured` has never been confirmed. Nick tapped it and
-    /// nothing happened. Pin that one pairing so a later refactor of the variant table
-    /// cannot quietly re-flatten it.
-    func testTheFastSyncButtonLooksUnavailableWhileTheEndpointIsUnmeasured() {
-        XCTAssertNil(PocketFastSyncEndpoint.measured,
-                     "the endpoint got measured — re-derive this guard from the real gate rather than deleting it")
+    /// THE REAL PRODUCTION PAIRINGS, RE-POINTED 2026-08-21.
+    ///
+    /// This case originally pinned the fast-sync button — `.grain(.outlined)` gated by
+    /// `.disabled(… || !fastSyncCanRun)`, which was false on every phone because
+    /// `PocketFastSyncEndpoint.measured` had never been confirmed. That is the control Nick
+    /// tapped when nothing happened, and it is the reason this whole file exists.
+    ///
+    /// **That button no longer exists.** P0 withdrew fast sync outright once the recorder's
+    /// access point was measured dropping clients ~8s after the handshake, so
+    /// `PocketFastSyncEndpoint` is gone from the codebase. Re-pointing rather than deleting:
+    /// the ORIGINAL subject is gone, but the guarantee it was pinning — that a specific
+    /// production pairing cannot be quietly re-flattened by a refactor of the variant table —
+    /// applies to every `.disabled` + `.grain` pairing still shipping.
+    ///
+    /// These are the variants actually paired with `.disabled(…)` in `App/DeviceScreen.swift`
+    /// today (`:1333`, `:1378`, `:1774`). The general rule is held by the tests above; this
+    /// one exists so the specific controls a person can actually reach are named.
+    func testEveryVariantActuallyDisabledInProductionLooksUnavailable() {
+        // Taken from the real call sites, not from the full variant list — a guard over
+        // `allCases` would stay green if production moved to a variant nobody checked.
+        let pairedWithDisabledInProduction: [GrainButtonVariant] =
+            [.outlined, .destructive, .filled, .text]
 
-        let live = GrainButtonStyle.appearance(variant: .outlined)
-        let dead = GrainButtonStyle.appearance(variant: .outlined, isEnabled: false)
-        XCTAssertNotEqual(live, dead,
-                          "the fast-sync button cannot run and still looks exactly like a button that can")
+        for variant in pairedWithDisabledInProduction {
+            let live = GrainButtonStyle.appearance(variant: variant)
+            let dead = GrainButtonStyle.appearance(variant: variant, isEnabled: false)
+            XCTAssertNotEqual(
+                live, dead,
+                ".grain(\(variant)) is paired with .disabled(…) in DeviceScreen and still looks "
+                + "exactly like a button that can be pressed")
+        }
     }
 
     /// The guard must not be satisfiable by making the DISABLED renderings differ from
