@@ -504,6 +504,35 @@ final class FakePocketBLEStack: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }; return central
     }
 
+    /// PRESENT THIS RECORDER AS ONE iOS HANDED BACK, not one this process connected.
+    ///
+    /// `20260821T0153_the_drain_survives_termination` P0.1. Three of that track's criteria are
+    /// about a peripheral restored underneath the app: already connected, already subscribed, and
+    /// possibly already sending — a state no amount of `connect()` can produce, because the whole
+    /// point is that **this process never called it**.
+    ///
+    /// `BLEEventSink.bleCentral(_:willRestore:)` has been declared on the seam all along
+    /// (`Sources/FoundryXKit/BluetoothSeam.swift:88`) and nothing has ever called it. That is the
+    /// gap: not a missing protocol, a fixture that could not exercise one the app already has.
+    ///
+    /// NOTE WHAT THIS DELIBERATELY DOES NOT DO. It does not bind the peripheral's delegate. A
+    /// restored peripheral arrives with live subscriptions and NO delegate until the app installs
+    /// one, which is precisely the window AC13's generation gate has to close — so anything the
+    /// recorder sends between here and `routeEventsToSink()` stages rather than delivers, and a
+    /// coordinator that binds carelessly gets it in a rush.
+    func presentAsRestoredSession() {
+        lock.lock()
+        connected = true
+        let central = self.central
+        lock.unlock()
+        peripheral.setLinkState(.connected)
+        peripheral.markSubscriptionsLiveAcrossRestoration()
+        deliver { sink in
+            guard let central else { return }
+            sink.bleCentral(central, willRestore: [self.peripheral])
+        }
+    }
+
     fileprivate func issueConnect() {
         let staged = reachability
         if staged.neverAnswersConnect { return }
@@ -1016,6 +1045,27 @@ final class FakePocketBLEPeripheral: BLEPeripheral, @unchecked Sendable {
 
     func routeEventsToSink() {
         lock.lock(); boundToSink = true; lock.unlock()
+    }
+
+    /// EVERY CHARACTERISTIC THIS PERIPHERAL WAS SUBSCRIBED TO IS STILL SUBSCRIBED.
+    ///
+    /// Core Bluetooth restores TRANSPORT state — connected peripherals and their characteristic
+    /// subscriptions — and nothing above it. That asymmetry is the entire hazard: the link is
+    /// live and the parser, the writer, the meter and the authenticated session are all gone.
+    fileprivate func markSubscriptionsLiveAcrossRestoration() {
+        // A RESTORED PERIPHERAL ARRIVES WITH ITS GRAPH ALREADY WALKED. iOS hands back the
+        // services and characteristics the previous process discovered, so the fake pre-discovers
+        // rather than making a test call `discoverServices` — which would be this process doing
+        // the discovering, the exact thing restoration means did NOT happen.
+        lock.lock()
+        discovered = catalog
+        lock.unlock()
+        for service in catalog {
+            service.discover(nil)
+            for characteristic in (service.discoveredCharacteristics ?? []) {
+                (characteristic as? FakePocketBLECharacteristic)?.isNotifying = true
+            }
+        }
     }
 
     func discoverServices(_ serviceUUIDs: [CBUUID]?) {

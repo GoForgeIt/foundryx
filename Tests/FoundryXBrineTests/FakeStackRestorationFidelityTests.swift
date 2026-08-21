@@ -82,6 +82,46 @@ final class FakeStackRestorationFidelityTests: XCTestCase {
                        "the staged callbacks did not arrive, so the window a generation gate has "
                            + "to close cannot be exercised")
     }
+    /// P0.1 — THE STATE NO `connect()` CAN PRODUCE.
+    ///
+    /// A restored peripheral is connected, its service graph is already walked, and its
+    /// characteristics are already notifying — because a PREVIOUS process did all of that. The
+    /// app is handed the result through `bleCentral(_:willRestore:)`, which the seam has always
+    /// declared and no fixture has ever called.
+    func testARestoredPeripheralArrivesConnectedAndSubscribedWithoutThisProcessConnecting() {
+        let stack = FakePocketBLEStack(deviceName: "PKT01_BLUE_26079bc5")
+        let sink = RecordingSink()
+        let queue = DispatchQueue(label: "restore")
+        _ = stack.factory(sink, queue, nil)
+
+        stack.presentAsRestoredSession()
+        queue.sync {}
+
+        XCTAssertEqual(sink.restored.count, 1,
+                       "the app was never handed a restored peripheral, so every criterion about "
+                           + "restoration is unrepresentable")
+        XCTAssertEqual(stack.peripheral.linkState, .connected,
+                       "a restored peripheral arrived disconnected")
+        let notifying = (stack.peripheral.discoveredServices ?? [])
+            .flatMap { ($0.discoveredCharacteristics ?? []) }
+            .filter(\.isNotifying)
+        XCTAssertGreaterThanOrEqual(notifying.count, 1,
+                                    "no characteristic is notifying, so a restored session cannot "
+                                        + "deliver the chunk AC1 must refuse to commit")
+    }
+
+    /// PAIRED EXISTENCE. A fixture that reports restoration for a stack nobody restored would
+    /// satisfy the assertions above on every test in the suite.
+    func testAnOrdinaryStackIsNotReportedAsRestored() {
+        let stack = FakePocketBLEStack(deviceName: "PKT01_BLUE_26079bc5")
+        let sink = RecordingSink()
+        let queue = DispatchQueue(label: "restore")
+        _ = stack.factory(sink, queue, nil)
+        queue.sync {}
+
+        XCTAssertTrue(sink.restored.isEmpty,
+                      "a stack nobody restored reported a restored peripheral")
+    }
 }
 
 /// Counts what the application layer was actually handed. Deliberately minimal: the question is
