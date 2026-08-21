@@ -268,39 +268,36 @@ public enum PocketMeasuredFigures {
             id: Id.fastSyncSpeed,
             renderedBy: "(nothing — no surface prints a rate)",
             describes: "how fast a recording comes over Bluetooth",
-            // MEASURED 2026-08-21, having been an open planning guess since the 2026-08-16
-            // bench. Two downloads of different lengths through the reference client, wall-clock
-            // timed, so rate and fixed session setup could be separated.
+            // MEASURED PROPERLY 2026-08-21, and the first attempt was WRONG BY 2.6x.
             //
-            //     rate  = (185,078 - 19,770) / (11.308 - 4.281) = 23,524 B/s
-            //     setup =  4.281 - 19,770 / 23,524              =  3.44 s
+            //     t = 5.34 s + bytes / 60,447 B/s     R^2 = 0.99661 over 6 points, 4 file sizes
             //
-            // A CORRECTION THAT MATTERS MORE THAN THE NUMBER. An earlier version of this comment
-            // carried a third line calling `3.44 + 185,078/23,524 = 11.31s vs 11.31s measured` a
-            // CHECK against a point the model did not come from. IT WAS CIRCULAR: a two-parameter
-            // line fitted from two observations must reproduce both exactly, so that line could
-            // not have failed. It is the defect family this file exists to police — a decision
-            // derived from a check whose failure is impossible — written into the register
-            // itself. A THIRD independently timed transfer is owed and is the only thing that
-            // tests linearity; until it exists the linear model is an assumption.
+            // ~60 KB/s steady, ~5.3 s fixed overhead, ~15x the 4,000 B/s audio-generation rate.
+            // Continuous background drain is comfortably viable.
             //
-            // WHAT IT SUPPORTS: Pocket audio is 32 kbps CBR = 4,000 B/s of wall-clock recording,
-            // so the link ran at 5.9x realtime OVER TWO SHORT TRANSFERS TOTALLING 205 KB. That is
-            // enough to say the link is not obviously too slow to build a drain on. It is NOT
-            // evidence that a drain keeps up in practice: nothing here tested sustained transfer,
-            // degradation, throttling, retry, battery, distance or interference.
+            // THE FIRST ATTEMPT FITTED TWO POINTS AND CALLED IT CHECKED. It reported 23,524 B/s
+            // and the "check" was circular — a two-parameter line through two observations
+            // reproduces both exactly. Worse, one point was fast relative to the true line and
+            // the other slow, so the errors pulled the slope in opposite directions and
+            // flattened it. Two individually unremarkable timings produced a rate 2.6x too low,
+            // and no amount of staring at them could have shown it.
             //
-            // AND IT REFUTES NEITHER PRIOR FIGURE, though an earlier version claimed both. The
-            // "~3-4 KB/s" from a laptop session could be an honest observation under different
-            // conditions rather than an error. The "18-36 KB/s" was about the WIFI leg and 23.5
-            // lies INSIDE it — inapplicable as Bluetooth evidence and unvalidated, not refuted.
+            // WHAT CAUGHT IT was a prediction PUBLISHED BEFORE THE MEASUREMENT: 124.0 s for a
+            // 2.84 MB file, with "under 90 s or over 170 s falsifies linearity" stated in
+            // advance. Measured 55.863 s. The prediction could not be adjusted afterwards
+            // because it already existed, which is the whole difference between a measurement
+            // and a fitting exercise.
+            //
+            // STILL NOT PRINTED. One unit, one firmware, desk distance, 20.3 MB total. Enough
+            // to decide an architecture, not enough to put on somebody's screen.
             support: .locallyMeasuredButWithheld(
                 artifact: bleThroughputArtifact,
                 method: """
-                    Two complete downloads of different lengths over Bluetooth through the \
-                    reference client, wall-clock timed around connect, bond, authenticate, \
-                    select and transfer; rate and setup solved separately and the linear model \
-                    checked against the point it was not derived from.
+                    Seven wall-clock timed downloads across four file sizes through the \
+                    reference client, least squares over six (the smallest is a reference-client \
+                    timeout artifact, not a property of the link). The model was tested by a \
+                    prediction published BEFORE the deciding measurement, which it failed — the \
+                    earlier two-point figure was 2.6x too low.
                     """)),
 
         PocketFigure(
