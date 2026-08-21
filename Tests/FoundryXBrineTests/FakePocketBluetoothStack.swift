@@ -300,6 +300,24 @@ final class FakePocketBLEStack: @unchecked Sendable {
     private weak var sink: BLEEventSink?
     private var queue: DispatchQueue?
     private var central: FakePocketBLECentral?
+
+    /// EVERY CENTRAL EVER HANDED OUT, not just the newest.
+    ///
+    /// `20260821T0153_the_drain_survives_termination` P0.4, and it is the Critical finding of that
+    /// track's plan review. This stack kept ONE sink, ONE queue and ONE central, and the factory
+    /// overwrote all three on every call — so a second phone could not exist, and AC16's
+    /// falsification ("two concurrent `SK&` in one recorder transcript") could never be produced.
+    /// P3.4 would have reported green against any implementation whatsoever.
+    ///
+    /// That is the same objection that justified this whole phase for AC1 — a criterion whose harm
+    /// the fixture cannot express is unrepresentable, not untested — missed one criterion over.
+    private var attachedCentrals: [(central: FakePocketBLECentral,
+                                    sink: BLEEventSink,
+                                    queue: DispatchQueue)] = []
+
+    /// How many centrals currently hold this recorder. One phone is the ordinary case; two is the
+    /// case AC16 must refuse.
+    var attachedCentralCount: Int { lock.lock(); defer { lock.unlock() }; return attachedCentrals.count }
     private(set) var peripheral: FakePocketBLEPeripheral!
     private var writtenCommands: [String] = []
     private var connected = false
@@ -374,9 +392,12 @@ final class FakePocketBLEStack: @unchecked Sendable {
             }
             let made = FakePocketBLECentral(stack: self)
             self.lock.lock()
+            // THE NEWEST IS STILL "CURRENT" so every existing scenario behaves exactly as before;
+            // what changes is that the previous one is no longer FORGOTTEN.
             self.sink = sink
             self.queue = queue
             self.central = made
+            self.attachedCentrals.append((central: made, sink: sink, queue: queue))
             self.lock.unlock()
             self.deliver { $0.bleCentralDidUpdateState(made) }
             return made

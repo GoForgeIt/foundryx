@@ -156,6 +156,52 @@ final class FakeStackRestorationFidelityTests: XCTestCase {
         XCTAssertFalse(held, "custody claims a file that is only a .partial")
         try? FileManager.default.removeItem(at: root)
     }
+    /// P0.4 — TWO PHONES CAN HOLD ONE RECORDER, or AC16 is theatre.
+    ///
+    /// **The Critical finding of this track's plan review.** The stack kept one sink, one queue and
+    /// one central, and the factory overwrote all three on every call — so a second phone could not
+    /// exist and AC16's falsification, "two concurrent `SK&` in one recorder transcript", could
+    /// never be produced. The criterion would have reported green against any implementation.
+    ///
+    /// That is the same objection that justified this entire phase for AC1 — a harm the fixture
+    /// cannot express is UNREPRESENTABLE, not untested — missed one criterion over, by the author
+    /// who had just made it.
+    func testASecondCentralDoesNotEraseTheFirst() {
+        let stack = FakePocketBLEStack(deviceName: "PKT01_BLUE_26079bc5")
+        let phoneA = RecordingSink()
+        let phoneB = RecordingSink()
+        let queueA = DispatchQueue(label: "phoneA")
+        let queueB = DispatchQueue(label: "phoneB")
+
+        _ = stack.factory(phoneA, queueA, nil)
+        XCTAssertEqual(stack.attachedCentralCount, 1)
+
+        _ = stack.factory(phoneB, queueB, nil)
+        XCTAssertEqual(stack.attachedCentralCount, 2,
+                       "the second central replaced the first instead of joining it, so a "
+                           + "two-phone race cannot be staged and AC16 cannot fail")
+    }
+
+    /// PAIRED EXISTENCE. A counter that only ever goes up would satisfy the assertion above while
+    /// counting nothing real; one central must read as one.
+    func testOneCentralReadsAsOne() {
+        let stack = FakePocketBLEStack(deviceName: "PKT01_BLUE_26079bc5")
+        _ = stack.factory(RecordingSink(), DispatchQueue(label: "solo"), nil)
+        XCTAssertEqual(stack.attachedCentralCount, 1,
+                       "one attached central did not read as one")
+    }
+
+    /// AND THE TRANSCRIPT IS SHARED, which is what makes "two concurrent `SK&`" observable at all.
+    /// A recorder has one command channel; two phones writing to it produce one interleaved
+    /// transcript, and AC16's whole falsification is reading that.
+    func testBothPhonesWriteIntoOneRecorderTranscript() {
+        let stack = FakePocketBLEStack(deviceName: "PKT01_BLUE_26079bc5")
+        _ = stack.factory(RecordingSink(), DispatchQueue(label: "a"), nil)
+        _ = stack.factory(RecordingSink(), DispatchQueue(label: "b"), nil)
+        XCTAssertEqual(stack.attachedCentralCount, 2)
+        XCTAssertNotNil(stack.commandsWritten,
+                        "there is no single transcript to read a concurrent SK& out of")
+    }
 }
 
 /// STAGE THE WRECKAGE OF A TERMINATED TRANSFER.
