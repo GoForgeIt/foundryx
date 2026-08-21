@@ -22,7 +22,10 @@ final class PocketRecorderRoomAndAutoClearTests: XCTestCase {
             safeElsewhere: PocketPlaceReading(answer: safeElsewhere ? .yes : .no, observedAt: Date()))
     }
 
-    private let armed = PocketAutoClear(armedAt: Date(timeIntervalSince1970: 1_000_000))
+    private let armedAt = Date(timeIntervalSince1970: 1_000_000)
+    private var armed: PocketAutoClear { PocketAutoClear(armedAt: armedAt) }
+    /// A copy that landed AFTER the owner armed the recorder.
+    private var syncedAfterArming: Date { armedAt.addingTimeInterval(60) }
 
     // MARK: - The setting decides, and OFF is the default
 
@@ -31,6 +34,7 @@ final class PocketRecorderRoomAndAutoClearTests: XCTestCase {
         let decisions = PocketAutomaticDrainPolicy.clearDecisions(
             broughtOverAutomatically: requests,
             autoClear: .off,
+            syncedAt: { _ in self.syncedAfterArming },
             presence: { _ in self.presence(safeElsewhere: true) })
 
         XCTAssertEqual(decisions.count, requests.count,
@@ -39,7 +43,7 @@ final class PocketRecorderRoomAndAutoClearTests: XCTestCase {
             guard case .keep(_, let why) = decision else {
                 return XCTFail("an unarmed recorder cleared something: \(decision)")
             }
-            XCTAssertEqual(why, .recorderIsNotArmed)
+            XCTAssertEqual(why, .thisRecorderIsNotArmed)
         }
     }
 
@@ -50,6 +54,7 @@ final class PocketRecorderRoomAndAutoClearTests: XCTestCase {
         let decisions = PocketAutomaticDrainPolicy.clearDecisions(
             broughtOverAutomatically: [one],
             autoClear: armed,
+            syncedAt: { _ in self.syncedAfterArming },
             presence: { _ in self.presence(safeElsewhere: true) })
 
         XCTAssertEqual(decisions, [.clear(one)])
@@ -61,9 +66,10 @@ final class PocketRecorderRoomAndAutoClearTests: XCTestCase {
         let decisions = PocketAutomaticDrainPolicy.clearDecisions(
             broughtOverAutomatically: [one],
             autoClear: armed,
+            syncedAt: { _ in self.syncedAfterArming },
             presence: { _ in self.presence(safeElsewhere: false) })
 
-        XCTAssertEqual(decisions, [.keep(one, because: .notProvenToBeAnywhereElse)])
+        XCTAssertEqual(decisions, [.keep(one, because: .notProvenSafe)])
     }
 
     /// `unknown ⇒ keep`. A place nobody asked about is not a copy anybody holds.
@@ -76,8 +82,58 @@ final class PocketRecorderRoomAndAutoClearTests: XCTestCase {
 
         XCTAssertEqual(
             PocketAutomaticDrainPolicy.clearDecisions(
-                broughtOverAutomatically: [one], autoClear: armed, presence: { _ in unknown }),
-            [.keep(one, because: .notProvenToBeAnywhereElse)])
+                broughtOverAutomatically: [one], autoClear: armed,
+                syncedAt: { _ in self.syncedAfterArming }, presence: { _ in unknown }),
+            [.keep(one, because: .notProvenSafe)])
+    }
+
+    /// **ARMING IS NOT RETROACTIVE, AND THIS TEST EXISTS BECAUSE I NEARLY SHIPPED A PATH THAT
+    /// IGNORED IT.**
+    ///
+    /// The first draft of `clearDecisions` re-spelled the rule as "armed && provably elsewhere"
+    /// and dropped `syncedAt >= armedAt`. On that draft this scenario would have CLEARED — the
+    /// recording is provably safe elsewhere and the recorder is armed — sweeping the entire
+    /// backlog that existed before the owner switched the control on. That is the behaviour the
+    /// 2026-08-16 ruling forbids, and it would have been reintroduced not by changing the rule
+    /// but by writing it a second time.
+    ///
+    /// `clearDecisions` now asks `PocketAutoClear.decision` and re-spells nothing.
+    func testARecordingThatBecameSafeBeforeTheOwnerArmedIsNotSweptUp() {
+        let one = request("20260821T090000")
+        let syncedBeforeArming = armedAt.addingTimeInterval(-60)
+
+        XCTAssertEqual(
+            PocketAutomaticDrainPolicy.clearDecisions(
+                broughtOverAutomatically: [one],
+                autoClear: armed,
+                syncedAt: { _ in syncedBeforeArming },
+                presence: { _ in self.presence(safeElsewhere: true) }),
+            [.keep(one, because: .itSyncedBeforeYouArmedThisRecorder)],
+            "arming swept up a recording that was already safe before the owner armed it")
+    }
+
+    /// Every arm of the shared decision is reachable through this policy — so the delegation
+    /// cannot quietly collapse four answers into two, which is exactly what the first draft did.
+    func testEveryDecisionArmIsReachableThroughThePolicy() {
+        let one = request("20260821T090000")
+        func reason(autoClear: PocketAutoClear, syncedAt: Date, safe: Bool) -> PocketAutoClear.Decision {
+            switch PocketAutomaticDrainPolicy.clearDecisions(
+                broughtOverAutomatically: [one], autoClear: autoClear,
+                syncedAt: { _ in syncedAt }, presence: { _ in self.presence(safeElsewhere: safe) }).first {
+            case .clear: return .clears
+            case .keep(_, let why): return why
+            case nil: return .notProvenSafe   // unreachable: one request in, one decision out
+            }
+        }
+        let observed: Set<PocketAutoClear.Decision> = [
+            reason(autoClear: .off, syncedAt: syncedAfterArming, safe: true),
+            reason(autoClear: armed, syncedAt: armedAt.addingTimeInterval(-60), safe: true),
+            reason(autoClear: armed, syncedAt: syncedAfterArming, safe: false),
+            reason(autoClear: armed, syncedAt: syncedAfterArming, safe: true),
+        ]
+        XCTAssertEqual(observed, Set(PocketAutoClear.Decision.allCases),
+                       "not every decision arm is reachable through the drain policy: missing "
+                       + "\(Set(PocketAutoClear.Decision.allCases).subtracting(observed))")
     }
 
     func testTheCandidateListAgreesWithTheDecisions() {
@@ -86,6 +142,7 @@ final class PocketRecorderRoomAndAutoClearTests: XCTestCase {
         let candidates = PocketAutomaticDrainPolicy.clearCandidates(
             broughtOverAutomatically: [safe, unsafe],
             autoClear: armed,
+            syncedAt: { _ in self.syncedAfterArming },
             presence: { $0 == safe ? self.presence(safeElsewhere: true)
                                    : self.presence(safeElsewhere: false) })
 

@@ -145,6 +145,7 @@ private final class AutoDrainWorld {
             let candidates = PocketAutomaticDrainPolicy.clearCandidates(
                 broughtOverAutomatically: autoCommitted,
                 autoClear: .off,
+                syncedAt: { _ in Date() },
                 presence: { _ in safeEverywhere })
             guard candidates.isEmpty else {
                 throw BrineStepError(
