@@ -1,17 +1,23 @@
 Feature: A transfer outlives the page that asked for it
   The queue was written, proven and shipped with NO production caller — the recorder page still
-  owned its transfer as a task on a screen, under an `.onDisappear` that cancelled it, so
-  walking away during a pull measured at 18-36 KB/s killed the pull. Wiring the page to the
-  queue is three decisions, and all three used to live where nothing in this repository could
-  execute them: what leaving the page does, what a finished transfer obliges the running app to
-  do, and which of the readings the radio produces is worth waking a screen for.
+  owned its transfer as a task on a screen, under an `.onDisappear` that cancelled it, so walking
+  away during a pull killed the pull. Wiring the page to the queue is three decisions, and all
+  three used to live where nothing in this repository could execute them: what leaving the page
+  does, what a finished transfer obliges the running app to do, and which of the readings the
+  radio produces is worth waking a screen for.
+
+  A RATE WAS NAMED HERE AND IT WAS NEVER MEASURED. This prose used to say the pull ran at
+  "18-36 KB/s". That figure was an estimate of the recorder's WiFi leg, taken from the reference
+  decode — not of Bluetooth, and never of anything timed on hardware. Fast sync is withdrawn as
+  of 2026-08-20 and every recording now crosses Bluetooth, whose rate nobody has measured;
+  `PocketMeasuredFigures` carries it as an open planning guess.
 
   Scenario: Leaving the page stops a check and leaves a transfer running
-    Given a shelf check, a durable transfer and the WiFi fast sync, each in flight in turn
+    Given a shelf check, a durable transfer and a non-durable errand on the same recording, each in flight in turn
     When the owner leaves the page during each of them
     Then the shelf check is stopped
     And the durable transfer is left running
-    And the fast sync is stopped, because it is not a durable job
+    And the non-durable errand is stopped, because only a durable job survives the page
     And a page with nothing running still answers stop
 
   Scenario: A finished transfer hands its conversation over and repeats what the clock said

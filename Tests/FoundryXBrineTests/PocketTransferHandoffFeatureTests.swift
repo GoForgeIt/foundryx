@@ -15,10 +15,14 @@ import BrineSwiftCore
 ///
 /// WHAT EACH SCENARIO CAN FAIL ON:
 ///
-///   * DEPARTURE is asserted over all four errands the page runs, INCLUDING the fast sync,
-///     which records itself under the same `bring-over` subject and must still stop. Return
-///     `.leaveItRunning` on the subject alone and the fast-sync check is red; return
+///   * DEPARTURE is asserted over all four errands the page runs, INCLUDING a NON-DURABLE one
+///     recorded under the same `bring-over` subject as the durable transfer, which must still
+///     stop. Return `.leaveItRunning` on the subject alone and that check is red; return
 ///     `.stopTheErrand` always — the shipped defect — and the transfer check is red.
+///     The WiFi fast sync was the instance that motivated this branch and it was withdrawn on
+///     2026-08-20; the RULE outlives it, because the subject token alone may never be what
+///     decides whether an errand survives the page — and continuous background drain is about
+///     to put a second errand under that same subject.
 ///   * FOLLOW-THROUGH is asserted over every case of `PocketTransferPhase`, so a case added
 ///     without a decision cannot compile past the exhaustive switch, and the clock warning is
 ///     asserted to be IN the rendered sentence — drop it from the phase or from the renderer
@@ -40,7 +44,7 @@ final class PocketTransferHandoffFeatureTests: XCTestCase {
 private enum TransferHandoffSteps {
     static func make(_ world: TransferHandoffWorld) -> [StepDefinition] {
         let acts = [
-            "a shelf check, a durable transfer and the WiFi fast sync, each in flight in turn",
+            "a shelf check, a durable transfer and a non-durable errand on the same recording, each in flight in turn",
             "the owner leaves the page during each of them",
             "every way one queued recording can end",
             "each ending is put to the follow-through",
@@ -50,7 +54,7 @@ private enum TransferHandoffSteps {
         let checks = [
             "the shelf check is stopped",
             "the durable transfer is left running",
-            "the fast sync is stopped, because it is not a durable job",
+            "the non-durable errand is stopped, because only a durable job survives the page",
             "a page with nothing running still answers stop",
             "only the endings that moved custody hand a conversation to the running app",
             "the sentence for a finished transfer carries the recorder's clock warning",
@@ -121,7 +125,7 @@ private final class TransferHandoffWorld {
 
     func act(_ phrase: String) throws {
         switch phrase {
-        case "a shelf check, a durable transfer and the WiFi fast sync, each in flight in turn":
+        case "a shelf check, a durable transfer and a non-durable errand on the same recording, each in flight in turn":
             // Nothing is staged here that the step below does not use; the errands are the
             // page's own four states and they are named where they are decided.
             departures = [:]
@@ -134,9 +138,13 @@ private final class TransferHandoffWorld {
                 PocketErrandInFlight(subject: PocketErrandCommand.bringOverSubject,
                                      recordingId: "2026-08-07/20260807142852"),
                 isDurableJob: true)
-            // THE TRAP THIS SCENARIO EXISTS FOR. The WiFi leg records itself under the SAME
-            // subject token as the Bluetooth transfer and is not a durable job.
-            departures["fast-sync"] = PocketErrandDeparturePolicy.decide(
+            // THE TRAP THIS SCENARIO EXISTS FOR: an errand recorded under the SAME subject
+            // token as the durable transfer, which is NOT a durable job. The WiFi leg was the
+            // instance that motivated it and it was withdrawn on 2026-08-20; the RULE outlives
+            // it, because the subject token alone must never be what decides whether an errand
+            // survives the page. Continuous background drain will put a second errand under
+            // this subject, and this is the branch that says which of them keeps running.
+            departures["non-durable"] = PocketErrandDeparturePolicy.decide(
                 PocketErrandInFlight(subject: PocketErrandCommand.bringOverSubject,
                                      recordingId: "2026-08-07/20260807142852"),
                 isDurableJob: false)
@@ -202,8 +210,8 @@ private final class TransferHandoffWorld {
             try expect(departures["transfer"] == .leaveItRunning,
                        "THE WHOLE DEFECT. A bring-over is custody moving, and the page leaving "
                            + "is the ordinary case rather than an abandonment")
-        case "the fast sync is stopped, because it is not a durable job":
-            try expect(departures["fast-sync"] == .stopTheErrand,
+        case "the non-durable errand is stopped, because only a durable job survives the page":
+            try expect(departures["non-durable"] == .stopTheErrand,
                        "the WiFi leg shares the `bring-over` subject and is NOT durable: its "
                            + "whole tail is behind the page's model and it holds a "
                            + "background-time assertion this model has to give back")
