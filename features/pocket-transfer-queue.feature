@@ -32,3 +32,12 @@ Feature: A bring-over is a queued job with real progress, not a field on a page
     Then the waits between retries follow the shipped backoff schedule
     And every retry wait says the transfer starts again from the beginning
     And the recording ends reported as not brought over, with nothing kept
+
+  # AC13, unheld until 2026-08-21. The queue's own progress callback fires once per BLE
+  # notification — deliberately, so readings reach the screen in arrival order. What keeps that
+  # from being a performance defect is the read model's admission rule, and nothing held it.
+  # This repo has a felt-performance proposal that exists because of exactly this shape.
+  Scenario: A long transfer does not tell the screen about every chunk that arrives
+    Given a transfer that delivers two thousand chunks of a large recording
+    Then the screen is told about fewer than one chunk in ten
+    And the screen is still told enough times for a bar to move

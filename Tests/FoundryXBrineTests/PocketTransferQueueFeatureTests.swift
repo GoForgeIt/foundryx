@@ -28,7 +28,8 @@ final class PocketTransferQueueFeatureTests: XCTestCase {
         let result = try await BrineFeatureRunner.run(
             "pocket-transfer-queue",
             registry: StepRegistry(PocketTransferQueueSteps.make(world)))
-        XCTAssertEqual(result.passed, 3)
+        XCTAssertEqual(result.passed, 4,
+                       "four scenarios — AC13 was added 2026-08-21")
     }
 }
 
@@ -37,6 +38,7 @@ private enum PocketTransferQueueSteps {
         let givens = [
             "a recorder holding two recordings queued for transfer, replaying the captured trace",
             "a recorder that drops the link partway through a transfer and stays away",
+            "a transfer that delivers two thousand chunks of a large recording",
         ]
         let whens = [
             "the queue runs",
@@ -52,6 +54,8 @@ private enum PocketTransferQueueSteps {
             "the waits between retries follow the shipped backoff schedule",
             "every retry wait says the transfer starts again from the beginning",
             "the recording ends reported as not brought over, with nothing kept",
+            "the screen is told about fewer than one chunk in ten",
+            "the screen is still told enough times for a bar to move",
         ]
         var steps = givens.map { phrase in
             defineStep(phrase) { context, _, _ in try await world.given(phrase); return context }
@@ -196,7 +200,31 @@ private actor PocketTransferQueueWorld {
 
     // MARK: - Given
 
+    /// AC13's ledger: how many of N chunk readings the READ MODEL was told about.
+    private var chunkReadings = 0
+    private var admittedReadings = 0
+
     func given(_ phrase: String) async throws {
+        if phrase == "a transfer that delivers two thousand chunks of a large recording" {
+            // THE SHIPPED GATE, not a copy of its rule. `PocketTransferProgressReporter` is what
+            // `App/DeviceScreen.swift:2718` puts between the queue's per-chunk callback and the
+            // screen, so it is the seam AC13 is about.
+            let reporter = PocketTransferProgressReporter()
+            // 2,000 chunks of a 4.8 MB recording — the size a twenty-minute Pocket file actually
+            // is at 32 kbps CBR. A SMALL file cannot exercise this rule: with fewer than ~1,010
+            // chunks nearly every chunk moves a whole percent, so N/10 is unreachable by
+            // construction and a scenario using one would be asserting arithmetic, not coalescing.
+            let announced = 4_800_000
+            let perChunk = announced / 2_000
+            chunkReadings = 2_000
+            admittedReadings = 0
+            for chunk in 1...2_000 {
+                let phase = PocketTransferPhase.transferring(deliveredBytes: chunk * perChunk,
+                                                             announcedBytes: announced)
+                if reporter.admit(phase) { admittedReadings += 1 }
+            }
+            return
+        }
         phases = PhaseLedger()
         sleeps = SleepLedger()
         secrets = InMemoryPocketSecretStore()
@@ -337,6 +365,24 @@ private actor PocketTransferQueueWorld {
 
     func then(_ phrase: String) async throws {
         switch phrase {
+        case "the screen is told about fewer than one chunk in ten":
+            guard admittedReadings < chunkReadings / 10 else {
+                throw BrineStepError(
+                    "the read model was told \(admittedReadings) times for \(chunkReadings) "
+                    + "chunks — publishing per chunk is the felt-performance defect this "
+                    + "criterion exists to prevent")
+            }
+
+        case "the screen is still told enough times for a bar to move":
+            // PAIRED EXISTENCE. A reporter that admitted NOTHING satisfies the bound above
+            // perfectly and renders a bar that never moves — the prohibition alone is
+            // satisfied by suppressing the feature it is protecting.
+            guard admittedReadings >= 10 else {
+                throw BrineStepError(
+                    "only \(admittedReadings) readings reached the screen across "
+                    + "\(chunkReadings) chunks; the bound is satisfied by saying nothing")
+            }
+
         case "both recordings arrive on a single authenticated session":
             let commands = try requireCommands()
             XCTAssertEqual(commands.filter { $0.hasPrefix("SK&") }.count, 1,
