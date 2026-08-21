@@ -122,6 +122,58 @@ final class FakeStackRestorationFidelityTests: XCTestCase {
         XCTAssertTrue(sink.restored.isEmpty,
                       "a stack nobody restored reported a restored peripheral")
     }
+    /// P0.3 — A `.partial` ON DISK THAT NO WRITER IN THIS PROCESS OWNS.
+    ///
+    /// The state after a mid-write termination, and the one AC1 and AC3 both turn on.
+    /// `PocketBringOver` writes arriving bytes to a `<timestamp>.mp3.partial` sibling and takes
+    /// the real name only after a verified re-read (`Sources/FoundryXKit/PocketBringOver.swift:146`)
+    /// — a genuinely good design, and it means partial bytes are NEVER mistaken for a recording.
+    /// What is missing is a reaper: `abandon()` is in-process only, so a kill mid-write leaves the
+    /// `.partial` forever and nothing at launch removes it.
+    ///
+    /// A fixture must be able to produce one WITHOUT a writer, because a `.partial` created by a
+    /// live writer is the case AC3 says to LEAVE ALONE. The two are distinguished by provenance,
+    /// so the fixture has to be able to make both.
+    func testAPartialCanBeStagedWithNoWriterInThisProcess() async throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("p03-\(UUID().uuidString)", isDirectory: true)
+        let store = PocketRecorderFileStore(root: root)
+        let key = PocketRecorderFileKey(
+            identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: "t"),
+            date: "2026-08-07", timestamp: "20260807142852")
+
+        let orphan = try PocketOrphanedPartial.stage(bytes: 4_096, for: key, in: store)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: orphan.path),
+                      "no .partial was staged, so the state after a mid-write kill cannot be set up")
+        XCTAssertEqual(orphan.pathExtension, "partial")
+        // AND IT IS NOT MISTAKEN FOR A RECORDING — the property the whole design rests on.
+        let real = store.url(for: key)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: real.path),
+                       "staging a partial produced an .mp3, which would mean partial bytes can be "
+                           + "read back as a complete recording")
+        let held = await store.alreadyHeld(key)
+        XCTAssertFalse(held, "custody claims a file that is only a .partial")
+        try? FileManager.default.removeItem(at: root)
+    }
+}
+
+/// STAGE THE WRECKAGE OF A TERMINATED TRANSFER.
+///
+/// Deliberately not a method on `PocketRecorderFileWriter`: a writer that can produce this has an
+/// owning process, and the whole point is a `.partial` with none. It writes the file the way a
+/// half-finished transfer leaves it and nothing else — no custody record, no receipt.
+enum PocketOrphanedPartial {
+    @discardableResult
+    static func stage(bytes: Int, for key: PocketRecorderFileKey,
+                      in store: PocketRecorderFileStore) throws -> URL {
+        let real = store.url(for: key)
+        try FileManager.default.createDirectory(at: real.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        let partial = real.appendingPathExtension("partial")
+        try Data(repeating: 0x5A, count: bytes).write(to: partial)
+        return partial
+    }
 }
 
 /// Counts what the application layer was actually handed. Deliberately minimal: the question is
