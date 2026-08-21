@@ -932,6 +932,49 @@ final class FakePocketBLEPeripheral: BLEPeripheral, @unchecked Sendable {
     private var discovered: [FakePocketBLEService]?
     private(set) var boundToSink = false
 
+    /// NOTIFICATIONS THAT ARRIVED BEFORE THE DELEGATE DID — the window AC13 exists to close.
+    ///
+    /// Production installs the real peripheral delegate ONLY in `routeEventsToSink()`
+    /// (`BluetoothSeam.swift:327`), so anything a peripheral sends before that reaches no
+    /// application code. This fake used to deliver it anyway: `deliver` sends to the
+    /// factory-installed sink whenever one exists and never consulted the flag above, which
+    /// `routeEventsToSink()` merely SET and nothing read. A scenario claiming to exercise
+    /// "a chunk arrived before we were listening" was therefore exercising nothing.
+    ///
+    /// Staged here instead, so a test can assert BOTH halves: that nothing reached the app while
+    /// unbound, and that a restoration coordinator which installs its delegate without first
+    /// establishing a generation gate then receives them in a rush.
+    private var stagedBeforeBinding: [(BLEEventSink) -> Void] = []
+
+    /// How many deliveries this peripheral refused because no delegate was installed yet.
+    private(set) var suppressedBeforeBinding = 0
+
+    /// THE GATE. Every `sink.blePeripheral(…)` delivery goes through here, because a peripheral
+    /// callback in CoreBluetooth reaches `CBPeripheralDelegate` and nothing else — a central
+    /// callback is a different delegate and is deliberately NOT gated on this.
+    fileprivate func deliverToDelegate(_ body: @escaping (BLEEventSink) -> Void) {
+        lock.lock()
+        let bound = boundToSink
+        if !bound {
+            stagedBeforeBinding.append(body)
+            suppressedBeforeBinding += 1
+        }
+        lock.unlock()
+        guard bound else { return }
+        stack.deliver { sink in body(sink) }
+    }
+
+    /// Hand the app everything that arrived before it was listening. A restoration coordinator
+    /// that installs its delegate before it is ready to reject stale work gets this in one go —
+    /// which is the harm AC13's generation gate has to survive.
+    func flushStagedNotifications() {
+        lock.lock()
+        let staged = stagedBeforeBinding
+        stagedBeforeBinding = []
+        lock.unlock()
+        for body in staged { stack.deliver { sink in body(sink) } }
+    }
+
     init(identifier: UUID, name: String?, services: [FakePocketBLEService],
          stack: FakePocketBLEStack) {
         self.identifier = identifier
@@ -982,7 +1025,7 @@ final class FakePocketBLEPeripheral: BLEPeripheral, @unchecked Sendable {
         if stack.reachability.neverListsServices { return }
         let found = catalog.filter { serviceUUIDs?.contains($0.uuid) ?? true }
         lock.lock(); discovered = found; lock.unlock()
-        stack.deliver { [weak self] sink in
+        deliverToDelegate { [weak self] sink in
             guard let self else { return }
             sink.blePeripheral(self, didDiscoverServices: nil)
         }
@@ -993,14 +1036,14 @@ final class FakePocketBLEPeripheral: BLEPeripheral, @unchecked Sendable {
             fatalError("the fake Pocket peripheral was handed a \(type(of: service))")
         }
         service.discover(characteristicUUIDs)
-        stack.deliver { [weak self] sink in
+        deliverToDelegate { [weak self] sink in
             guard let self else { return }
             sink.blePeripheral(self, didDiscoverCharacteristicsFor: service, error: nil)
         }
     }
 
     func readValue(for characteristic: BLECharacteristic) {
-        stack.deliver { [weak self] sink in
+        deliverToDelegate { [weak self] sink in
             guard let self else { return }
             sink.blePeripheral(self, didUpdateValueFor: characteristic, error: nil)
         }
