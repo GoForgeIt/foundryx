@@ -202,6 +202,63 @@ final class FakeStackRestorationFidelityTests: XCTestCase {
         XCTAssertNotNil(stack.commandsWritten,
                         "there is no single transcript to read a concurrent SK& out of")
     }
+    /// P0.5 — PROVE THE HARNESS ITSELF, which is the only task in this phase that could not be
+    /// skipped without the other four becoming decoration.
+    ///
+    /// Phase 0 closes no acceptance criterion. Its deliverable is that AC1, AC12, AC13 and AC16
+    /// become **capable of failing**, and there is exactly one way to know that: build the wrong
+    /// implementation on purpose and watch the fixture catch it.
+    ///
+    /// The coordinator does not exist yet — that is Phase 2 — so the wrong implementation is
+    /// modelled here: a consumer that does what a naive rebind of the Omi path would do, which is
+    /// take a restored peripheral's bytes and commit them.
+    ///
+    /// **If this test could not distinguish the naive consumer from a correct one, every scenario
+    /// written against this fixture in Phase 2 would be theatre**, and a green suite would say
+    /// nothing at all about whether the restored path is safe.
+    func testTheFixtureCatchesAConsumerThatCommitsRestoredBytes() async throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("p05-\(UUID().uuidString)", isDirectory: true)
+        let store = PocketRecorderFileStore(root: root)
+        let key = PocketRecorderFileKey(
+            identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: "t"),
+            date: "2026-08-07", timestamp: "20260807142852")
+        try PocketOrphanedPartial.stage(bytes: 4_096, for: key, in: store)
+
+        let stack = FakePocketBLEStack(deviceName: "PKT01_BLUE_26079bc5")
+        let sink = RecordingSink()
+        let queue = DispatchQueue(label: "p05")
+        _ = stack.factory(sink, queue, nil)
+        stack.presentAsRestoredSession()
+        queue.sync {}
+
+        // THE WRONG IMPLEMENTATION, stated as code rather than described in a comment: it sees a
+        // restored peripheral, binds immediately the way DeviceManager:1056 does for Omi, and
+        // accepts whatever arrives.
+        XCTAssertEqual(sink.restored.count, 1, "nothing to be naive ABOUT")
+        stack.peripheral.routeEventsToSink()
+        stack.peripheral.flushStagedNotifications()
+        stack.peripheral.readValue(for: stack.peripheral.discoveredServices!
+            .flatMap { $0.discoveredCharacteristics ?? [] }.first!)
+        queue.sync {}
+
+        // THE FIXTURE'S ANSWER: bytes reached a consumer that had no writer, no meter and no
+        // expected byte count. A correct coordinator must make this count zero by refusing at
+        // ingress, and Phase 2's AC13 is that refusal.
+        XCTAssertGreaterThanOrEqual(sink.peripheralCallbacks, 1,
+                                    "a naive consumer received NOTHING from a restored peripheral, "
+                                        + "so this fixture cannot tell a safe coordinator from an "
+                                        + "unsafe one and every Phase 2 scenario would be theatre")
+
+        // AND THE WRECKAGE IS STILL THERE TO BE MISHANDLED — the orphan a correct sweep removes
+        // and a naive one either commits or leaves forever.
+        let orphan = store.url(for: key).appendingPathExtension("partial")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: orphan.path),
+                      "the staged partial vanished, so AC3 has nothing to act on")
+        let held = await store.alreadyHeld(key)
+        XCTAssertFalse(held, "custody already claims the file, so AC1 cannot observe a wrong commit")
+        try? FileManager.default.removeItem(at: root)
+    }
 }
 
 /// STAGE THE WRECKAGE OF A TERMINATED TRANSFER.
