@@ -100,14 +100,82 @@ public enum PocketAutomaticDrainPolicy {
         }
     }
 
-    /// AC15. **An automatic drain contributes NO candidates to the owner-armed clear.**
+    /// Why the armed clear is not taking a recording the drain just brought over.
     ///
-    /// Not a bug and not an oversight: clearing removes a recording from the only device holding
-    /// it, and an unattended drain composed with an unattended delete is a Tier-3 action nobody
-    /// is watching. A recording brought over automatically is kept and left on the recorder; the
-    /// owner clears it from a screen, as they do today.
-    public static func clearCandidates(broughtOverAutomatically: [PocketRecordingRequest])
-        -> [PocketRecordingRequest] {
-        []
+    /// Never a bare omission from a list: "it was not offered" and "it was not offered because
+    /// nowhere else has answered yes" are different facts, and only the second can be shown to a
+    /// person or acted on.
+    public enum PocketAutoClearRefusal: Sendable, Equatable {
+        /// The owner has not armed this recorder. The default, and not a failure.
+        case recorderIsNotArmed
+        /// **THE SAFETY PREDICATE.** Nowhere other than the recorder has answered `yes`. An
+        /// unasked place is not a copy anybody holds, so `unknown` lands here too.
+        case notProvenToBeAnywhereElse
+
+        public var line: String {
+            switch self {
+            case .recorderIsNotArmed:
+                return "automatic clearing is off for this recorder"
+            case .notProvenToBeAnywhereElse:
+                return "it is not proven to be anywhere other than the recorder"
+            }
+        }
+    }
+
+    /// What the armed clear decided about one recording. Both arms carry the request, so a
+    /// caller can render the kept ones as easily as the cleared ones.
+    public enum PocketAutoClearDecision: Sendable, Equatable {
+        case clear(PocketRecordingRequest)
+        case keep(PocketRecordingRequest, because: PocketAutoClearRefusal)
+    }
+
+    /// AC15, **RESOLVED BY NICK 2026-08-21: automatic AND manual, the owner chooses.**
+    ///
+    /// This used to return `[]` unconditionally — automatic pulling with manual clearing —
+    /// as a deliberate, flagged scope reduction while an unattended drain had never run
+    /// unattended without incident. Nick's ruling supersedes it: both paths ship, the choice
+    /// is a per-recorder setting, and a person who cannot record because the recorder is full
+    /// is told so and offered both ways out.
+    ///
+    /// **WHAT DID NOT CHANGE, AND MUST NOT.** The safety predicate is the same one the manual
+    /// path has always used — `PocketRemoveFromRecorderPresentation.autoClearMayTake`, i.e.
+    /// `presence.isDurableElsewhere`. Arming a recorder does NOT lower the bar for removal; it
+    /// only removes the requirement that a person tap each one. Nick's standing rule is intact:
+    /// *nothing leaves the recorder unless we can prove we hold it somewhere else.*
+    ///
+    /// **TWO GATES, BOTH REQUIRED.** Armed, and provably elsewhere. Reading `autoClear` first
+    /// is not an optimisation — an unarmed recorder must not have its presence consulted at
+    /// all, so that a bug in presence resolution cannot express itself as a deletion on a
+    /// recorder whose owner never opted in.
+    ///
+    /// - Parameter presence: resolved per recording by the caller. Injected rather than fetched
+    ///   so a test can choose the state; a policy that fetches its own inputs cannot be driven.
+    public static func clearDecisions(
+        broughtOverAutomatically: [PocketRecordingRequest],
+        autoClear: PocketAutoClear,
+        presence: (PocketRecordingRequest) -> PocketRecordingPresence
+    ) -> [PocketAutoClearDecision] {
+        guard autoClear.isArmed else {
+            return broughtOverAutomatically.map { .keep($0, because: .recorderIsNotArmed) }
+        }
+        return broughtOverAutomatically.map { request in
+            PocketRemoveFromRecorderPresentation.autoClearMayTake(presence(request))
+                ? .clear(request)
+                : .keep(request, because: .notProvenToBeAnywhereElse)
+        }
+    }
+
+    /// The recordings the armed clear may take. A thin read over `clearDecisions`, kept so the
+    /// common call site does not restate the filter — and deliberately NOT the primary API, so
+    /// a caller that wants to say why something was kept has somewhere to get it.
+    public static func clearCandidates(
+        broughtOverAutomatically: [PocketRecordingRequest],
+        autoClear: PocketAutoClear,
+        presence: (PocketRecordingRequest) -> PocketRecordingPresence
+    ) -> [PocketRecordingRequest] {
+        clearDecisions(broughtOverAutomatically: broughtOverAutomatically,
+                       autoClear: autoClear,
+                       presence: presence)
+            .compactMap { if case .clear(let r) = $0 { return r } else { return nil } }
     }
 }
