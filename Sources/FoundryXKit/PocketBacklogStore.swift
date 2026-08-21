@@ -99,12 +99,24 @@ public enum PocketBacklogReadout: Sendable, Equatable {
 
 /// One recorder's backlog on disk, in a file of its own.
 public struct PocketBacklogStore: Sendable {
-    private let root: URL
+    /// nil means "resolve through the account scope, every time" — never a captured path.
+    private let injectedRoot: URL?
 
-    public init(root: URL? = nil) {
-        self.root = root ?? FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("PocketBacklogs", isDirectory: true)
+    /// ACCOUNT-SCOPED, AND THE FIRST VERSION WAS NOT.
+    ///
+    /// It defaulted to `applicationSupportDirectory`, and `AccountDataIsolationFeatureTests`
+    /// failed with "User-private durable paths must resolve through CaptureAccountScope." The
+    /// gate was right: a backlog NAMES somebody's recordings by day and instant, so two accounts
+    /// on one device would have shared one queue. It is user-private for exactly the reason the
+    /// audio is.
+    ///
+    /// RESOLVED PER CALL rather than captured at construction, because the account can change
+    /// under a long-lived store and a captured root would keep writing to the previous
+    /// account's directory.
+    public init(root: URL? = nil) { self.injectedRoot = root }
+
+    private var root: URL {
+        injectedRoot ?? CaptureAccountScope.privateURL(for: .pocketBacklogs)
     }
 
     /// One file per recorder, named by the device's own storage key — the same scoping custody

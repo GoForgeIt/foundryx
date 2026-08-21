@@ -105,11 +105,18 @@ public enum CaptureAccountScope {
         /// and it is a DIRECTORY, because one recorder's shelf is many files keyed by the
         /// recorder's own reported day and instant.
         case pocketRecordings
+        /// What a drain still intends to take off one recorder: the backlog, the owner's stops
+        /// and each recording's spent attempts. Account-private for the same reason
+        /// `pocketRecordings` is — it NAMES somebody's recordings by day and instant, so two
+        /// people on one device must not see each other's queue. A DIRECTORY, because it is one
+        /// file per recorder.
+        case pocketBacklogs
 
         fileprivate var relativePath: String {
             switch self {
             case .chatConversations: return "chat-conversations.json"
             case .pocketRecordings: return "pocket-recordings"
+            case .pocketBacklogs: return "pocket-backlogs"
             }
         }
     }
