@@ -6,15 +6,28 @@
 	<array>
 		<string>Default</string>
 	</array>
-	<!-- FAST SYNC (Step 8). Nick approved this on 2026-08-16. Joining the recorder's own
-	     access point is the whole transport swap; without this key `NEHotspotConfiguration`
-	     refuses and the one-tap join that is already written cannot run.
+	<!-- HOTSPOT CONFIGURATION. THE FEATURE THIS WAS ADDED FOR IS WITHDRAWN.
 
-	     IT IS A SIGNING CHANGE, NOT A RUNTIME ONE. The provisioning profile this app ships
-	     under must be regenerated with the Hotspot Configuration capability, or the build
-	     fails at SIGNING — a profile that does not carry the entitlement rejects a binary
-	     that requests it. Debug simulator builds are unsigned and unaffected, so a local
-	     green says nothing about this. -->
+	     It was added on 2026-08-16 for fast sync — joining the recorder's own access point.
+	     That capability was withdrawn on 2026-08-20 (`b0b352f`) because the recorder's AP
+	     drops a client about eight seconds after the WPA2 handshake completes: measured six
+	     times at 7.8s, 8.03s, 8.1s, 8.1s and 8.28s, three of them after taking a real DHCP
+	     lease, once with the file selection and begin-transfer already issued over Bluetooth
+	     with the phone still attached. A twenty-minute recording is ~4.8 MB and does not
+	     cross an eight-second link.
+
+	     WHY THE KEY IS STILL HERE, WHICH IS A DECISION AND NOT AN OVERSIGHT. Removing an
+	     entitlement is a SIGNING change: the provisioning profile must be regenerated, and a
+	     profile/binary mismatch fails at signing rather than at runtime — debug simulator
+	     builds are unsigned, so a local green says nothing about it. Ripping it out to tidy
+	     up would risk the ship path for a capability nobody is using. It is left in place,
+	     named as dead, pending a deliberate profile change. Nick's call, not a cleanup.
+
+	     THE CODE CANNOT REACH IT. `RecorderShelfControlsGateTests` fails if anything under
+	     `App/` names `NEHotspotConfiguration`, `PocketWiFiCommand` or
+	     `performReferenceWiFiCommand` — so this key grants a permission the application layer
+	     has no path to use. THE ENTITLEMENT IS NOT THE RE-ENTRY BAR; the measurement is.
+	     Finding this key enabled is not evidence that fast sync is one wiring job away. -->
 	<key>com.apple.developer.networking.HotspotConfiguration</key>
 	<true/>
 	<key>com.apple.security.application-groups</key>

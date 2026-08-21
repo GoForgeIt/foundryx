@@ -57,13 +57,40 @@ final class RecorderShelfControlsGateTests: XCTestCase {
                       "the shelf band does not walk the kit's control order, so the array "
                           + "above is a decision nothing obeys")
 
-        // 4. AND ONLY THEN, THE BAN — over COMPOSITION rather than spelling. What is gone is
-        //    the page's ability to START one, which no rename survives.
-        XCTAssertFalse(screen.contains("check.fastSync(hardwareToken:"),
-                       "the recorder page can still start a fast sync over an access point "
-                           + "that drops a client after eight seconds")
-        XCTAssertFalse(screen.contains("PocketFastSyncErrand.run("),
-                       "the page still reaches the fast-sync errand")
+        // 4. AND ONLY THEN, THE BAN.
+        //
+        // THIS USED TO SAY "which no rename survives" AND THAT WAS FALSE. It banned two
+        // SPELLINGS — `check.fastSync(hardwareToken:` and `PocketFastSyncErrand.run(` — with
+        // `String.contains`, so `check.quickTransfer(…)` calling the same transport passed it
+        // cleanly. A comment claiming a check is stronger than it is, is worse than the weak
+        // check alone: it stops the next reader looking. Found by the cross-vendor review of
+        // this track's own spec, 2026-08-21.
+        //
+        // WHAT IS BANNED NOW IS THE TRANSPORT, WHICH A RENAME CANNOT MOVE. The WiFi control
+        // vocabulary still exists in the kit — `PocketWiFiCommand` and
+        // `PocketBLEClient.performReferenceWiFiCommand` (`PocketBLEProtocolClient.swift:36,532`)
+        // — because the protocol record is worth keeping. What may not exist is any path from
+        // `App/` to it. Rename the button all you like; to actually raise the access point you
+        // have to name one of these, and then this fails.
+        for reachesTheTransport in ["performReferenceWiFiCommand", "PocketWiFiCommand",
+                                    "NEHotspotConfiguration", "PocketFastSyncErrand"] {
+            XCTAssertFalse(screen.contains(reachesTheTransport),
+                           "\(reachesTheTransport) is reachable from the recorder page, so a "
+                               + "transfer over an access point that drops a client after eight "
+                               + "seconds can be started again under any name")
+        }
+        // AND THE WHOLE APP LAYER, not just this one file — an entry point moved to a toolbar,
+        // a swipe action, a context menu or a deep link would leave the page clean and the
+        // capability restored. This is the half AC2 and AC3 cannot reach, because they only
+        // describe ONE band's declared population.
+        for file in try AppSourceTree.appSideSwiftFiles() {
+            let text = try String(contentsOf: file, encoding: .utf8)
+            let code = AppSourceTree.code(of: text)
+            for reachesTheTransport in ["performReferenceWiFiCommand", "PocketWiFiCommand"] {
+                XCTAssertFalse(code.contains(reachesTheTransport),
+                               "\(AppSourceTree.relativePath(file)) reaches the WiFi transport")
+            }
+        }
     }
 
     /// THE SPEED NOBODY MEASURED STILL MAY NOT REACH A PERSON, and now it matters MORE rather
