@@ -311,9 +311,28 @@ final class FakePocketBLEStack: @unchecked Sendable {
     ///
     /// That is the same objection that justified this whole phase for AC1 — a criterion whose harm
     /// the fixture cannot express is unrepresentable, not untested — missed one criterion over.
-    private var attachedCentrals: [(central: FakePocketBLECentral,
-                                    sink: BLEEventSink,
-                                    queue: DispatchQueue)] = []
+    /// THE SINK IS HELD WEAKLY HERE, AND THAT IS LOAD-BEARING RATHER THAN TIDY.
+    ///
+    /// `transportIsListening` is deliberately not a flag — it reads whether anything in the app
+    /// is STILL BOUND, by asking whether a weak reference survived. `OneTapIsOneErrandFeatureTests`
+    /// leans on that to prove the app let go of the radio when the page went away, which is the
+    /// strong form of "nobody is listening".
+    ///
+    /// The first version of this list held the sink STRONGLY, so nothing was ever released and
+    /// that scenario waited ten seconds for a release that could not happen. `swift test` was
+    /// green; the app-hosted lane caught it. A fixture that keeps the app alive changes the
+    /// property under test into a tautology.
+    private final class Attachment {
+        let central: FakePocketBLECentral
+        weak var sink: BLEEventSink?
+        let queue: DispatchQueue
+        init(central: FakePocketBLECentral, sink: BLEEventSink, queue: DispatchQueue) {
+            self.central = central
+            self.sink = sink
+            self.queue = queue
+        }
+    }
+    private var attachedCentrals: [Attachment] = []
 
     /// How many centrals currently hold this recorder. One phone is the ordinary case; two is the
     /// case AC16 must refuse.
@@ -397,7 +416,7 @@ final class FakePocketBLEStack: @unchecked Sendable {
             self.sink = sink
             self.queue = queue
             self.central = made
-            self.attachedCentrals.append((central: made, sink: sink, queue: queue))
+            self.attachedCentrals.append(Attachment(central: made, sink: sink, queue: queue))
             self.lock.unlock()
             self.deliver { $0.bleCentralDidUpdateState(made) }
             return made
