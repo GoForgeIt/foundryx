@@ -1580,6 +1580,18 @@ private struct CaptureCard: View {
                 waveformAnimated: isInProgress(p),
                 onTap: nil
             )
+            // WHAT IS ACTUALLY HAPPENING TO THIS RECORDING, from what the door reported and
+            // nothing else. Every row and every sentence comes from the kit
+            // (`RecordingJourneyPresentation.ladder`), so `swift test` holds the words: a stage
+            // decision written into a view body is a rule nothing in this repository can
+            // execute, which is exactly how the refuted privacy guards got there.
+            //
+            // It draws NOTHING until the poller has something to say — the ladder is empty for
+            // an empty reading and the band renders `EmptyView` for empty rows. A card that has
+            // not been polled says nothing rather than claiming a stage, which is the whole
+            // point: the shipped build said "transcribing locally" while the Vault already held
+            // the transcript.
+            RecordingJourneyBand(rows: RecordingJourneyPresentation.ladder(poller.journey))
             if canRecover || recoveryInProgress {
                 Button(CaptureCardPresentation.manualRecoveryActionTitle(
                     destination: destination)) { onRecover?() }

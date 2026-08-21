@@ -15,7 +15,7 @@ import Foundation
 /// The door pipeline stage as the card understands it. Mirrors the door's
 /// `stage_str` strings; unknown strings degrade to `.stored` (never crash on a
 /// stage the phone doesn't recognise).
-public enum CaptureLifecycleStage: String, Sendable, Equatable {
+public enum CaptureLifecycleStage: String, Sendable, Equatable, CaseIterable {
     case recording
     case stored
     case transcribing
@@ -256,6 +256,23 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
     /// and whether a (useless-for-a-drop) retry is offered.
     @Published public private(set) var droppedReason: String?
 
+    /// **THIS RECORDING'S JOURNEY, DERIVED FROM WHAT THE DOOR ACTUALLY SAID.**
+    ///
+    /// Published from the poller rather than assembled by a view, so the band is bound to a
+    /// live seam. A reading some view composed is a reading no test can hold, because
+    /// `swift test` cannot compile `App/`.
+    ///
+    /// **IT CLAIMS ONE STAGE, BECAUSE THE DOOR'S REPLY SUPPORTS ONE STAGE.** `speakers`,
+    /// `naming` and `intelligence` stay `.notEstablished` unless something actually reports
+    /// them. That is this surface's whole purpose: the shipped build said "transcribing
+    /// locally" while the Vault already held the transcript, and the door's own `summarizing`
+    /// flag was `transcribed && title.is_none()` — **the absence of a title, not work in
+    /// flight** — which read `true` for four days on a capture that could never be titled.
+    ///
+    /// So a missing title maps to `.notEstablished`, NEVER to `.inFlight`. "Nobody told us"
+    /// and "it is running" are different facts, and only the first is true here.
+    @Published public private(set) var journey = RecordingJourneyReading()
+
     private let client: CaptureStatusFetching
     private let baseInterval: TimeInterval
     private let maxInterval: TimeInterval
@@ -387,6 +404,43 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
     }
 
     /// Publish the polled state on the main actor and return what the loop needs.
+    /// THE DERIVATION, AS A PURE FUNCTION so it is testable without a poller, a clock or a door.
+    ///
+    /// **Every field it does not set stays at the reading's honest default.** That is deliberate
+    /// and it is the criterion: this function may only produce a claim it can point at a source
+    /// for. Adding a field here without a source in `CaptureStatusResponse` is how the surface
+    /// starts inventing progress again.
+    static func journey(stage: CaptureLifecycleStage,
+                        transcribed: Bool,
+                        title: String?,
+                        droppedReason: String?) -> RecordingJourneyReading {
+        var reading = RecordingJourneyReading()
+
+        // TRANSCRIPT — the one thing the door genuinely reports.
+        if stage == .failed {
+            reading.transcript = .failed(droppedReason)
+        } else if transcribed {
+            reading.transcript = .done
+        } else if stage == .transcribing {
+            // `.inProgress(nil)`: the door sends no window counts, and a bar drawn from a
+            // number nobody measured is the defect this whole surface exists to remove.
+            reading.transcript = .inProgress(nil)
+        }
+
+        // NAMING — only `.done`, and only from a title that EXISTS.
+        //
+        // There is deliberately no `else` branch putting this `.inFlight`. The door's
+        // `summarizing` was exactly that inference — `transcribed && title.is_none()` — and it
+        // told people work was running on a capture that could never be titled. An absent title
+        // is the seam saying nothing, which is `.notEstablished`, which is already the default.
+        if let title, !title.isEmpty { reading.naming = .done }
+
+        // SPEAKERS and INTELLIGENCE are left `.notEstablished` on purpose: nothing in a status
+        // poll reports either. See `RecordingIntelligence`'s own doc — `conversation_processing`
+        // is marker-guarded and swallows failures, so no per-capture run state exists to read.
+        return reading
+    }
+
     @MainActor private func apply(_ resp: CaptureStatusResponse) -> PollOutcome {
         guard !accountExposureClosing, !accountExposureClosed else {
             return PollOutcome(
@@ -399,6 +453,10 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
         if let s = resp.summary, !s.isEmpty { summary = s }
         lastTranscribed = resp.transcribed
         droppedReason = resp.droppedReason
+        journey = Self.journey(stage: next,
+                               transcribed: resp.transcribed,
+                               title: title,
+                               droppedReason: resp.droppedReason)
         // Persist name/description/stage into the durable card tombstone so the whole
         // timeline stays browsable (with a title + summary) offline + after pruning.
         if let baseDir {
