@@ -46,6 +46,16 @@ Feature: The owner can stop a transfer, and can empty the recorder in one go
     Then the backlog is the two this phone does not hold
     And the backlog never contains a recording this phone is already holding
 
+  # Found by the cross-vendor reviewer, 2026-08-20. The number on that control is what a person
+  # consents to before spending a full-length Bluetooth transfer on each recording, so a number
+  # larger than the set the tap actually takes is an invented cost. The design already forbade
+  # resolving the count and the set two different ways; this disagreement arrives through the
+  # LISTING instead, and the check above could not see it because it compared a Set.
+  Scenario: A recorder that lists one recording twice does not offer to bring two over
+    Given a recorder listing the same recording twice, which this phone does not hold
+    Then the backlog holds that recording once
+    And the number on the control is the number the queue would actually take
+
   Scenario: While some other errand holds the radio, the controls are dead but the stop is not
     Given a shelf check is running and the recorder holds recordings this phone does not
     Then no control the page offers can be tapped

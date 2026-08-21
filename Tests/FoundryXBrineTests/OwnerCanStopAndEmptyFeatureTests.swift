@@ -34,7 +34,8 @@ final class OwnerCanStopAndEmptyFeatureTests: XCTestCase {
         let result = try await BrineFeatureRunner.run(
             "the-owner-can-stop-and-can-empty-the-recorder",
             registry: StepRegistry(StopAndEmptySteps.make(world)))
-        XCTAssertEqual(result.passed, 10)
+        XCTAssertEqual(result.passed, 11,
+                       "eleven scenarios — the duplicate-listing one was added 2026-08-20")
     }
 }
 
@@ -50,6 +51,7 @@ private enum StopAndEmptySteps {
             "a shelf check is running and the recorder holds recordings this phone does not",
             "a queue of five recordings that were all already on this iPhone",
             "a batch sentence asked for more brought over than the queue ever held",
+            "a recorder listing the same recording twice, which this phone does not hold",
         ]
         let whens = ["the owner's stop is used", "a transfer is running as well"]
         let checks = [
@@ -74,6 +76,8 @@ private enum StopAndEmptySteps {
             "the page does not say five were brought over",
             "the page says five were already on this iPhone",
             "the sentence never claims more than the queue held",
+            "the backlog holds that recording once",
+            "the number on the control is the number the queue would actually take",
         ]
         var steps = givens.map { phrase in
             defineStep(phrase) { context, _, _ in try await world.given(phrase); return context }
@@ -167,6 +171,14 @@ private final class StopAndEmptyWorld {
             })
         case "a batch sentence asked for more brought over than the queue ever held":
             corruptLine = PocketTransferFollowThrough.batchLine(broughtOver: 99, of: 2)
+        case "a recorder listing the same recording twice, which this phone does not hold":
+            // ONE recording, listed TWICE. Same date and same timestamp, which is the identity
+            // every layer below keys on.
+            backlogRecordings = [
+                PocketRecording(date: "2026-08-07", timestamp: "one", sizeBytes: 0),
+                PocketRecording(date: "2026-08-07", timestamp: "one", sizeBytes: 0),
+            ]
+
         case "a recorder listing four recordings, two of which this phone already holds":
             backlogRecordings = ["one", "two", "three", "four"].map {
                 PocketRecording(date: "2026-08-07", timestamp: $0, sizeBytes: 0)
@@ -311,6 +323,41 @@ private final class StopAndEmptyWorld {
                 throw BrineStepError("the backlog was "
                                      + String(describing: backlog.map(\.timestamp)))
             }
+        case "the backlog holds that recording once":
+            let backlog = await PocketTransferQueue.derivedBacklog(
+                from: backlogRecordings,
+                custody: HoldsExactly(holding: []),
+                identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: "t"))
+            // COUNT, NOT A SET. Comparing `Set(map(\.timestamp))` is what let this through:
+            // a duplicate is invisible to a set and is exactly the failure being held here.
+            guard backlog.count == 1 else {
+                throw BrineStepError("a recording listed twice produced a backlog of "
+                                     + "\(backlog.count); the listing is not the population")
+            }
+
+        case "the number on the control is the number the queue would actually take":
+            // THE TWO HALVES PUT TOGETHER. The button's title is rendered from the backlog's
+            // count; the queue's population is what `enqueue` accepts. A person consents to the
+            // number, so the number must be the set — if they can differ, the title states a
+            // cost nobody will pay.
+            let backlog = await PocketTransferQueue.derivedBacklog(
+                from: backlogRecordings,
+                custody: HoldsExactly(holding: []),
+                identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: "t"))
+            // NOT RUN — only asked what it would TAKE. No radio, no custody writes.
+            let queue = PocketTransferQueue(peripheralIdentifier: UUID(),
+                                            advertisedName: "duplicate-listing")
+            await queue.enqueue(backlog)
+            let queued = await queue.snapshot.count
+            guard backlog.count == queued else {
+                throw BrineStepError("the control would say \(backlog.count) and the queue "
+                                     + "would take \(queued)")
+            }
+            // PAIRED EXISTENCE: an empty backlog satisfies the equality above trivially.
+            guard queued >= 1 else {
+                throw BrineStepError("the queue took nothing, so the equality is vacuous")
+            }
+
         case "the backlog never contains a recording this phone is already holding":
             // THE PAIRED HALF, and it is not the same assertion twice: a `derivedBacklog` that
             // returned EVERYTHING satisfies neither, but one that returned NOTHING satisfies

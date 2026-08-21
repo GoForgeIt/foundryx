@@ -293,6 +293,25 @@ public actor PocketTransferQueue {
     public static func derivedBacklog(from recordings: [PocketRecording],
                                       custody: any PocketRecorderFileCustody,
                                       identity: RecordingDeviceIdentity) async -> [PocketRecording] {
+        // THE LISTING IS NOT THE POPULATION. A recorder that lists the same date and timestamp
+        // twice used to yield a backlog of two — the ordering pass makes one candidate per
+        // ENTRY, and the map back through `recordings.first` then resolves both to the same
+        // recording. `enqueue` deduplicates on `request`, so the button said "Bring all 2 over"
+        // and the queue took one: a number a person consents to that is larger than the set
+        // they get, which is an invented cost on a control whose whole job is to state one.
+        //
+        // Found by the cross-vendor reviewer 2026-08-20. The design already forbade resolving
+        // the count and the set two different ways; this disagreement came in through the
+        // LISTING instead, and the scenario guarding it compared a `Set` — which cannot see a
+        // duplicate. It is the entries-versus-distinct-values shape, again.
+        //
+        // Deduplicated HERE rather than at the call sites because this function is documented
+        // as "the whole queue, recomputable from disk"; a population that is authoritative
+        // everywhere except for duplicates is not authoritative. First occurrence wins, so the
+        // recorder's own order is untouched.
+        var seen: Set<PocketRecordingRequest> = []
+        let recordings = recordings.filter { seen.insert($0.request).inserted }
+
         var held: Set<PocketRecordingRequest> = []
         for recording in recordings {
             let key = PocketRecorderFileKey(identity: identity,
