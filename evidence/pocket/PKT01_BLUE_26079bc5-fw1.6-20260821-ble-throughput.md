@@ -12,8 +12,22 @@ the whole command, which includes connect, bond, authenticate, select and transf
 
 Two points of different sizes were taken deliberately: a single download yields one number
 dominated by fixed session setup and cannot be extrapolated. Two allow rate and setup to be
-separated and, critically, allow the model to be **checked against a measurement it did not come
-from**.
+separated.
+
+**AND NO FURTHER — A CORRECTION, 2026-08-21.** An earlier version of this file claimed the two
+points allowed the model to be "checked against a measurement it did not come from". **That claim
+was false and it was circular.** A two-parameter line fitted from two observations must reproduce
+both observations exactly: the slope was computed from both points and the intercept from one, so
+substituting the other is algebraic reconstruction, not validation. It could not have failed.
+
+That is precisely the defect family this repository has a law about — *a decision derived from a
+check whose failure is impossible is not a check* — and it was built here, then cited as evidence
+of rigour in four separate documents. Found by cross-vendor review.
+
+**A THIRD INDEPENDENTLY TIMED TRANSFER IS OWED** and is the only thing that tests linearity. It was
+attempted on 2026-08-21 against `2026-08-14 / 20260814184537` (~2,836,000 bytes; the two-point model
+predicts **124.0 s**) and the recorder had gone to sleep. Until that number exists, **the linear
+model is an assumption, not a finding.**
 
 | recording | announced bytes | wall clock |
 |---|---|---|
@@ -25,25 +39,35 @@ from**.
     rate  = (185,078 − 19,770) / (11.308 − 4.281)  =  23,524 B/s   (23.0 KB/s)
     setup =  4.281 − 19,770 / 23,524               =   3.44 s
 
-**Check, against the point not used to derive `setup`:**
-`3.44 + 185,078 / 23,524 = 11.31 s` versus **11.31 s measured**. The linear model holds.
-
 ## What it means
 
 - Pocket audio is 32 kbps CBR = **4,000 bytes per second of wall-clock recording**.
-- **23,524 / 4,000 = 5.9× realtime.** A continuous drain keeps up with a recorder still in use,
-  with roughly six times the headroom it needs. This was the open question behind
-  `20260821T0153_the_drain_survives_termination`, and the answer is yes.
-- A 30-minute recording (7.2 MB) transfers in **5.1 minutes**.
-- The device held **58,194 s of audio (16.2 hours, 233 MB)** across 20 recordings at the time of
-  measurement; the whole backlog would drain in **2.75 hours**, plus ~69 s of total session setup.
+- **23,524 / 4,000 = 5.9× realtime**, *over the two short transfers observed*.
+- **STATED AS EXTRAPOLATION, NOT AS OUTCOME — corrected 2026-08-21.** An earlier version presented
+  the figures below as demonstrated: "a continuous drain keeps up", "the answer is yes", "the whole
+  backlog would drain in 2.75 hours". **Only 205 KB was actually transferred, in two sessions
+  lasting seconds.** Nothing here tests sustained transfer, throughput degradation, throttling,
+  disconnect and retry behaviour, per-file variability, battery state, distance or interference.
+  A link that starts at 23.5 KB/s and degrades after minutes of sustained work would leave every
+  measurement and every calculation above correct and the conclusion wrong.
+- So, as arithmetic on the observed rate and nothing more: a 30-minute recording (7.2 MB) would be
+  ~5.2 minutes, and the device's 16.2-hour backlog (233 MB) ~2.75 hours.
+- **What the drain track may take from this:** the link is not obviously too slow, which is enough
+  to justify building. It is not enough to claim the backlog will shrink in practice.
 
-## Two prior figures this refutes
+## Two prior figures, and what this can HONESTLY say about them — corrected 2026-08-21
 
-1. **"~3–4 KB/s"**, reported from a laptop session on 2026-08-20. Wrong by a factor of six.
-2. **"18–36 KB/s"**, carried in the protocol record and flagged there as an unmeasured estimate of
-   the *WiFi* leg. It brackets the real *Bluetooth* rate almost exactly — which is a coincidence,
-   not a vindication, and the flag on it was correct at the time it was written.
+An earlier version said this measurement "refutes" both. It does not, and the word was wrong twice.
+
+1. **"~3–4 KB/s"** from a laptop session on 2026-08-20. This observation **contradicts treating that
+   as a general BLE rate**, but it cannot show the earlier session was mistaken: different
+   conditions, distance, or measurement boundaries could produce both numbers honestly. If a repeat
+   of that setup reproduced 3.5 KB/s, calling it "wrong by six times" would have mislabelled a real
+   conditional observation as an error.
+2. **"18–36 KB/s"** from the protocol record. **23.5 KB/s lies inside that range**, so it is not
+   refuted numerically at all — and the figure was about the *WiFi* leg, which this experiment did
+   not measure. The defensible statement is that it is **inapplicable as Bluetooth evidence and
+   remains unvalidated**, not that it was refuted.
 
 ## And one incidental confirmation
 

@@ -80,7 +80,12 @@ public enum PocketFigureSupport: Sendable, Equatable {
     /// would settle it — both required, so a withheld figure can never become a bare "no".
     case planningGuess(because: String, closedBy: String)
 
-    /// WE MEASURED IT, ON HARDWARE, AND IT IS STILL NOT PRINTED.
+    /// WE MEASURED IT LOCALLY, ON HARDWARE, AND IT IS STILL NOT PRINTED.
+    ///
+    /// NAMED FOR THE WITHHOLDING, NOT FOR THE MEASURING — a cross-vendor review pointed out that
+    /// a case called `weMeasured` reads as "approved", and the predictable failure is a future
+    /// caller switching on it and rendering the value because *measured* sounds like *safe*. The
+    /// name now carries the constraint rather than the provenance alone.
     ///
     /// The third state exists because the first two could not express a true thing: a figure the
     /// RECORDER never announced but which we established ourselves. Before this case a measured
@@ -93,7 +98,7 @@ public enum PocketFigureSupport: Sendable, Equatable {
     /// radio environment is sound enough to decide an architecture and not sound enough to put an
     /// ETA on somebody's screen — their conditions will differ. **Known and withheld are not a
     /// contradiction; conflating them is what put "~150×" in front of a person.**
-    case weMeasured(artifact: String, method: String)
+    case locallyMeasuredButWithheld(artifact: String, method: String)
 }
 
 /// One figure this app can put in front of a person about a recorder.
@@ -126,7 +131,7 @@ public struct PocketFigure: Sendable, Equatable {
             return nil
         case .planningGuess(let because, let closedBy):
             return "\(because) Closed by: \(closedBy)"
-        case .weMeasured(let artifact, let method):
+        case .locallyMeasuredButWithheld(let artifact, let method):
             return "Measured, not announced by the recorder, so it is not printed: \(method) "
                 + "See \(artifact)."
         }
@@ -263,25 +268,33 @@ public enum PocketMeasuredFigures {
             id: Id.fastSyncSpeed,
             renderedBy: "(nothing — no surface prints a rate)",
             describes: "how fast a recording comes over Bluetooth",
-            // CLOSED BY MEASUREMENT 2026-08-21, having been an open planning guess since the
-            // 2026-08-16 bench. Two downloads of different lengths through the reference client,
-            // wall-clock timed, so rate and fixed session setup could be separated — one download
-            // yields a single number dominated by setup and cannot be extrapolated.
+            // MEASURED 2026-08-21, having been an open planning guess since the 2026-08-16
+            // bench. Two downloads of different lengths through the reference client, wall-clock
+            // timed, so rate and fixed session setup could be separated.
             //
             //     rate  = (185,078 - 19,770) / (11.308 - 4.281) = 23,524 B/s
             //     setup =  4.281 - 19,770 / 23,524              =  3.44 s
-            //     check =  3.44 + 185,078 / 23,524 = 11.31 s vs 11.31 s measured
             //
-            // WHY IT MATTERS: Pocket audio is 32 kbps CBR = 4,000 bytes per second of wall-clock
-            // recording, so this link runs at 5.9x realtime. A continuous background drain keeps
-            // up with a recorder still in use, with six times the headroom it needs. That was the
-            // open question behind the drain-survives-termination track and the answer is yes.
+            // A CORRECTION THAT MATTERS MORE THAN THE NUMBER. An earlier version of this comment
+            // carried a third line calling `3.44 + 185,078/23,524 = 11.31s vs 11.31s measured` a
+            // CHECK against a point the model did not come from. IT WAS CIRCULAR: a two-parameter
+            // line fitted from two observations must reproduce both exactly, so that line could
+            // not have failed. It is the defect family this file exists to police — a decision
+            // derived from a check whose failure is impossible — written into the register
+            // itself. A THIRD independently timed transfer is owed and is the only thing that
+            // tests linearity; until it exists the linear model is an assumption.
             //
-            // It REFUTES two figures this repository has carried: a "~3-4 KB/s" reported from a
-            // laptop session on 2026-08-20 (wrong by six times), and the "18-36 KB/s" in the
-            // protocol record, which was an estimate of the WIFI leg and happens to bracket the
-            // Bluetooth rate — a coincidence, not a vindication.
-            support: .weMeasured(
+            // WHAT IT SUPPORTS: Pocket audio is 32 kbps CBR = 4,000 B/s of wall-clock recording,
+            // so the link ran at 5.9x realtime OVER TWO SHORT TRANSFERS TOTALLING 205 KB. That is
+            // enough to say the link is not obviously too slow to build a drain on. It is NOT
+            // evidence that a drain keeps up in practice: nothing here tested sustained transfer,
+            // degradation, throttling, retry, battery, distance or interference.
+            //
+            // AND IT REFUTES NEITHER PRIOR FIGURE, though an earlier version claimed both. The
+            // "~3-4 KB/s" from a laptop session could be an honest observation under different
+            // conditions rather than an error. The "18-36 KB/s" was about the WIFI leg and 23.5
+            // lies INSIDE it — inapplicable as Bluetooth evidence and unvalidated, not refuted.
+            support: .locallyMeasuredButWithheld(
                 artifact: bleThroughputArtifact,
                 method: """
                     Two complete downloads of different lengths over Bluetooth through the \

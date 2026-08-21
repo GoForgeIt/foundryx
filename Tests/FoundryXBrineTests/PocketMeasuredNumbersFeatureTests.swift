@@ -254,8 +254,16 @@ private actor MeasuredNumbersWorld {
             guard !PocketMeasuredFigures.withheld.isEmpty else {
                 throw BrineStepError("nothing is withheld — this scan proves nothing")
             }
-            for figure in PocketMeasuredFigures.withheld where figure.isPrinted {
-                throw BrineStepError("\(figure.id) rests on a guess and is printed anyway")
+            // THIS LOOP COULD NEVER EXECUTE. `withheld` is `all.filter { !$0.isPrinted }`, and
+            // it was then iterated `where figure.isPrinted` — an empty set by construction, in
+            // the register whose whole purpose is to prevent checks that cannot fail. Found by
+            // the cross-vendor review of this track, 2026-08-21. The population is now `all`, so
+            // a guess that becomes printed is actually reachable by the assertion.
+            for figure in PocketMeasuredFigures.all where figure.isPrinted {
+                guard case .recorderSaidSo = figure.support else {
+                    throw BrineStepError("\(figure.id) is printed while resting on "
+                                         + "\(figure.support) rather than something a recorder said")
+                }
             }
             // AND PRODUCTION AGREES. The three questions the shipped surfaces ask this
             // register, asserted here so a surface that stops asking is a red, not a shrug.
@@ -289,15 +297,26 @@ private actor MeasuredNumbersWorld {
                 case .recorderSaidSo:
                     throw BrineStepError("\(figure.id) is withheld while naming a recorder frame")
 
-                case .planningGuess:
-                    guard reason.contains("Closed by:") else {
+                case .planningGuess(let because, let closedBy):
+                    // READ THE PAYLOAD, NOT THE LABEL. This used to search `reason` for
+                    // "Closed by:" — a marker `withheldBecause` GENERATES ITSELF, so
+                    // `closedBy: ""` passed. The test was matching the code under test's own
+                    // formatting. Found by the cross-vendor review, 2026-08-21; it is the
+                    // label-versus-payload defect, inside the register that exists to catch it.
+                    guard because.trimmingCharacters(in: .whitespacesAndNewlines).count > 40 else {
+                        throw BrineStepError("\(figure.id) does not say why it is withheld")
+                    }
+                    guard closedBy.trimmingCharacters(in: .whitespacesAndNewlines).count > 20 else {
                         throw BrineStepError(
                             "\(figure.id) says why it is withheld but not what would settle it")
                     }
 
-                case .weMeasured(let artifact, let method):
+                case .locallyMeasuredButWithheld(let artifact, let method):
                     measuredWithheld += 1
-                    guard method.count > 40 else {
+                    // TRIMMED, because `String(repeating: " ", count: 41)` satisfied a raw
+                    // count. A length test over untrimmed input measures the keyboard, not the
+                    // claim.
+                    guard method.trimmingCharacters(in: .whitespacesAndNewlines).count > 40 else {
                         throw BrineStepError("\(figure.id) was measured but names no method")
                     }
                     // THE SAME EVIDENCE BAR A PRINTED FIGURE CLEARS. A measurement nobody can
@@ -309,6 +328,18 @@ private actor MeasuredNumbersWorld {
                     }
                     guard text.contains(PocketMeasuredFigures.benchFirmwareVersion) else {
                         throw BrineStepError("\(artifact) never names the firmware it was running")
+                    }
+                    // AND IT CARRIES THE OBSERVATIONS, not just the right nouns. An artifact can
+                    // name the device and "1.6" in unrelated prose and say nothing measured —
+                    // which is the shape of every finding in this file's own history.
+                    guard text.contains("Method") || text.contains("method") else {
+                        throw BrineStepError("\(artifact) states no method")
+                    }
+                    let digits = text.filter(\.isNumber).count
+                    guard digits >= 20 else {
+                        throw BrineStepError(
+                            "\(artifact) carries almost no numbers (\(digits) digits), so it "
+                                + "records a claim rather than a measurement")
                     }
                 }
             }
