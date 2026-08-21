@@ -79,6 +79,21 @@ public enum PocketFigureSupport: Sendable, Equatable {
     /// Nobody has measured it. `because` says why it is still open and `closedBy` says what
     /// would settle it — both required, so a withheld figure can never become a bare "no".
     case planningGuess(because: String, closedBy: String)
+
+    /// WE MEASURED IT, ON HARDWARE, AND IT IS STILL NOT PRINTED.
+    ///
+    /// The third state exists because the first two could not express a true thing: a figure the
+    /// RECORDER never announced but which we established ourselves. Before this case a measured
+    /// rate had to be filed as a `planningGuess` — a lie — or as `recorderSaidSo` with an invented
+    /// frame, which is a worse lie and would have been caught by the frame gate.
+    ///
+    /// IT DOES NOT LICENSE PRINTING, and that is the point. `isPrinted` stays false for it, so
+    /// the rule above survives intact: only something a recorder said about ITSELF, right now,
+    /// goes in front of a person. A rate measured once, on one unit, at one distance, in one
+    /// radio environment is sound enough to decide an architecture and not sound enough to put an
+    /// ETA on somebody's screen — their conditions will differ. **Known and withheld are not a
+    /// contradiction; conflating them is what put "~150×" in front of a person.**
+    case weMeasured(artifact: String, method: String)
 }
 
 /// One figure this app can put in front of a person about a recorder.
@@ -106,10 +121,15 @@ public struct PocketFigure: Sendable, Equatable {
 
     /// The reason a withheld figure is withheld, for the surface that has to explain itself.
     public var withheldBecause: String? {
-        if case .planningGuess(let because, let closedBy) = support {
+        switch support {
+        case .recorderSaidSo:
+            return nil
+        case .planningGuess(let because, let closedBy):
             return "\(because) Closed by: \(closedBy)"
+        case .weMeasured(let artifact, let method):
+            return "Measured, not announced by the recorder, so it is not printed: \(method) "
+                + "See \(artifact)."
         }
-        return nil
     }
 }
 
@@ -131,6 +151,10 @@ public enum PocketMeasuredFigures {
 
     /// The write-up — including the section naming everything that was NOT measured.
     public static let benchArtifact = "PKT01_BLUE_26079bc5-fw1.6-20260816-bench.md"
+
+    /// The 2026-08-21 throughput measurement — two timed downloads, rate and setup separated.
+    public static let bleThroughputArtifact =
+        "PKT01_BLUE_26079bc5-fw1.6-20260821-ble-throughput.md"
 
     /// THE FIRST TWO FILES THAT EVER CAME OFF A POCKET, 2026-08-18. It is what entitles this
     /// app to state a LENGTH, and simultaneously what disqualifies the listing number from
@@ -239,28 +263,31 @@ public enum PocketMeasuredFigures {
             id: Id.fastSyncSpeed,
             renderedBy: "(nothing — no surface prints a rate)",
             describes: "how fast a recording comes over Bluetooth",
-            support: .planningGuess(
-                because: """
-                    Never timed. BLE throughput was not measured at the 2026-08-16 bench — no \
-                    file was transferred and no MTU, connection interval or PHY was recorded — \
-                    and the "~150x" figure this row used to carry was arithmetic over it. THE \
-                    WIFI HALF OF THIS QUESTION IS CLOSED AND THE ANSWER WAS NO: on 2026-08-20 \
-                    six joins established that the recorder's access point drops a client about \
-                    eight seconds after the WPA2 handshake, including one run that issued the \
-                    file selection and the begin-transfer over Bluetooth with the phone still \
-                    attached. Fast sync is removed; Bluetooth carries every recording. THAT \
-                    MAKES THIS FIGURE LOAD-BEARING RATHER THAN COSMETIC. Pocket audio is 32 \
-                    kbps CBR — exactly 4,000 bytes per second of wall-clock recording — so a \
-                    link that drains slower than 4,000 B/s can never catch up with a recorder \
-                    that is still being used, and continuous background pull is not a design \
-                    that can work. Nobody has established which side of that line this link is \
-                    on.
-                    """,
-                closedBy: """
-                    Time two recordings of different lengths over Bluetooth on one recorder and \
-                    record bytes against elapsed seconds, so the result is a RATE rather than \
-                    one point dominated by connection setup. Record MTU, connection interval \
-                    and PHY beside it — those explain the number and say whether it is tunable.
+            // CLOSED BY MEASUREMENT 2026-08-21, having been an open planning guess since the
+            // 2026-08-16 bench. Two downloads of different lengths through the reference client,
+            // wall-clock timed, so rate and fixed session setup could be separated — one download
+            // yields a single number dominated by setup and cannot be extrapolated.
+            //
+            //     rate  = (185,078 - 19,770) / (11.308 - 4.281) = 23,524 B/s
+            //     setup =  4.281 - 19,770 / 23,524              =  3.44 s
+            //     check =  3.44 + 185,078 / 23,524 = 11.31 s vs 11.31 s measured
+            //
+            // WHY IT MATTERS: Pocket audio is 32 kbps CBR = 4,000 bytes per second of wall-clock
+            // recording, so this link runs at 5.9x realtime. A continuous background drain keeps
+            // up with a recorder still in use, with six times the headroom it needs. That was the
+            // open question behind the drain-survives-termination track and the answer is yes.
+            //
+            // It REFUTES two figures this repository has carried: a "~3-4 KB/s" reported from a
+            // laptop session on 2026-08-20 (wrong by six times), and the "18-36 KB/s" in the
+            // protocol record, which was an estimate of the WIFI leg and happens to bracket the
+            // Bluetooth rate — a coincidence, not a vindication.
+            support: .weMeasured(
+                artifact: bleThroughputArtifact,
+                method: """
+                    Two complete downloads of different lengths over Bluetooth through the \
+                    reference client, wall-clock timed around connect, bond, authenticate, \
+                    select and transfer; rate and setup solved separately and the linear model \
+                    checked against the point it was not derived from.
                     """)),
 
         PocketFigure(

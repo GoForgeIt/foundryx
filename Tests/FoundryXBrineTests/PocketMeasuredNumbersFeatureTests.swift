@@ -273,14 +273,50 @@ private actor MeasuredNumbersWorld {
             }
 
         case "each withheld figure says why nobody has measured it yet":
+            // TWO REASONS A FIGURE IS WITHHELD, AND THEY OWE DIFFERENT THINGS. The rule used to
+            // be one — "say why, and say what would close it" — because withheld could only mean
+            // unmeasured. A figure we measured ourselves and still refuse to print (a rate taken
+            // once, on one unit, at one distance) has nothing left to close, and demanding a
+            // settlement clause from it would force a fiction. So the obligation SPLITS, and the
+            // measured branch owes MORE rather than less: the evidence standard of a printed
+            // figure, on a figure that is still not printed.
+            var measuredWithheld = 0
             for figure in PocketMeasuredFigures.withheld {
                 guard let reason = figure.withheldBecause, reason.count > 40 else {
                     throw BrineStepError("\(figure.id) is withheld without saying why")
                 }
-                guard reason.contains("Closed by:") else {
-                    throw BrineStepError(
-                        "\(figure.id) says why it is withheld but not what would settle it")
+                switch figure.support {
+                case .recorderSaidSo:
+                    throw BrineStepError("\(figure.id) is withheld while naming a recorder frame")
+
+                case .planningGuess:
+                    guard reason.contains("Closed by:") else {
+                        throw BrineStepError(
+                            "\(figure.id) says why it is withheld but not what would settle it")
+                    }
+
+                case .weMeasured(let artifact, let method):
+                    measuredWithheld += 1
+                    guard method.count > 40 else {
+                        throw BrineStepError("\(figure.id) was measured but names no method")
+                    }
+                    // THE SAME EVIDENCE BAR A PRINTED FIGURE CLEARS. A measurement nobody can
+                    // find is a claim, and this register exists because claims were being
+                    // rendered as results.
+                    let text = try Self.read(artifact)
+                    guard text.contains(PocketMeasuredFigures.benchDeviceIdentifier) else {
+                        throw BrineStepError("\(artifact) never names the recorder it came off")
+                    }
+                    guard text.contains(PocketMeasuredFigures.benchFirmwareVersion) else {
+                        throw BrineStepError("\(artifact) never names the firmware it was running")
+                    }
                 }
+            }
+            // PAIRED EXISTENCE for the new branch: with no measured-but-withheld figure at all,
+            // every rule in that arm passes over an empty loop.
+            guard measuredWithheld >= 1 else {
+                throw BrineStepError(
+                    "no figure is measured-but-withheld, so that arm is vacuous")
             }
 
         case "the recorder's answer about its network credentials is recorded exactly as it came back":
