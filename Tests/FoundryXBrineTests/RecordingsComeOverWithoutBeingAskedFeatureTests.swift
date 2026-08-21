@@ -130,13 +130,27 @@ private final class AutoDrainWorld {
         case "the reason is simply that nothing is waiting":
             guard refusal == .backlogEmpty else { throw BrineStepError("\(refusal!)") }
         case "none of them is offered up to be cleared from the recorder":
-            let candidates = PocketAutomaticDrainPolicy.clearCandidates(
-                broughtOverAutomatically: autoCommitted)
+            // SUPERSEDED IN MEANING, NOT WEAKENED — Nick's ruling of 2026-08-21 ships automatic
+            // clearing as a per-recorder SETTING, so this scenario is now about an UNARMED
+            // recorder. It is a STRONGER check than the one it replaces: every recording below
+            // is provably safe elsewhere, so the only thing standing between the drain and a
+            // deletion is the owner's setting. If arming ever stops gating the clear, this
+            // reddens. The previous version passed because the feature did not exist — the kind
+            // of green that stops meaning anything the moment somebody builds it.
             guard autoCommitted.count == 2 else { throw BrineStepError("nothing came over, so this proves nothing") }
+            let safeEverywhere = PocketRecordingPresence(
+                onRecorder: PocketPlaceReading(answer: .yes, observedAt: Date()),
+                onThisPhone: PocketPlaceReading(answer: .yes, observedAt: Date()),
+                safeElsewhere: PocketPlaceReading(answer: .yes, observedAt: Date()))
+            let candidates = PocketAutomaticDrainPolicy.clearCandidates(
+                broughtOverAutomatically: autoCommitted,
+                autoClear: .off,
+                syncedAt: { _ in Date() },
+                presence: { _ in safeEverywhere })
             guard candidates.isEmpty else {
                 throw BrineStepError(
-                    "\(candidates.count) recording(s) queued for deletion by a drain nobody "
-                        + "watched — clearing removes a recording from the only device holding it")
+                    "\(candidates.count) recording(s) queued for deletion on a recorder whose "
+                        + "owner never turned automatic clearing on")
             }
         default: throw BrineStepError("unhandled Then: \(phrase)")
         }

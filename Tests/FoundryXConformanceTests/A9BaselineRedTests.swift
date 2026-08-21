@@ -57,23 +57,76 @@ final class A9BaselineRedTests: XCTestCase {
             "the three executed predicates must be P1, P2 and P3; got \(outcomes.map(\.name).sorted())")
     }
 
-    /// THREE RED. Softening any predicate to pass at the baseline reddens here, and the
-    /// message NAMES the one that came back green — *"the one signal that separates
-    /// 'the fix landed' from 'the gate stopped working'"*.
+    /// THREE RED, **read from the RECORDED baseline rather than from a live run of HEAD.**
+    ///
+    /// ## Re-pinned 2026-08-21, and why
+    ///
+    /// This used to re-derive "three reds" by running the predicates against HEAD, which made
+    /// it an **anti-gate**: it could only pass while all three defects were still unfixed.
+    /// Landing the mandatory door pin closed P1, so A9 went red *because the fix landed*, and
+    /// its message read as an accusation against a predicate that was working perfectly.
+    ///
+    /// That is backwards. A9's subject is a HISTORICAL FACT — *at the baseline, before any
+    /// reply was solicited, three predicates were executed and three were red* — and a
+    /// historical fact does not stop being true when the defect is fixed.
+    ///
+    /// The branch that closed P1 deliberately did NOT touch this, recorded that nothing had
+    /// been softened, and left the call to the integrator
+    /// (`evidence/mandatory-client-pin/06-full-suite-differential.log`). This is that decision.
+    ///
+    /// **NOTHING IS SOFTENED.** The baseline is now read where it is immutable, and the live
+    /// half of the claim — that P1 now REFUSES in both cases — is held by
+    /// `P1ConformanceTests.testP1IsClosedBecauseTheClientRefusesInBothCases`. Both directions
+    /// are still asserted, each by the check that can actually observe it.
+    ///
+    /// **THE PAIRED EXISTENCE ASSERTION IS THE POINT.** A check that reads a file looking for
+    /// the absence of something passes vacuously when the file is missing or empty. So this
+    /// asserts the record EXISTS and NAMES all three predicates first, and only then that each
+    /// was OPEN. Delete the evidence and this goes red rather than quiet.
     func testAllThreePredicatesAreRedAtTheBaseline() throws {
+        let record = BundlePredicates.repoRoot()
+            .appendingPathComponent("evidence/mandatory-client-pin/02-P1-baseline-OPEN-before-the-fix.log")
+
+        guard let text = try? String(contentsOf: record, encoding: .utf8), !text.isEmpty else {
+            return XCTFail(
+                """
+                The baseline-red record is missing or empty at \(record.path).
+                A9's entire subject is that record. Without it there is no evidence the gate \
+                could ever fail, and this assertion must NOT pass by finding nothing.
+                """)
+        }
+
+        // EXISTENCE FIRST, over the same population the prohibition below reads.
+        for name in ["P1", "P2", "P3"] {
+            XCTAssertTrue(text.contains("A9 baseline-red record: \(name) ["),
+                "the baseline record does not contain \(name) at all; three predicates must be RECORDED before three can be red")
+        }
+
+        // ...then the redness of each, read from that same record.
+        for name in ["P1", "P2", "P3"] {
+            XCTAssertTrue(text.contains("A9 baseline-red record: \(name) [OPEN]"),
+                """
+                A9 requires all three predicates RED at the pinned baseline, and the recorded \
+                baseline does not show \(name) as OPEN. A predicate that was green at the \
+                baseline cannot fail and is therefore not a gate (spec.md §7 item 4).
+                """)
+        }
+
+        print("=== A9 baseline-red record, read from \(record.lastPathComponent) ===")
+        print(text)
+    }
+
+    /// The live leg, kept deliberately: the three predicates still EXECUTE against HEAD.
+    ///
+    /// Re-pinning the baseline to evidence must not quietly stop the predicates running — that
+    /// would trade one vacuous pass for another. This asserts execution and says nothing about
+    /// colour, which is what makes it safe to keep while the colours legitimately change.
+    func testAllThreePredicatesStillExecuteAgainstHead() throws {
         let outcomes = try runAllThree()
-        let green = outcomes.filter { !$0.isRed }
-        XCTAssertTrue(green.isEmpty,
-            """
-            A9 requires all three predicates RED at the pinned baseline. \
-            \(green.count) came back GREEN: \(green.map(\.name).joined(separator: ", ")).
-            A predicate that is green at the baseline cannot fail and is therefore not a \
-            gate (spec.md §7 item 4). Fix the predicate; do not proceed to solicit a reply.
-            \(outcomes.map { "\($0.line)\n\($0.output)" }.joined(separator: "\n---\n"))
-            """)
-        // "recorded with their output" — emitted on every run, not only on failure.
+        XCTAssertEqual(outcomes.count, 3,
+            "three predicates must still execute against HEAD; \(outcomes.count) did")
         for o in outcomes {
-            print("=== A9 baseline-red record: \(o.name) [\(o.status.rawValue)] casesExecuted=\(o.casesExecuted) ===")
+            print("=== A9 live record: \(o.name) [\(o.status.rawValue)] casesExecuted=\(o.casesExecuted) ===")
             print(o.output)
         }
     }

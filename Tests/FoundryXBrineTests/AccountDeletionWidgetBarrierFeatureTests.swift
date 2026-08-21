@@ -164,6 +164,11 @@ fileprivate final class WidgetDeletionFixture: @unchecked Sendable {
     }
 
     func cleanup() {
+        // THE WITHDRAWAL FAULT IS PROCESS-GLOBAL AND `init` SETS IT for `.persistenceFailure`.
+        // Cleared unconditionally rather than only in that mode: a cleanup that clears state
+        // only when it believes it set it is a cleanup that stops working the moment another
+        // mode learns to set it. Clearing an already-clear fault costs nothing.
+        CaptureWidgetSnapshotStore.setWithdrawalFaultForTesting(nil)
         CaptureWidgetSnapshotStore.resetDefaultsForTesting()
         defaults.removePersistentDomain(forName: defaultsName)
         try? FileManager.default.removeItem(at: root)

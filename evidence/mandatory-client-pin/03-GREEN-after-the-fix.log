@@ -1,0 +1,20 @@
+[0/1] Planning build
+Building for debugging...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.47s)
+Test Suite 'Selected tests' started at 2026-08-13 15:06:35.700.
+Test Suite 'FoundryXPackageTests.xctest' started at 2026-08-13 15:06:35.701.
+Test Suite 'MandatoryDoorPinTests' started at 2026-08-13 15:06:35.701.
+Test Case '-[FoundryXConformanceTests.MandatoryDoorPinTests testThePhoneRefusesAHostItCannotPin]' started.
+Test Case '-[FoundryXConformanceTests.MandatoryDoorPinTests testThePhoneRefusesAHostItCannotPin]' passed (0.111 seconds).
+Test Suite 'MandatoryDoorPinTests' passed at 2026-08-13 15:06:35.813.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.111 (0.112) seconds
+Test Suite 'FoundryXPackageTests.xctest' passed at 2026-08-13 15:06:35.813.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.111 (0.112) seconds
+Test Suite 'Selected tests' passed at 2026-08-13 15:06:35.813.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.111 (0.113) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.
+rc=0

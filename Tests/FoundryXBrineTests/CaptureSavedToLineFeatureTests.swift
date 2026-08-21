@@ -315,9 +315,14 @@ private enum SavedToLineSteps {
                 let tunnel = try p.requireString(0)
                 w.target = DoorTarget(
                     baseURL: URL(string: "http://127.0.0.1:1")!, bearer: "x",
+                    // `expectedDoorStatic` is not optional: the phone cannot express an
+                    // unpinned dial. This scenario is about what the ACK line NAMES, not
+                    // about pinning, and it never completes a handshake (port 1) — so any
+                    // well-formed key serves, per the convention in the transport tests.
                     relay: RelayConfig(relayURL: URL(string: "wss://relay.example.dev")!,
                                        tunnelId: tunnel,
-                                       staticPrivate: Data(repeating: 0, count: 32)))
+                                       staticPrivate: Data(repeating: 0, count: 32),
+                                       expectedDoorStatic: Data(repeating: 5, count: 32)))
                 return ctx
             },
             defineStep("a segment is uploaded and acknowledged") { ctx, _, _ in

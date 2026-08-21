@@ -100,14 +100,78 @@ public enum PocketAutomaticDrainPolicy {
         }
     }
 
-    /// AC15. **An automatic drain contributes NO candidates to the owner-armed clear.**
+    /// What the armed clear decided about one recording.
     ///
-    /// Not a bug and not an oversight: clearing removes a recording from the only device holding
-    /// it, and an unattended drain composed with an unattended delete is a Tier-3 action nobody
-    /// is watching. A recording brought over automatically is kept and left on the recorder; the
-    /// owner clears it from a screen, as they do today.
-    public static func clearCandidates(broughtOverAutomatically: [PocketRecordingRequest])
-        -> [PocketRecordingRequest] {
-        []
+    /// **THE REASON IS `PocketAutoClear.Decision` AND NOT AN ENUM OF THIS TYPE'S OWN.** The
+    /// first draft of this file declared a private two-case refusal — not armed, not proven
+    /// elsewhere — which looked complete and was not: `PocketAutoClear.Decision` has FOUR arms,
+    /// and the one omitted was `itSyncedBeforeYouArmedThisRecorder`. Arming is not retroactive,
+    /// and a policy that re-spelled the rule in two cases would have swept the backlog that
+    /// existed before the owner switched the control on — precisely the behaviour the 2026-08-16
+    /// ruling forbids, reintroduced by a second implementation of a rule that already had one.
+    ///
+    /// So there is no second implementation. `clearDecisions` asks `PocketAutoClear.decision`
+    /// and reports what it answered.
+    public enum PocketAutoClearDecision: Sendable, Equatable {
+        case clear(PocketRecordingRequest)
+        case keep(PocketRecordingRequest, because: PocketAutoClear.Decision)
+    }
+
+    /// AC15, **RESOLVED BY NICK 2026-08-21: automatic AND manual, the owner chooses.**
+    ///
+    /// This used to return `[]` unconditionally — automatic pulling with manual clearing —
+    /// as a deliberate, flagged scope reduction while an unattended drain had never run
+    /// unattended without incident. Nick's ruling supersedes it: both paths ship, the choice
+    /// is a per-recorder setting, and a person who cannot record because the recorder is full
+    /// is told so and offered both ways out.
+    ///
+    /// **THIS DOES NOT DECIDE ANYTHING. `PocketAutoClear.decision` DOES.**
+    ///
+    /// The rule — armed, not retroactive, and provably safe elsewhere — lives in exactly one
+    /// place, and this asks it once per recording. That is not tidiness: the first draft of this
+    /// function re-spelled the rule as "armed && autoClearMayTake" and thereby dropped
+    /// `syncedAt >= armedAt`, which would have cleared the whole backlog that existed before the
+    /// owner switched the control on. Two implementations of one safety rule is how a ruling
+    /// gets reversed by a refactor nobody read as a reversal.
+    ///
+    /// **WHAT DID NOT CHANGE.** The bar is the same one the manual path meets —
+    /// `PocketRemoveFromRecorderPresentation.autoClearMayTake`, i.e. `presence.isDurableElsewhere`.
+    /// Arming removes the requirement that a person tap each recording; it does not lower the
+    /// bar. Nick's standing rule is intact: *nothing leaves the recorder unless we can prove we
+    /// hold it somewhere else.*
+    ///
+    /// - Parameter syncedAt: when the copy that makes each recording safe elsewhere landed.
+    ///   Required, with no default — a caller that does not know when a recording became safe
+    ///   cannot honestly claim it became safe after the owner armed the recorder.
+    /// - Parameter presence: resolved per recording by the caller. Injected rather than fetched
+    ///   so a test can choose the state; a policy that fetches its own inputs cannot be driven.
+    public static func clearDecisions(
+        broughtOverAutomatically: [PocketRecordingRequest],
+        autoClear: PocketAutoClear,
+        syncedAt: (PocketRecordingRequest) -> Date,
+        presence: (PocketRecordingRequest) -> PocketRecordingPresence
+    ) -> [PocketAutoClearDecision] {
+        broughtOverAutomatically.map { request in
+            switch autoClear.decision(syncedAt: syncedAt(request), presence: presence(request)) {
+            case .clears: return .clear(request)
+            case let other: return .keep(request, because: other)
+            }
+        }
+    }
+
+    /// The recordings the armed clear may take. A thin read over `clearDecisions`, kept so the
+    /// common call site does not restate the filter — and deliberately NOT the primary API, so
+    /// a caller that wants to say why something was kept has somewhere to get it.
+    public static func clearCandidates(
+        broughtOverAutomatically: [PocketRecordingRequest],
+        autoClear: PocketAutoClear,
+        syncedAt: (PocketRecordingRequest) -> Date,
+        presence: (PocketRecordingRequest) -> PocketRecordingPresence
+    ) -> [PocketRecordingRequest] {
+        clearDecisions(broughtOverAutomatically: broughtOverAutomatically,
+                       autoClear: autoClear,
+                       syncedAt: syncedAt,
+                       presence: presence)
+            .compactMap { if case .clear(let r) = $0 { return r } else { return nil } }
     }
 }

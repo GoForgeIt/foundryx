@@ -408,6 +408,20 @@ public enum CaptureAttributionPresentation {
     /// conversation an upgrading user already owns.
     public static let preDeviceTrackingName = "Recorded before device tracking"
 
+    /// **THE RENDERED NAMES THAT ARE NOT A DEVICE'S NAME.** Every one of them must arrive
+    /// with a diagnostic, and a gate over that rule belongs over THIS POPULATION rather than
+    /// over whichever of them a test author happened to remember.
+    ///
+    /// Both members are covered by name in `DeviceRenderedSurfaceFeatureTests` today, so this
+    /// closes no live hole. It closes the NEXT one: a third non-device name added here is
+    /// covered the moment it is declared, whereas a hand-listed check keeps passing and simply
+    /// stops mentioning it — the failure that looks exactly like a clean result.
+    ///
+    /// Carried over from `og/legacy-attribution-honesty`, whose remaining content main had
+    /// already arrived at independently.
+    public static let namesThatAreNotADevice: Set<String> = [unknownDeviceName,
+                                                            preDeviceTrackingName]
+
     /// Why a recording from that era carries no device name. It is not a hedge on the era —
     /// the era is the answer — it is what a reader gets when they ask why nothing more
     /// specific is there.

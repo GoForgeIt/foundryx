@@ -1,0 +1,79 @@
+FULL-SUITE DIFFERENTIAL — branch vs clean origin/main
+
+Both runs: `swift test` over the whole package, same machine, same session, with
+FOUNDRYX_CONFORMANCE_TUNNEL_BIN pointed at a real `foundryx-relay-server` binary.
+FOUNDRYX_CONFORMANCE_RELAY_BIN was NOT set in either run, so P3's relay-process
+fixture refuses in both — that is the environment, and it is identical on both sides,
+which is the only reason it can be read as "not mine".
+
+CLEAN BASE — detached origin/main c83c53bfe1fbde6f55d358724c4de1a019b527b0
+    Executed 1391 tests, with 5 tests skipped and 2 failures (0 unexpected) in 268.307s
+    rc=1
+    failing test cases:
+      -[FoundryXConformanceTests.P3ConformanceTests testP3ConformanceFeature]   (2 assertions)
+
+BRANCH — foundryx-relay/mandatory-pin-20260813, run 1
+    Executed 1392 tests, with 5 tests skipped and 6 failures (0 unexpected) in 277.943s
+    rc=1
+    failing test cases:
+      -[FoundryXConformanceTests.P3ConformanceTests testP3ConformanceFeature]        (2)  SAME AS BASE
+      -[FoundryXConformanceTests.A9BaselineRedTests testAllThreePredicatesAreRed…]   (1)  CAUSED BY THIS CHANGE
+      -[FoundryXBrineTests.PocketFactoryFreshMintFeatureTests testPocketFactoryF…]   (3)  FLAKE, see below
+
+BRANCH — foundryx-relay/mandatory-pin-20260813, run 2 (same tree, same command)
+    Executed 1392 tests, with 5 tests skipped and 3 failures (0 unexpected) in 217.572s
+    rc=1
+    failing test cases:
+      -[FoundryXConformanceTests.P3ConformanceTests testP3ConformanceFeature]        (2)  SAME AS BASE
+      -[FoundryXConformanceTests.A9BaselineRedTests testAllThreePredicatesAreRed…]   (1)  CAUSED BY THIS CHANGE
+    the pocket test did NOT fail on this run.
+
+1392 vs 1391 = the one test this branch adds (MandatoryDoorPinTests), which passes.
+
+DIFFERENTIAL, branch minus base, reproduced across two runs:
+    exactly one test case, A9BaselineRedTests.testAllThreePredicatesAreRedAtTheBaseline.
+
+----------------------------------------------------------------------------------
+A9 — CAUSED BY THIS CHANGE, DELIBERATELY NOT BOUGHT GREEN
+
+  A9 requires all three predicates RED at the pinned baseline. 1 came back GREEN: P1.
+  A predicate that is green at the baseline cannot fail and is therefore not a gate
+  (spec.md §7 item 4). Fix the predicate; do not proceed to solicit a reply.
+
+A9 re-derives the "three reds" from a live run of HEAD, so it can only ever pass while
+all three defects are unfixed. P1's defect is now fixed and P1 reports CLOSED, with the
+positive control completing a real channel — so A9 is red BECAUSE the fix landed, and its
+message reads as an accusation against the predicate when the predicate is fine.
+
+Nothing here was softened to clear it. Re-pinning T25's baseline record (read the recorded
+baseline reds from evidence rather than from a re-run of HEAD) is a governance decision
+about T25's handshake, not a security control, and it is left to the integrator.
+
+The baseline red A9 exists to preserve IS recorded, verbatim, in
+02-P1-baseline-OPEN-before-the-fix.log:
+  case absent-identity: the client COMPLETED the channel (expectedDoorStatic pinned=false)
+  the client PROCEEDED in 1 of 2 case(s): absent-identity — a channel reached transport
+  mode with no door identity checked. P1 OPEN
+
+----------------------------------------------------------------------------------
+PocketFactoryFreshMintFeatureTests — FLAKE, NOT THIS CHANGE
+
+  [failed] a key this iPhone cannot store is never sent to the recorder: a confirmed mint
+  on a factory-fresh recorder produced Optional(FoundryXKit.RecordingDeviceAttachOutcome
+  .unreachable("the link dropped"))
+
+Its subject is a BLE recorder mint and a simulated link drop. It shares no type, no file
+and no call path with the door pin; this branch touches neither pocket nor BLE.
+
+  in isolation on this branch, 5 consecutive runs:
+    Executed 8 tests, with 0 failures (0 unexpected) in 0.446s
+    Executed 8 tests, with 0 failures (0 unexpected) in 0.502s
+    Executed 8 tests, with 0 failures (0 unexpected) in 0.565s
+    Executed 8 tests, with 0 failures (0 unexpected) in 0.446s
+    Executed 8 tests, with 0 failures (0 unexpected) in 0.529s
+
+It did not fire on the clean-base full run, and it did not fire on a SECOND full run of
+this same branch tree. One observation in three full runs, zero in ten isolated runs: a
+load-dependent flake, not a difference this change made. It is named here rather than
+filed as "pre-existing" from memory, and it is a real defect somebody should chase — a
+mint that reports `unreachable("the link dropped")` under load is worth a look.

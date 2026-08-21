@@ -263,15 +263,35 @@ public enum RecordingDeviceReadingPresentation {
     /// recorder, so withdrawing the ratio is a one-line change in the register — beside the
     /// frame that entitles it — and never a quiet edit in a view.
     public static func storageFullness(used: Int, total: Int) -> String? {
+        switch room(used: used, total: total) {
+        case .notAsked:                   return nil
+        case .roomRemaining(let percent): return "\(percent)% full"
+        case .noRoomLeft:                 return "\(fullPercent)% full"
+        }
+    }
+
+    /// The percentage a full recorder prints. Named once so the sentence and the decision
+    /// cannot disagree about what "full" looks like.
+    public static let fullPercent = 100
+
+    /// **WHETHER THE RECORDER CAN TAKE ANOTHER RECORDING**, as a value rather than a rendered
+    /// string.
+    ///
+    /// `storageFullness` renders this and nothing else, so the sentence a person reads and the
+    /// decision the app makes come from ONE rule. Without this, a caller asking "is it full"
+    /// holds a `String` and has to match `"100% full"` — a check that silently stops working
+    /// the day the copy is reworded, which is this codebase's most-repeated defect class.
+    ///
+    /// FLOOR, NOT ROUNDED, and it matters at exactly one place — the top. Nick's recorder
+    /// reports 58,767 of 58,992, which is 99.6% and would ROUND to full. It is not full: it
+    /// took another recording that same day. **Only a recorder reporting at least as much used
+    /// as it has capacity has no room left.** Telling somebody they cannot record when they can
+    /// is the one direction this must not err in.
+    public static func room(used: Int, total: Int) -> PocketRecorderRoom {
         guard PocketMeasuredFigures.mayStateHowFullTheRecorderIs,
-              total > 0, used >= 0 else { return nil }
-        // FLOOR, NOT ROUNDED, AND IT MATTERS AT EXACTLY ONE PLACE — the top. Nick's recorder
-        // reports 58,767 of 58,992, which is 99.6% and ROUNDS TO "100% full". It is not full:
-        // it took another recording that same day. "100%" tells a person they cannot record
-        // when they can, and that is the one direction this figure must not err in. Only a
-        // recorder reporting at least as much used as it has capacity reads as 100.
-        let percent = used >= total ? 100 : Int(Double(used) / Double(total) * 100)
-        return "\(percent)% full"
+              total > 0, used >= 0 else { return .notAsked }
+        guard used < total else { return .noRoomLeft }
+        return .roomRemaining(percentFull: Int(Double(used) / Double(total) * 100))
     }
 
     // A SENTENCE EXPLAINING WHY THERE IS NO MEGABYTES FIGURE WAS WRITTEN HERE AND DELETED.

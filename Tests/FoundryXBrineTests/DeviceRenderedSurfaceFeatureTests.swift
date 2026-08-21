@@ -1252,15 +1252,27 @@ enum DeviceRenderedSurfaceSteps {
                 }
                 // An unnameable recorder does NOT put a shrug on the row — the row has no
                 // space for the diagnostic that would make it an answer.
-                let hedged = CaptureAttributionPresentation.metaLine(
-                    "3:04 – 3:21 PM",
-                    attribution: CaptureAttribution(
-                        deviceName: CaptureAttributionPresentation.unknownDeviceName,
-                        diagnostic: "its device record went missing"))
-                guard !hedged.contains(CaptureAttributionPresentation.unknownDeviceName) else {
+                //
+                // THE WHOLE POPULATION of names that are not a device's name, not the one a
+                // test author remembered. This used to check `unknownDeviceName` alone while
+                // `preDeviceTrackingName` was equally capable of reaching a row; both are
+                // covered now, and a third name added to the population is covered the moment
+                // it is declared rather than the day somebody notices.
+                guard !CaptureAttributionPresentation.namesThatAreNotADevice.isEmpty else {
                     throw BrineStepError(
-                        "the row prints \"\(CaptureAttributionPresentation.unknownDeviceName)\" "
-                            + "with nothing a user can act on")
+                        "the non-device-name population is empty, so the check below would "
+                            + "pass without examining anything")
+                }
+                for name in CaptureAttributionPresentation.namesThatAreNotADevice {
+                    let hedged = CaptureAttributionPresentation.metaLine(
+                        "3:04 – 3:21 PM",
+                        attribution: CaptureAttribution(
+                            deviceName: name,
+                            diagnostic: "its device record went missing"))
+                    guard !hedged.contains(name) else {
+                        throw BrineStepError(
+                            "the row prints \"\(name)\" with nothing a user can act on")
+                    }
                 }
             },
 
