@@ -28,8 +28,8 @@ final class PocketTransferQueueFeatureTests: XCTestCase {
         let result = try await BrineFeatureRunner.run(
             "pocket-transfer-queue",
             registry: StepRegistry(PocketTransferQueueSteps.make(world)))
-        XCTAssertEqual(result.passed, 4,
-                       "four scenarios — AC13 was added 2026-08-21")
+        XCTAssertEqual(result.passed, 5,
+                       "five scenarios — AC13 and AC2 were added 2026-08-21")
     }
 }
 
@@ -39,6 +39,7 @@ private enum PocketTransferQueueSteps {
             "a recorder holding two recordings queued for transfer, replaying the captured trace",
             "a recorder that drops the link partway through a transfer and stays away",
             "a transfer that delivers two thousand chunks of a large recording",
+            "a recorder holding two recordings that refuses the key this phone holds",
         ]
         let whens = [
             "the queue runs",
@@ -56,6 +57,8 @@ private enum PocketTransferQueueSteps {
             "the recording ends reported as not brought over, with nothing kept",
             "the screen is told about fewer than one chunk in ten",
             "the screen is still told enough times for a bar to move",
+            "nothing arrived and nothing was kept",
+            "no partial file was left behind",
         ]
         var steps = givens.map { phrase in
             defineStep(phrase) { context, _, _ in try await world.given(phrase); return context }
@@ -264,6 +267,33 @@ private actor PocketTransferQueueWorld {
                                 sizeBytes: Self.listedBytes),
             ]
 
+        case "a recorder holding two recordings that refuses the key this phone holds":
+            // A recorder ALREADY KEYED TO SOMEBODY ELSE. It answers `MCU&SK&FAIL` to our
+            // `APP&SK&`, so no session this queue opens can ever become authenticated. The
+            // inventory is deliberately NON-EMPTY: a recorder holding nothing would satisfy
+            // "nothing arrived" for a reason that has nothing to do with authentication.
+            let made = FakePocketBLEStack(
+                deviceId: identifier,
+                deviceName: "PKT01_BLUE_26079bc5",
+                acceptedSecret: nil,
+                inventory: [
+                    .init(date: Self.day, timestamp: Self.firstTimestamp,
+                          sizeBytes: payload.count, content: payload),
+                    .init(date: Self.day, timestamp: Self.secondTimestamp,
+                          sizeBytes: payload.count, content: payload),
+                ],
+                behaviour: .keyed("ffffffffffffffff"))
+            stack = made
+            try await secrets.save(
+                Self.secret,
+                for: try PocketAuthenticatedIdentity(peripheralIdentifier: identifier.uuidString))
+            queued = [
+                PocketRecording(date: Self.day, timestamp: Self.firstTimestamp,
+                                sizeBytes: Self.listedBytes),
+                PocketRecording(date: Self.day, timestamp: Self.secondTimestamp,
+                                sizeBytes: Self.listedBytes),
+            ]
+
         case "a recorder that drops the link partway through a transfer and stays away":
             try await stage(
                 inventory: [
@@ -365,6 +395,27 @@ private actor PocketTransferQueueWorld {
 
     func then(_ phrase: String) async throws {
         switch phrase {
+        case "nothing arrived and nothing was kept":
+            // THE POPULATION FIRST — otherwise "nothing arrived" is satisfied by a queue that
+            // was never given anything to do, which is the vacuity this AC exists to close.
+            let finals = try await finalPhases()
+            guard finals.count == 2 else {
+                throw BrineStepError("the queue reported on \(finals.count) items, not the two "
+                                     + "staged — \"nothing arrived\" would be vacuous")
+            }
+            for (request, phase) in finals {
+                if case .broughtOver = phase {
+                    throw BrineStepError("\(request.timestamp) was brought over from a recorder "
+                                         + "that never accepted the key this phone holds")
+                }
+            }
+            XCTAssertEqual(try keptFiles(extension: "mp3"), [],
+                           "a file was kept from an unauthenticated session")
+
+        case "no partial file was left behind":
+            XCTAssertEqual(try keptFiles(extension: "partial"), [],
+                           "a .partial survived an unauthenticated session")
+
         case "the screen is told about fewer than one chunk in ten":
             guard admittedReadings < chunkReadings / 10 else {
                 throw BrineStepError(
