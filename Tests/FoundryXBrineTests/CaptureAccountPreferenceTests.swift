@@ -648,6 +648,10 @@ final class CaptureAccountPreferenceTests: ProcessGlobalStateTestCase {
 
         CaptureWidgetSnapshotStore.setWithdrawalFaultForTesting(
             .synchronizeFailure)
+        // Belt as well as braces: the clear at the end of this block is what the scenario
+        // needs, and this `defer` covers the path where a throw above it means that clear
+        // never runs. The fault is process-global, so a leak here fails OTHER suites.
+        defer { CaptureWidgetSnapshotStore.setWithdrawalFaultForTesting(nil) }
         XCTAssertEqual(
             CaptureWidgetSnapshotStore.withdraw(
                 expectedOwner: fixture.binding.scope),

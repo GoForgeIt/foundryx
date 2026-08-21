@@ -1546,6 +1546,15 @@ final class AccountDeletionLifecycleTests: XCTestCase {
         defer { fixture.cleanup() }
         CaptureWidgetSnapshotStore.setWithdrawalFaultForTesting(
             .synchronizeFailure)
+        // THE FAULT IS PROCESS-GLOBAL, SO CLEARING IT IS NOT OPTIONAL. Without this the
+        // injected fault outlives this test and every later withdrawal in the process
+        // returns `.persistenceFailed`. That is how
+        // `CaptureAccountPreferenceTests.testWidgetWithdrawIsOwnerCheckedAndPersistenceVerified`
+        // failed in the iosbrine suite while passing when run alone: it clears the fault
+        // itself, then asserts `.withdrawn`, and got `.persistenceFailed` from a fault
+        // this test set. `defer` rather than a trailing call, because an assertion
+        // failing above the clear leaks it just as surely.
+        defer { CaptureWidgetSnapshotStore.setWithdrawalFaultForTesting(nil) }
 
         await XCTAssertThrowsErrorAsync {
             try await fixture.lifecycle.begin(binding: fixture.bindingB)

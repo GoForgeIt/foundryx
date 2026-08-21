@@ -56,6 +56,10 @@ final class WidgetWithdrawalDurabilityTests: XCTestCase {
     func testAFailedWithdrawalDoesNotRepublishTheAccount() throws {
         try seed(owner: "owner-a")
         CaptureWidgetSnapshotStore.setWithdrawalFaultForTesting(.absenceProbeSurvives)
+        // Cleared on the way out as well as at `:72` below. The mid-test clear is part of
+        // what this scenario asserts; this one exists for the path where an assertion above
+        // it never reaches it, because the fault is process-global and outlives the test.
+        defer { CaptureWidgetSnapshotStore.setWithdrawalFaultForTesting(nil) }
         XCTAssertEqual(
             CaptureWidgetSnapshotStore.withdraw(expectedOwner: "owner-a"),
             .persistenceFailed)
