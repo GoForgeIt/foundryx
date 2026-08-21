@@ -107,7 +107,9 @@ final class DoorFixture: NSObject, URLSessionWebSocketDelegate {
 
     /// A 64-hex machine id that is a VALID X25519 public key encoding but is NOT this
     /// door's. Case (ii) needs the pin to be *present and wrong*, not malformed — a
-    /// malformed one would fail the `hexToData` guard and collapse into case (i).
+    /// malformed one would be refused at resolve by
+    /// `HostResolver.doorStaticKey(fromMachineId:)` and collapse into case (i), which
+    /// the predicate now detects and refuses rather than counting as a pass.
     static func someOtherMachineIdHex() -> String {
         Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation
             .map { String(format: "%02x", $0) }.joined()

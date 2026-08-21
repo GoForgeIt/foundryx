@@ -363,7 +363,7 @@ public final class RemoteSession: ObservableObject {
             }
             relay = cfg
             status = .connected(host: cfg.tunnelId)
-            note("resolve OK tunnel=\(cfg.tunnelId) relay=\(cfg.relayURL.absoluteString) pinned=\(cfg.expectedDoorStatic != nil)")
+            note("resolve OK tunnel=\(cfg.tunnelId) relay=\(cfg.relayURL.absoluteString) door=\(cfg.pinnedDoorPrefix)")
         } catch HostResolveError.noHostDesignated {
             guard requestedGeneration == CaptureAccountScope.identityGeneration else {
                 return

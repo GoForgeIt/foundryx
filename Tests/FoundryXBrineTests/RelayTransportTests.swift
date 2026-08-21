@@ -68,7 +68,10 @@ final class RelayTransportTests: XCTestCase {
         let cfg = RelayConfig(
             relayURL: URL(string: "ws://127.0.0.1:9/")!,
             tunnelId: "desktop-abc123",
-            staticPrivate: Curve25519KeyHelper.randomStatic()
+            staticPrivate: Curve25519KeyHelper.randomStatic(),
+            // The pin is mandatory and has no default: a RelayConfig cannot be
+            // written without naming the door it will accept.
+            expectedDoorStatic: Curve25519KeyHelper.randomDoorPublic()
         )
         // tunnel_id is a parameter, never hardcoded.
         XCTAssertEqual(cfg.tunnelId, "desktop-abc123")
@@ -85,7 +88,8 @@ final class RelayTransportTests: XCTestCase {
             bearer: "t",
             relay: RelayConfig(relayURL: URL(string: "wss://relay/")!,
                                tunnelId: "desktop-xyz",
-                               staticPrivate: Curve25519KeyHelper.randomStatic())
+                               staticPrivate: Curve25519KeyHelper.randomStatic(),
+                               expectedDoorStatic: Curve25519KeyHelper.randomDoorPublic())
         )
         XCTAssertNotNil(relayTarget.relay, "relay path is available when explicitly configured")
     }
@@ -94,5 +98,10 @@ final class RelayTransportTests: XCTestCase {
 enum Curve25519KeyHelper {
     static func randomStatic() -> Data {
         Curve25519.KeyAgreement.PrivateKey().rawRepresentation
+    }
+
+    /// A real 32-byte X25519 PUBLIC key, for the mandatory door pin.
+    static func randomDoorPublic() -> Data {
+        Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation
     }
 }

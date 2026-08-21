@@ -117,9 +117,13 @@ final class GatewayFixture {
 
     // MARK: the two response shapes P1 drives
 
-    /// Case (i): `machine_id` ABSENT. `HostResolver` reads `(obj["machine_id"] as? String) ?? ""`,
-    /// `hexToData("")` returns nil on the `!hex.isEmpty` guard, and the RelayConfig
-    /// carries `expectedDoorStatic: nil`.
+    /// Case (i): `machine_id` ABSENT.
+    ///
+    /// Until 2026-08-13 `HostResolver` read `(obj["machine_id"] as? String) ?? ""`,
+    /// `hexToData("")` returned nil on its `!hex.isEmpty` guard, and the RelayConfig
+    /// carried `expectedDoorStatic: nil` — the phone dialled unpinned. Since the pin
+    /// became mandatory this body makes `resolveRelayConfig` throw
+    /// `HostResolveError.hostCannotBePinned` and no RelayConfig is produced at all.
     static func absentIdentity(tunnelId: String) -> GatewayFixture {
         GatewayFixture(body: #"{"tunnel_id":"\#(tunnelId)","label":"conformance-host"}"#)
     }

@@ -30,14 +30,30 @@ public struct RelayConfig: Sendable {
     public let tunnelId: String
     /// The phone's 32-byte X25519 Noise static private key (its durable initiator identity).
     public let staticPrivate: Data
-    /// Optional pin: the door's expected static public key (channel auth across reconnects).
-    public let expectedDoorStatic: Data?
+    /// THE PIN — the door's expected static public key (channel auth across reconnects).
+    ///
+    /// NOT optional, and not defaulted. It was both until 2026-08-13, and that is the
+    /// whole of the fail-open: `nil` had a spelling here, both dial sites read it with
+    /// `if let`, and a configuration built from a gateway answer that carried no door
+    /// key dialled with no identity check at all. Making the type non-optional means an
+    /// unpinned dial cannot be WRITTEN — the compiler is the guard, at the one point
+    /// every dial passes through, rather than a check each new call site must remember.
+    ///
+    /// A caller that has no key does not get to pass `nil`; it has to refuse (see
+    /// `HostResolver.doorStaticKey(fromMachineId:)`).
+    public let expectedDoorStatic: Data
 
-    public init(relayURL: URL, tunnelId: String, staticPrivate: Data, expectedDoorStatic: Data? = nil) {
+    public init(relayURL: URL, tunnelId: String, staticPrivate: Data, expectedDoorStatic: Data) {
         self.relayURL = relayURL
         self.tunnelId = tunnelId
         self.staticPrivate = staticPrivate
         self.expectedDoorStatic = expectedDoorStatic
+    }
+
+    /// The first 8 hex characters of the pinned door key — enough to tell two doors
+    /// apart in a log without writing a key into one.
+    public var pinnedDoorPrefix: String {
+        expectedDoorStatic.prefix(4).map { String(format: "%02x", $0) }.joined()
     }
 
     /// The INTERACTIVE channel: same relay, key, and door-key pin, but the tunnel id
@@ -105,14 +121,13 @@ public final class RelayTransport: NSObject, @unchecked Sendable {
         let msg3 = try initiator.writeMessage()
         try await task.send(.data(msg3))
 
-        // Pin the door's identity if requested.
-        if let expected = config.expectedDoorStatic {
-            guard initiator.remoteStaticPublic == expected else {
-                throw RelayError.doorIdentityMismatch
-            }
+        // THE PIN. Unconditional: `expectedDoorStatic` is not optional, so there is no
+        // "if requested" left to write and no configuration that can skip this.
+        guard initiator.remoteStaticPublic == config.expectedDoorStatic else {
+            throw RelayError.doorIdentityMismatch
         }
         let (send, recv) = try initiator.split()
-        log?.info("✓ relay Noise handshake complete (door static pinned: \(config.expectedDoorStatic != nil))")
+        log?.info("✓ relay Noise handshake complete (door \(config.pinnedDoorPrefix) pinned)")
 
         // 3. Transport: encrypt the request, read reply frames until empty plaintext.
         let reqCt = try send.encryptWithAd(ad: Data(), plaintext: requestBytes)

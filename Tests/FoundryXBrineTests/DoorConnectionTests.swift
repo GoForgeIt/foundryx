@@ -172,7 +172,11 @@ final class DoorConnectionTests: XCTestCase {
         }
         let pool = DoorConnectionPool(makeChannel: makeChannel)
         let cfg = RelayConfig(relayURL: URL(string: "ws://x")!, tunnelId: "t",
-                              staticPrivate: Data(repeating: 0, count: 32), expectedDoorStatic: nil)
+                              staticPrivate: Data(repeating: 0, count: 32),
+                              // A real-shaped pin: the type no longer admits "no pin".
+                              // These pool tests never reach a handshake (the channel is
+                              // supplied by the test), so the value only has to exist.
+                              expectedDoorStatic: Data(repeating: 5, count: 32))
 
         let a = try await pool.turn(config: cfg, request: Data("a".utf8))
         XCTAssertEqual(a.map { String(decoding: $0, as: UTF8.self) }, ["a"])
@@ -277,7 +281,11 @@ final class DoorConnectionTests: XCTestCase {
         let pool = DoorConnectionPool(makeChannel: makeChannel,
                                       now: { clock.now() }, jitter: { 1.0 })
         let cfg = RelayConfig(relayURL: URL(string: "ws://x")!, tunnelId: "t",
-                              staticPrivate: Data(repeating: 0, count: 32), expectedDoorStatic: nil)
+                              staticPrivate: Data(repeating: 0, count: 32),
+                              // A real-shaped pin: the type no longer admits "no pin".
+                              // These pool tests never reach a handshake (the channel is
+                              // supplied by the test), so the value only has to exist.
+                              expectedDoorStatic: Data(repeating: 5, count: 32))
 
         // 50 rapid turns at t=0: the first dials (fails → schedules a 0.25s window); every
         // subsequent call inside the window is refused fast, WITHOUT a handshake.
@@ -330,7 +338,11 @@ final class DoorConnectionTests: XCTestCase {
         let pool = DoorConnectionPool(makeChannel: makeChannel,
                                       now: { clock.now() }, jitter: { 1.0 })
         let cfg = RelayConfig(relayURL: URL(string: "ws://x")!, tunnelId: "t",
-                              staticPrivate: Data(repeating: 0, count: 32), expectedDoorStatic: nil)
+                              staticPrivate: Data(repeating: 0, count: 32),
+                              // A real-shaped pin: the type no longer admits "no pin".
+                              // These pool tests never reach a handshake (the channel is
+                              // supplied by the test), so the value only has to exist.
+                              expectedDoorStatic: Data(repeating: 5, count: 32))
 
         // First call dials immediately (no prior failure to gate it) and fails.
         _ = try? await pool.turn(config: cfg, request: Data("a".utf8))
