@@ -154,5 +154,78 @@ space-before, space-after, a delete acknowledgement **and** a completed re-listi
 any is missing it prints `NO VERDICT — probe incomplete:` and names them. **A measurement
 instrument must not be able to conclude from data it never gathered.**
 
-*(P3's second half has not yet produced a result: the corrected probe is written but its compile
-is pending. The reclaim figure in `PocketMeasuredFigures.swift:305` stays withheld.)*
+---
+
+# PROBE P3 — ANSWERED. **`APP&D` UNLINKS. IT DOES NOT RECLAIM.**
+
+Authorised by the owner and run 2026-08-22 against `2026-08-20 / 20260820160218` (2 KB, ~1 s).
+
+## Verbatim
+
+    >> APP&SK&<redacted>
+    << MCU&SK&OK
+    >> APP&LIST&2026-08-20
+    << MCU&F&2026-08-20&20260820160218&2      <- present, 2 KB
+    << MCU&LIST&001
+    >> APP&SPACE
+    << MCU&SPA&058766&058992                  <- 226 KB free
+    >> APP&D&2026-08-20&20260820160218
+    << MCU&D                                  <- acknowledged
+
+    (fresh session, read-only)
+    >> APP&SPACE
+    << MCU&SPA&058766&058992                  <- STILL 226 KB free
+    >> APP&LIST&2026-08-20
+    << MCU&LIST&000                           <- the date is now EMPTY
+
+| | before | after |
+|---|---:|---:|
+| listed on 2026-08-20 | 1 file | **0 files** |
+| used | 58,766 KB | **58,766 KB** |
+| free | 226 KB | **226 KB** |
+
+**A 2 KB file was removed from the shelf and free space did not move by one kilobyte.**
+
+## What this changes, and it is not small
+
+`PocketMeasuredFigures.swift:305` describes this figure as *"how much room deleting a recording
+gives back"*. **The answer is: none.**
+
+**AUTO-CLEAR CANNOT FREE SPACE ON THIS FIRMWARE.** Clearing recordings removes them from the
+listing but does not make room to record. A recorder at 226 KB free stays at 226 KB free however
+much is cleared.
+
+**This contradicts an assumption in the out-of-space guidance shipped earlier the same day.**
+`PocketRecorderRoomPresentation.makeRoomAction` reads *"Make room now"* and is offered to an owner
+whose recorder is full. On this firmware **that offer does not do what it says.** Clearing is
+still worth doing — it is how recordings leave the device once they are safe elsewhere — but it is
+NOT a remedy for a full recorder, and the copy must stop implying that it is.
+
+Whether a factory reset (`APP&RESET`, untested) reclaims, or whether the space returns after some
+delayed compaction, is **unknown and not claimed here.** One observation, one firmware, one file.
+
+## The instrument had to be fixed three times first, and refused to lie each time
+
+Three verbs, three DIFFERENT completion signals — none of which except `MCU&OFF` appears anywhere
+in this repository:
+
+| verb | completion signal |
+|---|---|
+| `LIST&<date>` | `MCU&LIST&<zero-padded count>` |
+| `SPACE` | `MCU&SPA&<used>&<total>` — self-terminating |
+| `D&<date>&<stamp>` | `MCU&D` — bare, self-terminating |
+| a transfer | `MCU&OFF` |
+
+The probe stalled on each in turn. **On every stall the verdict guard refused to conclude** and
+named what was missing — *"space-after never read; no delete acknowledgement received; recorder
+never re-listed"*. Without that guard, the FIRST run would have printed this same conclusion
+having measured nothing at all, and the right answer would have been believed for entirely wrong
+reasons.
+
+**A near-miss worth recording even so:** while making a re-run work, `presentBefore = true` was
+briefly written into a terminator handler — fabricating a measurement to satisfy the guard. It was
+reverted before running. The before-values above are carried as constants explicitly labelled
+`[recorded trace]`, taken from the deleting run's own output, and are not re-derived.
+
+`MCU&D` is also a prefix of `MCU&DIRS`; this probe compares whole fields, which is the same
+discipline `PocketRecorderClearing.swift:56` uses.
