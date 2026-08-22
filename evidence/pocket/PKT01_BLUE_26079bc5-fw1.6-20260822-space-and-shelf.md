@@ -81,12 +81,40 @@ This is the same defect class this program keeps finding in its own code: a mech
 truncation is indistinguishable from a complete result. It is recorded here rather than quietly
 corrected because a reader of the totals above should know how close they came to being wrong.
 
-## Protocol note — `MCU&OFF` ends the ERRAND, not the listing
+## Protocol note — **CORRECTED 2026-08-22, and the first version was wrong**
 
-Issuing a second `LIST&<date>` after `MCU&OFF` on the same session returns nothing. `MCU&OFF` is
-`PocketBLEProtocolClient.transferTerminatorFrame`, and `PocketTransferJob.swift:26` records that
-the transfer loop re-authenticates after it. The six dates above were therefore enumerated on
-**six separate connections**, one per date, which is slower and unambiguous.
+### The correction: a LISTING terminates with `MCU&LIST&<count>`, not `MCU&OFF`
+
+    >> APP&LIST&2026-08-20
+    << MCU&F&2026-08-20&20260820160218&2
+    << MCU&LIST&001
+
+**`MCU&LIST&<zero-padded count>` is the listing terminator**, and it appears in no source file in
+this repository — `PocketBLEProtocolClient` knows `MCU&OFF` as
+`transferTerminatorFrame` and nothing else. A client waiting only for `MCU&OFF` after a `LIST&`
+waits forever.
+
+### What the first version of this note claimed, and why it was wrong
+
+It said: *"Issuing a second `LIST&<date>` after `MCU&OFF` on the same session returns nothing…
+the six dates were therefore enumerated on six separate connections."*
+
+**That inference was false.** The multi-date program was waiting for `MCU&OFF` to advance to the
+next date. Listings do not send `MCU&OFF` — they send `MCU&LIST&<count>` — so the program stalled
+after the first date and I attributed the stall to a **session constraint that does not exist**.
+Six connections worked, but not for the stated reason, and the stated reason would have misled
+the next person into an unnecessary reconnect per date.
+
+`MCU&OFF` really is the transfer terminator (`PocketTransferJob.swift:26` records the transfer
+loop re-authenticating after it). That part stands. **What does not stand is applying it to
+listings.**
+
+### Why this is recorded rather than silently edited
+
+It is the same failure as the truncated `LIST_DIRS` above, one layer up: a mechanism produced
+silence, and I supplied a confident explanation for the silence instead of investigating it. Two
+instances in one session, in one probe, from the same root — **an absent signal read as a
+positive finding.**
 
 ## WHAT IS STILL OPEN — Probe P3's second half
 
@@ -99,5 +127,32 @@ it is what owner-armed auto-clear actually does: delete an EXISTING recording th
 stored elsewhere and read `APP&SPACE` either side. Against a 226 KB baseline the delta is
 unambiguous at any file size — free space moves, or it does not.
 
-**Blocked on the owner's explicit authorisation for one named recording.** Nothing here composes
-a delete.
+**Authorised by the owner 2026-08-22** for one named recording: `2026-08-20 / 20260820160218`
+(2 KB, ~1 s).
+
+### THE FIRST ATTEMPT DELETED NOTHING AND REPORTED A VERDICT ANYWAY
+
+Recorded in full, because it is the most serious instance of this program's defining defect that
+this session produced — and it happened **inside the instrument built to measure that defect.**
+
+The run timed out in its FIRST phase (`listBefore`), because of the `MCU&LIST&<count>` terminator
+corrected above. **No `APP&D` was composed. No `APP&SPACE` was read** — both `used` values were
+still their `-1` sentinel. And it printed:
+
+    VERDICT: APP&D UNLINKS ONLY — gone from the listing, free space did not move
+
+The mechanism: the verdict branch tested `presentBefore && !presentAfter`, and `presentAfter` is
+`false` **both when the recording was measured absent and when the re-listing never ran.** One
+value, two meanings, and the wrong one was load-bearing.
+
+Had that gone unexamined, this directory would now contain a hardware finding — *"`APP&D` unlinks
+without reclaiming"* — supported by **no measurement whatsoever**, in a file whose entire purpose
+is that every figure traces to an observation.
+
+**The fix is structural, not a corrected branch.** The verdict now refuses to speak unless
+space-before, space-after, a delete acknowledgement **and** a completed re-listing all exist; if
+any is missing it prints `NO VERDICT — probe incomplete:` and names them. **A measurement
+instrument must not be able to conclude from data it never gathered.**
+
+*(P3's second half has not yet produced a result: the corrected probe is written but its compile
+is pending. The reclaim figure in `PocketMeasuredFigures.swift:305` stays withheld.)*
