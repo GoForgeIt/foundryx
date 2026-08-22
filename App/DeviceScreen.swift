@@ -3306,10 +3306,25 @@ final class RecordingDeviceAttachModel: ObservableObject {
 
     /// The attachment every path in this model opens a link with: the production one unless a
     /// scenario running inside a DEBUG build has supplied a radio and a custody store.
-    /// - Parameter log: the relay-bound log. Defaulted to the shared instance so a caller
-    ///   that has none still reports somewhere, and accepted explicitly so the device screen
-    ///   can hand over the very log its `DeviceManager` was built with.
-    private static func makeAttachment(log: DoorLog? = .shared) -> RecordingDeviceAttachment {
+    ///
+    /// - Parameter log: the relay-bound log. **REQUIRED, and deliberately NOT optional.**
+    ///
+    /// ## Why this is not `DoorLog? = .shared`
+    ///
+    /// It was, and that violated this track's AC5 — *"`makeAttachment(log:)` has no `nil` default
+    /// and both call sites pass `DoorLog.shared`"* — while LOOKING like it satisfied it, because
+    /// the default was `.shared` and the common case logged.
+    ///
+    /// **The hole was the optionality, not the default.** `DeviceManager.diagnosticLog` is
+    /// `DoorLog?`, and one call site passed it straight through to an attachment that stores
+    /// `DoorLog?` and reports via `log?.record(…)`. A `nil` there is not an error — **it is
+    /// silence** — so AC3 (*every `errand.start`, `errand.stop` and `custody.commit` produces a
+    /// command record*) could fail with nothing failing.
+    ///
+    /// Required and non-optional forces every caller to answer the question. The one caller that
+    /// genuinely holds an optional now resolves it AT ITS OWN CALL SITE, where the fallback is
+    /// visible in the diff, instead of here where it was invisible.
+    private static func makeAttachment(log: DoorLog) -> RecordingDeviceAttachment {
         #if DEBUG
         if let seam = scenarioSeam {
             return RecordingDeviceAttachment(makeCentral: seam.makeCentral,
@@ -3343,7 +3358,10 @@ final class RecordingDeviceAttachModel: ObservableObject {
         inlineMessage = nil
         keyEntryMessage = nil
         self.diagnosticLog = device.diagnosticLog
-        let attachment = Self.makeAttachment(log: device.diagnosticLog)
+        // The fallback is HERE, where it is visible, rather than hidden in a defaulted
+        // optional parameter. `DeviceManager.diagnosticLog` is optional; a recorder errand
+        // that reported nowhere would satisfy every test and tell nobody anything.
+        let attachment = Self.makeAttachment(log: device.diagnosticLog ?? .shared)
         self.attachment = attachment
         let name = found.name
         let id = found.id
@@ -3531,7 +3549,7 @@ final class RecordingDeviceAttachModel: ObservableObject {
         guard let target = ceremonyTarget, !submittingKey else { return }
         submittingKey = true
         keyEntryMessage = nil
-        let attachment = Self.makeAttachment()
+        let attachment = Self.makeAttachment(log: .shared)
         self.attachment = attachment
         Task {
             let outcome = await attachment.attach(
@@ -3620,7 +3638,7 @@ final class RecordingDeviceAttachModel: ObservableObject {
     func retryPlainAttach() -> Bool {
         guard let target = ceremonyTarget, !submittingKey else { return false }
         submittingKey = true
-        let attachment = Self.makeAttachment()
+        let attachment = Self.makeAttachment(log: .shared)
         self.attachment = attachment
         Task {
             let outcome = await attachment.attach(peripheralIdentifier: target.id,
