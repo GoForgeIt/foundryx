@@ -104,6 +104,10 @@ a11y-identifier	App/PocketOnboardingView.swift	pocket-session-key-message
 a11y-identifier	App/PocketOnboardingView.swift	pocket-session-key-progress
 a11y-identifier	App/PocketOnboardingView.swift	pocket-session-key-submit
 a11y-identifier	App/RecorderPageProof.swift	recorder-page-proof
+a11y-identifier	App/RecordingJourneyBand.swift	recording-journey
+a11y-identifier	App/RecordingJourneyBand.swift	recording-journey-\(row.stage.rawValue)
+a11y-identifier	App/RecordingJourneyBand.swift	recording-journey-bar-\(row.stage.rawValue)
+a11y-identifier	App/RecordingJourneyBand.swift	recording-name-provisional
 a11y-identifier	App/RecordingScreen.swift	live-transcript
 a11y-identifier	App/RecordingScreen.swift	minimize-recording
 a11y-identifier	App/RecordingScreen.swift	recording-elapsed
