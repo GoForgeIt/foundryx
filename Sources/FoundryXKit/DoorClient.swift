@@ -213,6 +213,26 @@ public struct CaptureStatusResponse: Decodable, Sendable, Equatable {
     /// honest, specific message ("No speech detected" / "Audio couldn't be
     /// recovered") instead of a generic — and for `key_lost`, misleading — "retry".
     public let droppedReason: String?
+    /// HOW FAR A WINDOWED TRANSCRIPTION HAS GOT, **or nothing at all**.
+    ///
+    /// `nil` is the ordinary case and it is the point. A recording under Lore's 600 s
+    /// chunking threshold is transcribed whole and has no windows to count; one that
+    /// has not started has none yet. The door omits the field in both cases rather
+    /// than sending `{0, 0}`, and this stays optional all the way to the band so an
+    /// absence is drawn as "transcribing, no bar" instead of as 0%.
+    public let transcribeWindows: TranscribeWindowsPayload?
+
+    /// The door's `transcribeWindows` object. Decoded as a whole or not at all —
+    /// `Decodable` synthesis requires BOTH members, so a half-present object fails to
+    /// decode rather than defaulting one side to zero.
+    public struct TranscribeWindowsPayload: Decodable, Sendable, Equatable {
+        public let windowsDone: Int
+        public let windowCount: Int
+        public init(windowsDone: Int, windowCount: Int) {
+            self.windowsDone = windowsDone
+            self.windowCount = windowCount
+        }
+    }
 
     enum CodingKeys: String, CodingKey {
         case stage
@@ -221,17 +241,20 @@ public struct CaptureStatusResponse: Decodable, Sendable, Equatable {
         case title
         case summary
         case droppedReason
+        case transcribeWindows
     }
 
     public init(stage: String, loreCaptureId: String?, transcribed: Bool,
                 title: String? = nil, summary: String? = nil,
-                droppedReason: String? = nil) {
+                droppedReason: String? = nil,
+                transcribeWindows: TranscribeWindowsPayload? = nil) {
         self.stage = stage
         self.loreCaptureId = loreCaptureId
         self.transcribed = transcribed
         self.title = title
         self.summary = summary
         self.droppedReason = droppedReason
+        self.transcribeWindows = transcribeWindows
     }
 }
 

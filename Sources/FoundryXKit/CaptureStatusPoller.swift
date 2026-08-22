@@ -413,7 +413,9 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
     static func journey(stage: CaptureLifecycleStage,
                         transcribed: Bool,
                         title: String?,
-                        droppedReason: String?) -> RecordingJourneyReading {
+                        droppedReason: String?,
+                        transcribeWindows: CaptureStatusResponse.TranscribeWindowsPayload? = nil)
+        -> RecordingJourneyReading {
         var reading = RecordingJourneyReading()
 
         // TRANSCRIPT — the one thing the door genuinely reports.
@@ -422,9 +424,31 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
         } else if transcribed {
             reading.transcript = .done
         } else if stage == .transcribing {
-            // `.inProgress(nil)`: the door sends no window counts, and a bar drawn from a
-            // number nobody measured is the defect this whole surface exists to remove.
-            reading.transcript = .inProgress(nil)
+            // THE WINDOW COUNTS, WHEN THE DOOR ACTUALLY COUNTED THEM.
+            //
+            // This read `.inProgress(nil)` unconditionally until the door could report
+            // `transcribeWindows` — Lore counts one `transcribe_chunk` row per finished
+            // window and carries the total in `chunk_count`, so both numbers are read
+            // rather than inferred from a duration or a rate.
+            //
+            // **`nil` REMAINS THE ORDINARY CASE and still means no bar.** A recording
+            // under the 600 s threshold is transcribed whole and has no windows; one
+            // that has not started has none yet. Neither is 0%, and the reading stays
+            // optional the whole way down so an absence cannot be drawn as a zero.
+            //
+            // A count that exceeds its total is REFUSED rather than clamped: it means
+            // the counts disagree, and a bar pinned at 100% while work continues is the
+            // same lie as a bar at 0% for work nobody measured.
+            if let w = transcribeWindows,
+               w.windowCount > 0,
+               w.windowsDone >= 0,
+               w.windowsDone <= w.windowCount {
+                reading.transcript = .inProgress(
+                    TranscribeWindowsReading(windowsDone: w.windowsDone,
+                                             windowCount: w.windowCount))
+            } else {
+                reading.transcript = .inProgress(nil)
+            }
         }
 
         // NAMING — only `.done`, and only from a title that EXISTS.
@@ -456,7 +480,8 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
         journey = Self.journey(stage: next,
                                transcribed: resp.transcribed,
                                title: title,
-                               droppedReason: resp.droppedReason)
+                               droppedReason: resp.droppedReason,
+                               transcribeWindows: resp.transcribeWindows)
         // Persist name/description/stage into the durable card tombstone so the whole
         // timeline stays browsable (with a title + summary) offline + after pruning.
         if let baseDir {
