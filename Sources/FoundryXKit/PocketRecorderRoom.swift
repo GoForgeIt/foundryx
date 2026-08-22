@@ -59,11 +59,28 @@ public enum PocketRecorderRoomPresentation {
 
     /// The consequence, stated plainly. **The recorder keeps its button and will still be
     /// pressed**; what it will not do is keep what it hears.
+    ///
+    /// **CORRECTED 2026-08-22 BY MEASUREMENT.** This read *"until you make room"*, which promised
+    /// a remedy this app cannot deliver — see `makeRoomAction` below.
     public static let fullConsequence =
-        "It will not record anything more until you make room."
+        "It will not record anything more."
 
-    /// Route 1 — do it now, by hand.
-    public static let makeRoomAction = "Make room now"
+    /// ## THIS USED TO SAY "Make room now", AND THAT WAS A PROMISE THE HARDWARE DOES NOT KEEP
+    ///
+    /// Probe P3, run on real hardware on 2026-08-22
+    /// (`evidence/pocket/PKT01_BLUE_26079bc5-fw1.6-20260822-space-and-shelf.md`): a 2 KB
+    /// recording was deleted, the recorder acknowledged it with `MCU&D`, the date re-listed as
+    /// `MCU&LIST&000` — **and free space did not move by one kilobyte.** 226 KB before, 226 KB
+    /// after.
+    ///
+    /// **`APP&D` UNLINKS; IT DOES NOT RECLAIM.** Clearing is still the right thing — it is how a
+    /// recording leaves the device once it is safe somewhere else — but on this firmware it is
+    /// **NOT a way to make room**, and an offer that says otherwise sends a person to press a
+    /// button that cannot help them.
+    ///
+    /// The wording now describes what clearing DOES, not what somebody hoped it would do. Nothing
+    /// in this file offers to make room, because nothing this app can do makes room.
+    public static let makeRoomAction = "Clear recordings that are already safe"
 
     /// Route 2 — the standing choice, so this does not happen again.
     public static let armAutoClearAction = "Clear recordings automatically once they're safe"
@@ -79,6 +96,19 @@ public enum PocketRecorderRoomPresentation {
     /// recorder's own button, so this warns rather than claims to prevent.
     public static let fullOnCaptureEnable =
         "This recorder is full, so pressing its button won't record anything."
+
+    /// **WHAT A FULL RECORDER ACTUALLY NEEDS, WHICH THIS APP CANNOT DO.**
+    ///
+    /// Measured 2026-08-22: deleting a recording does not return its space. So an owner whose
+    /// recorder is full has no remedy inside this app, and **saying nothing would leave them
+    /// pressing a button that cannot help.** This sentence exists because the honest answer to
+    /// "how do I record again" is currently "not from here".
+    ///
+    /// It deliberately does NOT name a fix. `APP&RESET` has never been issued to this hardware
+    /// and whether it reclaims is unknown; naming an untested remedy would repeat the error this
+    /// whole correction is fixing.
+    public static let fullNeedsMoreThanClearing =
+        "Clearing recordings won't free space on this recorder."
 
     /// THE OFFERS, over the population rather than as separate booleans a caller must remember
     /// to check. An already-armed recorder is NOT offered arming again — an offer that does
@@ -99,5 +129,14 @@ public enum PocketRecorderRoomPresentation {
     public static let everyLine: [String] = [
         fullHeadline, fullConsequence, makeRoomAction,
         armAutoClearAction, armAutoClearConsequence, fullOnCaptureEnable,
+        fullNeedsMoreThanClearing,
     ]
+
+    /// **NO LINE IN THIS SURFACE MAY PROMISE THAT CLEARING MAKES ROOM.**
+    ///
+    /// Measured on 2026-08-22: `APP&D` unlinks and does not reclaim. The phrase "make room" and
+    /// its relatives are therefore claims this hardware does not honour, and one of them shipped
+    /// in this very file for a day. Held as a value so a test can read it rather than a reviewer
+    /// having to remember it.
+    public static let phrasesThatPromiseSpace = ["make room", "free up", "frees space", "more space"]
 }
