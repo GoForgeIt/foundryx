@@ -218,6 +218,27 @@ public enum TranscriptReadiness: Sendable, Equatable {
     case done
     /// Terminal failure, with Lore's drop reason when it gave one.
     case failed(String?)
+
+    /// **IS A PERSON WAITING FOR A TRANSCRIPT, OR IS THERE NOTHING COMING?**
+    ///
+    /// The detail screen used to answer this from `/content` alone: `found == false` rendered
+    /// "the transcript is still being produced". That conflates two different facts. A capture
+    /// the door reports `transcribed:true` whose content is simply not there — the live
+    /// capture's exact state — then read as work in flight FOREVER. It is the same shape as
+    /// the four-day `summarizing: true` defect: **an absence presented as progress.**
+    ///
+    /// `.done` is not a wait — the transcript exists and something else is wrong.
+    /// `.failed` is not a wait — it is never arriving, and saying "still producing" about a
+    /// dropped recording is the cruellest version of this bug.
+    ///
+    /// It lives here and not in a SwiftUI body on purpose: the sibling journey track's AC9 is
+    /// that no stage decision is made inside a view.
+    public var isAWait: Bool {
+        switch self {
+        case .notStarted, .inProgress: return true
+        case .done, .failed:           return false
+        }
+    }
 }
 
 // MARK: - The reading

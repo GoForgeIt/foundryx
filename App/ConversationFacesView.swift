@@ -86,6 +86,12 @@ struct ConversationFacesView: View {
     @State private var loadError: String?
     @State private var loading = true
     @State private var didAttemptFetch = false
+    /// THE DOOR'S OWN READING OF WHERE THIS CAPTURE IS.
+    ///
+    /// Read because `/content` reporting `found:false` is NOT evidence that transcription is
+    /// running. Those are two different facts and the screen used to conflate them — see the
+    /// wait branch below.
+    @State private var doorStage: RecordingJourneyReading?
     /// AC2 — the on-device summary synthesized from the transcript when no summary
     /// exists at any source. Persisted to the card once produced so the CARD fills too.
     @State private var synthesizedSummary: String?
@@ -976,9 +982,28 @@ struct ConversationFacesView: View {
             // the place actually answering: Mac, Vault, or this phone's own storage.
             WaitingExperienceView(kind: .doorFetch)
         } else if didAttemptFetch, content?.found == false, loadError == nil {
-            // Saved, but the transcript is still being produced (on-device STT / the
-            // brain's pipeline) — name the wait honestly instead of a bare line.
-            WaitingExperienceView(kind: .transcription)
+            // ⚠ `/content` SAYING `found:false` IS NOT EVIDENCE THAT TRANSCRIPTION IS RUNNING.
+            //
+            // This branch used to render the transcription wait on `found == false` alone, with
+            // no reference to what the door said about the capture. So a capture the door
+            // reports as `transcribed:true` whose content simply is not there — the live
+            // capture's exact state — read "the transcript is still being produced", FOREVER.
+            // That is the same shape as the four-day `summarizing: true` defect: an absence
+            // presented as work in flight.
+            //
+            // Now the door's own reading decides. `.inProgress` and `.notStarted` are the two
+            // states where a wait is TRUE. `.done` (content missing for another reason) and
+            // `.failed` (it never will arrive) are not, and neither is an absent reading —
+            // which falls back to the previous behaviour rather than inventing a stage.
+            if doorStage?.transcript.isAWait ?? true {
+                WaitingExperienceView(kind: .transcription)
+            } else {
+                Text("Transcript not loaded")
+                    .grainTextStyle(.title).foregroundStyle(GrainColor.ink)
+                Text(ConversationDetailCopy.loadTranscriptNote(isOlder: isOlder,
+                                                               destination: destination))
+                    .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
+            }
             GrainButton("Check again", variant: .tonal, size: .sm) { Task { await fetchFromDoor() } }
         } else {
             Text("Transcript not loaded")
@@ -1380,6 +1405,12 @@ struct ConversationFacesView: View {
         loadError = nil
         didAttemptFetch = true
         do {
+            // THE STAGE, ALONGSIDE THE CONTENT. Best-effort on purpose: a capture whose
+            // transcript loads fine must not fail because `/status` was unreachable. An absent
+            // reading falls back to the old behaviour rather than inventing a stage.
+            if let status = try? await DoorClient(target: target).captureStatus(captureId: captureId) {
+                doorStage = RecordingJourneyReading.fromStatus(status)
+            }
             let fetched = try await DoorClient(target: target).captureContent(captureId: captureId)
             if cached == nil || contentDiffersFromCache(fetched) {
                 guard CaptureAccountScope.perform(
