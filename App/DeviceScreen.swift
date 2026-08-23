@@ -470,6 +470,11 @@ struct RecordingDevicePageView: View {
     @State private var revealedKey: String?
     @State private var didCopyKey = false
     @State private var keyCustodyFoundNothing = false
+    /// N13. FORGETTING A RECORDER MUST TAKE THE OWNER OFF ITS PAGE. There was no `dismiss` in
+    /// this file at all: `forget()` removed the store record and refreshed the list behind, while
+    /// the pushed page went on rendering from the `input` captured at push time — same name, same
+    /// status, same Forget button, for a device that no longer exists.
+    @Environment(\.dismiss) private var dismiss
     /// Whether the SYNCHRONISED (§10) copy of this recorder's key exists, asked of the store
     /// when the screen opens. `false` renders the sentence that tells the owner to write the
     /// key down, which is the safe direction to be wrong in.
@@ -1505,7 +1510,15 @@ struct RecordingDevicePageView: View {
         let token = input.identity.hardwareToken
         Task {
             guard let identity = try? PocketAuthenticatedIdentity(peripheralIdentifier: token)
-            else { return }
+            else {
+                // N10. THIS USED TO BE A BARE `return` AND THE TAP DID NOTHING. The
+                // honest-absence copy already existed and was already correct for exactly this
+                // moment — it was set only on the path BELOW this guard, so a token that would
+                // not parse produced no key and no sentence. Nothing new is written here; the
+                // branch that was already right just needed reaching.
+                keyCustodyFoundNothing = true
+                return
+            }
             let held = await PocketKeyCustody().reveal(for: identity)
             revealedKey = held
             // ASKED AND FOUND NOTHING is a different sentence from "you haven't asked yet",
@@ -1560,6 +1573,16 @@ struct RecordingDevicePageView: View {
                     recoveryToken: PocketRecoveryToken(advertisedName: displayName))
             }
             onChange()
+            // N13. OFF THE PAGE OF A DEVICE THAT NO LONGER EXISTS.
+            //
+            // `onChange()` refreshes the LIST behind this page; it does nothing to the page
+            // itself, which renders from the `input` captured when the row was pushed. Its
+            // `isRemembered` is still true, so `RecordingDevicePage.resolve` keeps emitting the
+            // Forget action and a second tap does nothing at all.
+            //
+            // AFTER `onChange()`, NOT BEFORE: the list behind must already be correct when this
+            // pops, or the owner lands on a list still showing the row they just forgot.
+            dismiss()
         }
     }
 
