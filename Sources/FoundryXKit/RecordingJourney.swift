@@ -115,6 +115,33 @@ public struct VaultUploadReading: Sendable, Equatable {
     /// How many there are in total, from whoever actually knows. `nil` ⇒ count, no bar.
     public let segmentsExpected: Int?
 
+    /// **THE DENOMINATOR COMES FROM THE UPLOADER, BECAUSE THE UPLOADER IS THE ONLY ONE WHO KNOWS.**
+    ///
+    /// The door cannot supply it. `/foundryx/capture/<id>/segments` returns `seqs` — the sequence
+    /// numbers it has RECEIVED — and the manifest carries `segments_received`, `first_seq`,
+    /// `last_seq`. Every one of those is a fact about what arrived. **None of them is a total.**
+    /// Dividing received-by-received reads 100 % while segments are still in flight, which is the
+    /// false-completion the spec's AC8 names first.
+    ///
+    /// The phone produced the segments, so the phone knows how many there are: `CaptureStatus`
+    /// carries `totalSegments` (every segment on disk) and `syncedSegments`.
+    ///
+    /// ⚠ `syncedSegments` COUNTS ACKS; IT IS NOT THE RESUME WATERMARK. `CaptureWAL` computes both
+    /// and they are different numbers on purpose. The watermark is *"contiguous run from 0"*
+    /// (`CaptureWAL.swift:859`) because a resume must not skip a hole; `syncedCount` increments per
+    /// acknowledged segment. For an acked set of `{0…48, 50…79}` the watermark is **49** and the
+    /// count is **79**. Reading the watermark here would under-report by every hole — a bar that
+    /// goes backwards when a gap appears. This uses the count.
+    ///
+    /// `nil` when there is nothing to divide by, which is AC8b: with no authoritative expected
+    /// count, a surface shows a count and no percentage and no bar. An absence must never be
+    /// drawn as a zero.
+    public static func from(_ status: CaptureStatus) -> VaultUploadReading? {
+        guard status.totalSegments > 0 else { return nil }
+        return VaultUploadReading(segmentsConfirmed: status.syncedSegments,
+                                  segmentsExpected: status.totalSegments)
+    }
+
     public init(segmentsConfirmed: Int, segmentsExpected: Int?) {
         self.segmentsConfirmed = segmentsConfirmed
         self.segmentsExpected = segmentsExpected
