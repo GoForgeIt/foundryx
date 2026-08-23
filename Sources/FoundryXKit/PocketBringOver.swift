@@ -527,7 +527,19 @@ public enum PocketBringOver {
             let key = PocketRecorderFileKey(identity: identity,
                                             date: recording.date,
                                             timestamp: recording.timestamp)
-            if await custody.alreadyHeld(key) { held.insert(recording.request) }
+            // HELD BYTES ARE NOT A FINISHED RECORDING. `alreadyHeld` is a bare `fileExists`
+            // (`:125`) and deliberately says nothing about whether a conversation was ever made.
+            // Excluding on it alone strands a recording that was written and then failed to
+            // import: the audio sits on the phone forever with no conversation, and the shelf
+            // never offers it again.
+            //
+            // The retry already exists and is correct — `run()` re-imports off the held file with
+            // no radio time — it just could not be reached, because this predicate had already
+            // removed the recording from the offer.
+            if await custody.alreadyHeld(key),
+               await custody.conversation(for: key) != nil {
+                held.insert(recording.request)
+            }
         }
         return offered(recordings, excluding: held)
     }

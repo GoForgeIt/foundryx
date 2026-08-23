@@ -317,7 +317,14 @@ public actor PocketTransferQueue {
             let key = PocketRecorderFileKey(identity: identity,
                                             date: recording.date,
                                             timestamp: recording.timestamp)
-            if await custody.alreadyHeld(key) { held.insert(recording.request) }
+            // THE SAME STRAND, ON THE QUEUE. This function is documented as "the whole queue,
+            // recomputable from disk"; a held-but-unimported recording excluded here is stranded
+            // out of the DRAIN as well as out of the offer, which is the path a person uses for
+            // more than one file. Fixing only `offeredNext` would have left it reachable here.
+            if await custody.alreadyHeld(key),
+               await custody.conversation(for: key) != nil {
+                held.insert(recording.request)
+            }
         }
         let ordering = RecordingDeviceIdentity(shape: .filePull, hardwareToken: "ordering")
         let candidates = recordings

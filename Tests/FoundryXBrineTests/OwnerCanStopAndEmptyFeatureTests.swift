@@ -105,7 +105,13 @@ private struct HoldsExactly: PocketRecorderFileCustody {
     func beginKeeping(_ key: PocketRecorderFileKey) async throws -> any PocketRecorderFileWriting {
         fatalError("unreachable: these scenarios choose files, they never bring one over")
     }
-    func conversation(for key: PocketRecorderFileKey) async -> String? { nil }
+    /// A SLOT THIS STUB HOLDS IS ALSO A CONVERSATION. This answered `nil` unconditionally, which
+    /// modelled every held recording as HELD-BUT-UNIMPORTED — the strand case — while the
+    /// scenarios here mean "this phone already has it, finished". Since the queue now excludes on
+    /// held AND imported, `nil` would put every held recording back in the backlog.
+    func conversation(for key: PocketRecorderFileKey) async -> String? {
+        holding.contains(key.date + "/" + key.timestamp) ? "capture-\(key.timestamp)" : nil
+    }
     func noteConversation(_ captureID: String, for key: PocketRecorderFileKey) async {
         fatalError("unreachable: nothing here imports a conversation")
     }

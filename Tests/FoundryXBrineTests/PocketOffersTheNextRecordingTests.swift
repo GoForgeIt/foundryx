@@ -88,12 +88,56 @@ final class PocketOffersTheNextRecordingTests: XCTestCase {
         XCTAssertEqual(next?.request, shelf[1].request,
                        "the smallest is already here; the next one is what is left")
     }
+
+    /// **THE STRAND, AND WHY IT COST A RECORDING FOREVER.**
+    ///
+    /// `alreadyHeld` is a bare `fileExists` and says nothing about whether a conversation was
+    /// ever made. A pull that wrote the bytes and then failed to import left the audio on the
+    /// phone with no conversation — and `offeredNext` excluded it on the bytes alone, so the
+    /// shelf never offered it again and the retry (`run()` re-imports off the held file with no
+    /// radio time) could not be reached.
+    func testARecordingHeldButNeverImportedIsOfferedAgain() async {
+        let shelf = [
+            PocketRecording(date: "2026-08-14", timestamp: "PH260814090000", sizeBytes: 40_000),
+            PocketRecording(date: "2026-08-14", timestamp: "PH260814100000", sizeBytes: 80_000),
+        ]
+        let identity = RecordingDeviceIdentity(shape: .filePull, hardwareToken: "test")
+        // bytes on disk, no conversation
+        let custody = HoldsTheSmallestCustody(holding: shelf[0].request, importedToo: false)
+
+        let next = await PocketBringOver.offeredNext(shelf, custody: custody, identity: identity)
+        XCTAssertEqual(next?.request, shelf[0].request,
+                       "a recording whose bytes are held but which never became a conversation "
+                           + "was not offered again — it is stranded on the phone forever")
+    }
+
+    /// **THE PAIRED POSITIVE.** Without it, "offer the stranded one" is satisfied by "offer
+    /// everything always", which would send the owner back to the recorder for files already
+    /// safely imported.
+    func testARecordingThatIsAlreadyAConversationIsNotOfferedAgain() async {
+        let shelf = [
+            PocketRecording(date: "2026-08-14", timestamp: "PH260814090000", sizeBytes: 40_000),
+        ]
+        let identity = RecordingDeviceIdentity(shape: .filePull, hardwareToken: "test")
+        // bytes AND a conversation
+        let custody = HoldsTheSmallestCustody(holding: shelf[0].request, importedToo: true)
+
+        let next = await PocketBringOver.offeredNext(shelf, custody: custody, identity: identity)
+        XCTAssertNil(next,
+                     "a recording that is already a conversation was offered again — the owner "
+                         + "is being sent back to the recorder for something already here")
+    }
 }
 
 /// Answers `alreadyHeld` yes for exactly one slot. Every other member is unreachable in these
 /// tests and traps rather than returning a plausible default — a custody stub that quietly
 /// answers "no file here" would make a bring-over test pass while proving nothing.
 private struct HoldsTheSmallestCustody: PocketRecorderFileCustody {
+    init(holding: PocketRecordingRequest, importedToo: Bool = true) {
+        self.holding = holding
+        self.importedToo = importedToo
+    }
+
     let holding: PocketRecordingRequest
 
     func alreadyHeld(_ key: PocketRecorderFileKey) async -> Bool {
@@ -103,7 +147,16 @@ private struct HoldsTheSmallestCustody: PocketRecorderFileCustody {
     func beginKeeping(_ key: PocketRecorderFileKey) async throws -> any PocketRecorderFileWriting {
         fatalError("unreachable: these tests choose a file, they never bring one over")
     }
-    func conversation(for key: PocketRecorderFileKey) async -> String? { nil }
+    /// WHETHER THE HELD SLOT IS ALSO A CONVERSATION. This used to answer `nil` unconditionally,
+    /// which quietly modelled a HELD-BUT-UNIMPORTED recording — the strand case — while the test
+    /// above asserted such a recording is skipped. That assertion encoded the defect.
+    let importedToo: Bool
+    func conversation(for key: PocketRecorderFileKey) async -> String? {
+        guard importedToo, key.date == holding.date, key.timestamp == holding.timestamp else {
+            return nil
+        }
+        return "capture-for-\(holding.timestamp)"
+    }
     func noteConversation(_ captureID: String, for key: PocketRecorderFileKey) async {
         fatalError("unreachable: nothing here imports a conversation")
     }
