@@ -91,6 +91,26 @@ final class RecorderPageModel: ObservableObject {
     private var reReadsRequested = 0
     private var latestReReadApplied = 0
 
+    /// **HOW MANY RE-READS HAVE ACTUALLY BEEN APPLIED**, published so a scenario can wait for the
+    /// one IT caused rather than for any one at all.
+    ///
+    /// MEASURED 2026-08-23: `the-recorder-page-re-reads-what-an-errand-changed` flaked — the same
+    /// tree failed one run and passed the next. The scenario waited on `factsGeneration`
+    /// advancing, and `factsGeneration` advancing means SOME re-read landed, not THIS one. A
+    /// re-read still in flight from an earlier step could complete first, bump the generation past
+    /// the value the step captured, and let the assertion read PRE-REMOVAL free space — the exact
+    /// symptom, "the one number a person watches while they clear space is the one number that did
+    /// not move".
+    ///
+    /// The stale-drop at `errandFinished` is correct and stays: an older re-read that lands after a
+    /// newer one must not overwrite it, and when it is dropped it deliberately does NOT bump the
+    /// generation. That correctness is precisely what made the generation an unreliable settle
+    /// signal.
+    ///
+    /// So a scenario settles on THIS number reaching the request it issued. Read-only; nothing
+    /// outside can move it.
+    private(set) var reReadsApplied = 0
+
     init(check: PocketRecorderCheckModel,
          identity: RecordingDeviceIdentity,
          isSavedOmi: Bool) {
@@ -176,6 +196,9 @@ final class RecorderPageModel: ObservableObject {
             self.reReading = outcome
             if case .refreshed(let found) = outcome { self.lastRead = found }
             self.factsGeneration += 1
+            // Bumped ONLY on the applied path — a dropped stale re-read must not look like a
+            // re-read that landed, or the settle signal has the same hole the generation had.
+            self.reReadsApplied += 1
         }
     }
 }

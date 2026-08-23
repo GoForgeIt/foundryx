@@ -247,6 +247,33 @@ private final class PageReReadWorld {
                             + "this scenario cannot be about a figure that changed. The app "
                             + "said: " + (check.removalMessage ?? "(nothing)"))
                 }
+                // ⚠ AND WAIT FOR THE FIGURE ITSELF TO MOVE. THIS IS NOT BELT-AND-BRACES.
+                //
+                // MEASURED: this scenario flaked 1 run in 5 even after `errand()` was fixed to
+                // settle on `reReadsApplied` instead of `factsGeneration`. That fix was right and
+                // insufficient — it proves THIS errand's re-read was applied, and says nothing
+                // about whether the store held the new figure WHEN it was read. The removal writes
+                // the new free-space figure to this account's store; the re-read is spawned when
+                // the errand finishes. Nothing ordered those two, so a re-read could apply
+                // faithfully and carry the PRE-REMOVAL number.
+                //
+                // The failure text was always the same and always literal: "the page still says
+                // free space is 19% full … the one number a person watches while they clear space
+                // is the one number that did not move."
+                //
+                // So the step waits for the page to stop showing the figure it showed BEFORE.
+                // That is deliberately NOT the assertion: the `Then` requires the number to have
+                // gone DOWN, and a build that moved it the wrong way satisfies this settle and
+                // still fails the scenario. Waiting for "changed" and asserting "decreased" are
+                // two different claims.
+                if let before = freeSpaceBefore {
+                    try await AppScenarioHost.settle(
+                        untilTrue: {
+                            (try? self.requireReading("Storage").value) != before
+                        },
+                        describing: "the page's free-space figure to stop showing the "
+                            + "pre-removal value (\(before))")
+                }
             }
 
         case "the list behind that page pushes a newer reading":
@@ -481,10 +508,22 @@ private final class PageReReadWorld {
     /// become true would be an assertion that cannot fail, only time out.
     private func errand(describing what: String,
                         _ body: () async throws -> Void) async throws {
-        let before = model.factsGeneration
+        // ⚠ SETTLE ON THE RE-READ THAT LANDED, NOT ON THE GENERATION.
+        //
+        // This waited on `factsGeneration > before` and FLAKED — the same tree failed one run and
+        // passed the next. `factsGeneration` advancing means SOME re-read landed, not this one: a
+        // re-read still in flight from an earlier step can complete first, carry PRE-ERRAND data,
+        // bump the generation past `before`, and let the assertion read the old figure. That is
+        // exactly the failure text — "the one number a person watches while they clear space is
+        // the one number that did not move".
+        //
+        // `reReadsApplied` counts only re-reads that were APPLIED. A stale one is dropped by
+        // `errandFinished`'s guard — correctly, so an older read cannot overwrite a newer — and a
+        // dropped read moves neither counter.
+        let applied = model.reReadsApplied
         try await body()
         try await AppScenarioHost.settle(
-            untilTrue: { self.model.factsGeneration > before },
+            untilTrue: { self.model.reReadsApplied > applied },
             describing: "the page to re-read what \(what) changed")
     }
 
