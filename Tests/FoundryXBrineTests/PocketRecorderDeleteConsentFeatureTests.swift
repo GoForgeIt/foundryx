@@ -399,9 +399,14 @@ private actor PocketDeleteConsentWorld {
             guard case .broughtOver = outcomes.first else {
                 return XCTFail("the first pull did not land: \(outcomes)")
             }
-            XCTAssertEqual(Array(outcomes.dropFirst()),
-                           [.transferIncomplete, .transferIncomplete],
+            // BOTH FAILED, AND EACH NAMED A CAUSE. `.transferIncomplete` now carries which, so
+            // this asserts the shape (two failures) without pinning a cause this scenario is
+            // not about — and still fails if either stops reporting one.
+            let failures = Array(outcomes.dropFirst()).map(\.failure)
+            XCTAssertEqual(failures.count, 2,
                            "the failing pull and its retry did not both fail, so no retry ran")
+            XCTAssertTrue(failures.allSatisfy { $0 != nil },
+                          "a failing pull reported no cause at all: \(failures)")
             XCTAssertEqual(sweptCaptureIDs.count, 1,
                            "the retention sweep ran over \(sweptCaptureIDs.count) captures")
             // THE SEND LEG, JUDGED AGAINST WHAT THERE WAS TO SEND. Where the host's audio

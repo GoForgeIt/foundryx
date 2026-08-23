@@ -267,8 +267,20 @@ public struct PocketTransferFollowThrough: Sendable, Equatable {
     /// that is NOT one of the three constants is the attach seam's own, and that seam's whole
     /// vocabulary is "the recorder could not be reached".
     private static func token(forFailure reason: String) -> String {
+        // EVERY REAL CAUSE FIRST, AND BY ITS OWN TOKEN. This used to compare against the single
+        // `transferIncompleteLine` and send everything else to `default`, which is how eight
+        // distinct causes would have re-folded into "recorder-unavailable" the moment they were
+        // given distinct sentences — the fold moving one layer out rather than closing.
+        if let failure = PocketBringOverFailure.allCases.first(where: {
+            PocketBringOverPresentation.message(forFailure: $0) == reason
+        }) {
+            return failure.logToken
+        }
         switch reason {
         case PocketBringOverPresentation.unreadableRecordingLine:   return "unreadable"
+        // THE LEGACY LINE, STILL MAPPED. Nothing produces it now that every cause has its own
+        // sentence, but it is public API and a caller holding it must not fall to the default
+        // and be told "recorder-unavailable" — which is a different claim about the world.
         case PocketBringOverPresentation.transferIncompleteLine:    return "transfer-incomplete"
         case PocketTransferQueuePresentation.gaveUpLine:            return "gave-up"
         default:                                                    return "recorder-unavailable"

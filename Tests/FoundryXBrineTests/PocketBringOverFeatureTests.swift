@@ -19,7 +19,12 @@ final class PocketBringOverFeatureTests: XCTestCase {
         let result = try await BrineFeatureRunner.run(
             "pocket-bring-over",
             registry: StepRegistry(PocketBringOverSteps.make(world)))
-        XCTAssertEqual(result.passed, 11)
+        // NON-VACUITY FLOOR. Raised 11 -> 14 on 2026-08-22 when the failure census landed:
+        // "every way a transfer can fail says something different", "only losing the recorder
+        // blames how close it is", and the paired positive "a transfer that works reports no
+        // failure at all". Raised deliberately, never to chase a number — a scenario that stops
+        // running must fail HERE rather than quietly leave the count intact.
+        XCTAssertEqual(result.passed, 14)
     }
 
     /// THE CEILING, CHECKED BEFORE A SESSION IS OPENED. A file too big to take is refused on the
@@ -157,6 +162,7 @@ private enum PocketBringOverSteps {
             "a remembered recorder holding a long recording and a short one",
             "a remembered recorder whose file stops arriving partway through",
             "a remembered recorder whose file is not a readable recording",
+                    "the ways a bring-over can fail",
         ]
         let whens = [
             "I bring that recording over",
@@ -185,6 +191,11 @@ private enum PocketBringOverSteps {
             "no FrameRouter, Live Activity, recording pill, or currently-recording state is "
                 + "reached",
             "the conversation was never streaming",
+                    "each way has its own sentence",
+            "each way has its own log token",
+            "only losing the recorder mentions how near it is",
+            "no failure sentence was shown",
+            "the recording is in Solleva's custody",
         ]
         var steps = givens.map { phrase in
             defineStep(phrase) { context, _, _ in try await world.given(phrase); return context }
@@ -279,6 +290,12 @@ private actor PocketBringOverWorld {
         library = captures
 
         switch phrase {
+        case "the ways a bring-over can fail":
+            // NO STAGING. This scenario asks a question about the FAILURE SET itself — every
+            // way a bring-over can fail, and whether any two of them say the same thing. It
+            // needs no recorder, because it is not performing a transfer.
+            break
+
         case "a remembered recorder holding one short recording":
             let audio = Self.fixtureMP3()
             try await stage(identifier: identifier, inventory: [
@@ -635,12 +652,68 @@ private actor PocketBringOverWorld {
                            "the pull did not go to the shorter of the two files — the first "
                                + "file anybody pulls off a Pocket should be one that finishes")
 
+        case "each way has its own sentence":
+            // NON-VACUITY FIRST. Every assertion below is a claim about a SET, and an EMPTY set
+            // satisfies all of them: no two of nothing collide, and none of nothing is blank.
+            // Without this floor the whole census passes against an enum with no cases.
+            XCTAssertEqual(PocketBringOverFailure.allCases.count, 8,
+                           "the failure set changed size — raise this deliberately, and check "
+                               + "the new case has a sentence and a token of its own")
+            let sentences = PocketBringOverFailure.allCases.map {
+                PocketBringOverPresentation.message(forFailure: $0)
+            }
+            XCTAssertEqual(Set(sentences).count, sentences.count,
+                           "two ways of failing say the same thing, so a person reading it "
+                               + "cannot tell which happened: \(sentences.sorted())")
+            XCTAssertFalse(sentences.contains(where: \.isEmpty),
+                           "a way of failing has no sentence at all")
+
+        case "each way has its own log token":
+            let tokens = PocketBringOverFailure.allCases.map(\.logToken)
+            XCTAssertEqual(Set(tokens).count, tokens.count,
+                           "two ways of failing share a log token, so the log cannot name "
+                               + "which happened: \(tokens.sorted())")
+            XCTAssertFalse(tokens.contains(where: \.isEmpty),
+                           "a way of failing has no log token at all")
+
+        case "only losing the recorder mentions how near it is":
+            // AC2 AS A CENSUS OVER THE WHOLE SET, not seven string checks. A case added later
+            // with a proximity sentence and no test of its own must fail HERE.
+            let blaming = PocketBringOverFailure.allCases.filter {
+                let line = PocketBringOverPresentation.message(forFailure: $0).lowercased()
+                return line.contains("nearby") || line.contains("near ")
+                    || line.contains("close") || line.contains("range")
+            }
+            XCTAssertEqual(blaming, [.lostTheRecorder],
+                           "a failure the code cannot attribute to distance says it was distance: "
+                               + "\(blaming.map(\.logToken))")
+
+        case "no failure sentence was shown":
+            // THE PAIRED POSITIVE. Without this, a set that produced NO failures would satisfy
+            // every distinctness claim above vacuously.
+            XCTAssertEqual(outcomes.compactMap(\.failure), [],
+                           "a transfer that worked still reported a way of failing")
+            XCTAssertFalse(outcomes.isEmpty,
+                           "no transfer ran at all, so 'no failure' proves nothing")
+
+        case "the recording is in Solleva's custody":
+            XCTAssertEqual(try keptFiles(extension: "mp3").count, 1,
+                           "the transfer reported success and kept no file")
+
         case "Solleva keeps no partial copy and says the transfer did not finish":
-            XCTAssertEqual(outcomes, [.transferIncomplete])
+            // TIGHTENED, NOT LOOSENED. This used to assert `[.transferIncomplete]` — the one word
+            // that covered eight causes. It now names WHICH, so a stall that starts reporting
+            // itself as a disk failure fails here instead of passing.
+            let why = outcomes.first?.failure
+            XCTAssertNotNil(why, "a transfer that stopped partway reported no cause at all")
+            XCTAssertEqual(outcomes.count, 1)
             XCTAssertEqual(try keptFiles(extension: nil), [],
                            "a transfer that stopped partway left an artifact behind")
-            XCTAssertEqual(PocketBringOverPresentation.message(for: .transferIncomplete),
-                           PocketBringOverPresentation.transferIncompleteLine)
+            if let why {
+                XCTAssertEqual(PocketBringOverPresentation.message(for: .transferIncomplete(why)),
+                               PocketBringOverPresentation.message(forFailure: why))
+                XCTAssertFalse(why.logToken.isEmpty)
+            }
 
         case "that recording is still listed as only on the recorder":
             let detail = try await checkedShelf()

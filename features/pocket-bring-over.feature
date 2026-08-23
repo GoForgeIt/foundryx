@@ -89,3 +89,25 @@ Feature: Bringing one recording over from a record-then-sync recorder
     When I bring that recording over
     Then no FrameRouter, Live Activity, recording pill, or currently-recording state is reached
     And the conversation was never streaming
+
+  # WHY THESE ARE A CENSUS AND NOT SEVEN TRANSFERS. AC1 and AC2 are properties of the whole
+  # failure set — "no two share a sentence", "only one may blame proximity" — and a property
+  # over a set cannot be established by exercising members one at a time. Seven separate
+  # transfers would each assert its own sentence and none would notice two of them matching.
+  # The success scenario is the paired positive: without it, a set that produced NO failures
+  # would satisfy every distinctness claim above vacuously.
+
+  Scenario: Every way a transfer can fail says something different
+    Given the ways a bring-over can fail
+    Then each way has its own sentence
+    And each way has its own log token
+
+  Scenario: Only losing the recorder blames how close it is
+    Given the ways a bring-over can fail
+    Then only losing the recorder mentions how near it is
+
+  Scenario: A transfer that works reports no failure at all
+    Given a remembered recorder holding one short recording
+    When I bring that recording over
+    Then no failure sentence was shown
+    And the recording is in Solleva's custody

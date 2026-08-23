@@ -252,6 +252,73 @@ public final class PocketRecorderFileWriter: PocketRecorderFileWriting, @uncheck
     }
 }
 
+/// WHY A TRANSFER DID NOT FINISH — one case per cause the code can actually distinguish.
+///
+/// `.transferIncomplete` used to be one word for seven different things: a disk that refused the
+/// write, bytes that did not survive the round trip, five separate protocol errors, a refused
+/// deletion, and a file that vanished after custody said it was kept. One sentence covered them
+/// all, and it said *"try again when it's nearby"* — which names a cause the code cannot know.
+/// Proximity has nothing to do with a full disk or a mismatched digest.
+///
+/// The sibling removal path's doc comment already said why this is not cosmetic: *"Folding them
+/// into one word is how 'it didn't work' becomes unanswerable at three in the morning."*
+public enum PocketBringOverFailure: String, Sendable, Equatable, CaseIterable {
+    /// `beginKeeping`/write threw `couldNotWrite` — the disk refused.
+    case couldNotWriteToDisk
+    /// `didNotReadBackIdentical` — the bytes did not survive the round trip.
+    case didNotArriveIntact
+    /// The link dropped. THE ONLY CASE ALLOWED TO MENTION PROXIMITY.
+    case lostTheRecorder
+    /// The recorder stopped answering without dropping the link.
+    case stalled
+    /// The transport itself failed.
+    case transportFailed
+    /// The transfer was stopped on purpose.
+    case stoppedByRequest
+    /// A deletion nobody chose was refused.
+    case deletionRefused
+    /// Custody reported a successful commit and then had no file.
+    case vanishedAfterCommit
+
+    /// The token that reaches the log. One per case, and never a shared default — a default is
+    /// exactly how a new unmapped case silently re-folds into the old single word.
+    public var logToken: String {
+        switch self {
+        case .couldNotWriteToDisk: return "transfer-disk-refused"
+        case .didNotArriveIntact:  return "transfer-digest-mismatch"
+        case .lostTheRecorder:     return "transfer-lost-recorder"
+        case .stalled:             return "transfer-stalled"
+        case .transportFailed:     return "transfer-transport-failed"
+        case .stoppedByRequest:    return "transfer-stopped"
+        case .deletionRefused:     return "transfer-deletion-refused"
+        case .vanishedAfterCommit: return "transfer-vanished-after-commit"
+        }
+    }
+}
+
+/// Which failure a thrown custody error actually is.
+///
+/// THE REASON THIS FUNCTION EXISTS. `couldNotWrite` and `didNotReadBackIdentical` are thrown from
+/// the same custody calls and land in the same `catch`, so they have no separate return sites to
+/// edit — a plan that assumed they did would have folded the two most-likely causes of a failed
+/// bring-over back together. Binding the error and switching on it is the only thing that tells
+/// them apart.
+enum PocketBringOverCause {
+    static func of(_ error: Error) -> PocketBringOverFailure {
+        guard let custody = error as? PocketRecorderCustodyFailure else {
+            // AN ERROR THIS FILE DOES NOT KNOW. It is not silently called a disk failure — the
+            // owner is told the bytes did not survive, which is the honest reading of "we wrote
+            // and cannot prove we hold it".
+            return .didNotArriveIntact
+        }
+        switch custody {
+        case .couldNotWrite:            return .couldNotWriteToDisk
+        case .didNotReadBackIdentical:  return .didNotArriveIntact
+        @unknown default:               return .didNotArriveIntact
+        }
+    }
+}
+
 /// What one bring-over established.
 public enum PocketBringOverOutcome: Sendable, Equatable {
     /// The file is in custody AND it is a conversation. `captureID` is carried because the
@@ -266,9 +333,17 @@ public enum PocketBringOverOutcome: Sendable, Equatable {
     case broughtOver(bytes: Int, captureID: String, clockWarning: String?)
     /// The bytes AND the conversation were already here; the recorder was not asked again.
     case alreadyHeld(captureID: String)
-    case transferIncomplete     // fewer bytes than announced / stall / disconnect
+    /// CARRIES ITS CAUSE. An outcome that only said "incomplete" is what made the seven
+    /// indistinguishable in the first place.
+    case transferIncomplete(PocketBringOverFailure)
     case unreadableRecording    // no MP3 sync, refused by the ceiling, or not audio at all
     case recorderUnavailable(String)   // carries a presentation line, never a raw error
+
+    /// Why this bring-over did not finish, if it did not.
+    public var failure: PocketBringOverFailure? {
+        if case .transferIncomplete(let why) = self { return why }
+        return nil
+    }
 
     /// The conversation this bring-over produced, if it produced one.
     public var captureID: String? {
@@ -305,6 +380,39 @@ public enum PocketBringOverPresentation {
     public static let transferIncompleteLine =
         "The transfer didn't finish, so nothing was kept. The recording is still on the "
         + "recorder — try again when it's nearby."
+
+    /// ONE SENTENCE PER REAL CAUSE. The old single line said *"try again when it's nearby"* for
+    /// all of them, which names a cause the code cannot know: proximity has nothing to do with a
+    /// refusing disk or a mismatched digest. Only `.lostTheRecorder` is allowed to mention it,
+    /// and a census test over this whole switch is what holds that.
+    public static func message(forFailure failure: PocketBringOverFailure) -> String {
+        switch failure {
+        case .couldNotWriteToDisk:
+            return "Solleva couldn't save this recording on this phone, so nothing was kept. "
+                + "It's still on the recorder."
+        case .didNotArriveIntact:
+            return "This recording didn't arrive intact, so nothing was kept. "
+                + "It's still on the recorder."
+        case .lostTheRecorder:
+            return "Solleva lost the recorder partway through, so nothing was kept. "
+                + "Try again when it's nearby."
+        case .stalled:
+            return "The recorder stopped sending partway through, so nothing was kept. "
+                + "It's still on the recorder."
+        case .transportFailed:
+            return "The connection to the recorder failed, so nothing was kept. "
+                + "It's still on the recorder."
+        case .stoppedByRequest:
+            return "Bringing this recording over was stopped, so nothing was kept. "
+                + "It's still on the recorder."
+        case .deletionRefused:
+            return "Solleva wouldn't remove anything from the recorder, so it stopped and kept "
+                + "nothing. Your recording is untouched."
+        case .vanishedAfterCommit:
+            return "Solleva saved this recording and then couldn't find it, so nothing was kept. "
+                + "It's still on the recorder."
+        }
+    }
 
     public static let unreadableRecordingLine =
         "Solleva couldn't read this recording, so nothing was kept. It's still on the recorder."
@@ -355,7 +463,7 @@ public enum PocketBringOverPresentation {
             guard let clockWarning else { return broughtOverLine }
             return broughtOverLine + " " + clockWarning
         case .alreadyHeld:              return alreadyHeldLine
-        case .transferIncomplete:       return transferIncompleteLine
+        case .transferIncomplete(let why): return message(forFailure: why)
         case .unreadableRecording:      return unreadableRecordingLine
         case .recorderUnavailable(let line): return line
         }
@@ -534,7 +642,7 @@ public enum PocketBringOver {
         }
         let writer: any PocketRecorderFileWriting
         do { writer = try await custody.beginKeeping(key) }
-        catch { return .transferIncomplete }
+        catch { return .transferIncomplete(.couldNotWriteToDisk) }
         let bytes: Int
         do {
             try writer.write(payload)
@@ -542,10 +650,16 @@ public enum PocketBringOver {
         } catch {
             // NOTHING IS KEPT, and custody has already removed the partial. The recorder still
             // holds the only copy, which it always did.
+            //
+            // THE ERROR IS BOUND AND SWITCHED ON, not discarded. A refusing disk and a digest
+            // that did not match arrive at this one arm, and telling an owner "the recording
+            // did not arrive intact" when their disk is full sends them to look at the recorder.
             writer.abandon()
-            return .transferIncomplete
+            return .transferIncomplete(PocketBringOverCause.of(error))
         }
-        guard let held = await custody.heldFile(key) else { return .transferIncomplete }
+        guard let held = await custody.heldFile(key) else {
+            return .transferIncomplete(.vanishedAfterCommit)
+        }
         return await conversation(from: held, key: key, bytes: bytes,
                                   deviceIdentity: identity,
                                   advertisedName: advertisedName,
@@ -603,7 +717,8 @@ public enum PocketBringOver {
 
         let writer: any PocketRecorderFileWriting
         do { writer = try await custody.beginKeeping(key) }
-        catch { return .init(outcome: .transferIncomplete, interruption: nil) }
+        catch { return .init(outcome: .transferIncomplete(.couldNotWriteToDisk),
+                             interruption: nil) }
 
         let bytes: Int
         do {
@@ -634,17 +749,17 @@ public enum PocketBringOver {
                 // recorder simply goes quiet — so silence past the deadline IS the evidence.
                 // The link itself is up; that is a different fact from `.disconnected` below,
                 // and the queue's retry policy turns on the difference.
-                return .init(outcome: .transferIncomplete, interruption: .stalled)
+                return .init(outcome: .transferIncomplete(.stalled), interruption: .stalled)
             case .disconnected:
                 // THE DEVICE LEFT. Out of range, powered off, or claimed by another phone —
                 // the same silence from here, and the one case backoff is for.
-                return .init(outcome: .transferIncomplete, interruption: .linkDropped)
+                return .init(outcome: .transferIncomplete(.lostTheRecorder), interruption: .linkDropped)
             case .transportFailure:
-                return .init(outcome: .transferIncomplete, interruption: .transport)
+                return .init(outcome: .transferIncomplete(.transportFailed), interruption: .transport)
             case .cancelled:
                 // SOMEBODY STOPPED IT. Not a failure of the recorder and never reported as
                 // one; custody has already discarded the partial.
-                return .init(outcome: .transferIncomplete, interruption: .stopped)
+                return .init(outcome: .transferIncomplete(.stoppedByRequest), interruption: .stopped)
             case .unauthenticated, .busy, .malformedSecret, .authenticationRejected,
                  .unsupportedProtocol:
                 return .init(outcome: .recorderUnavailable(
@@ -655,18 +770,18 @@ public enum PocketBringOver {
                 // holds. If one ever appears on this path the gate refuses it, and the owner
                 // is told the recording did not come over rather than being told a story about
                 // their recorder: nothing was taken from it, which is the whole point.
-                return .init(outcome: .transferIncomplete, interruption: nil)
+                return .init(outcome: .transferIncomplete(.deletionRefused), interruption: nil)
             }
         } catch {
             // THE BYTES ARRIVED AND THIS PHONE COULD NOT PROVE IT IS HOLDING THEM. Custody has
             // already removed whatever it wrote, so "nothing was kept" is a fact rather than a
             // hope, and the recorder still has the only copy — which it always did.
             writer.abandon()
-            return .init(outcome: .transferIncomplete, interruption: nil)
+            return .init(outcome: .transferIncomplete(PocketBringOverCause.of(error)), interruption: nil)
         }
 
         guard let held = await custody.heldFile(key) else {
-            return .init(outcome: .transferIncomplete, interruption: nil)
+            return .init(outcome: .transferIncomplete(.vanishedAfterCommit), interruption: nil)
         }
         return .init(outcome: await conversation(
             from: held, key: key, bytes: bytes,

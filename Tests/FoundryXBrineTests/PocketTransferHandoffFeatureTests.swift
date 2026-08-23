@@ -162,8 +162,11 @@ private final class TransferHandoffWorld {
                 ("stopped", .stopped),
                 ("unreadable",
                  .failed(PocketBringOverPresentation.unreadableRecordingLine)),
+                // A LIVE CAUSE, NOT THE LEGACY LINE. `transferIncompleteLine` is no longer
+                // produced by anything — every cause now carries its own sentence — so feeding
+                // it here tested a dead path. `.stalled` is a real one and its token is its own.
                 ("incomplete",
-                 .failed(PocketBringOverPresentation.transferIncompleteLine)),
+                 .failed(PocketBringOverPresentation.message(forFailure: .stalled))),
                 ("gave-up", .failed(PocketTransferQueuePresentation.gaveUpLine)),
                 ("unavailable", .failed(PocketRecorderCheckPresentation.notThisRecorderLine)),
                 ("queued", .queued),
@@ -257,7 +260,7 @@ private final class TransferHandoffWorld {
                                   "already-held": "already-held",
                                   "stopped": "stopped",
                                   "unreadable": "unreadable",
-                                  "incomplete": "transfer-incomplete",
+                                  "incomplete": "transfer-stalled",
                                   "gave-up": "gave-up",
                                   "unavailable": "recorder-unavailable"],
                        "the closed tokens are \(tokens.sorted(by: { $0.key < $1.key })); folding "
