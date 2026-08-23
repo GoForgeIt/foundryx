@@ -557,11 +557,16 @@ public actor PocketTransferQueue {
                     // The item is reported and the rest gets a fresh session.
                     setPhase(request, .failed(line))
                     return .reattachNow
-                case .transferIncomplete:
+                case .transferIncomplete(let why):
                     // Cut short with no radio interruption: custody would not take the bytes.
                     // Retrying on the same session cannot fix a disk.
+                    //
+                    // THE CAUSE IS BOUND AND CARRIED. `case .transferIncomplete:` matches without
+                    // binding, so this compiled while discarding which of eight ways it failed —
+                    // and the queued drain is the path the shelf actually uses, so the fold this
+                    // track exists to close survived exactly here.
                     setPhase(request,
-                             .failed(PocketBringOverPresentation.transferIncompleteLine))
+                             .failed(PocketBringOverPresentation.message(forFailure: why)))
                 }
             }
         }

@@ -1,4 +1,5 @@
 import XCTest
+import Foundation
 import BrineSwiftCore
 @testable import FoundryXKit
 
@@ -109,6 +110,44 @@ final class PocketBringOverFeatureTests: XCTestCase {
         XCTAssertTrue(refusedWithoutDelivering,
                       "a recorder announcing more than the ceiling allows still got to stream "
                           + "bytes into this phone")
+    }
+
+    /// THE QUEUED DRAIN CARRIES THE CAUSE — the regression guard for a fold that survived the
+    /// first pass of this work and was caught in implementation review.
+    ///
+    /// `PocketTransferJob` matched `case .transferIncomplete:` WITHOUT binding the payload. Swift
+    /// allows that, so it compiled, and the queued drain — the path the shelf actually uses —
+    /// went on rendering the one folded sentence for all eight causes while the direct path had
+    /// already been split. A source scan is the only thing that catches it, because both spellings
+    /// type-check and only one is right.
+    func testNoProductionSiteMatchesTransferIncompleteWithoutBindingItsCause() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<3 { root.deleteLastPathComponent() }
+        var offenders: [String] = []
+        var scanned = 0
+        for dir in ["Sources", "App"] {
+            let base = root.appendingPathComponent(dir)
+            guard let walk = FileManager.default.enumerator(atPath: base.path) else { continue }
+            for case let rel as String in walk where rel.hasSuffix(".swift") {
+                let url = base.appendingPathComponent(rel)
+                guard let text = try? String(contentsOf: url) else { continue }
+                scanned += 1
+                for (n, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    guard !trimmed.hasPrefix("//"), !trimmed.hasPrefix("///") else { continue }
+                    // The needle is assembled so this file's own scan does not match itself.
+                    if trimmed.contains("case ." + "transferIncomplete" + ":") {
+                        offenders.append("\(dir)/\(rel):\(n + 1)")
+                    }
+                }
+            }
+        }
+        // NON-VACUITY: a scan that read nothing cannot report that nothing is wrong.
+        XCTAssertGreaterThan(scanned, 100,
+                             "the source scan read \(scanned) files — it is not scanning the tree")
+        XCTAssertEqual(offenders, [],
+                       "a production site matches .transferIncomplete without binding its cause, "
+                           + "so which of eight ways it failed is discarded: \(offenders)")
     }
 
     /// THE SHARED FRAMER, ASKED DIRECTLY. `Opus48kFramePacker` was lifted out of
