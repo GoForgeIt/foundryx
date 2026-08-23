@@ -212,8 +212,38 @@ _report_swift_failures() {
   echo "(full log: $out)"
 }
 
+# THE CONFORMANCE BINARIES, NAMED THE WAY CI NAMES THEM.
+#
+# The conformance suites refuse — correctly, and loudly — unless these point at real binaries:
+# "THIS IS THE REFUSAL, NOT A SKIP." `.github/workflows/ios-publish.yml` exports both; this hook
+# did not, so the LOCAL gate was stricter than CI for a purely environmental reason and reported
+# ten failures that CI never sees. A gate that fails for reasons CI does not have is how people
+# learn to reach for `--no-verify`, and that is how a real red eventually gets through.
+#
+# NOT INVENTED IF ABSENT. If a binary is missing this says so and leaves the variable unset, so
+# the suites refuse with their own sentence rather than being pointed at something that is not
+# there. Silence here would be the same defect one level up.
+_resolve_conformance_binaries() {
+  local root="${FOUNDRY_REPO_ROOT:-$HOME/Development/foundry}/target/release"
+  local relay="$root/foundry-relay"
+  local tunnel="$root/foundryx-relay-server"
+  if [ -z "${FOUNDRYX_CONFORMANCE_RELAY_BIN:-}" ] && [ -x "$relay" ]; then
+    export FOUNDRYX_CONFORMANCE_RELAY_BIN="$relay"
+    echo "    conformance relay:  $relay"
+  fi
+  if [ -z "${FOUNDRYX_CONFORMANCE_TUNNEL_BIN:-}" ] && [ -x "$tunnel" ]; then
+    export FOUNDRYX_CONFORMANCE_TUNNEL_BIN="$tunnel"
+    echo "    conformance tunnel: $tunnel"
+  fi
+  [ -n "${FOUNDRYX_CONFORMANCE_RELAY_BIN:-}" ] || \
+    echo "    NOTE: no conformance relay found at $relay — those suites will refuse, as designed"
+  [ -n "${FOUNDRYX_CONFORMANCE_TUNNEL_BIN:-}" ] || \
+    echo "    NOTE: no conformance tunnel found at $tunnel — those suites will refuse, as designed"
+}
+
 phase_swift() {
   echo "==> [swift] swift test (full package)"
+  _resolve_conformance_binaries
   local out; out="build/ci-gates-swift.log"
   mkdir -p build
   local rc=0

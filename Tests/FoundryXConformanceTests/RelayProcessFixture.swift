@@ -108,6 +108,7 @@ final class RelayProcessFixture {
 
     private var process: Process?
     private var stdoutPipe: Pipe?
+    private var stderrPipe: Pipe?
 
     // MARK: bring-up
 
@@ -181,17 +182,51 @@ final class RelayProcessFixture {
         p.arguments = ["--config-dir", dir.path, "--bind", "127.0.0.1:0"]
         var env = ProcessInfo.processInfo.environment
         env["AUTH_TIMEOUT"] = String(authTimeoutSeconds)
+
+        // THE SESSION-SIGNING MATERIAL, WHICH THE RELAY NOW REQUIRES AND THIS FIXTURE DID NOT
+        // PROVIDE. The relay refuses to serve without it — and refuses to GENERATE one, for a
+        // stated reason: "a generated key changes at every redeploy, every session in flight
+        // stops verifying, and the holder is refused with the same bytes a banned principal is
+        // refused with." That refusal is correct. The fixture was simply written before it
+        // existed, so every P3 scenario failed with "the relay never reported a listening
+        // address" while the actual sentence sat unread on a stderr pipe (see below).
+        //
+        // A FIXED KEY, NOT A RANDOM ONE. This deployment lives for one test; a per-run key would
+        // make a failure that depended on the key impossible to reproduce from the log.
+        let signingKey = dir.appendingPathComponent("session-signing.key")
+        try String(repeating: "ab", count: 32)
+            .write(to: signingKey, atomically: true, encoding: .utf8)
+        env["RELAY_SESSION_SIGNING_KEY_FILE"] = signingKey.path
         p.environment = env
         let out = Pipe()
         p.standardOutput = out
-        p.standardError = Pipe()
+        // STDERR IS KEPT AND READ, NOT DISCARDED. This was `Pipe()` with no reader: the
+        // relay's own explanation of why it would not serve was written into a pipe nobody
+        // drained, so the only symptom was "nothing matching `listening on` arrived" — a
+        // failure whose cause was sitting three feet away and unreadable. An unread pipe is
+        // also a hazard in its own right: a child that fills the buffer blocks on write.
+        let errPipe = Pipe()
+        p.standardError = errPipe
+        stderrPipe = errPipe
         do { try p.run() } catch { throw RelayFixtureError.io("the relay could not be started: \(error)") }
         process = p
         stdoutPipe = out
         pid = p.processIdentifier
         startedPids.append(pid)
 
-        port = try Self.readListeningPort(from: out, deadline: Date().addingTimeInterval(10))
+        do {
+            port = try Self.readListeningPort(from: out, deadline: Date().addingTimeInterval(10))
+        } catch {
+            // THE RELAY'S OWN WORDS, ON THE FAILURE PATH. Without this the harness reports that
+            // no address arrived and says nothing about why, which is indistinguishable from a
+            // relay that is merely slow.
+            let said = (try? errPipe.fileHandleForReading.readToEnd())
+                .flatMap { String(data: $0, encoding: .utf8) }?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if said.isEmpty { throw error }
+            throw RelayFixtureError.didNotListen(
+                "the relay refused to serve and said: \(said)")
+        }
 
         // ---- THE CLIENT CAN NOW BE ISSUED SOMETHING TO SIGN ------------------------
         // Set HERE and nowhere else, because this is the first instant both halves are
