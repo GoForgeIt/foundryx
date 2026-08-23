@@ -128,6 +128,48 @@ final class RecorderPageAnswersFeatureTests: XCTestCase {
             return false
         }
 
+        var inlineViolations: [String] = []
+        // INLINE CONTROL BODIES, WHICH THE NAME-BASED SCAN ABOVE CANNOT SEE.
+        //
+        // MEASURED in implementation review: five controls in this file do not call a named
+        // function — their action is written inline over several lines, or is a `Binding`'s
+        // setter. Two of them (the remove-from-recorder confirm and cancel) contain
+        // `guard let token = page?.fileToken else { return }`, which is EXACTLY the shape this
+        // invariant is about, and the name-based scan was blind to all five.
+        //
+        // So the region from a `Button(`/`Toggle(` line to the close of its body is scanned too.
+        var inlineRegions: [(Int, Int)] = []
+        for (n, line) in lines.enumerated() {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            guard !t.hasPrefix("//"), !t.hasPrefix("///") else { continue }
+            guard t.contains("Button(") || t.contains("Toggle(") else { continue }
+            var depth = 0
+            var started = false
+            var i = n
+            while i < lines.count, i < n + 40 {
+                let u = lines[i]
+                depth += u.filter { $0 == "(" || $0 == "{" }.count
+                depth -= u.filter { $0 == ")" || $0 == "}" }.count
+                started = started || depth > 0
+                if started, depth <= 0 { break }
+                i += 1
+            }
+            if i > n { inlineRegions.append((n, i)) }
+        }
+        XCTAssertFalse(inlineRegions.isEmpty,
+                       "no control bodies were located — the inline scan covers nothing")
+
+        for (start, end) in inlineRegions {
+            for n in start...min(end, lines.count - 1) {
+                let t = lines[n].trimmingCharacters(in: .whitespaces)
+                guard !t.hasPrefix("//"), !t.hasPrefix("///") else { continue }
+                let isBare = t == "return" || t.hasSuffix("{ return }") || t == "else { return }"
+                guard isBare, !blockMutatesState(endingAt: n) else { continue }
+                inlineViolations.append("  inline control body at line \(n + 1) — a bare return "
+                                            + "that sets no state and no message")
+            }
+        }
+
         var violations: [String] = []
         var excluded: [String] = []
         var currentFunc = ""
@@ -184,7 +226,7 @@ final class RecorderPageAnswersFeatureTests: XCTestCase {
                               + "still showing the row they just forgot")
         }
 
-        XCTAssertEqual(violations, [],
+        XCTAssertEqual(violations + Array(Set(inlineViolations)).sorted(), [],
                        "a control on the recorder surface returns in silence — it neither changes "
                            + "the page nor says why it did not:\n"
                            + violations.joined(separator: "\n"))
