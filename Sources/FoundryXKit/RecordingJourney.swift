@@ -266,33 +266,43 @@ public struct RecordingJourneyReading: Sendable, Equatable {
     public static func fromStatus(_ status: CaptureStatusResponse,
                                   vault: VaultUploadReading? = nil,
                                   offTheRecorder: RecorderTransferReading? = nil) -> Self {
-        let stage = CaptureLifecycleStage(wire: status.stage)
-        let hasTitle = (status.title?.isEmpty == false)
-        let transcript: TranscriptReadiness
-        switch stage {
-        case .failed:
-            transcript = .failed(status.droppedReason)
-        case .recording, .stored:
-            transcript = status.transcribed ? .done : .notStarted
-        case .transcribing:
-            transcript = .inProgress(nil)
-        case .transcribed, .inLore, .organized:
-            transcript = status.transcribed ? .done : .inProgress(nil)
-        }
-        let naming: NamingState
-        if hasTitle {
-            naming = .done
-        } else if case .done = transcript {
-            naming = .notEstablished
-        } else {
-            naming = .waitingForTranscript
-        }
+        // ⚠ THIS DELEGATES, AND IT DID NOT USED TO. READ THIS BEFORE RE-INLINING IT.
+        //
+        // There were TWO derivations of a reading from a `/status` response, and they were not the
+        // same function:
+        //
+        //   * `CaptureStatusPoller.journey(…)` — what the PHONE runs (`CaptureStatusPoller:480`).
+        //   * this one — **zero production callers**, and the one `RecordingJourneyFeatureTests`
+        //     grades.
+        //
+        // MEASURED 2026-08-23 over 252 status shapes: they disagreed on **186** of them — 108 on
+        // `naming`, 78 on `transcript` — across EVERY stage. So this track's headline assertions,
+        // including "a transcribed untitled capture does not claim naming is running", were being
+        // proven about a function the phone never calls.
+        //
+        // One disagreement was a real lie, and it lived HERE: on a FAILED capture this function
+        // returned `naming = .waitingForTranscript` — telling a person the name is pending on a
+        // recording that was dropped and will never have one. The poller returns
+        // `.notEstablished`, which is right.
+        //
+        // Rather than fix the copy and leave two copies, the shared fields now come from the ONE
+        // function the phone runs. Drift is no longer something a test must notice; it is
+        // impossible by construction. What remains here is the part `journey` does not model — the
+        // vault and recorder readings, which no production caller supplies today (see this track's
+        // AC8 blocker).
+        let shared = CaptureStatusPoller.journey(
+            stage: CaptureLifecycleStage(wire: status.stage),
+            transcribed: status.transcribed,
+            title: status.title,
+            droppedReason: status.droppedReason,
+            transcribeWindows: status.transcribeWindows)
+
         return Self(offTheRecorder: offTheRecorder,
                     toTheVault: vault,
-                    transcript: transcript,
-                    speakers: .notEstablished,
-                    naming: naming,
-                    intelligence: .notEstablished)
+                    transcript: shared.transcript,
+                    speakers: shared.speakers,
+                    naming: shared.naming,
+                    intelligence: shared.intelligence)
     }
 }
 
