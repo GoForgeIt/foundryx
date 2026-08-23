@@ -247,7 +247,14 @@ public actor PocketTransferQueue {
     private let sleeper: Sleeper
     private let configuration: Configuration
 
-    private var items: [PocketTransferItem] = []
+    /// The queue, in the order `enqueue` accepted it.
+    ///
+    /// `private(set)` at INTERNAL visibility rather than `private`, so a `@testable` test can READ
+    /// the queue without being able to write it. That read is what lets the consent-count
+    /// assertion obtain its two numbers from two different objects — the promised count off
+    /// `PocketSelection`, the accepted count off this. Reading both off the selection would make
+    /// that assertion `n == n`, which is the very defect it exists to catch.
+    internal private(set) var items: [PocketTransferItem] = []
     /// THE OWNER'S STOPS, DURABLY SUPPRESSED. The queue is re-derivable from the shelf, and a
     /// stop that lived only in the current list would be re-offered by the next re-derivation —
     /// which turns "stop this one" into a button that un-presses itself. `enqueue` refuses
