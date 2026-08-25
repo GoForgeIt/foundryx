@@ -408,12 +408,29 @@ public struct ConversationHit: Decodable, Sendable, Identifiable, Equatable {
     public let title: String
     public let dateLabel: String
     public let snippet: String
+    /// Unix seconds. `dateLabel` has DAY precision and cannot order two conversations from
+    /// one day, so a merged list needs this to interleave local and remote rows by time.
+    /// Optional: the door and an older Lore version independently, and absent means unknown.
+    public let capturedAt: Int64?
+    /// When the SECOND PLACE last saw this row, unix seconds. Residence is derived from this,
+    /// never from the row merely being in a response — membership is a past observation.
+    /// Optional for the same versioning reason; absent yields `.unknown`, never `held`.
+    public let observedAt: Int64?
     public var id: String { captureId }
-    public init(captureId: String, title: String, dateLabel: String, snippet: String) {
+    public init(
+        captureId: String,
+        title: String,
+        dateLabel: String,
+        snippet: String,
+        capturedAt: Int64? = nil,
+        observedAt: Int64? = nil
+    ) {
         self.captureId = captureId
         self.title = title
         self.dateLabel = dateLabel
         self.snippet = snippet
+        self.capturedAt = capturedAt
+        self.observedAt = observedAt
     }
 }
 
