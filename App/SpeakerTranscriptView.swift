@@ -195,6 +195,21 @@ struct InlineConfirmControls: View {
                 }
                 .frame(minHeight: GrainSpacing.x8)
                 .accessibilityIdentifier("confirm-inflight")
+            // ⚠ AC5b — VISUALLY DISTINCT FROM LANDED, and distinguishable from the
+            // rendered row ALONE. Muted rather than sage, and the words say where it is:
+            // "Saved here" is true, "Saved <name>" would imply the Mac has it. Before this
+            // phase existed the row flipped straight to the sage check, so a confirmation
+            // that never reached the Mac looked exactly like one that did — and an owner
+            // cannot re-do work they were told succeeded.
+            case .pendingSync:
+                HStack(spacing: GrainSpacing.x2) {
+                    Image(grain: .check).foregroundStyle(GrainColor.textMuted)
+                    Text("Saved here · not on your Mac yet")
+                        .grainTextStyle(.caption)
+                        .foregroundStyle(GrainColor.textMuted)
+                }
+                .frame(minHeight: GrainSpacing.x8)
+                .accessibilityIdentifier("confirm-pending")
             case .confirmed:
                 HStack(spacing: GrainSpacing.x2) {
                     Image(grain: .check).foregroundStyle(GrainColor.sage)

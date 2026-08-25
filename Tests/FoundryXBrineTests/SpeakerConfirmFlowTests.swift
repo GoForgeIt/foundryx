@@ -339,18 +339,23 @@ final class SpeakerConfirmFlowTests: XCTestCase {
                 return ok
             },
             onConfirmed: { confirmedOutcome = $0 })
-        XCTAssertEqual(resolved, .confirmed, "the local save resolves to confirmed immediately")
+        // ⚠ CHANGED WITH AC5b, AND THE OLD EXPECTATION ENCODED THE DEFECT. This asserted
+        // `.confirmed` -- "the local save resolves to confirmed immediately" -- which is
+        // exactly what made a confirmation that NEVER REACHED the Mac indistinguishable from
+        // one that did. The save is still local-first and still does not block on the wire
+        // (the next assertion); what it no longer does is CLAIM the second place has it.
+        XCTAssertEqual(resolved, .pendingSync, "a local save is not a landing")
         XCTAssertLessThan(Date().timeIntervalSince(start), 2, "the save must not block on the wire")
         XCTAssertEqual(confirmedOutcome?.speakerName, "Dana", "the optimistic hook fires with the local outcome")
         XCTAssertEqual(SpeakerConfirmQueue.pending(baseDir: dir).count, 1,
                        "the intent is durably queued for the background ship")
-        // The confirmed check lingers, then clears back to the row's own rendering.
-        var cleared = false
-        for _ in 0..<200 where !cleared {
-            if controller.phase(for: "speaker_1") == .idle { cleared = true; break }
-            try await Task.sleep(nanoseconds: 10_000_000)
-        }
-        XCTAssertTrue(cleared, "the transient confirmed phase must clear after its dwell")
+        // ⚠ AND IT MUST NOT CLEAR. The dwell clears a `.confirmed` check back to the row's
+        // own rendering, which is right for a LANDED confirmation. This ship never returns, so
+        // the row stays `pendingSync` -- if it cleared on a timer the owner would be left with
+        // a row that looks settled while nothing ever reached the Mac.
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(controller.phase(for: "speaker_1"), .pendingSync,
+                       "an unshipped confirmation keeps saying so; it does not time out into silence")
     }
 
     @MainActor

@@ -98,6 +98,15 @@ public enum SpeakerLateOffer {
 public enum SpeakerConfirmPhase: Equatable, Sendable {
     case idle
     case inFlight
+    /// Saved on THIS PHONE, not yet acknowledged by the second place.
+    ///
+    /// ⚠ THE STATE THAT MAKES A CONFIRMATION HONEST. The local write is optimistic on purpose
+    /// — it keeps the tap from hanging on the network — but before this existed the row flipped
+    /// straight to `.confirmed`, so a confirmation that NEVER LANDED was indistinguishable from
+    /// one that did. That is the failure standing between 17 confirmed speakers and the
+    /// captures waiting to be tagged: an owner cannot re-do work they were told succeeded.
+    case pendingSync
+    /// The second place has it. Claimed only on acknowledgement, never on the local save.
     case confirmed
 }
 
@@ -342,13 +351,45 @@ public final class SpeakerConfirmController: ObservableObject {
     /// How long `.confirmed` lingers before clearing back to the row's own rendering.
     private let successDwell: TimeInterval
 
+    /// Torn down with the controller so a released surface stops reconciling.
+    private var syncObserver: NSObjectProtocol?
+
     public init(baseDir: URL,
                 deadline: TimeInterval = SpeakerConfirmFlow.defaultDeadline,
                 successDwell: TimeInterval = 1.8) {
         self.baseDir = baseDir
         self.deadline = deadline
         self.successDwell = successDwell
+        // ⚠ THE ONLY PLACE `.confirmed` IS REACHED. The local save leaves the row at
+        // `pendingSync`; ONLY the second place's acknowledgement promotes it. Without this
+        // observer the phase would never reach `.confirmed` at all — which is not a stricter
+        // machine but a broken one, and is why the paired test asserts an acknowledged
+        // confirmation DOES read confirmed.
+        syncObserver = NotificationCenter.default.addObserver(
+            forName: .foundryxSpeakerConfirmSynced, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let outcome = note.userInfo?["outcome"] as? ConfirmOutcome else { return }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                // Promote only a row this surface has pending — never invent a phase for a
+                // slot the owner never touched here.
+                if self.phases[outcome.slotLabel] == .pendingSync {
+                    self.phases[outcome.slotLabel] = .confirmed
+                    let dwell = self.successDwell
+                    Task { [weak self] in
+                        try? await Task.sleep(nanoseconds: UInt64(dwell * 1_000_000_000))
+                        if let self, self.phases[outcome.slotLabel] == .confirmed {
+                            self.phases[outcome.slotLabel] = nil
+                        }
+                    }
+                }
+            }
+        }
     }
+
+    // No explicit removal in `deinit`: the token is not Sendable and a nonisolated deinit
+    // cannot touch it. The observer holds `self` WEAKLY, so a released controller stops
+    // reconciling on its own and the block becomes a no-op.
 
     public func phase(for slot: String) -> SpeakerConfirmPhase { phases[slot] ?? .idle }
 
@@ -377,11 +418,14 @@ public final class SpeakerConfirmController: ObservableObject {
             SpeakerConfirmQueue.enqueue(captureId: captureId, slot: slot,
                                         name: name, speakerId: speakerId, baseDir: base)
         }.value
-        // Instant LOCAL success — the label flips in place NOW; the Mac is not consulted.
-        onConfirmed(ConfirmOutcome(captureId: captureId, slotLabel: slot, status: "confirmed",
+        // The local outcome still fires immediately — the tap must not wait on the network.
+        // What changed is the PHASE: the row reads `pendingSync`, not `confirmed`, until the
+        // second place acknowledges. Claiming `confirmed` here is what made an unlanded
+        // confirmation read as a landed one.
+        onConfirmed(ConfirmOutcome(captureId: captureId, slotLabel: slot, status: "pending",
                                    speakerId: speakerId ?? "", speakerName: name ?? "",
                                    offeredCaptures: []))
-        phases[slot] = .confirmed
+        phases[slot] = .pendingSync
         // Background ship — detached from the phase machine. On ACK it reconciles via the
         // synced notification; on failure it stays quietly pending (drain retries).
         let dl = deadline
@@ -390,7 +434,9 @@ public final class SpeakerConfirmController: ObservableObject {
                 captureId: captureId, slot: slot, name: name, speakerId: speakerId,
                 ts: ts, baseDir: base, deadline: dl, ship: ship)
         }
-        // The confirmed check lingers, then clears back to the row's rendering.
+        // The confirmed check lingers, then clears back to the row's rendering. It clears
+        // ONLY from `.confirmed`: a `pendingSync` row must keep saying so until it lands or the
+        // drain gives up, or the distinction this phase exists for would evaporate on a timer.
         let dwell = successDwell
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(dwell * 1_000_000_000))

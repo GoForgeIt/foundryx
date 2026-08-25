@@ -298,7 +298,15 @@ private enum ConfirmFeedbackSteps {
 
             // ── Thens ─────────────────────────────────────────────────────────
             defineStep("the save shows progress immediately, before my computer has answered") { ctx, _, _ in
-                guard w.resolvedPhase == .confirmed || w.resolvedPhase == .inFlight else {
+                // `.pendingSync` accepted with AC5b: the tap still responds INSTANTLY, it
+                // just no longer claims the computer has it. That is the whole point of this
+                // step -- progress before the wire answers -- and `pendingSync` is exactly
+                // that, honestly named. `.confirmed` is deliberately still accepted: a fast
+                // ACK can promote the row before this step reads it, and a scenario that
+                // failed on a WIN would be a flake.
+                guard w.resolvedPhase == .pendingSync
+                    || w.resolvedPhase == .confirmed
+                    || w.resolvedPhase == .inFlight else {
                     throw BrineStepError("tap did not show progress: \(String(describing: w.resolvedPhase))")
                 }
                 guard !w.shipAnswered else { throw BrineStepError("the save waited on the wire") }

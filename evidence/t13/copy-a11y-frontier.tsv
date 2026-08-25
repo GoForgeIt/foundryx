@@ -121,6 +121,7 @@ a11y-identifier	App/SettingsScreen.swift	sign-in
 a11y-identifier	App/SettingsScreen.swift	sign-out
 a11y-identifier	App/SettingsScreen.swift	vault-detail-entry
 a11y-identifier	App/SpeakerTranscriptView.swift	confirm-inflight
+a11y-identifier	App/SpeakerTranscriptView.swift	confirm-pending
 a11y-identifier	App/SpeakerTranscriptView.swift	confirm-success
 a11y-identifier	App/SpeakerTranscriptView.swift	person-create-new
 a11y-identifier	App/SpeakerTranscriptView.swift	person-likely-\(person.entityId)
@@ -366,6 +367,7 @@ customer-facing-string	App/SpeakerTranscriptView.swift	Not them? Choose who it i
 customer-facing-string	App/SpeakerTranscriptView.swift	Reassign this speaker to a person.
 customer-facing-string	App/SpeakerTranscriptView.swift	Saved \(confirmedName)
 customer-facing-string	App/SpeakerTranscriptView.swift	Saved \(name)
+customer-facing-string	App/SpeakerTranscriptView.swift	Saved here · not on your Mac yet
 customer-facing-string	App/SpeakerTranscriptView.swift	Saving…
 customer-facing-string	App/SpeakerTranscriptView.swift	Stop
 customer-facing-string	App/SpeakerTranscriptView.swift	Syncing to your computer — this voice will be recognized in future conversations.
