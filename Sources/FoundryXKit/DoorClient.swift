@@ -222,6 +222,20 @@ public struct CaptureStatusResponse: Decodable, Sendable, Equatable {
     /// absence is drawn as "transcribing, no bar" instead of as 0%.
     public let transcribeWindows: TranscribeWindowsPayload?
 
+    /// WHAT TITLING IS DOING, as the door forwards it from Lore — or `nil`.
+    ///
+    /// `"inFlight" | "completed" | "failed"`, and **`nil` is the ordinary case**: no titling
+    /// run id was recorded, the run failed to fire, or Lore's runtime could not be asked.
+    /// None of those is "running", and the absence must stay an absence — deriving a stage
+    /// from its absence is the four-day `summarizing` defect this whole surface exists to
+    /// remove.
+    ///
+    /// Kept as `String?` rather than an enum so an unrecognised token decodes rather than
+    /// failing the WHOLE response: a Lore that grows a fourth state must not take the
+    /// transcript reading down with it. The mapping to a `NamingState` is where an unknown
+    /// token becomes "no stage".
+    public let naming: String?
+
     /// The door's `transcribeWindows` object. Decoded as a whole or not at all —
     /// `Decodable` synthesis requires BOTH members, so a half-present object fails to
     /// decode rather than defaulting one side to zero.
@@ -242,12 +256,14 @@ public struct CaptureStatusResponse: Decodable, Sendable, Equatable {
         case summary
         case droppedReason
         case transcribeWindows
+        case naming
     }
 
     public init(stage: String, loreCaptureId: String?, transcribed: Bool,
                 title: String? = nil, summary: String? = nil,
                 droppedReason: String? = nil,
-                transcribeWindows: TranscribeWindowsPayload? = nil) {
+                transcribeWindows: TranscribeWindowsPayload? = nil,
+                naming: String? = nil) {
         self.stage = stage
         self.loreCaptureId = loreCaptureId
         self.transcribed = transcribed
@@ -255,6 +271,7 @@ public struct CaptureStatusResponse: Decodable, Sendable, Equatable {
         self.summary = summary
         self.droppedReason = droppedReason
         self.transcribeWindows = transcribeWindows
+        self.naming = naming
     }
 }
 

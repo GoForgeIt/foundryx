@@ -343,7 +343,8 @@ public struct RecordingJourneyReading: Sendable, Equatable {
             transcribed: status.transcribed,
             title: status.title,
             droppedReason: status.droppedReason,
-            transcribeWindows: status.transcribeWindows)
+            transcribeWindows: status.transcribeWindows,
+            naming: status.naming)
 
         return Self(offTheRecorder: offTheRecorder,
                     toTheVault: vault,

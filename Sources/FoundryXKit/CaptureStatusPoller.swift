@@ -414,7 +414,8 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
                         transcribed: Bool,
                         title: String?,
                         droppedReason: String?,
-                        transcribeWindows: CaptureStatusResponse.TranscribeWindowsPayload? = nil)
+                        transcribeWindows: CaptureStatusResponse.TranscribeWindowsPayload? = nil,
+                        naming: String? = nil)
         -> RecordingJourneyReading {
         var reading = RecordingJourneyReading()
 
@@ -451,17 +452,34 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
             }
         }
 
-        // NAMING — only `.done`, and only from a title that EXISTS.
+        // NAMING — a title that EXISTS, else EVIDENCE, and still never an inference.
         //
-        // There is deliberately no `else` branch putting this `.inFlight`. The door's
+        // There is STILL no branch turning an absent title into `.inFlight`. The door's
         // `summarizing` was exactly that inference — `transcribed && title.is_none()` — and it
-        // told people work was running on a capture that could never be titled. An absent title
-        // is the seam saying nothing, which is `.notEstablished`, which is already the default.
-        if let title, !title.isEmpty { reading.naming = .done }
+        // told people work was running on a capture that could never be titled.
+        //
+        // ⚠ `.inFlight` IS NOW REACHABLE, AND ONLY FROM EVIDENCE. Lore records the
+        // `conversation_processing` run id and resolves it through its runtime's
+        // `GET /status/{run_id}`, so `"inFlight"` here means a run that is ACTUALLY RUNNING —
+        // not a marker that was set before the fire and kept when the fire failed. That
+        // distinction is the whole reason this arrives as a field instead of being derived.
+        //
+        // `"failed"` and `"completed"` both fall through to `.notEstablished`, deliberately:
+        //   · failed    → nothing is running and no name exists. That IS "the seam says nothing".
+        //   · completed → the run finished and produced no title, which the runner documents as
+        //                 a correct outcome ("abstention … is a correct, scored-positive
+        //                 outcome — never a null fabricated over"). Showing "naming" for a run
+        //                 that deliberately declined to name would be the same lie inverted.
+        // Surfacing failure to a PERSON is a product question and would need a fifth
+        // `NamingState` case plus every rendering that switches on it; not invented here.
+        if let title, !title.isEmpty {
+            reading.naming = .done
+        } else if naming == "inFlight" {
+            reading.naming = .inFlight
+        }
 
         // SPEAKERS and INTELLIGENCE are left `.notEstablished` on purpose: nothing in a status
-        // poll reports either. See `RecordingIntelligence`'s own doc — `conversation_processing`
-        // is marker-guarded and swallows failures, so no per-capture run state exists to read.
+        // poll reports either. (Naming used to be listed here too — that is no longer true.)
         return reading
     }
 
@@ -481,7 +499,8 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
                                transcribed: resp.transcribed,
                                title: title,
                                droppedReason: resp.droppedReason,
-                               transcribeWindows: resp.transcribeWindows)
+                               transcribeWindows: resp.transcribeWindows,
+                               naming: resp.naming)
         // Persist name/description/stage into the durable card tombstone so the whole
         // timeline stays browsable (with a title + summary) offline + after pruning.
         if let baseDir {
