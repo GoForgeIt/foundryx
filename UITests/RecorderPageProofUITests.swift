@@ -228,15 +228,34 @@ final class RecorderPageProofUITests: XCTestCase {
         let second = sheet(answered)
         XCTAssertTrue(second.staticTexts["Where this recording is"].firstMatch.exists,
                       "the second row's page does not head the three places")
-        XCTAssertFalse(second.buttons[Self.removeAction].firstMatch.exists,
-                       "a recording Solleva has not proved it holds anywhere else is offered "
-                        + "removal — Nick's ruling is that the affordance does not exist for a "
-                        + "recording we have not brought over")
+        // ⚠ UPDATED 2026-08-25 — THIS ASSERTED A SUPERSEDED RULING AND WAS RED ON `main`.
+        //
+        // It used to assert the affordance does NOT exist here, citing "Nick's ruling". That
+        // ruling was replaced. `tracks/20260817T1730_a_recording_leaves_the_recorder_only_when_
+        // somewhere_else_answers/amendments.md` records the successor in Nick's own framing:
+        //
+        //   "a manual delete is ALWAYS composable. What varies is the SENTENCE stated before it"
+        //   "§5.5's `.justMyPhone ⇒ refuse` row is REVERSED for the manual path"
+        //
+        // `PocketRecorderClearing.swift:306` records the same thing from the other side — the old
+        // doc "outlived the ruling that made it true by one commit" — and the shipped predicate is
+        // `isOffered(for:) { presence.onRecorder.answer == .yes }`.
+        //
+        // ⚠ THE REPLACEMENT IS STRICTLY STRONGER, WHICH IS WHY IT IS SAFE. The old pair asserted
+        // an ABSENCE (a button not existing, which any broken render satisfies). This asserts the
+        // affordance IS offered AND that the sentence carrying the risk is the right one — so a
+        // build that offered removal in SILENCE, which is the actual hazard now that the delete is
+        // always composable, goes red here.
+        XCTAssertTrue(second.buttons[Self.removeAction].firstMatch.exists,
+                      "the manual delete is always composable (Nick, 2026-08-18) — a recording the "
+                        + "recorder is holding must offer removal, and what varies is the sentence")
         XCTAssertTrue(second.staticTexts[
-            "Solleva hasn't confirmed a copy of this anywhere else yet, so it won't take it "
-            + "off the recorder."].firstMatch.exists,
-                      "the withheld action is withheld in silence, which is the half of the "
-                        + "row's rule that was missing")
+            "Solleva hasn't checked whether anything else has a copy of this. Taking it "
+            + "off the recorder could be the end of it."].firstMatch.exists,
+                      "the delete is offered with NO sentence about what it costs — this row's "
+                        + "presence is safeElsewhere:.neverAsked, so PocketDeleteConsequence."
+                        + "ofRemoving resolves .nobodyHasCheckedWhereElseItIs and that warning "
+                        + "is the only thing standing between the owner and an unrecoverable tap")
         XCTAssertTrue(second.buttons["Bring over"].firstMatch.exists,
                       "the owner cannot ask for THIS recording, which is the whole gap")
         shoot(answered, "recorder-page-06-one-recording-not-proven-elsewhere")
