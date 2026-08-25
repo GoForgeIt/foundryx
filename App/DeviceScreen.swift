@@ -2086,7 +2086,8 @@ final class PocketRecorderCheckModel: ObservableObject {
          proofOfferedRecording: PocketRecording? = nil,
          proofShelfAnsweredAt: Date? = nil,
          proofShelf: [PocketRecording] = [],
-         proofPresences: [PocketRecordingPresence]? = nil) {
+         proofPresences: [PocketRecordingPresence]? = nil,
+         proofBacklogCount: Int = 0) {
         // A PHOTOGRAPH RUNS NO ERRAND, so it never takes any time — but the lease must exist
         // or the model has a stored property this initialiser leaves unset.
         lease = PocketBackgroundLease(time: Self.backgroundTime())
@@ -2097,6 +2098,23 @@ final class PocketRecorderCheckModel: ObservableObject {
         shelfObservedAt = proofShelfAnsweredAt
         shelfRecordings = proofShelf
         presences = proofPresences
+        // ⚠ WITHOUT THIS THE PHOTOGRAPH IS OF A STATE THE PRODUCT NEVER SHOWS.
+        //
+        // `backlogCount` defaults to 0 and is otherwise set ONLY by the async
+        // `PocketTransferQueue.derivedBacklog` on the live path (`:2315`). A proof cannot
+        // await it, so it stayed 0 — and `PocketTransferControls.controls` gates the
+        // bring-over control on `backlogCount >= 1`. The answered shelf therefore rendered
+        // its rows and its Remove affordance and NO bring-over control, which is not a state
+        // the shipped app can reach.
+        //
+        // It looked plausible in the picture, which is why it survived: the failure was three
+        // UI-proof assertions disagreeing about what was on screen — `:231` finding Remove
+        // while `:285` found no bring-over — because row-level affordances come from
+        // `presences` and the shelf-level control comes from THIS.
+        //
+        // This initialiser's own doc says it "sets the same published properties the live path
+        // sets". That was the promise; this is the property it was missing.
+        backlogCount = proofBacklogCount
     }
     #endif
 

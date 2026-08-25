@@ -221,6 +221,19 @@ enum RecorderPageProofFixture {
                                                      listedAt: listedAt))
     }
 
+    /// HOW MANY RECORDINGS ARE STILL ONLY ON THE RECORDER — the number the bring-over control
+    /// is gated on (`PocketTransferControls.controls`, `backlogCount >= 1`).
+    ///
+    /// Derived from `recordings` minus `heldFileIDs`, the same two seeds the rows are built
+    /// from, so the control and the list cannot disagree about what is left to fetch.
+    ///
+    /// ⚠ IT IS NOT A LITERAL AND MUST NOT BECOME ONE. The live path computes this with
+    /// `PocketTransferQueue.derivedBacklog`; a hand-typed count here would keep photographing a
+    /// backlog after someone changed a seed, which is the picture lying about the product.
+    static var backlogCount: Int {
+        recordings.filter { !heldFileIDs.contains("\($0.date)/\($0.timestamp)") }.count
+    }
+
     /// The file a tap would ask for, chosen by the shipped comparator rather than picked here.
     static var offered: PocketRecording? {
         PocketBringOver.offered(
@@ -274,7 +287,12 @@ enum RecorderPageProofFixture {
                                             proofOfferedRecording: offered,
                                             proofShelfAnsweredAt: listedAt,
                                             proofShelf: recordings,
-                                            proofPresences: shelfPresences)
+                                            proofPresences: shelfPresences,
+                                            // DERIVED FROM THE SAME TWO VALUES THE ROWS ARE, not
+                                            // typed. A literal here would drift from `recordings`
+                                            // the moment either seed changed, and the picture
+                                            // would claim a backlog the shelf does not show.
+                                            proofBacklogCount: backlogCount)
         }
     }
 }
