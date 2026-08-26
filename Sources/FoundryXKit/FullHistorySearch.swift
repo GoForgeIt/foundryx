@@ -19,6 +19,24 @@ public enum RemoteSearchState: Equatable, Sendable {
     case unreachable
 }
 
+public extension RemoteSearchState {
+    /// Whether this state can be RECOVERED FROM by asking again.
+    ///
+    /// ⚠ AC4 REQUIRES NAMED **AND** RECOVERABLE, and the plan's first draft conflated the two:
+    /// it said "preserve `.unreachable`" and called that the retry. `.unreachable` is a STATE.
+    /// A banner naming the condition with no way out leaves the owner staring at a permanent
+    /// apology while their history sits one working request away.
+    ///
+    /// Only `.unreachable` qualifies. `.notConnected` deliberately does NOT: no second place is
+    /// connected, so retrying reaches nothing and offering the control would lie about what it
+    /// can do. An affordance that cannot work is worse than none — it teaches the owner that
+    /// controls here are decorative.
+    var isRetryable: Bool {
+        if case .unreachable = self { return true }
+        return false
+    }
+}
+
 /// Resolves the remote (computer/Lore) half of a full-history search.
 public enum FullHistorySearch {
     /// Compute the remote-search state for `query`. An empty query is `.idle`. With no
