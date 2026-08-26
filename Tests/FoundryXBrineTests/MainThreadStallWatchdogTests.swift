@@ -63,8 +63,16 @@ final class MainThreadStallWatchdogTests: XCTestCase {
         target.async { Thread.sleep(forTimeInterval: 0.7) }
         let deadline = Date().addingTimeInterval(3)
         while captures.value.isEmpty && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
-        // Let the stall end so the terminal emit also lands.
-        Thread.sleep(forTimeInterval: 0.4)
+        // Let the stall end so the terminal emit also lands. POLLED, not a fixed sleep.
+        //
+        // ⚠ THIS WAS A FIXED `Thread.sleep(0.4)` AND IT FLAKED UNDER LOAD. The capture above
+        // already waits on a DEADLINE; the emit did not, so on a loaded machine the ping had
+        // not landed when the assertion ran and `emits` was empty. The assertion is unchanged
+        // and the thresholds are unchanged — only the WAIT is now patient. Weakening the
+        // assertion instead would have been the wrong repair: a stall detector whose test
+        // stops requiring the span is a stall detector that can stop emitting one.
+        let emitDeadline = Date().addingTimeInterval(5)
+        while emits.value.isEmpty && Date() < emitDeadline { Thread.sleep(forTimeInterval: 0.02) }
         dog.stop()
 
         XCTAssertEqual(captures.value.count, 1, "exactly one stack capture per stall, not per tick")

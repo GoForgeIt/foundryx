@@ -147,7 +147,18 @@ final class PerfTelemetry: NSObject, @unchecked Sendable {
             thresholdMs: 250,
             pingInterval: 0.25,
             target: .main,
-            captureThresholdMs: 400,
+            // 400 -> 3000, Nick 2026-08-25: "a 400ms stall threshold is also very, very
+            // short". He is right, and the BUDGET is the argument: stack captures are capped
+            // at 5 PER SESSION (stackBudget above). At 400ms those five get spent on ordinary
+            // jank, so the multi-second hang that actually matters — the nav stall this
+            // watchdog was built for measured 6.6s — can arrive with the budget already
+            // exhausted and never be sampled at all. Raising the bar spends the five captures
+            // on stalls worth a backtrace.
+            //
+            // The 250ms SPAN threshold above is deliberately NOT raised: spans are cheap,
+            // separately rate-limited (≤1/5s, ≤60/session), and accumulating small stalls are
+            // exactly what the span series is for. Only the expensive, scarce capture moves.
+            captureThresholdMs: 3000,
             onStack: { ms in
                 guard stackBudget.admit() else { return }
                 let frames = sampler.sample()
