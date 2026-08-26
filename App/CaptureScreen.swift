@@ -885,12 +885,32 @@ struct CaptureScreen: View {
         // `restingRemote` already excludes anything this phone holds (deduped by captureId
         // and by tombstone in `applyRestingPage`), so interleaving cannot double-render a
         // conversation that lives in both places.
-        let merged: [HistoryRow] =
-            (filteredCaptures.map { HistoryRow.onPhone($0) }
-             + (searchMatches == nil && categoryFilter == nil
-                ? restingRemote.map { HistoryRow.elsewhere($0) }
-                : []))
-            .sorted { rowDate($0) > rowDate($1) }
+        // ⚠ MERGED, NOT RE-SORTED. `visibleCaptures` is already sorted date-descending at
+        // every rebuild and `restingRemote` arrives newest-first from the door, so a
+        // `.sorted` here would re-sort N rows on EVERY BODY PASS — the exact cost the
+        // comment above this function was written to prevent (track
+        // `residual_on_main_actor_work`). My first version did precisely that.
+        //
+        // Two already-sorted sequences interleave in O(n+m) with no comparisons beyond the
+        // merge itself.
+        let localRows = filteredCaptures.map { HistoryRow.onPhone($0) }
+        let remoteRows = (searchMatches == nil && categoryFilter == nil)
+            ? restingRemote.map { HistoryRow.elsewhere($0) }
+            : []
+        var merged: [HistoryRow] = []
+        merged.reserveCapacity(localRows.count + remoteRows.count)
+        var li = 0, ri = 0
+        while li < localRows.count || ri < remoteRows.count {
+            if ri >= remoteRows.count {
+                merged.append(localRows[li]); li += 1
+            } else if li >= localRows.count {
+                merged.append(remoteRows[ri]); ri += 1
+            } else if rowDate(localRows[li]) >= rowDate(remoteRows[ri]) {
+                merged.append(localRows[li]); li += 1
+            } else {
+                merged.append(remoteRows[ri]); ri += 1
+            }
+        }
         let sections = ConversationGrouping.groupPresorted(merged, now: Date()) { rowDate($0) }
         // NOT pinned (T1 AC3): a pinned header needs an opaque band to hide the rows
         // scrolling under it — that band was the white/elevated stripe the design never

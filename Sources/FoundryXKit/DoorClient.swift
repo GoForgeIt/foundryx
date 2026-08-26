@@ -962,6 +962,46 @@ public final class DoorClient: @unchecked Sendable {
             cursorParam = ""
         }
         let path = "/foundryx/conversations?q=\(q)&limit=\(limit)\(cursorParam)"
+
+        // ⚠ THE RELAY LEG, WITHOUT WHICH THIS REQUEST NEVER REACHES THE MAC AT ALL.
+        //
+        // MEASURED 2026-08-26 from the door's own event log: `capture/status`,
+        // `capture/content`, `models` and `chat` all arrived; `/foundryx/conversations`
+        // NEVER appeared once, across hours, while the phone was demonstrably connected.
+        // The door logs even unauthorized requests, so an absent line means the request
+        // never got there.
+        //
+        // Every one of those working routes has this leg. This method — added with the
+        // portal — had only the direct `baseURL` path, so when the phone reaches the Mac
+        // THROUGH the relay tunnel (the normal case: the door dials out to the gateway and
+        // the phone rides that tunnel), the request was addressed to a base URL that is not
+        // the door and cannot be. The portal could not have worked from a phone that was
+        // not on the same network, and the failure was silent because a request that goes
+        // nowhere produces no door-side evidence.
+        //
+        // `.interactive()` for the same reason `captureContent` uses it: a user-facing read
+        // rides the chat tunnel and must not queue behind bulk capture sync.
+        if let relay = target.relay?.interactive() {
+            let resp = try await RelayHTTP.roundTrip(
+                relay: relay, bearer: target.bearer, method: "GET",
+                path: path, session: session, log: log, useMux: target.useMux)
+            if resp.status == 401 { throw DoorError.unauthorized }
+            // An older door with no endpoint degrades to local-only rather than throwing —
+            // the same concession the direct leg below makes, for the same reason.
+            if resp.status == 404 {
+                return ConversationPageResponse(conversations: [], total: nil, nextCursor: nil)
+            }
+            guard resp.status == 200 else { throw DoorError.http(resp.status) }
+            // The ENVELOPE is what the wire carries; `ConversationPageResponse` is the phone's
+            // shape and is deliberately not `Decodable`, so both legs decode the same envelope
+            // and map it identically. Two decoders over one wire is how the legs drift.
+            let decoded = try JSONDecoder().decode(ConversationSearchResponse.self, from: resp.body)
+            return ConversationPageResponse(
+                conversations: decoded.conversations,
+                total: decoded.total,
+                nextCursor: decoded.nextCursor)
+        }
+
         let base = target.baseURL.absoluteString
         guard let url = URL(string: "\(base)\(path)") else {
             throw DoorError.transport("bad conversations url")
@@ -1330,18 +1370,35 @@ public final class DoorClient: @unchecked Sendable {
     /// `decision` is "once" | "always" | "reject"; the suspended /chat SSE then resumes.
     public func answerApproval(sessionId: String, callId: String,
                                decision: String, feedback: String? = nil) async throws {
+        let path = "/foundryx/chat/\(sessionId)/approvals/\(callId)"
+        var payload: [String: String] = ["decision": decision]
+        if let f = feedback { payload["feedback"] = f }
+        let bodyData = try JSONSerialization.data(withJSONObject: payload)
+
+        // ⚠ FOUND BY `DoorRouteRelayLegTests`, WHICH WAS WRITTEN FOR A DIFFERENT ROUTE.
+        // This had only the direct `baseURL` leg, so approving a tool call from a phone not
+        // on the Mac's network silently did nothing — the same shape as the portal defect
+        // that prompted the test. `.interactive()` because an approval is a person waiting
+        // on a prompt, and must not queue behind bulk capture sync.
+        if let relay = target.relay?.interactive() {
+            let resp = try await RelayHTTP.roundTrip(
+                relay: relay, bearer: target.bearer, method: "POST",
+                path: path, body: bodyData,
+                session: session, log: log, useMux: target.useMux)
+            if resp.status == 401 { throw DoorError.unauthorized }
+            return
+        }
+
         let s = target.baseURL.absoluteString
         let base = s.hasSuffix("/") ? String(s.dropLast()) : s
-        guard let url = URL(string: "\(base)/foundryx/chat/\(sessionId)/approvals/\(callId)") else {
+        guard let url = URL(string: "\(base)\(path)") else {
             throw DoorError.transport("bad approvals url")
         }
         var r = URLRequest(url: url)
         r.httpMethod = "POST"
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")
         r.setValue("Bearer \(target.bearer)", forHTTPHeaderField: "Authorization")
-        var payload: [String: String] = ["decision": decision]
-        if let f = feedback { payload["feedback"] = f }
-        r.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        r.httpBody = bodyData
         let (_, response) = try await session.data(for: r)
         if let http = response as? HTTPURLResponse, http.statusCode == 401 { throw DoorError.unauthorized }
     }
