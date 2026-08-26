@@ -164,10 +164,31 @@ public enum SpeakerConfirmFlow {
         ts: UInt64,
         baseDir: URL,
         deadline: TimeInterval = defaultDeadline,
-        ship: @escaping @Sendable () async throws -> ConfirmOutcome
+        ship: @escaping @Sendable () async throws -> ConfirmOutcome,
+        /// Read the second place back and say whether it holds this confirmation LIVE.
+        ///
+        /// ⚠ THIS PARAMETER IS THE CRITERION. Without it "landed" meant "the POST
+        /// returned", and a confirmation that never actually took still removed its queue
+        /// entry and posted `.synced` — so the owner saw a name stick, the queue forgot
+        /// it, and nothing ever retried. Against 1,005 taggable captures there are 17
+        /// confirmations, the last on 2026-07-17.
+        ///
+        /// `nil` keeps the old behaviour for callers that cannot read back (tests, and
+        /// paths with no door). That is deliberate and NOT a silent default: a caller
+        /// passing nothing is choosing the weaker contract explicitly at the call site.
+        readBack: (@Sendable () async -> Bool)? = nil
     ) async -> ConfirmOutcome? {
         do {
             let outcome = try await withDeadline(deadline, ship: ship)
+            // ⚠ AN HTTP 200 IS NOT EVIDENCE. AC5a: a confirmation reads as landed ONLY
+            // when a read-back proves the second place holds it live. A door can accept
+            // the POST and still be serving a cached diarization, in which case the name
+            // is not there and never will be.
+            if let readBack, await readBack() == false {
+                // NOT landed. The entry stays queued so the drain retries, and nothing
+                // claims success — an unshipped confirmation must stay visibly unshipped.
+                return nil
+            }
             await Task.detached {
                 SpeakerConfirmQueue.remove(captureId: captureId, slot: slot, ifTsMatches: ts, baseDir: baseDir)
                 TranscriptCacheStore.confirmSpeaker(

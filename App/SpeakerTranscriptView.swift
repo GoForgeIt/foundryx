@@ -958,9 +958,33 @@ struct SpeakerTagSheet: View {
                                     entityId: entityId)
         let outcomeBox = ConfirmOutcomeBox()
         Task {
+            // ⚠ READ THE MAC BACK BEFORE CALLING IT LANDED. The POST returning 200 only
+            // proves the door accepted the request; it can still be serving a CACHED
+            // diarization, in which case the name is not on the conversation and no retry
+            // was ever scheduled because the queue entry had already been dropped.
+            //
+            // Both halves are required. `speakersAreLive` alone would accept a live read
+            // that does not carry this name; the slot match alone would accept a cached
+            // answer that happens to contain it. Absent provenance is UNKNOWN and fails
+            // closed — the confirmation stays queued rather than being declared shipped.
+            let verify: @Sendable () async -> Bool = { [target, captureId, slot, shipName] in
+                do {
+                    let content = try await DoorClient(target: target)
+                        .captureContent(captureId: captureId)
+                    guard content.diarizationSource?.speakersAreLive == true else { return false }
+                    guard let row = content.speakers.first(where: { $0.slot == slot }) else {
+                        return false
+                    }
+                    return row.confirmedSpeakerId != nil || row.name == shipName
+                } catch {
+                    // Unreachable is NOT refuted — it is unproven, which fails closed for
+                    // the same reason: the drain will retry, and nothing claims success.
+                    return false
+                }
+            }
             let outcome = await SpeakerConfirmFlow.backgroundShip(
                 captureId: captureId, slot: slot, name: shipName, speakerId: speakerId,
-                ts: ts, baseDir: base, ship: ship)
+                ts: ts, baseDir: base, ship: ship, readBack: verify)
             await outcomeBox.set(outcome)
         }
 

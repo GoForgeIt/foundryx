@@ -210,6 +210,58 @@ final class SpeakerConfirmFlowTests: XCTestCase {
         XCTAssertEqual(rejectedName, "Dana")
     }
 
+    /// AC5a — a POST that SUCCEEDS but whose read-back cannot prove the second place
+    /// holds it live is NOT landed.
+    ///
+    /// ⚠ THE SHIP HERE RETURNS A GOOD OUTCOME ON PURPOSE. That is the whole point: before
+    /// this gate existed, an HTTP 200 dropped the queue entry and posted `.synced`, so a
+    /// confirmation the Mac never actually recorded looked identical to one it did — and
+    /// nothing retried, because the intent had already been forgotten. Measured
+    /// consequence: 17 confirmations against 1,005 taggable captures, none since
+    /// 2026-07-17.
+    func testBackgroundShipUnprovenReadBackKeepsQueuedAndClaimsNothing() async {
+        let ts = SpeakerConfirmQueue.enqueue(
+            captureId: "cap-1", slot: "speaker_1", name: "Dana", baseDir: dir)
+        // Bound BEFORE the closure: `ship` is `@Sendable` and an XCTestCase is not, so
+        // calling the fixture inside it would capture `self`.
+        let ok = outcome()
+        var syncedFired = false
+        let obs = NotificationCenter.default.addObserver(
+            forName: .foundryxSpeakerConfirmSynced, object: nil, queue: .main) { _ in
+                syncedFired = true
+            }
+        defer { NotificationCenter.default.removeObserver(obs) }
+
+        let result = await SpeakerConfirmFlow.backgroundShip(
+            captureId: "cap-1", slot: "speaker_1", name: "Dana", speakerId: nil,
+            ts: ts, baseDir: dir,
+            ship: { ok },                      // the POST SUCCEEDS
+            readBack: { false })               // ...and the Mac cannot prove it holds it
+
+        XCTAssertNil(result, "an unproven confirmation yields no landed outcome")
+        XCTAssertEqual(SpeakerConfirmQueue.pending(baseDir: dir).count, 1,
+                       "the intent STAYS queued so the drain retries it")
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertFalse(syncedFired, "nothing may announce synced on an unproven read-back")
+    }
+
+    /// The positive control. Without it the test above passes for a `backgroundShip` that
+    /// refuses EVERYTHING, which would be a gate that cannot go green rather than one that
+    /// cannot lie.
+    func testBackgroundShipProvenReadBackLandsAndDrainsTheQueue() async {
+        let ts = SpeakerConfirmQueue.enqueue(
+            captureId: "cap-1", slot: "speaker_1", name: "Dana", baseDir: dir)
+        let ok = outcome()
+        let result = await SpeakerConfirmFlow.backgroundShip(
+            captureId: "cap-1", slot: "speaker_1", name: "Dana", speakerId: nil,
+            ts: ts, baseDir: dir,
+            ship: { ok },
+            readBack: { true })
+        XCTAssertNotNil(result, "a proven confirmation IS landed")
+        XCTAssertTrue(SpeakerConfirmQueue.pending(baseDir: dir).isEmpty,
+                      "a proven confirmation drops the intent")
+    }
+
     func testBackgroundShipTransientKeepsQueued() async {
         let ts = SpeakerConfirmQueue.enqueue(captureId: "cap-1", slot: "speaker_1", name: "Dana", baseDir: dir)
         let result = await SpeakerConfirmFlow.backgroundShip(

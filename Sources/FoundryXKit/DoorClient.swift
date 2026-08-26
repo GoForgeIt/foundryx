@@ -278,6 +278,21 @@ public struct CaptureStatusResponse: Decodable, Sendable, Equatable {
 /// The door's transcript reply (`GET /foundryx/capture/{phone_id}/content`, Phase
 /// B) — the conversation text Lore produced + when it was captured. `found` is
 /// false (the door 404s with `{found:false}`) until Lore has transcribed it.
+/// Which side answered a diarization read.
+///
+/// ⚠ ABSENT IS NOT "cache", AND IT IS NOT "live" EITHER. The door omits a section that
+/// carried no rows, so `nil` means UNKNOWN and a caller asking "did my confirmation
+/// land?" must treat it as NOT PROVEN rather than as either answer.
+public struct DiarizationSource: Decodable, Sendable, Equatable {
+    public let segments: String?
+    public let speakers: String?
+    public var speakersAreLive: Bool { speakers == "live" }
+    public init(segments: String?, speakers: String?) {
+        self.segments = segments
+        self.speakers = speakers
+    }
+}
+
 public struct CaptureContent: Decodable, Sendable, Equatable {
     public let transcript: String
     public let capturedAt: Int
@@ -301,6 +316,16 @@ public struct CaptureContent: Decodable, Sendable, Equatable {
     /// Deepgram paragraph structure for non-diarized captures. Empty for legacy replies
     /// or when diarized `segments` are present.
     public let paragraphs: [TranscriptParagraph]
+    /// Which side answered, per section: `"live"` or `"cache"`, absent when the section
+    /// carried no rows at all.
+    ///
+    /// ⚠ THE DOOR HAS ALWAYS SENT THIS AND THE PHONE DISCARDED IT. `diarizationSource` is
+    /// emitted on exactly this route, and `CodingKeys` listed only
+    /// `segments, speakers, paragraphs` — so the one signal that distinguishes a LIVE
+    /// answer from a replayed cache never reached the device that needed it. A
+    /// confirmation could therefore only be judged by its HTTP status, which is what
+    /// AC5a forbids.
+    public let diarizationSource: DiarizationSource?
 
     /// The grouped, slot-aware view of the diarized transcript (segments → speaker
     /// turns + stable numbering/colour). Empty `segments` → `hasSegments` is false and
@@ -311,7 +336,7 @@ public struct CaptureContent: Decodable, Sendable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case transcript, capturedAt, found, title, summary, titleModel, summarizing
-        case segments, speakers, paragraphs
+        case segments, speakers, paragraphs, diarizationSource
     }
 
     public init(from decoder: Decoder) throws {
@@ -325,6 +350,8 @@ public struct CaptureContent: Decodable, Sendable, Equatable {
         summarizing = try c.decodeIfPresent(Bool.self, forKey: .summarizing) ?? false
         segments = try c.decodeIfPresent([TranscriptSegment].self, forKey: .segments) ?? []
         speakers = try c.decodeIfPresent([CaptureSpeaker].self, forKey: .speakers) ?? []
+        diarizationSource = try c.decodeIfPresent(
+            DiarizationSource.self, forKey: .diarizationSource)
         paragraphs = try c.decodeIfPresent([TranscriptParagraph].self, forKey: .paragraphs) ?? []
     }
 
@@ -332,7 +359,8 @@ public struct CaptureContent: Decodable, Sendable, Equatable {
                 title: String? = nil, summary: String? = nil,
                 titleModel: String? = nil, summarizing: Bool = false,
                 segments: [TranscriptSegment] = [], speakers: [CaptureSpeaker] = [],
-                paragraphs: [TranscriptParagraph] = []) {
+                paragraphs: [TranscriptParagraph] = [],
+                diarizationSource: DiarizationSource? = nil) {
         self.transcript = transcript
         self.capturedAt = capturedAt
         self.found = found
@@ -343,6 +371,7 @@ public struct CaptureContent: Decodable, Sendable, Equatable {
         self.segments = segments
         self.speakers = speakers
         self.paragraphs = paragraphs
+        self.diarizationSource = diarizationSource
     }
 }
 
