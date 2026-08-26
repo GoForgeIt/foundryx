@@ -255,6 +255,13 @@ struct CaptureScreen: View {
     /// worse still, because it is retained past deletion BY DESIGN, so reading it as
     /// residence would tell the owner a deleted transcript is safe.
     @State private var restingResidence: [String: RowResidence] = [:]
+
+    /// True while older LOCAL captures may still exist past the launch bound.
+    ///
+    /// Starts `true` only when the list is AT the bound: below it, hydration already
+    /// showed everything and an affordance would promise rows that are not there.
+    @State private var mayHaveOlderLocal = false
+    @State private var loadingOlderLocal = false
     /// Selected category filter chip id (nil = All).
     @State private var categoryFilter: String?
     @State private var newCategoryName = ""
@@ -439,6 +446,11 @@ struct CaptureScreen: View {
         // The RESTING list asks the second place what it holds, once per appearance. Without
         // this the owner sees only what the phone kept and has no way to learn the rest exists.
         .task { await loadRestingRemote() }
+        .task {
+            // The bound is a LOCAL fact: only offer to reach past it when the list is
+            // actually standing at it.
+            mayHaveOlderLocal = manager.visibleCaptures.count >= CaptureManager.maxCapturesToLoad
+        }
         // Search sweeps local disk (cached transcripts) AND, when the computer is
         // connected, the FULL history in Lore (track 20260714T1200) — off-main, newest
         // state wins. The computer results are deduped against the local matches.
@@ -831,6 +843,29 @@ struct CaptureScreen: View {
                     } header: {
                         searchSectionHeader(section.title)
                     }
+                }
+                // ⚠ THE LOCAL BOUND, MADE REACHABLE. Launch hydration stops at 300 because
+                // hydrating everything on the main thread overran the launch watchdog. That
+                // bound stays; this is the way past it, in bounded pages, off the main
+                // actor. Shown only while older captures may remain, so it vanishes when
+                // the walk is done instead of promising rows that are not there.
+                if mayHaveOlderLocal {
+                    Button {
+                        Task {
+                            loadingOlderLocal = true
+                            mayHaveOlderLocal = await manager.loadOlderCaptures()
+                            loadingOlderLocal = false
+                        }
+                    } label: {
+                        if loadingOlderLocal {
+                            Text("Loading older…")
+                        } else {
+                            Text("Show older")
+                        }
+                    }
+                    .disabled(loadingOlderLocal)
+                    .accessibilityIdentifier("local-show-older")
+                    .padding(.vertical, GrainSpacing.x2)
                 }
                 remoteResultsSection
                 restingRemoteSection

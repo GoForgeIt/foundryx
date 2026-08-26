@@ -106,6 +106,7 @@ coding-key	Sources/FoundryXKit/ConversationMeta.swift	startedAt = "started_at"
 coding-key	Sources/FoundryXKit/DoorClient.swift	captureId
 coding-key	Sources/FoundryXKit/DoorClient.swift	capturedAt
 coding-key	Sources/FoundryXKit/DoorClient.swift	chatId = "chat_id"
+coding-key	Sources/FoundryXKit/DoorClient.swift	diarizationSource
 coding-key	Sources/FoundryXKit/DoorClient.swift	droppedReason
 coding-key	Sources/FoundryXKit/DoorClient.swift	endedAt = "ended_at"
 coding-key	Sources/FoundryXKit/DoorClient.swift	found

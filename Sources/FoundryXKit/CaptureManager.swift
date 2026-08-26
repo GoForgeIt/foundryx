@@ -3698,6 +3698,63 @@ public final class CaptureManager: ObservableObject {
     /// Build a WAL, threading the per-segment upload override — AND the name of where
     /// that override puts the bytes — so every capture this manager owns uploads
     /// through the same path and says the same true thing about it.
+    /// Load the next page of OLDER captures from disk, on demand.
+    ///
+    /// ⚠ THIS IS THE **LOCAL** HALF OF THE TRUNCATION, and it is the half that is easy to
+    /// forget. Launch hydration stops at `maxCapturesToLoad` (300) because enumerating and
+    /// hydrating every folder on the main thread overran the iOS launch watchdog and got
+    /// this app SIGKILL'd. The bound is correct and stays. What was missing is any way to
+    /// reach past it: `LocalCapturePaging` was written and tested for exactly this and had
+    /// no caller, so a phone with thousands of captures could not show its own history and
+    /// no remote fix could help — the missing rows were never on the Mac's side.
+    ///
+    /// ⚠ AND IT MUST NOT RECREATE THE STALL IT PAGES AROUND. The criterion refuses
+    /// "enumerating and hydrating every remaining folder on Show older", which satisfies
+    /// "they load" while reproducing the 6–11s hang. So the directory scan, the filtering
+    /// and the WAL construction all happen in a detached task; only the append touches the
+    /// main actor, exactly as hydration does.
+    ///
+    /// Returns `true` while older captures remain — the affordance disappears when the
+    /// walk is genuinely exhausted rather than sitting there inert.
+    @discardableResult
+    public func loadOlderCaptures(limit: Int = 100) async -> Bool {
+        let base = baseDir
+        let after = captures.map(\.captureId).min()   // ids sort newest-first; oldest loaded
+        let picked: LocalCapturePaging.Page = await Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            guard let entries = try? fm.contentsOfDirectory(
+                at: base, includingPropertiesForKeys: nil)
+            else { return LocalCapturePaging.Page(ids: [], nextAfter: nil) }
+            // The SAME filters hydration applies. A different filter here would make the
+            // older pages disagree with the first one about what a capture even is.
+            let names = entries.map { $0.lastPathComponent }
+                .filter { !$0.hasPrefix(".") }
+                .filter { name in
+                    let dir = base.appendingPathComponent(name, isDirectory: true)
+                    var isDir: ObjCBool = false
+                    guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue
+                    else { return false }
+                    if fm.fileExists(atPath: dir.appendingPathComponent(".discarded").path) {
+                        return false
+                    }
+                    if fm.fileExists(atPath: dir.appendingPathComponent(".deleted").path) {
+                        return false
+                    }
+                    return true
+                }
+            return LocalCapturePaging.page(names: names, after: after, limit: limit)
+        }.value
+
+        guard !picked.ids.isEmpty else { return false }
+        let known = Set(captures.map(\.captureId))
+        let fresh = picked.ids.filter { !known.contains($0) }
+        guard !fresh.isEmpty else { return picked.nextAfter != nil }
+        let hydrated = fresh.map { self.makeWAL(captureId: $0) }
+        captures.append(contentsOf: hydrated)   // didSet republishes
+        log?.info("loaded \(hydrated.count) older capture(s) on demand")
+        return picked.nextAfter != nil
+    }
+
     private nonisolated func makeWAL(captureId id: String) -> CaptureWAL {
         let upload: (@Sendable (UInt64, Data) async throws -> Void)?
         if let uploadSegment { upload = { seq, body in try await uploadSegment(id, seq, body) } }

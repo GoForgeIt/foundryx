@@ -30,6 +30,7 @@ a11y-identifier	App/ArtifactViewers.swift	artifact-markdown
 a11y-identifier	App/ArtifactViewers.swift	artifact-unavailable
 a11y-identifier	App/CaptureJourneyStrip.swift	capture-journey
 a11y-identifier	App/CaptureScreen.swift	live-hero-pause
+a11y-identifier	App/CaptureScreen.swift	local-show-older
 a11y-identifier	App/CaptureScreen.swift	record-block-reason
 a11y-identifier	App/CaptureScreen.swift	record-cta
 a11y-identifier	App/CaptureScreen.swift	recorder-status
@@ -212,6 +213,7 @@ customer-facing-string	App/CaptureScreen.swift	Delete \"\(cat.name)\"
 customer-facing-string	App/CaptureScreen.swift	Edit
 customer-facing-string	App/CaptureScreen.swift	Fetching the rest…
 customer-facing-string	App/CaptureScreen.swift	Live · on-device
+customer-facing-string	App/CaptureScreen.swift	Loading older…
 customer-facing-string	App/CaptureScreen.swift	Merge \(selectedIds.count)
 customer-facing-string	App/CaptureScreen.swift	Merge with…
 customer-facing-string	App/CaptureScreen.swift	New
@@ -223,6 +225,7 @@ customer-facing-string	App/CaptureScreen.swift	Rename
 customer-facing-string	App/CaptureScreen.swift	Rename or delete category
 customer-facing-string	App/CaptureScreen.swift	Search all voice notes
 customer-facing-string	App/CaptureScreen.swift	Show all
+customer-facing-string	App/CaptureScreen.swift	Show older
 customer-facing-string	App/CaptureScreen.swift	Try again
 customer-facing-string	App/CaptureScreen.swift	Try reaching \(place) again
 customer-facing-string	App/CaptureScreen.swift	\(selectedIds.count) selected
