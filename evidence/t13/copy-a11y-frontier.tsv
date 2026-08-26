@@ -220,6 +220,8 @@ customer-facing-string	App/CaptureScreen.swift	Removes it from your phone, your 
 customer-facing-string	App/CaptureScreen.swift	Rename
 customer-facing-string	App/CaptureScreen.swift	Rename or delete category
 customer-facing-string	App/CaptureScreen.swift	Search all voice notes
+customer-facing-string	App/CaptureScreen.swift	Try again
+customer-facing-string	App/CaptureScreen.swift	Try reaching \(place) again
 customer-facing-string	App/CaptureScreen.swift	\(selectedIds.count) selected
 customer-facing-string	App/ChatListView.swift	Delete
 customer-facing-string	App/ChatListView.swift	Done

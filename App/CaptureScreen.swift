@@ -411,21 +411,7 @@ struct CaptureScreen: View {
         #endif
         // The RESTING list asks the second place what it holds, once per appearance. Without
         // this the owner sees only what the phone kept and has no way to learn the rest exists.
-        .task {
-            guard destination != .phone else { return }
-            let localTarget = target
-            do {
-                let page = try await DoorClient(target: localTarget)
-                    .conversationPage(query: "", limit: 50)
-                let localIds = Set(manager.visibleCaptures.map(\.captureId))
-                restingRemote = page.conversations.filter { !localIds.contains($0.captureId) }
-                restingRemoteTotal = page.total
-                restingRemoteFailed = false
-            } catch {
-                // A failure is NAMED, never rendered as "you have nothing more".
-                restingRemoteFailed = true
-            }
-        }
+        .task { await loadRestingRemote() }
         // Search sweeps local disk (cached transcripts) AND, when the computer is
         // connected, the FULL history in Lore (track 20260714T1200) — off-main, newest
         // state wins. The computer results are deduped against the local matches.
@@ -876,7 +862,24 @@ struct CaptureScreen: View {
             if restingRemoteFailed {
                 // An absence must never read as a presence, and the reverse: an unreachable
                 // computer is SAID, not rendered as an empty list.
-                searchNote("Couldn't reach \(destination.secondPlace ?? "your computer").")
+                // NAMED **and** RECOVERABLE. The sentence alone left the owner with a
+                // dead end: nothing on screen could re-ask, so a transient outage looked
+                // permanent until the whole page was left and re-entered.
+                // ⚠ THE PLACE NAME IS BOUND ONCE, and not only to avoid saying it twice.
+                // Interpolating `destination.secondPlace ?? "your computer"` directly inside
+                // the accessibility label nests a quoted literal inside a quoted literal, and
+                // the copy/a11y frontier derives its pinned string by reading to the first
+                // closing quote — so the manifest row became the fragment
+                // `Try reaching \(destination.secondPlace ?? `. A binding keeps the literal
+                // whole, which is what makes the pin reviewable.
+                let place = destination.secondPlace ?? "your computer"
+                VStack(alignment: .leading, spacing: GrainSpacing.x2) {
+                    searchNote("Couldn't reach \(place).")
+                    Button("Try again") {
+                        Task { await loadRestingRemote() }
+                    }
+                    .accessibilityLabel("Try reaching \(place) again")
+                }
             } else if !restingRemote.isEmpty {
                 Section {
                     ForEach(restingRemote) { hit in
@@ -886,6 +889,30 @@ struct CaptureScreen: View {
                     searchSectionHeader(restingRemoteHeadline)
                 }
             }
+        }
+    }
+
+    /// Ask the second place what it holds.
+    ///
+    /// ⚠ ONE PATH, CALLED BY BOTH the initial `.task` and the retry. The first version
+    /// inlined this in `.task`, which meant the failure could be NAMED and never
+    /// re-attempted — the criterion asks for unreachable to be named AND RECOVERABLE,
+    /// and a sentence with no way to act on it satisfies only the first half. Two copies
+    /// would be worse: the retry would be free to drift into a different request than the
+    /// one that failed.
+    private func loadRestingRemote() async {
+        guard destination != .phone else { return }
+        let localTarget = target
+        do {
+            let page = try await DoorClient(target: localTarget)
+                .conversationPage(query: "", limit: 50)
+            let localIds = Set(manager.visibleCaptures.map(\.captureId))
+            restingRemote = page.conversations.filter { !localIds.contains($0.captureId) }
+            restingRemoteTotal = page.total
+            restingRemoteFailed = false
+        } catch {
+            // A failure is NAMED, never rendered as "you have nothing more".
+            restingRemoteFailed = true
         }
     }
 
