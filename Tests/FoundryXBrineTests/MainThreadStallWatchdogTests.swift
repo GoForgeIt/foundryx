@@ -7,6 +7,34 @@ import XCTest
 
 final class MainThreadStallWatchdogTests: XCTestCase {
 
+    /// How long a test may wait for a watchdog observation to APPEAR.
+    ///
+    /// ⚠ THESE WAITS ARE READ UNDER A DELIBERATE 14-WAY CPU LOAD. `ci-gates.sh`'s
+    /// `flake-under-load` phase re-runs this suite while saturating the machine, which
+    /// is exactly when a watchdog thread gets starved and an observation lands late.
+    ///
+    /// MEASURED 2026-08-26: `testMidStallStackCaptureFiresOnceAfterCaptureThreshold`
+    /// failed that phase on a 3s deadline — `captures` was empty, so BOTH capture
+    /// assertions failed at once. The stall it models is 0.7s; 3s was never a claim
+    /// about correctness, only an impatient one.
+    ///
+    /// ⚠ AND THE PRECEDING FIX STOPPED ONE LINE SHORT. The commit that made the EMIT
+    /// wait patient (`d496040`) left the CAPTURE wait four lines above it as a fixed
+    /// deadline, and its subject said the flake was fixed. Raising one wait and
+    /// shipping "stop the watchdog test flaking" is how the next failure looks like a
+    /// new defect instead of the same one.
+    ///
+    /// A patient wait WEAKENS NOTHING: every loop below exits the moment its condition
+    /// is met, and the assertions that follow are unchanged. Shortening an assertion
+    /// instead would be the wrong repair — a stall detector whose test stops requiring
+    /// the observation is a stall detector that can stop making it.
+    ///
+    /// This does NOT apply to waits that assert a NEGATIVE ("no emits after stop()"):
+    /// there, a longer wait is strictly stronger and a shorter one fails toward a false
+    /// PASS, so those stay as they are.
+    private static let observationBudget: TimeInterval = 15
+
+
     /// A blocked target queue produces at least one stall emit of ~the blocked
     /// duration — and (single-ping-in-flight) roughly ONE, not a pile of
     /// interval-sized fragments.
@@ -20,7 +48,7 @@ final class MainThreadStallWatchdogTests: XCTestCase {
         // Deliberately wedge the "main" queue well past the threshold.
         target.async { Thread.sleep(forTimeInterval: 0.6) }
         // Give the watchdog time to post a ping into the wedge and see it land.
-        let deadline = Date().addingTimeInterval(3)
+        let deadline = Date().addingTimeInterval(Self.observationBudget)
         while emitted.value.isEmpty && Date() < deadline {
             Thread.sleep(forTimeInterval: 0.05)
         }
@@ -61,7 +89,7 @@ final class MainThreadStallWatchdogTests: XCTestCase {
         // Wedge the "main" queue ~700ms — past both the 250ms report threshold and the
         // 400ms capture threshold — so a live capture must trigger mid-stall.
         target.async { Thread.sleep(forTimeInterval: 0.7) }
-        let deadline = Date().addingTimeInterval(3)
+        let deadline = Date().addingTimeInterval(Self.observationBudget)
         while captures.value.isEmpty && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
         // Let the stall end so the terminal emit also lands. POLLED, not a fixed sleep.
         //
@@ -71,7 +99,7 @@ final class MainThreadStallWatchdogTests: XCTestCase {
         // and the thresholds are unchanged — only the WAIT is now patient. Weakening the
         // assertion instead would have been the wrong repair: a stall detector whose test
         // stops requiring the span is a stall detector that can stop emitting one.
-        let emitDeadline = Date().addingTimeInterval(5)
+        let emitDeadline = Date().addingTimeInterval(Self.observationBudget)
         while emits.value.isEmpty && Date() < emitDeadline { Thread.sleep(forTimeInterval: 0.02) }
         dog.stop()
 
@@ -109,7 +137,7 @@ final class MainThreadStallWatchdogTests: XCTestCase {
         dog.tickSynchronouslyForTests()       // still stuck; 200ms must NOT sample
         releaseTarget.signal()
 
-        let deadline = Date().addingTimeInterval(2)
+        let deadline = Date().addingTimeInterval(Self.observationBudget)
         while emits.value.isEmpty && Date() < deadline {
             Thread.sleep(forTimeInterval: 0.01)
         }
@@ -162,7 +190,7 @@ final class MainThreadStallWatchdogTests: XCTestCase {
                       "no stack capture may be attributed to the background gap")
         // Still alive: a REAL wedge after resume is caught.
         target.async { Thread.sleep(forTimeInterval: 0.6) }
-        let deadline = Date().addingTimeInterval(3)
+        let deadline = Date().addingTimeInterval(Self.observationBudget)
         while emitted.value.isEmpty && Date() < deadline {
             Thread.sleep(forTimeInterval: 0.05)
         }
