@@ -602,6 +602,35 @@ private enum JourneySteps {
                 w.reading = RecordingJourneyReading()
                 return ctx
             },
+            // ⚠ THE STAGE THIS SCENARIO WAS MISSING, AND IT SHIPPED THE BUG.
+            //
+            // "A recording nothing is known about" already seeded EXACTLY the defective
+            // state — `RecordingJourneyReading()`, the same default `CaptureStatusPoller`
+            // starts with — and asserted only about SPEAKERS and ACTIONS. Transcribing
+            // returned a `.waiting` row reading "Not transcribed yet", and no check looked.
+            //
+            // Measured 2026-08-26 on a shipped build: the list said "Not transcribed yet"
+            // under recordings whose own detail view said "Transcribed ✓". The fixture was
+            // right, the coverage was a SUBSET, and a subset of stages is not a claim about
+            // the surface.
+            defineCheck("it says nothing about transcribing") { _, _, _ in
+                try expect(w.row(.transcribing) == nil,
+                           "the surface invented a transcription stage from nothing — an "
+                           + "unpolled card must not claim a recording is untranscribed")
+            },
+            // ⚠ AND THE WHOLE-LADDER CHECK, SO THE NEXT STAGE CANNOT SLIP THROUGH.
+            //
+            // Enumerating stages one at a time is what let this through: every stage added
+            // later is silently unasserted until somebody remembers to extend the list. The
+            // honest claim about a reading that knows nothing is that it produces NOTHING,
+            // and that is one assertion no future stage can escape.
+            defineCheck("it says nothing at all") { _, _, _ in
+                let ladder = RecordingJourneyPresentation.ladder(w.reading)
+                try expect(ladder.isEmpty,
+                           "a reading that knows nothing produced \(ladder.count) row(s): "
+                           + "\(ladder.map(\.line)). Every one is a claim manufactured from "
+                           + "an absence.")
+            },
             defineCheck("it says nothing about separating speakers") { _, _, _ in
                 try expect(w.row(.separatingSpeakers) == nil,
                            "the surface invented a speakers stage from nothing")
