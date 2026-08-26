@@ -820,6 +820,45 @@ struct CaptureScreen: View {
     }
 
     /// Search + category filters applied over the manager's visible list.
+    /// ONE list. A row is either a recording this phone holds or one only the second
+    /// place holds, and the list is ordered by TIME across both.
+    ///
+    /// ⚠ TWO SECTIONS WAS THE WRONG SHAPE AND THE OWNER SAID SO: "I'd rather they not be
+    /// 2 sections just one list ordered by time please". The first implementation rendered
+    /// "RECENT ON THIS PHONE" and a separate "On your Mac" band, which asks the owner to
+    /// hold two timelines in their head and reconcile them — the job the app is supposed to
+    /// be doing. It also made the phone's 2 notes look like the whole history with the Mac's
+    /// as an appendix, when the truth is the reverse.
+    /// The one clock BOTH kinds of row are ordered by.
+    ///
+    /// ⚠ A SINGLE SOURCE, DELIBERATELY. Sorting phone rows by one time and remote rows by
+    /// another is how an interleaved list ends up in an order the owner cannot explain.
+    /// Local rows use the start date the card itself renders; remote rows use `capturedAt`
+    /// from the wire, which is the same instant the second place recorded.
+    private func rowDate(_ row: HistoryRow) -> Date {
+        switch row {
+        case .onPhone(let wal):
+            return manager.conversationStartDate(wal)
+        case .elsewhere(let hit):
+            // A row with no capture time sorts to the far past rather than to "now" — an
+            // unknown time must never masquerade as the newest thing you recorded.
+            guard let at = hit.capturedAt else { return .distantPast }
+            return Date(timeIntervalSince1970: TimeInterval(at))
+        }
+    }
+
+    private enum HistoryRow: Identifiable {
+        case onPhone(CaptureWAL)
+        case elsewhere(ConversationHit)
+
+        var id: String {
+            switch self {
+            case .onPhone(let w): return w.captureId
+            case .elsewhere(let h): return h.captureId
+            }
+        }
+    }
+
     private var filteredCaptures: [CaptureWAL] {
         var items = manager.visibleCaptures
         if let matches = searchMatches {
@@ -842,9 +881,17 @@ struct CaptureScreen: View {
         // PRESORTED: `visibleCaptures` is sorted date-descending at every rebuild and the
         // search/category filters preserve order, so the grouping must not re-sort N rows on
         // every body pass (track `residual_on_main_actor_work`).
-        let sections = ConversationGrouping.groupPresorted(filteredCaptures, now: Date()) {
-            manager.conversationStartDate($0)
-        }
+        // ⚠ ONE MERGED, TIME-ORDERED LIST — not the phone's list with the Mac's appended.
+        // `restingRemote` already excludes anything this phone holds (deduped by captureId
+        // and by tombstone in `applyRestingPage`), so interleaving cannot double-render a
+        // conversation that lives in both places.
+        let merged: [HistoryRow] =
+            (filteredCaptures.map { HistoryRow.onPhone($0) }
+             + (searchMatches == nil && categoryFilter == nil
+                ? restingRemote.map { HistoryRow.elsewhere($0) }
+                : []))
+            .sorted { rowDate($0) > rowDate($1) }
+        let sections = ConversationGrouping.groupPresorted(merged, now: Date()) { rowDate($0) }
         // NOT pinned (T1 AC3): a pinned header needs an opaque band to hide the rows
         // scrolling under it — that band was the white/elevated stripe the design never
         // had. Non-sticky eyebrows sit on the page background instead.
@@ -852,9 +899,15 @@ struct CaptureScreen: View {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
                     Section {
-                        ForEach(section.items, id: \.captureId) { wal in
-                            conversationRow(wal)
-                                .padding(.bottom, GrainSpacing.x2)
+                        ForEach(section.items) { row in
+                            switch row {
+                            case .onPhone(let wal):
+                                conversationRow(wal)
+                                    .padding(.bottom, GrainSpacing.x2)
+                            case .elsewhere(let hit):
+                                remoteHitRow(hit)
+                                    .padding(.bottom, GrainSpacing.x2)
+                            }
                         }
                     } header: {
                         searchSectionHeader(section.title)
@@ -965,9 +1018,11 @@ struct CaptureScreen: View {
                 }
             } else if !restingRemote.isEmpty {
                 Section {
-                    ForEach(restingRemote) { hit in
-                        remoteHitRow(hit).padding(.bottom, GrainSpacing.x2)
-                    }
+                    // ⚠ THE ROWS ARE NOT HERE ANY MORE — they are interleaved into the one
+                    // time-ordered list above. Rendering them here as well would show every
+                    // remote conversation twice. What remains is the reach affordance, which
+                    // belongs to the list as a whole rather than to any row.
+                    //
                     // ⚠ THE AFFORDANCE IS THE CRITERION. The header already said 1,893 and
                     // the list held 50; announcing a number the owner cannot act on is the
                     // shape the spec names and refuses. This appears only while a cursor
@@ -1876,19 +1931,27 @@ private struct CaptureCard: View {
                 // is static-but-varied (T1 AC4).
                 waveformAnimated: isInProgress(p),
                 onTap: nil
-            )
-            // WHAT IS ACTUALLY HAPPENING TO THIS RECORDING, from what the door reported and
-            // nothing else. Every row and every sentence comes from the kit
-            // (`RecordingJourneyPresentation.ladder`), so `swift test` holds the words: a stage
-            // decision written into a view body is a rule nothing in this repository can
-            // execute, which is exactly how the refuted privacy guards got there.
-            //
-            // It draws NOTHING until the poller has something to say — the ladder is empty for
-            // an empty reading and the band renders `EmptyView` for empty rows. A card that has
-            // not been polled says nothing rather than claiming a stage, which is the whole
-            // point: the shipped build said "transcribing locally" while the Vault already held
-            // the transcript.
-            RecordingJourneyBand(rows: RecordingJourneyPresentation.ladder(poller.journey))
+            ) {
+                // WHAT IS ACTUALLY HAPPENING TO THIS RECORDING — now INSIDE the card.
+                //
+                // ⚠ IT USED TO BE A SIBLING BELOW THE CARD, and on screen that read as a
+                // second, emptier card stacked under every conversation. The owner asked for
+                // it twice: first to collapse it to icons (done), then "can we move them into
+                // the card". A sibling cannot be in the card no matter how its padding is
+                // tuned — the card owns its own surface, so the slot had to be added to
+                // `GrainConversationCard` itself.
+                //
+                // Every row and every sentence still comes from the kit
+                // (`RecordingJourneyPresentation.ladder`), so `swift test` holds the words: a
+                // stage decision written into a view body is a rule nothing in this repository
+                // can execute.
+                //
+                // It draws NOTHING until the poller has something to say — a card that has not
+                // been polled says nothing rather than claiming a stage, which is the whole
+                // point: the shipped build said "transcribing locally" while the Vault already
+                // held the transcript.
+                RecordingJourneyBand(rows: RecordingJourneyPresentation.ladder(poller.journey))
+            }
             if canRecover || recoveryInProgress {
                 Button(CaptureCardPresentation.manualRecoveryActionTitle(
                     destination: destination)) { onRecover?() }
