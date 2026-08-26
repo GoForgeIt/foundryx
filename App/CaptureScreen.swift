@@ -218,6 +218,16 @@ struct CaptureScreen: View {
     /// The computer/Lore half of search (track 20260714T1200): resolved from the door
     /// when connected, deduped against the local matches above.
     @State private var remoteState: RemoteSearchState = .idle
+    /// The computer's conversations for the RESTING list — not a search result.
+    ///
+    /// ⚠ THE PORTAL SHIPPED WITHOUT THIS AND THAT WAS THE WHOLE GAP. Lore, the door and the
+    /// merge all carried the second place's history correctly, and `remoteResultsSection`
+    /// rendered it ONLY under `if find.searchOpen, !q.isEmpty` — so the owner had to already be
+    /// searching to see that anything else existed. Nick, looking at the shipped build: "i still
+    /// only see 2 voice notes and nothing showing me the rest are coming over."
+    @State private var restingRemote: [ConversationHit] = []
+    @State private var restingRemoteTotal: Int?
+    @State private var restingRemoteFailed = false
     /// Selected category filter chip id (nil = All).
     @State private var categoryFilter: String?
     @State private var newCategoryName = ""
@@ -399,6 +409,23 @@ struct CaptureScreen: View {
             }
         }
         #endif
+        // The RESTING list asks the second place what it holds, once per appearance. Without
+        // this the owner sees only what the phone kept and has no way to learn the rest exists.
+        .task {
+            guard destination != .phone else { return }
+            let localTarget = target
+            do {
+                let page = try await DoorClient(target: localTarget)
+                    .conversationPage(query: "", limit: 50)
+                let localIds = Set(manager.visibleCaptures.map(\.captureId))
+                restingRemote = page.conversations.filter { !localIds.contains($0.captureId) }
+                restingRemoteTotal = page.total
+                restingRemoteFailed = false
+            } catch {
+                // A failure is NAMED, never rendered as "you have nothing more".
+                restingRemoteFailed = true
+            }
+        }
         // Search sweeps local disk (cached transcripts) AND, when the computer is
         // connected, the FULL history in Lore (track 20260714T1200) — off-main, newest
         // state wins. The computer results are deduped against the local matches.
@@ -793,6 +820,7 @@ struct CaptureScreen: View {
                     }
                 }
                 remoteResultsSection
+                restingRemoteSection
             }
             .padding(.horizontal, GrainSpacing.x4)
             .padding(.bottom, GrainSpacing.x6)
@@ -836,7 +864,48 @@ struct CaptureScreen: View {
     /// query is active. Computer-only hits render as their own "From your computer"
     /// section (each opens the same three-face detail, fetched by id — AC4); the
     /// connection states are said honestly.
-    @ViewBuilder private var remoteResultsSection: some View {
+/// The computer's conversations in the RESTING list — the surface the portal was missing.
+    ///
+    /// Only when NOT searching (the search path has its own section), and only on a tier with a
+    /// second place. `total` says how many exist so the owner learns their history continues
+    /// past this page; a failure is NAMED rather than rendered as "nothing more".
+    @ViewBuilder private var restingRemoteSection: some View {
+        let searching = find.searchOpen
+            && !find.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if !searching, destination != .phone {
+            if restingRemoteFailed {
+                // An absence must never read as a presence, and the reverse: an unreachable
+                // computer is SAID, not rendered as an empty list.
+                searchNote("Couldn't reach \(destination.secondPlace ?? "your computer").")
+            } else if !restingRemote.isEmpty {
+                Section {
+                    ForEach(restingRemote) { hit in
+                        remoteHitRow(hit).padding(.bottom, GrainSpacing.x2)
+                    }
+                } header: {
+                    searchSectionHeader(restingRemoteHeadline)
+                }
+            }
+        }
+    }
+
+    /// "On your Mac · 1,893 voice notes" — the count is what tells the owner the list is a
+    /// PAGE and not the whole of it. Without a total it says only where they live, because a
+    /// number nobody sent must not be invented.
+    ///
+    /// ⚠ "voice notes", NOT "conversations". `features/voice-notes-language.feature` retired
+    /// both "recording" and "conversation" as user-facing nouns, and the gate caught this copy
+    /// on the way in — "library copy still uses retired language". A vocabulary the product
+    /// decided once is not mine to re-open in a headline.
+    private var restingRemoteHeadline: String {
+        let place = destination.secondPlace ?? "your computer"
+        guard let total = restingRemoteTotal, total > restingRemote.count else {
+            return "On \(place)"
+        }
+        return "On \(place) · \(total) voice notes"
+    }
+
+        @ViewBuilder private var remoteResultsSection: some View {
         let q = find.query.trimmingCharacters(in: .whitespacesAndNewlines)
         if find.searchOpen, !q.isEmpty {
             switch remoteState {

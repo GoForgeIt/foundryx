@@ -32,9 +32,33 @@ struct RecordingJourneyBand: View {
     /// for a full name — a permanent badge on a permanent name is noise.
     var provisionalNote: String? = nil
 
+    /// Every stage settled — nothing is in flight and nothing failed.
+    ///
+    /// ⚠ THE CARD EARNS ITS SPACE ONLY WHILE SOMETHING IS HAPPENING. Nick, on the shipped
+    /// build: "each recording now has another card underneath it ... this is great but it takes
+    /// so much space". The words matter while a stage is WORKING — they say what the phone is
+    /// waiting on. Once every stage is done they say only "this finished", which the row above
+    /// already implies, and they cost a whole second card per recording to say it.
+    ///
+    /// `.cannotHappen` counts as settled: a stage that will never occur is not pending, and a
+    /// tier where it can't happen must not be held open by it forever.
+    private var allSettled: Bool {
+        !rows.isEmpty && rows.allSatisfy { $0.state == .done || $0.state == .cannotHappen }
+    }
+
     var body: some View {
         if rows.isEmpty && provisionalNote == nil {
             EmptyView()
+        } else if allSettled && provisionalNote == nil {
+            // SETTLED — one inline strip of dots, no card chrome, no per-stage lines. Same
+            // stages, same order, same accessibility identifier, a fraction of the height.
+            HStack(spacing: GrainSpacing.x1) {
+                ForEach(rows, id: \.stage) { row in
+                    dot(row.state)
+                }
+            }
+            .accessibilityIdentifier("recording-journey")
+            .accessibilityLabel(settledSummary)
         } else {
             VStack(alignment: .leading, spacing: GrainSpacing.x2) {
                 if let provisionalNote {
@@ -55,6 +79,13 @@ struct RecordingJourneyBand: View {
                 .strokeBorder(GrainColor.borderFaint, lineWidth: 1))
             .accessibilityIdentifier("recording-journey")
         }
+    }
+
+    /// What the dots say out loud. Collapsing to icons must not cost a screen-reader the
+    /// stage names — the strip is a VISUAL compression, not an information one.
+    private var settledSummary: String {
+        let done = rows.filter { $0.state == .done }.map(\.line)
+        return done.isEmpty ? "All steps finished" : done.joined(separator: ", ") + " — finished"
     }
 
     @ViewBuilder

@@ -435,8 +435,23 @@ public struct ConversationHit: Decodable, Sendable, Identifiable, Equatable {
 }
 
 /// The door's `/foundryx/conversations` response envelope.
+///
+/// `total` and `nextCursor` are OPTIONAL because the phone and the door version
+/// independently: an older door sends neither, and absent must read as UNKNOWN. A `total` of 0
+/// would say the second place holds nothing — indistinguishable from a genuinely empty history,
+/// which is the confusion this field exists to remove.
 struct ConversationSearchResponse: Decodable {
     let conversations: [ConversationHit]
+    let total: Int?
+    let nextCursor: String?
+}
+
+/// One page of the second place's conversations, as the phone sees it.
+public struct ConversationPageResponse: Sendable {
+    public let conversations: [ConversationHit]
+    /// How many the second place holds — UNKNOWN when absent, never 0.
+    public let total: Int?
+    public let nextCursor: String?
 }
 
 /// The authenticated door client. `events(for:)` streams the turn; `collect(_:)` is a
@@ -885,6 +900,39 @@ public final class DoorClient: @unchecked Sendable {
     /// old door without the endpoint — returns `[]` so the phone degrades to local-only
     /// search; a transport failure / non-2xx throws (the caller says "couldn't reach
     /// your computer"). An empty `query` asks the door for the recent list.
+    /// One page of the second place's conversations, WITH the envelope.
+    ///
+    /// `searchConversations` returns only rows and is kept for the search path. The RESTING
+    /// list needs the envelope: `total` is how the owner learns their history continues past
+    /// what this page carried.
+    public func conversationPage(query: String, limit: Int = 50) async throws -> ConversationPageResponse {
+        let q = query.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+        let path = "/foundryx/conversations?q=\(q)&limit=\(limit)"
+        let base = target.baseURL.absoluteString
+        guard let url = URL(string: "\(base)\(path)") else {
+            throw DoorError.transport("bad conversations url")
+        }
+        var r = URLRequest(url: url)
+        r.httpMethod = "GET"
+        r.setValue("Bearer \(target.bearer)", forHTTPHeaderField: "Authorization")
+        r.timeoutInterval = 30
+        let (data, response) = try await session.data(for: r)
+        guard let http = response as? HTTPURLResponse else {
+            throw DoorError.transport("non-HTTP response")
+        }
+        if http.statusCode == 401 { throw DoorError.unauthorized }
+        // An older door with no endpoint degrades to local-only rather than throwing.
+        if http.statusCode == 404 {
+            return ConversationPageResponse(conversations: [], total: nil, nextCursor: nil)
+        }
+        guard http.statusCode == 200 else { throw DoorError.http(http.statusCode) }
+        let decoded = try JSONDecoder().decode(ConversationSearchResponse.self, from: data)
+        return ConversationPageResponse(
+            conversations: decoded.conversations,
+            total: decoded.total,
+            nextCursor: decoded.nextCursor)
+    }
+
     public func searchConversations(query: String, limit: Int = 50) async throws -> [ConversationHit] {
         try await PerfHook.timed("door-conversations") {
             try await self.searchConversationsUncounted(query: query, limit: limit)
