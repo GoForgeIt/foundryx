@@ -233,6 +233,28 @@ struct CaptureScreen: View {
 
     /// One page. Named once so the walk and the first fetch cannot disagree about it.
     private static let restingPageLimit = 50
+
+    /// How long an observation keeps supporting a residence claim.
+    ///
+    /// ⚠ DECLARED, NOT CHOSEN PER CALL — that is the criterion, not a style note. An
+    /// undeclared threshold is one each call site picks differently, and "is my transcript
+    /// safe on the Mac?" then gets a different answer depending on which screen asked.
+    /// Past this window a row reads UNKNOWN rather than held: an absence must never become
+    /// a reading, the same direction migration 080 took when it made an absent run id
+    /// report unknown instead of running.
+    ///
+    /// Twelve hours: long enough that a Mac asleep overnight does not make yesterday's
+    /// notes read as missing, short enough that a machine gone for days stops vouching for
+    /// them.
+    private static let residenceFreshWithin: Int64 = 12 * 60 * 60
+
+    /// Residence per capture id, derived by `MergedHistory` from `observedAt` FRESHNESS.
+    ///
+    /// ⚠ NEVER FROM RESPONSE MEMBERSHIP. A hit being in this response is a PAST
+    /// observation, not proof the second place holds it now — and `.lore-confirmed` is
+    /// worse still, because it is retained past deletion BY DESIGN, so reading it as
+    /// residence would tell the owner a deleted transcript is safe.
+    @State private var restingResidence: [String: RowResidence] = [:]
     /// Selected category filter chip id (nil = All).
     @State private var categoryFilter: String?
     @State private var newCategoryName = ""
@@ -985,6 +1007,25 @@ struct CaptureScreen: View {
             CaptureManager.isDeletedOnDisk($0, baseDir: base)
         })
         let survivors = DeletionPrecedence.apply(remote: hits, locallyDeleted: tombstoned)
+
+        // Residence is DERIVED, not assumed. `MergedHistory` was written for this and had
+        // no production caller, so the list rendered rows with no residence at all while a
+        // correct implementation of the criterion sat beside it under test.
+        let now = Int64(Date().timeIntervalSince1970)
+        let merged = MergedHistory.merge(
+            local: manager.visibleCaptures.map {
+                // `status.startedAt` is the timestamp the card itself renders from, so the
+                // merge orders by the same clock the owner sees rather than a second one.
+                LocalRow(
+                    captureId: $0.captureId,
+                    capturedAt: Int64($0.status.startedAt.timeIntervalSince1970))
+            },
+            remote: survivors,
+            now: now,
+            freshWithin: Self.residenceFreshWithin)
+        restingResidence = Dictionary(
+            merged.map { ($0.captureId, $0.residence) }, uniquingKeysWith: { a, _ in a })
+
         restingRemote = survivors.filter { !localIds.contains($0.captureId) }
         restingRemoteTotal = total
         restingRemoteNextCursor = cursor
@@ -1032,6 +1073,23 @@ struct CaptureScreen: View {
 
     /// A conversation that lives only on the computer — tapping fetches its detail from
     /// the door by id (the three-face detail already handles a Lore-resident capture).
+    /// What this row can honestly say about where the voice note lives NOW.
+    ///
+    /// ⚠ `unknown` IS A REAL ANSWER HERE, not a fallback. An observation older than the
+    /// declared window, or a second place too old to send `observedAt` at all, cannot
+    /// support "it is safe over there" — and saying so anyway is the failure this whole
+    /// track exists to prevent, because the owner's question is precisely "if I lose this
+    /// phone, is the transcript still somewhere?"
+    private func residenceSentence(for captureId: String) -> String {
+        let place = destination.secondPlace ?? "your computer"
+        switch restingResidence[captureId] {
+        case .bothPlaces: return "On this phone and \(place)"
+        case .secondPlaceOnly: return "On \(place)"
+        case .phoneOnly: return "Only on this phone"
+        case .unknown, .none: return "Not confirmed on \(place) recently"
+        }
+    }
+
     private func remoteHitRow(_ hit: ConversationHit) -> some View {
         NavigationLink {
             ConversationFacesView(
@@ -1055,6 +1113,12 @@ struct CaptureScreen: View {
                         .foregroundStyle(GrainColor.textMuted)
                         .lineLimit(2)
                 }
+                // ⚠ WHERE IT LIVES **NOW**, and the row says so. Computing residence and
+                // not rendering it would leave the criterion exactly as unmet as computing
+                // nothing — the owner cannot act on a value that never reaches the screen.
+                Text(residenceSentence(for: hit.captureId))
+                    .grainTextStyle(.caption)
+                    .foregroundStyle(GrainColor.textMuted)
                 if !hit.dateLabel.isEmpty {
                     Text(hit.dateLabel)
                         .grainTextStyle(.caption)
