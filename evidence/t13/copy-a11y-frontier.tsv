@@ -35,6 +35,7 @@ a11y-identifier	App/CaptureScreen.swift	record-block-reason
 a11y-identifier	App/CaptureScreen.swift	record-cta
 a11y-identifier	App/CaptureScreen.swift	recorder-status
 a11y-identifier	App/CaptureScreen.swift	resting-remote-show-all
+a11y-identifier	App/CaptureScreen.swift	second-place-retry
 a11y-identifier	App/ChatListView.swift	chat-list
 a11y-identifier	App/ChatListView.swift	chat-list-coverage
 a11y-identifier	App/ChatListView.swift	chat-list-done

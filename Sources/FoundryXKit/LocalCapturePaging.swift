@@ -23,7 +23,23 @@ public enum LocalCapturePaging {
     /// yields NOTHING rather than restarting at the top, because a restart re-serves page one
     /// forever and reads as progress.
     public static func page(names: [String], after: String?, limit: Int) -> Page {
-        let ordered = names.sorted(by: >)
+        // ⚠ THE SAME ORDER LAUNCH HYDRATION USES, AND THAT IS NOT A DETAIL.
+        //
+        // This sorted `names.sorted(by: >)` — raw lexicographic — while hydration sorts by
+        // the capture id's EMBEDDED START TIME with the name only as a tiebreak, for the
+        // reason its own comment gives: "a non-`omi-` id would sort wrong under a raw
+        // lexicographic name sort". Two orders over one list means the cursor from one is
+        // meaningless to the other, and rows between the two boundaries are SKIPPED —
+        // silently, because a short page looks exactly like the end of the walk.
+        //
+        // Found by a cross-vendor review of this file's first wiring. The filters were
+        // carefully copied from hydration and the ORDER was not, which is the half that
+        // paging actually depends on.
+        let ordered = names.sorted { a, b in
+            let ta = CaptureIdTime.startedAt(fromCaptureId: a) ?? 0
+            let tb = CaptureIdTime.startedAt(fromCaptureId: b) ?? 0
+            return ta != tb ? ta > tb : a > b
+        }
         var start = 0
         if let after {
             guard let idx = ordered.firstIndex(of: after) else {

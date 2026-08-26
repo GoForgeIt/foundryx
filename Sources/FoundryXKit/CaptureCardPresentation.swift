@@ -282,6 +282,20 @@ public enum CaptureHomeCopy {
 
     /// "Recent on this phone" headline + its "N conversations" row-meta.
     public static let recentHeadline = "Recent on this phone"
+
+    /// The headline for the list when a SECOND PLACE is answering.
+    ///
+    /// ⚠ "Recent on this phone" BECAME A FALSE CLAIM the moment the list merged. The page
+    /// now interleaves what this phone holds with what the second place holds, ordered by
+    /// time — so a header saying "on this phone" sits above rows that are not on this
+    /// phone. The owner asked for one list precisely so the two places stop being separate
+    /// timelines; the label has to stop separating them too.
+    ///
+    /// Phone tier keeps `recentHeadline`, because there it is simply true.
+    public static func recentHeadline(secondPlace: String?) -> String {
+        guard let secondPlace, !secondPlace.isEmpty else { return recentHeadline }
+        return "Recent on this phone and \(secondPlace)"
+    }
     public static func conversationCount(_ n: Int) -> String {
         "\(n) voice note\(n == 1 ? "" : "s")"
     }

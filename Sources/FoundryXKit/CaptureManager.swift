@@ -3719,7 +3719,15 @@ public final class CaptureManager: ObservableObject {
     @discardableResult
     public func loadOlderCaptures(limit: Int = 100) async -> Bool {
         let base = baseDir
-        let after = captures.map(\.captureId).min()   // ids sort newest-first; oldest loaded
+        // ⚠ THE OLDEST LOADED **BY THE PAGING ORDER**, not the lexicographic minimum.
+        // `.min()` is lexicographic; the walk is time-ordered. Picking the cursor by a
+        // different order than the one it indexes is how rows between the two boundaries
+        // vanish without any page reporting short.
+        let after = captures.map(\.captureId).min { a, b in
+            let ta = CaptureIdTime.startedAt(fromCaptureId: a) ?? 0
+            let tb = CaptureIdTime.startedAt(fromCaptureId: b) ?? 0
+            return ta != tb ? ta > tb : a > b
+        }
         let picked: LocalCapturePaging.Page = await Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             guard let entries = try? fm.contentsOfDirectory(

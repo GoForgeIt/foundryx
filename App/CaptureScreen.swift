@@ -237,6 +237,26 @@ struct CaptureScreen: View {
     /// One page. Named once so the walk and the first fetch cannot disagree about it.
     private static let restingPageLimit = 50
 
+    /// The owner CHOSE a second place, and this phone cannot currently reach it.
+    ///
+    /// ⚠ THIS IS THE DEEPEST VERSION OF THE BUG THIS SCREEN KEEPS HAVING. `destination`
+    /// falls back to `.phone` whenever `makeDoorTarget()` is nil — no relay session, no
+    /// bound token — and EVERY second-place affordance is gated on `destination != .phone`.
+    /// So on a phone that cannot reach the Mac, the page silently became phone-tier and
+    /// said "This phone holds your full history", which is FALSE for an owner who chose
+    /// their computer and has 1,893 voice notes on it.
+    ///
+    /// Worse, the "Couldn't reach your computer" note was itself inside that same gate, so
+    /// the one message written for this exact situation could never fire in it. Reported
+    /// verbatim: "no indication that it's trying to get anything from the computer or that
+    /// it has tried."
+    ///
+    /// An absence must never render as a presence. The choice is the owner's and is known;
+    /// only the reach is missing, and that is what the page now says.
+    private var chosenSecondPlaceUnreachable: Bool {
+        brain != .justMyPhone && destination == .phone
+    }
+
     /// How long an observation keeps supporting a residence claim.
     ///
     /// ⚠ DECLARED, NOT CHOSEN PER CALL — that is the criterion, not a style note. An
@@ -688,7 +708,10 @@ struct CaptureScreen: View {
     private func recentHeadline(count: Int) -> some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                GrainSectionEyebrow(CaptureHomeCopy.recentHeadline)
+                // ⚠ THE LABEL FOLLOWS THE LIST. Once the list interleaves both places,
+                // "Recent on this phone" sits above rows that are not on this phone.
+                GrainSectionEyebrow(
+                    CaptureHomeCopy.recentHeadline(secondPlace: destination.secondPlace))
                 Text(CaptureHomeCopy.conversationCount(count))
                     .grainTextStyle(.caption).foregroundStyle(GrainColor.textFaint)
             }
@@ -917,6 +940,16 @@ struct CaptureScreen: View {
         // had. Non-sticky eyebrows sit on the page background instead.
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
+                // ⚠ OUTSIDE the `destination != .phone` gate ON PURPOSE — that gate is
+                // exactly what is closed when this needs to be said.
+                if chosenSecondPlaceUnreachable {
+                    VStack(alignment: .leading, spacing: GrainSpacing.x1) {
+                        searchNote("Can't reach your computer right now — showing only what's on this phone.")
+                        Button("Try again") { Task { await retryReachingSecondPlace() } }
+                            .accessibilityIdentifier("second-place-retry")
+                    }
+                    .padding(.bottom, GrainSpacing.x2)
+                }
                 ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
                     Section {
                         ForEach(section.items) { row in
@@ -1081,6 +1114,16 @@ struct CaptureScreen: View {
     /// and a sentence with no way to act on it satisfies only the first half. Two copies
     /// would be worse: the retry would be free to drift into a different request than the
     /// one that failed.
+    /// Ask the connection to re-establish, then try the list again.
+    ///
+    /// The reach is owned by the session, not this screen, so this nudges the session and
+    /// re-runs the fetch — which is a no-op if the destination is still `.phone`, and the
+    /// banner simply stays. A retry that cannot report progress is still better than a
+    /// dead end, which is what this screen offered before.
+    private func retryReachingSecondPlace() async {
+        await loadRestingRemote()
+    }
+
     private func loadRestingRemote() async {
         guard destination != .phone else { return }
         restingRemoteLoading = true

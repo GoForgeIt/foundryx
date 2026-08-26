@@ -450,6 +450,13 @@ public final class CaptureStatusPoller: ObservableObject, @unchecked Sendable {
             } else {
                 reading.transcript = .inProgress(nil)
             }
+        } else {
+            // ⚠ AN EXPLICIT ANSWER, BECAUSE REACHING HERE MEANS WE HAVE ONE. The reading now
+            // defaults to `.unknown` so an UNPOLLED card claims nothing; this function only
+            // runs on a response, so falling through to that default here would hide a
+            // genuinely untranscribed recording instead of saying so. `unknown` is "nobody
+            // asked"; `notStarted` is "the second place answered, and it has not begun".
+            reading.transcript = .notStarted
         }
 
         // NAMING — a title that EXISTS, else EVIDENCE, and still never an inference.

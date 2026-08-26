@@ -240,6 +240,21 @@ public enum RecordingIntelligence: Sendable, Equatable {
 /// because a transcription with no countable windows is the ordinary case for a recording under
 /// the 600 s threshold — it is transcribed whole, and there is nothing to count.
 public enum TranscriptReadiness: Sendable, Equatable {
+    /// NOBODY HAS ASKED YET, or the answer could not be obtained.
+    ///
+    /// ⚠ THIS CASE EXISTS BECAUSE ITS ABSENCE MADE THE CARD LIE. `RecordingJourneyReading`
+    /// defaulted `transcript` to `.notStarted`, and `CaptureStatusPoller.journey` starts as
+    /// a default reading — so a card whose poller had never reached the door rendered
+    /// "Not transcribed yet" as a statement of fact. Measured 2026-08-26: the list said
+    /// exactly that for two recordings whose own detail view said "Transcribed ✓
+    /// Summarized ✓". Two surfaces, one truth, and the one with less information was the
+    /// one making the claim.
+    ///
+    /// The band's own comment already promised this behaviour — "a card that has not been
+    /// polled says nothing rather than claiming a stage" — and the type made it impossible
+    /// to honour. `notStarted` is a real answer from the second place; this is the absence
+    /// of an answer, and the two must never be spelled the same way.
+    case unknown
     case notStarted
     case inProgress(TranscribeWindowsReading?)
     case done
@@ -264,6 +279,10 @@ public enum TranscriptReadiness: Sendable, Equatable {
         switch self {
         case .notStarted, .inProgress: return true
         case .done, .failed:           return false
+        // ⚠ NOT A WAIT. Nobody is waiting on an answer nobody has asked for, and telling a
+        // person "still producing" about a recording we simply have not polled is the same
+        // manufactured claim this case was added to remove.
+        case .unknown:                 return false
         }
     }
 }
@@ -284,7 +303,7 @@ public struct RecordingJourneyReading: Sendable, Equatable {
 
     public init(offTheRecorder: RecorderTransferReading? = nil,
                 toTheVault: VaultUploadReading? = nil,
-                transcript: TranscriptReadiness = .notStarted,
+                transcript: TranscriptReadiness = .unknown,
                 speakers: SpeakerSeparation = .notEstablished,
                 naming: NamingState = .notEstablished,
                 intelligence: RecordingIntelligence = .notEstablished) {
@@ -438,6 +457,10 @@ public enum RecordingJourneyPresentation {
                 measure: finished ? .none : measure)
         case .transcribing:
             switch reading.transcript {
+            // NOTHING KNOWN, SO NOTHING SAID. `nil` means "this reading says nothing here",
+            // which is exactly the honest answer for a card the poller has not reached.
+            case .unknown:
+                return nil
             case .notStarted:
                 return RecordingJourneyRow(stage: stage, state: .waiting,
                                            line: transcriptNotStartedLine, measure: .none)
