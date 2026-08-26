@@ -228,6 +228,9 @@ struct CaptureScreen: View {
     @State private var restingRemote: [ConversationHit] = []
     @State private var restingRemoteTotal: Int?
     @State private var restingRemoteFailed = false
+    /// True while the phone is ASKING the second place. Drives the one thing the owner
+    /// asked for and never had: something on screen that says a fetch is happening.
+    @State private var restingRemoteLoading = false
     @State private var restingRemoteNextCursor: String?
     @State private var restingRemoteLoadingAll = false
 
@@ -445,7 +448,20 @@ struct CaptureScreen: View {
         #endif
         // The RESTING list asks the second place what it holds, once per appearance. Without
         // this the owner sees only what the phone kept and has no way to learn the rest exists.
-        .task { await loadRestingRemote() }
+        // ⚠ `id: destination` — WITHOUT IT THIS NEVER RE-RUNS, AND THAT WAS THE BUG.
+        //
+        // MEASURED 2026-08-26 from the door's own log: the phone POSTed /foundryx/chat
+        // (so the relay and bearer were fine) and NEVER ONCE requested
+        // /foundryx/conversations. A bare `.task` runs once per appearance. The app opens
+        // before the computer connects, so `destination` is `.phone`, `loadRestingRemote`
+        // hits its own guard and returns — and when the connection comes up moments later
+        // and the destination flips to `.computer`, nothing re-fires.
+        //
+        // The result reads as "the Mac has nothing": no rows, no error, no spinner, because
+        // no request was ever made. Every layer below this — the cursor, the merge, the
+        // residence, the paging — was correct and unreachable behind a task that had
+        // already returned.
+        .task(id: destination) { await loadRestingRemote() }
         .task {
             // The bound is a LOCAL fact: only offer to reach past it when the list is
             // actually standing at it.
@@ -921,7 +937,12 @@ struct CaptureScreen: View {
         let searching = find.searchOpen
             && !find.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         if !searching, destination != .phone {
-            if restingRemoteFailed {
+            if restingRemoteLoading && restingRemote.isEmpty {
+                // ⚠ SILENCE WAS THE COMPLAINT, AND IT WAS FAIR. Before this the page showed
+                // nothing at all while a fetch was in flight, which is indistinguishable
+                // from "your computer holds nothing" and from "nothing was ever asked".
+                searchNote("Checking \(destination.secondPlace ?? "your computer")…")
+            } else if restingRemoteFailed {
                 // An absence must never read as a presence, and the reverse: an unreachable
                 // computer is SAID, not rendered as an empty list.
                 // NAMED **and** RECOVERABLE. The sentence alone left the owner with a
@@ -968,6 +989,11 @@ struct CaptureScreen: View {
                 } header: {
                     searchSectionHeader(restingRemoteHeadline)
                 }
+            } else if restingRemoteTotal != nil {
+                // ASKED AND ANSWERED, AND THE ANSWER WAS NONE. Distinct from both the
+                // loading case above and the never-asked case, which used to be the same
+                // blank space. `restingRemoteTotal` is only non-nil once a reply landed.
+                searchNote("\(destination.secondPlace ?? "Your computer") holds nothing this phone doesn't already have.")
             }
         }
     }
@@ -982,6 +1008,8 @@ struct CaptureScreen: View {
     /// one that failed.
     private func loadRestingRemote() async {
         guard destination != .phone else { return }
+        restingRemoteLoading = true
+        defer { restingRemoteLoading = false }
         let localTarget = target
         do {
             let client = DoorClient(target: localTarget)
