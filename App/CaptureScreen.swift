@@ -228,6 +228,11 @@ struct CaptureScreen: View {
     @State private var restingRemote: [ConversationHit] = []
     @State private var restingRemoteTotal: Int?
     @State private var restingRemoteFailed = false
+    @State private var restingRemoteNextCursor: String?
+    @State private var restingRemoteLoadingAll = false
+
+    /// One page. Named once so the walk and the first fetch cannot disagree about it.
+    private static let restingPageLimit = 50
     /// Selected category filter chip id (nil = All).
     @State private var categoryFilter: String?
     @State private var newCategoryName = ""
@@ -885,6 +890,24 @@ struct CaptureScreen: View {
                     ForEach(restingRemote) { hit in
                         remoteHitRow(hit).padding(.bottom, GrainSpacing.x2)
                     }
+                    // ⚠ THE AFFORDANCE IS THE CRITERION. The header already said 1,893 and
+                    // the list held 50; announcing a number the owner cannot act on is the
+                    // shape the spec names and refuses. This appears only while a cursor
+                    // remains, so it disappears when the walk is genuinely exhausted rather
+                    // than sitting there inert.
+                    if restingRemoteNextCursor != nil {
+                        Button {
+                            Task { await loadAllRestingRemote() }
+                        } label: {
+                            if restingRemoteLoadingAll {
+                                Text("Fetching the rest…")
+                            } else {
+                                Text("Show all")
+                            }
+                        }
+                        .disabled(restingRemoteLoadingAll)
+                        .accessibilityIdentifier("resting-remote-show-all")
+                    }
                 } header: {
                     searchSectionHeader(restingRemoteHeadline)
                 }
@@ -904,16 +927,67 @@ struct CaptureScreen: View {
         guard destination != .phone else { return }
         let localTarget = target
         do {
-            let page = try await DoorClient(target: localTarget)
-                .conversationPage(query: "", limit: 50)
-            let localIds = Set(manager.visibleCaptures.map(\.captureId))
-            restingRemote = page.conversations.filter { !localIds.contains($0.captureId) }
-            restingRemoteTotal = page.total
+            let client = DoorClient(target: localTarget)
+            let page = try await client.conversationPage(query: "", limit: Self.restingPageLimit)
+            applyRestingPage(page.conversations, total: page.total, cursor: page.nextCursor)
             restingRemoteFailed = false
         } catch {
             // A failure is NAMED, never rendered as "you have nothing more".
             restingRemoteFailed = true
         }
+    }
+
+    /// Follow the cursor to EXHAUSTION, so the count above the list stops being the only
+    /// evidence the rest exists.
+    ///
+    /// ⚠ THIS IS THE CRITERION, NOT A CONVENIENCE. `HistoryPaging.everything` was written,
+    /// tested, and then never called — the first page rendered under a total of 1,893 and
+    /// the remaining 1,843 were unreachable from the product. The spec refuses that in so
+    /// many words: "rendering 50 rows, printing 'more exist', and offering no way to get
+    /// them." A correct helper with no call site is not an implementation.
+    private func loadAllRestingRemote() async {
+        guard destination != .phone, !restingRemoteLoadingAll else { return }
+        restingRemoteLoadingAll = true
+        defer { restingRemoteLoadingAll = false }
+        let localTarget = target
+        do {
+            let client = DoorClient(target: localTarget)
+            let all = try await HistoryPaging.everything(pageLimit: Self.restingPageLimit) { cursor in
+                let page = try await client.conversationPage(
+                    query: "", limit: Self.restingPageLimit, after: cursor)
+                return ConversationPageResult(
+                    conversations: page.conversations, nextCursor: page.nextCursor)
+            }
+            // `everything` terminated, so there is no cursor left to follow.
+            applyRestingPage(all, total: restingRemoteTotal ?? all.count, cursor: nil)
+            restingRemoteFailed = false
+        } catch {
+            // A cursor that never terminates is a NAMED failure, not a spin and not a
+            // silently short list.
+            restingRemoteFailed = true
+        }
+    }
+
+    /// Dedupe against what the phone holds AND against what it has DELETED.
+    ///
+    /// ⚠ FILTERING ON `visibleCaptures` ALONE RESURRECTS DELETED NOTES. A capture the owner
+    /// deleted leaves `visibleCaptures` but the second place still holds it, so the remote
+    /// row reappeared as if the deletion had not happened. `DeletionPrecedence.apply` was
+    /// written for exactly this and was never called; the criterion is that a local
+    /// deletion WINS over remote presence.
+    private func applyRestingPage(_ hits: [ConversationHit], total: Int?, cursor: String?) {
+        let localIds = Set(manager.visibleCaptures.map(\.captureId))
+        // Only the ids actually received are asked about — one `stat` each, never a sweep
+        // of every capture directory, which is the main-actor stall the 300-row hydration
+        // bound exists to prevent.
+        let base = manager.baseDir
+        let tombstoned = Set(hits.map(\.captureId).filter {
+            CaptureManager.isDeletedOnDisk($0, baseDir: base)
+        })
+        let survivors = DeletionPrecedence.apply(remote: hits, locallyDeleted: tombstoned)
+        restingRemote = survivors.filter { !localIds.contains($0.captureId) }
+        restingRemoteTotal = total
+        restingRemoteNextCursor = cursor
     }
 
     /// "On your Mac · 1,893 voice notes" — the count is what tells the owner the list is a

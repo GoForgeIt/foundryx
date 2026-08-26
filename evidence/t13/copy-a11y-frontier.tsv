@@ -33,6 +33,7 @@ a11y-identifier	App/CaptureScreen.swift	live-hero-pause
 a11y-identifier	App/CaptureScreen.swift	record-block-reason
 a11y-identifier	App/CaptureScreen.swift	record-cta
 a11y-identifier	App/CaptureScreen.swift	recorder-status
+a11y-identifier	App/CaptureScreen.swift	resting-remote-show-all
 a11y-identifier	App/ChatListView.swift	chat-list
 a11y-identifier	App/ChatListView.swift	chat-list-coverage
 a11y-identifier	App/ChatListView.swift	chat-list-done
@@ -209,6 +210,7 @@ customer-facing-string	App/CaptureScreen.swift	Create
 customer-facing-string	App/CaptureScreen.swift	Delete
 customer-facing-string	App/CaptureScreen.swift	Delete \"\(cat.name)\"
 customer-facing-string	App/CaptureScreen.swift	Edit
+customer-facing-string	App/CaptureScreen.swift	Fetching the rest…
 customer-facing-string	App/CaptureScreen.swift	Live · on-device
 customer-facing-string	App/CaptureScreen.swift	Merge \(selectedIds.count)
 customer-facing-string	App/CaptureScreen.swift	Merge with…
@@ -220,6 +222,7 @@ customer-facing-string	App/CaptureScreen.swift	Removes it from your phone, your 
 customer-facing-string	App/CaptureScreen.swift	Rename
 customer-facing-string	App/CaptureScreen.swift	Rename or delete category
 customer-facing-string	App/CaptureScreen.swift	Search all voice notes
+customer-facing-string	App/CaptureScreen.swift	Show all
 customer-facing-string	App/CaptureScreen.swift	Try again
 customer-facing-string	App/CaptureScreen.swift	Try reaching \(place) again
 customer-facing-string	App/CaptureScreen.swift	\(selectedIds.count) selected

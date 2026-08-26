@@ -8,7 +8,11 @@ import XCTest
 /// follows it. Pure paging logic, injected fetch, so it is provable without a door.
 final class HistoryPagingTests: XCTestCase {
 
-    private func page(_ ids: [String], next: String?) -> ConversationPageResult {
+    /// ⚠ `static` SO THE FETCH CLOSURES CAPTURE NOTHING. `HistoryPaging.everything` takes
+    /// a `@Sendable` fetch — it has to, because the only production caller is a view that
+    /// must hand the walk off the main actor. An instance method here would capture `self`
+    /// (an XCTestCase, not Sendable) and the suite would not compile.
+    private static func page(_ ids: [String], next: String?) -> ConversationPageResult {
         ConversationPageResult(
             conversations: ids.map {
                 ConversationHit(captureId: $0, title: "T-\($0)", dateLabel: "2026-08-26", snippet: "s")
@@ -20,12 +24,12 @@ final class HistoryPagingTests: XCTestCase {
 
     func testFollowingTheCursorReachesEveryRow() async throws {
         let pages: [String?: ConversationPageResult] = [
-            nil: page(["a", "b"], next: "c1"),
-            "c1": page(["c", "d"], next: "c2"),
-            "c2": page(["e"], next: nil),
+            nil: Self.page(["a", "b"], next: "c1"),
+            "c1": Self.page(["c", "d"], next: "c2"),
+            "c2": Self.page(["e"], next: nil),
         ]
         let all = try await HistoryPaging.everything(pageLimit: 2) { cursor in
-            pages[cursor] ?? self.page([], next: nil)
+            pages[cursor] ?? Self.page([], next: nil)
         }
         XCTAssertEqual(all.map(\.captureId), ["a", "b", "c", "d", "e"])
     }
@@ -36,7 +40,7 @@ final class HistoryPagingTests: XCTestCase {
     func testACursorThatNeverAdvancesIsRefusedRatherThanLoopingForever() async {
         do {
             _ = try await HistoryPaging.everything(pageLimit: 2, maxPages: 4) { _ in
-                self.page(["a"], next: "always-the-same")
+                Self.page(["a"], next: "always-the-same")
             }
             XCTFail("a non-advancing cursor must be refused, not followed forever")
         } catch let error as HistoryPaging.PagingError {
@@ -52,7 +56,7 @@ final class HistoryPagingTests: XCTestCase {
     /// A single complete page must NOT be reported as truncated.
     func testOnePageWithNoCursorIsTheWholeHistory() async throws {
         let all = try await HistoryPaging.everything(pageLimit: 50) { _ in
-            self.page(["a", "b"], next: nil)
+            Self.page(["a", "b"], next: nil)
         }
         XCTAssertEqual(all.count, 2)
     }
@@ -61,7 +65,7 @@ final class HistoryPagingTests: XCTestCase {
     func testAnEmptyPageWithACursorIsRefused() async {
         do {
             _ = try await HistoryPaging.everything(pageLimit: 2) { _ in
-                self.page([], next: "more")
+                Self.page([], next: "more")
             }
             XCTFail("an empty page promising more must be refused")
         } catch let error as HistoryPaging.PagingError {

@@ -905,9 +905,34 @@ public final class DoorClient: @unchecked Sendable {
     /// `searchConversations` returns only rows and is kept for the search path. The RESTING
     /// list needs the envelope: `total` is how the owner learns their history continues past
     /// what this page carried.
-    public func conversationPage(query: String, limit: Int = 50) async throws -> ConversationPageResponse {
+    /// One page of what the second place holds.
+    ///
+    /// ⚠ `after` IS WHAT MAKES THE LIST REACHABLE RATHER THAN MERELY COUNTED. This
+    /// method used to take only `(query:limit:)`, so the door's `nextCursor` was decoded
+    /// into `ConversationPageResponse` and could never be sent back — the walk existed
+    /// at every layer except the one that had to perform it. Live, that rendered
+    /// "On your Mac · 1,893 voice notes" above 50 rows with no way to the other 1,843,
+    /// which the spec refuses in those words.
+    ///
+    /// Pass the previous response's `nextCursor`. `nil` asks for page one.
+    public func conversationPage(
+        query: String,
+        limit: Int = 50,
+        after cursor: String? = nil
+    ) async throws -> ConversationPageResponse {
         let q = query.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
-        let path = "/foundryx/conversations?q=\(q)&limit=\(limit)"
+        // The cursor is OPAQUE and must survive the round trip byte-for-byte: it carries
+        // a `.` separator and an external id that is not guaranteed to be alphanumeric,
+        // so it is percent-encoded against a set that escapes everything else.
+        let cursorParam: String
+        if let cursor, !cursor.trimmingCharacters(in: .whitespaces).isEmpty {
+            let encoded = cursor.addingPercentEncoding(
+                withAllowedCharacters: .alphanumerics) ?? ""
+            cursorParam = "&cursor=\(encoded)"
+        } else {
+            cursorParam = ""
+        }
+        let path = "/foundryx/conversations?q=\(q)&limit=\(limit)\(cursorParam)"
         let base = target.baseURL.absoluteString
         guard let url = URL(string: "\(base)\(path)") else {
             throw DoorError.transport("bad conversations url")

@@ -41,7 +41,11 @@ public enum HistoryPaging {
     public static func everything(
         pageLimit: Int,
         maxPages: Int = 200,
-        fetch: (String?) async throws -> ConversationPageResult
+        // ⚠ `@Sendable` BECAUSE THE ONLY REAL CALLER IS A VIEW. `loadAllRestingRemote` runs
+        // on the main actor and the walk must not; without this the closure cannot cross
+        // the isolation boundary and the helper stays callable only from tests — which is
+        // precisely how it sat correct-and-uncalled while the product could not page.
+        fetch: @Sendable (String?) async throws -> ConversationPageResult
     ) async throws -> [ConversationHit] {
         var out: [ConversationHit] = []
         var seen: Set<String> = []
