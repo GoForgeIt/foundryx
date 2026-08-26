@@ -982,6 +982,7 @@ public final class DoorClient: @unchecked Sendable {
         // `.interactive()` for the same reason `captureContent` uses it: a user-facing read
         // rides the chat tunnel and must not queue behind bulk capture sync.
         if let relay = target.relay?.interactive() {
+            DoorSeam.record(method: "GET", path: path, leg: .relay)
             let resp = try await RelayHTTP.roundTrip(
                 relay: relay, bearer: target.bearer, method: "GET",
                 path: path, session: session, log: log, useMux: target.useMux)
@@ -1002,6 +1003,7 @@ public final class DoorClient: @unchecked Sendable {
                 nextCursor: decoded.nextCursor)
         }
 
+        DoorSeam.record(method: "GET", path: path, leg: .direct)
         let base = target.baseURL.absoluteString
         guard let url = URL(string: "\(base)\(path)") else {
             throw DoorError.transport("bad conversations url")
