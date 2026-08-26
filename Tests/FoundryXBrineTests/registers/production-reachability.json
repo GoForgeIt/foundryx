@@ -870,7 +870,8 @@
         }
       ],
       "tested_from": [
-        "Tests/FoundryXBrineTests/OwnerCanStopAndEmptyFeatureTests.swift"
+        "Tests/FoundryXBrineTests/OwnerCanStopAndEmptyFeatureTests.swift",
+        "Tests/FoundryXBrineTests/OfferedBacklogExcludesStoppedTests.swift"
       ],
       "verdict": "reachable",
       "why": "IT HAD ZERO CALLERS ANYWHERE, tests included — dead code in `Sources/` computing exactly the set the queue was built to drain, while the single production `enqueue` site passed `[recording]`, a one-element array. So `PocketTransferQueue`'s one-session advantage, the entire reason it exists, was never exercised on the real path and every extra recording still cost another tap and another full handshake. The anchor is `bringEverythingOver`, behind the `Bring all N over` control; the same function also counts what that control's title states, so the number on the button and the set the tap enqueues cannot disagree. AND IT IS NOT ENOUGH ON ITS OWN: the same review changed the view's `.bringEverythingOver` switch arm to `break`, and changed `recordings: backlog` to `recordings: [backlog[0]]`, and this row stayed green both times. `pocket-transfer-empty-control-dispatch` anchors the button's line and `pocket-transfer-batch-enqueue` anchors the whole result reaching the queue."
