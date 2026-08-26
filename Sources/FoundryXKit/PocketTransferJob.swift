@@ -297,9 +297,24 @@ public actor PocketTransferQueue {
     /// not become a conversation is still excluded here: re-pulling it would cost radio time
     /// for bytes already on the phone, and the import retries off the held file the next time
     /// the item is asked for.
+    /// - Parameter stopped: the requests the owner STOPPED, read from the DURABLE store.
+    ///
+    ///   ⚠ NO DEFAULT, DELIBERATELY. Every call site must state its stops, because a default of
+    ///   `[]` is exactly the defect this parameter exists to remove: the caller that forgets
+    ///   gets the old behaviour silently, and the compiler says nothing. Reflection review of
+    ///   `20260823T0908` (HIGH-1) traced the live path — this function does not exclude stopped,
+    ///   the selection takes its output, `promised = s.count` therefore counts a stopped
+    ///   recording, and `enqueue` then REFUSES it at `PocketTransferJob.swift:366`. The result
+    ///   is `accepted < promised`: a number a person consents to that is larger than the set
+    ///   they get, on a control whose whole job is to state one.
+    ///
+    ///   Read from the store rather than from the actor's `stoppedRequests`, which stays
+    ///   `private`: its privacy is why stop is "the difference between a stop button and a
+    ///   decoration", and a fix that reaches into it trades one invariant for another.
     public static func derivedBacklog(from recordings: [PocketRecording],
                                       custody: any PocketRecorderFileCustody,
-                                      identity: RecordingDeviceIdentity) async -> [PocketRecording] {
+                                      identity: RecordingDeviceIdentity,
+                                      stopped: Set<PocketRecordingRequest>) async -> [PocketRecording] {
         // THE LISTING IS NOT THE POPULATION. A recorder that lists the same date and timestamp
         // twice used to yield a backlog of two — the ordering pass makes one candidate per
         // ENTRY, and the map back through `recordings.first` then resolves both to the same
@@ -317,7 +332,11 @@ public actor PocketTransferQueue {
         // everywhere except for duplicates is not authoritative. First occurrence wins, so the
         // recorder's own order is untouched.
         var seen: Set<PocketRecordingRequest> = []
-        let recordings = recordings.filter { seen.insert($0.request).inserted }
+        // ⚠ THE OWNER'S STOPS COME OUT FIRST, before anything else is derived — so no later
+        // pass can count one and no caller can be handed a population it will then be refused.
+        let recordings = recordings
+            .filter { !stopped.contains($0.request) }
+            .filter { seen.insert($0.request).inserted }
 
         var held: Set<PocketRecordingRequest> = []
         for recording in recordings {

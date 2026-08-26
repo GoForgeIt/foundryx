@@ -2330,9 +2330,14 @@ final class PocketRecorderCheckModel: ObservableObject {
         // resolutions of "does this phone hold it" is exactly how a number and a set come to
         // disagree — which would put an invented count on a button. One authority, asked once,
         // in the one place the shelf read model is stated.
+        // ONE AUTHORITY FOR THE STOPS, asked in the same place the population is derived —
+        // the same rule the comment above states for custody. Two readings of "did the owner
+        // stop this" is how a count and a set come to disagree.
+        let stopped = Self.durableStops(for: identity)
         self.backlogCount = await PocketTransferQueue.derivedBacklog(from: shelfRecordings,
                                                                      custody: custody,
-                                                                     identity: identity).count
+                                                                     identity: identity,
+                                                                     stopped: stopped).count
         // THE NEXT ONE, not the same one forever. `offered(_:)` is ordering only, and
         // ordering is stable — so bringing a file over and re-reading the shelf re-elected
         // the same winner, and a person with a backlog could bring over exactly one
@@ -2364,6 +2369,25 @@ final class PocketRecorderCheckModel: ObservableObject {
     /// One derivation, in one place, so the shelf cannot disagree with the transfer about what
     /// we hold. The fallback is unreachable for any token this model accepts (`run` has already
     /// parsed it as a UUID) and exists so this function is total rather than optional.
+    /// The owner's stops, from the DURABLE store — never from the queue actor's private set.
+    ///
+    /// `stoppedRequests` stays `private`: its privacy is why stop is "the difference between a
+    /// stop button and a decoration", and reaching into it would trade one invariant for
+    /// another. An UNREADABLE store yields NO stops rather than "stop everything", matching the
+    /// asymmetry the store's own header states — a drain that does not start is an
+    /// inconvenience; one that starts from a corrupt intent runs a radio against a recorder
+    /// nobody asked it to empty. Here the safe direction is the reverse: failing to exclude
+    /// shows a recording the owner stopped, which the enqueue guard still refuses, so the worst
+    /// case is the count being wrong — not a file being taken.
+    private static func durableStops(
+        for identity: RecordingDeviceIdentity
+    ) -> Set<PocketRecordingRequest> {
+        guard case .backlog(let backlog) = PocketBacklogStore().read(for: identity) else {
+            return []
+        }
+        return Set(backlog.entries.filter(\.stopped).map(\.recording.request))
+    }
+
     private static func custodyIdentity(for hardwareToken: String) -> RecordingDeviceIdentity {
         (try? PocketAuthenticatedIdentity(peripheralIdentifier: hardwareToken))?
             .recordingDeviceIdentity
@@ -2680,7 +2704,8 @@ final class PocketRecorderCheckModel: ObservableObject {
         Task { [weak self] in
             let backlog = await PocketTransferQueue.derivedBacklog(from: shelf,
                                                                    custody: custody,
-                                                                   identity: identity)
+                                                                   identity: identity,
+                                                                   stopped: Self.durableStops(for: identity))
             guard let self else { return }
             // THE TAP THAT FOUND NOTHING TO DO STILL ANSWERS.
             //

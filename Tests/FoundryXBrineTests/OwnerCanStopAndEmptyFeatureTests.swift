@@ -324,7 +324,8 @@ private final class StopAndEmptyWorld {
             let backlog = await PocketTransferQueue.derivedBacklog(
                 from: backlogRecordings,
                 custody: HoldsExactly(holding: ["2026-08-07/one", "2026-08-07/three"]),
-                identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: "t"))
+                identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: "t"),
+                  stopped: [])
             guard Set(backlog.map(\.timestamp)) == ["two", "four"] else {
                 throw BrineStepError("the backlog was "
                                      + String(describing: backlog.map(\.timestamp)))
@@ -333,7 +334,8 @@ private final class StopAndEmptyWorld {
             let backlog = await PocketTransferQueue.derivedBacklog(
                 from: backlogRecordings,
                 custody: HoldsExactly(holding: []),
-                identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: "t"))
+                identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: "t"),
+                  stopped: [])
             // COUNT, NOT A SET. Comparing `Set(map(\.timestamp))` is what let this through:
             // a duplicate is invisible to a set and is exactly the failure being held here.
             guard backlog.count == 1 else {
@@ -349,7 +351,8 @@ private final class StopAndEmptyWorld {
             let backlog = await PocketTransferQueue.derivedBacklog(
                 from: backlogRecordings,
                 custody: HoldsExactly(holding: []),
-                identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: "t"))
+                identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: "t"),
+                  stopped: [])
             // NOT RUN — only asked what it would TAKE. No radio, no custody writes.
             let queue = PocketTransferQueue(peripheralIdentifier: UUID(),
                                             advertisedName: "duplicate-listing")
@@ -371,7 +374,8 @@ private final class StopAndEmptyWorld {
             let all = await PocketTransferQueue.derivedBacklog(
                 from: backlogRecordings,
                 custody: HoldsExactly(holding: []),
-                identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: "t"))
+                identity: RecordingDeviceIdentity(shape: .filePull, hardwareToken: "t"),
+                  stopped: [])
             guard all.count == backlogRecordings.count else {
                 throw BrineStepError("with nothing held, every listed recording is backlog; "
                                      + "got \(all.count) of \(backlogRecordings.count)")
