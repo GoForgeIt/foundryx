@@ -72,11 +72,14 @@ public final class RemoteSession: ObservableObject {
     @Published public private(set) var relay: RelayConfig?
     /// The current verified id_token — sent to the door as the bearer (the door
     /// verifies it; no manual door bearer needed in remote-only mode).
-    @Published public private(set) var idToken: String?
+    /// `internal(set)` so a test can construct the state that shipped the empty-bearer
+    /// defect. Matches `status` directly above, which is `public internal(set)` for the same
+    /// reason: a state nothing outside the module can reach is a state nothing can pin.
+    @Published public internal(set) var idToken: String?
     /// The same token bound to the account generation that requested it. Consumers
     /// of account-scoped state use this instead of relabeling a delayed token with
     /// whatever identity happens to be current when the await finishes.
-    @Published public private(set) var boundIdToken: AccountBoundToken?
+    @Published public internal(set) var boundIdToken: AccountBoundToken?
     /// Changes only after the account storage boundary transitions. RootView keys
     /// account-owned state objects with this revision.
     @Published public private(set) var identityRevision: UInt64 = 0
@@ -499,9 +502,36 @@ public final class RemoteSession: ObservableObject {
 
     /// The door target for the resolved remote host: the relay tunnel + the
     /// id_token as bearer (the door verifies it). `nil` until connected.
+    /// Can this string be presented at the door as a credential?
+    ///
+    /// ⚠ EXTRACTED SO IT CAN BE EXECUTED BY A TEST. Inlined in `makeDoorTarget`, the rule
+    /// could only be exercised by constructing a full session — relay, remote, generation
+    /// and all — and a test that cannot build that state passes because the OTHER guards
+    /// returned nil. That is a check whose failure looks exactly like its success, which is
+    /// the defect class this whole fix belongs to. My first version of the test did exactly
+    /// that and I nearly shipped it.
+    ///
+    /// Whitespace counts as empty: the door will refuse `Authorization: Bearer    ` the same
+    /// way, and the phone will be just as unable to say why.
+    /// `nonisolated` — the rule is a property of the STRING, not of the session's actor.
+    nonisolated static func isUsableBearer(_ value: String) -> Bool {
+        !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     public func makeDoorTarget() -> DoorTarget? {
+        // ⚠ `!boundIdToken.value.isEmpty` — THE CHECK WHOSE ABSENCE COST A DAY.
+        //
+        // The four guards below all PASS for an empty token: `""` is non-nil, its generation
+        // matches, and `"" == ""`. So this returned a perfectly well-formed `DoorTarget`
+        // carrying `bearer: ""`, the phone reached the Mac over a working relay, and the door
+        // refused every request as "no bearer" — 90 of 138 on 2026-08-26.
+        //
+        // It is checked HERE as well as at the source, deliberately. `currentIdToken()` now
+        // returns nil for an empty token, which is the real fix; this is the seam that HANDS
+        // OUT the credential, and a seam that can emit an unusable one is a seam that will.
         guard let relay,
               let boundIdToken,
+              Self.isUsableBearer(boundIdToken.value),
               boundIdToken.generation == CaptureAccountScope.identityGeneration,
               idToken == boundIdToken.value,
               let remote else { return nil }

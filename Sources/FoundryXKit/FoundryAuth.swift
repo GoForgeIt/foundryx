@@ -238,10 +238,22 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
 
     /// A currently-valid id_token for the signed-in account, refreshing via the
     /// stored refresh token when expired. `nil` when signed out / unrefreshable.
+    /// The identity token to present at the door, or `nil` when there is not one.
+    ///
+    /// ⚠ AN EMPTY STRING IS NOT A TOKEN, and treating it as one is how a phone spends a day
+    /// sending `Authorization: Bearer ` with nothing after it. MEASURED 2026-08-26 in the
+    /// Mac's own gateway log: 90 of 138 requests arrived and were refused as "no bearer",
+    /// while the phone showed "Connecting to your computer…" and every guard on the path
+    /// passed — because `""` is non-nil, `"" == ""` is true, and nothing anywhere asked
+    /// whether the token had any content. Exactly one call site in this whole kit checked
+    /// `!idToken.isEmpty`, and it was not on this path.
+    ///
+    /// Returning `nil` here is what lets the caller reach its "signed out / refresh failed"
+    /// branch and SAY so, instead of manufacturing a credential out of an absence.
     public func currentIdToken() async throws -> String? {
         guard let id = try AuthStore.loadFallibly() else { return nil }
         if id.expiresAt > Date().addingTimeInterval(60) {
-            return id.idToken
+            return id.idToken.isEmpty ? nil : id.idToken
         }
         guard let provider = AuthProvider(rawValue: id.provider),
               let clientID = config.clientID(for: provider),
@@ -249,7 +261,9 @@ public final class FoundryAuth: NSObject, @unchecked Sendable {
         do {
             let fresh = try await refreshToken(provider, clientID: clientID, refresh: refresh)
             try await AuthStore.save(fresh)
-            return fresh.idToken
+            // A refresh that "succeeds" with an empty token is a failed refresh wearing a
+            // success's clothes — the same absence, one layer further in.
+            return fresh.idToken.isEmpty ? nil : fresh.idToken
         } catch {
             log?.error("id_token refresh failed: \(error)")
             throw error
