@@ -50,7 +50,21 @@ public final class RemoteSession: ObservableObject {
     // `internal(set)` rather than `private(set)`: the seams need to drive a status
     // the app can only reach through a real refused sign-in. Still read-only to
     // every consumer outside this module.
-    @Published public internal(set) var status: Status = .signedOut
+    @Published public internal(set) var status: Status = .signedOut {
+        didSet {
+            // ⚠ ONE PLACE, BECAUSE THERE ARE FOURTEEN SETTLE SITES. Cancelling the watchdog
+            // at each of them means fourteen chances to forget, and the one that is
+            // forgotten is a working connection later stomped into an error by a watchdog
+            // nobody cancelled. A `didSet` cannot be forgotten by a site that does not know
+            // it exists.
+            //
+            // (My first attempt DID edit each site, by line, and split a multi-line
+            // `status = .error(` in half. Blind line-insertion into Swift is how that
+            // happens; the single observer avoids the whole class.)
+            if case .resolving = status { return }
+            cancelResolveWatchdog()
+        }
+    }
     /// Authentication state is independent of email. Apple commonly returns email
     /// only on the first authorization, while its stable subject remains signed in.
     @Published public private(set) var isSignedIn = false
@@ -107,6 +121,42 @@ public final class RemoteSession: ObservableObject {
     // getting past sign-in). Ship a running diagnostic to the relay's
     // unauthenticated /diag/log so we can read it server-side on the VM.
     private var diag: [String] = []
+
+    /// How long a resolve may claim to be in progress before it must say otherwise.
+    ///
+    /// Generous on purpose: a cold launch on a slow network legitimately takes seconds, and
+    /// a watchdog that fires on a working connection is worse than none. Short enough that
+    /// a person is not left waiting on a spinner that has already stopped meaning anything.
+    static let resolveBudget: TimeInterval = 30
+
+    private var resolveWatchdog: Task<Void, Never>?
+
+    /// Refuse to keep claiming progress after `resolveBudget`.
+    ///
+    /// The generation is captured so a watchdog armed by a superseded resolve cannot stomp
+    /// the status of the one that replaced it — the same guard the abandonment points use,
+    /// applied to the recovery rather than only to the failure.
+    private func startResolveWatchdog(generation: UInt64) {
+        resolveWatchdog?.cancel()
+        resolveWatchdog = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.resolveBudget * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            await MainActor.run {
+                guard generation == CaptureAccountScope.identityGeneration else { return }
+                guard case .resolving = self.status else { return }
+                self.note("resolve did not settle within \(Int(Self.resolveBudget))s — "
+                          + "reporting stopped rather than continuing to claim progress")
+                self.status = .error("Connection didn't complete")
+            }
+        }
+    }
+
+    /// Called by every path that SETTLES the status, so a settled resolve is not later
+    /// overwritten by a watchdog that has not noticed.
+    private func cancelResolveWatchdog() {
+        resolveWatchdog?.cancel()
+        resolveWatchdog = nil
+    }
 
     private func note(_ s: String) {
         log?.info("remote: \(s)")
@@ -309,6 +359,24 @@ public final class RemoteSession: ObservableObject {
         let requestedGeneration = CaptureAccountScope.identityGeneration
         status = .resolving
         note("resolve start (gateway=\(remote.gatewayHTTPURL.absoluteString))")
+        // ⚠ `.resolving` IS BOUNDED, BECAUSE AN UNBOUNDED ONE IS A LIE THE UI TELLS.
+        //
+        // `resolve()` has SEVEN `guard requestedGeneration == …identityGeneration else
+        // { return }` abandonment points. Every one leaves `status` at `.resolving`, and
+        // `WelcomeFrontDoor.connectStatus` maps that to "Connecting to your computer…".
+        // So an abandoned resolve renders as hopeful progress FOREVER.
+        //
+        // Measured 2026-08-26: the owner's phone sat on "Connecting to your computer…"
+        // while its every door request carried an EMPTY bearer — 90 of 138 that day. The
+        // session was not connecting. It had stopped, and the only surface that could have
+        // said so was reporting the opposite.
+        //
+        // Abandoning IS legitimate when a newer resolve superseded this one — that resolve
+        // sets its own status well within the window. What this refuses is the case where
+        // nothing follows: a person waiting on a spinner that will never resolve, with no
+        // reason given and nothing to act on. `.error` is the honest terminal state, and it
+        // is the one the UI already renders with a real sentence.
+        startResolveWatchdog(generation: requestedGeneration)
         let resolvedToken: String?
         do {
             resolvedToken = try await auth.currentIdToken()
